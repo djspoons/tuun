@@ -17,7 +17,8 @@ use sdl2::pixels::Color;
 
 pub fn main() {
     let mut freqs = Vec::new();
-    for arg in std::env::args().skip(1) {
+    let mode = std::env::args().nth(1).unwrap();
+    for arg in std::env::args().skip(2) {
         freqs.push(arg.parse::<u32>().unwrap());
     }
     println!("Freqs: {:?}", freqs);
@@ -31,8 +32,26 @@ pub fn main() {
     };
 
     let mut generators = Vec::new();
-    for freq in freqs {
-        generators.push(sequence::wave_from_frequency(freq as f32));
+    match mode.as_str() {
+        "S" => {
+            for freq in freqs {
+                generators.push(sequence::truncate(
+                    sequence::wave_from_frequency(freq as f32),
+                    Duration::from_secs(2)));
+            }
+        }
+        "C" => {
+            let mut chord_components = Vec::new();
+            for freq in freqs {
+                chord_components.push(sequence::wave_from_frequency(freq as f32));
+            }
+            generators.push(sequence::truncate(
+                sequence::chord(chord_components),
+                Duration::from_secs(2)));
+        }
+        _ => {
+            println!("Unknown mode: {}", mode);
+        }
     }
 
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -77,11 +96,10 @@ pub fn main() {
             }
         }
 
-        canvas.set_draw_color(Color::RGB(0, 0, 0));
-        canvas.clear();
-
         match receiver.recv_timeout(Duration::new(0, 1_000_000)) {
             Ok(out) => {
+                canvas.set_draw_color(Color::RGB(0, 0, 0));
+                canvas.clear();
                 let x_scale = width as f32 / out.len() as f32;
                 canvas.set_draw_color(Color::RGB(0, 255, 0));
                 for (i, f) in out.iter().enumerate() {
@@ -89,10 +107,10 @@ pub fn main() {
                     let y = (f * (height as f32 / 2.4) + (height as f32 / 2.0)) as i32;
                     canvas.draw_point((x, y)).unwrap();
                 }
+                canvas.present();
             }
             Err(_) => {}
         }
-        canvas.present();
         ::std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 30));
     }
 
