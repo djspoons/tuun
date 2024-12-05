@@ -1,0 +1,99 @@
+mod sequence;
+
+extern crate sdl2;
+
+
+use sdl2::event::Event;
+use std::time::Duration;
+
+use sdl2::audio::AudioSpecDesired;
+
+//use std::time::Duration;
+//use sequence::{new_sequence, wave_from_frequency};
+
+use sdl2::pixels::Color;
+
+// 440^1 494^1 
+
+pub fn main() {
+    let mut freqs = Vec::new();
+    for arg in std::env::args().skip(1) {
+        freqs.push(arg.parse::<u32>().unwrap());
+    }
+    println!("Freqs: {:?}", freqs);
+
+    let sdl_context = sdl2::init().unwrap();
+    let audio_subsystem = sdl_context.audio().unwrap();
+    let desired_spec = AudioSpecDesired {
+        freq: Some(44100),
+        channels: Some(1),  // mono
+        samples: None       // default sample size
+    };
+
+    let mut generators = Vec::new();
+    for freq in freqs {
+        generators.push(sequence::wave_from_frequency(freq as f32));
+    }
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+
+    let device = 
+        audio_subsystem.open_playback(None, &desired_spec, 
+            |spec| {
+                //            offsets: [Duration::from_millis(0), Duration::from_millis(1000)],
+                //            current_offset: Duration::from_millis(0)
+                println!("Spec: {:?}", spec);
+                sequence::new_sequence(
+                    spec.freq as f32,
+                    generators,
+                    sender)
+            }).unwrap();
+      
+    device.resume();
+
+    let video_subsystem = sdl_context.video().unwrap();
+
+    let width = 1200;
+    let height = 600;
+    let window = video_subsystem
+        .window("tuunel waveform", width, height)
+        .position_centered()
+        .build()
+        .map_err(|e| e.to_string()).unwrap();
+    let mut canvas = window.into_canvas().build().map_err(
+        |e| e.to_string()).unwrap();
+
+    let mut event_pump = sdl_context.event_pump().unwrap();
+
+    'running: loop {
+        for event in event_pump.poll_iter() {
+            println!("Event: {:?}", event);
+            match event {
+                Event::Quit { .. }
+                | Event::KeyDown {
+                        ..
+                } => break 'running,
+                _ => {}
+            }
+        }
+
+        canvas.set_draw_color(Color::RGB(0, 0, 0));
+        canvas.clear();
+
+        match receiver.recv_timeout(Duration::new(0, 1_000_000)) {
+            Ok(out) => {
+                let x_scale = width as f32 / out.len() as f32;
+                canvas.set_draw_color(Color::RGB(0, 255, 0));
+                for (i, f) in out.iter().enumerate() {
+                    let x = (i as f32 * x_scale) as i32;
+                    let y = (f * (height as f32 / 2.4) + (height as f32 / 2.0)) as i32;
+                    canvas.draw_point((x, y)).unwrap();
+                }
+            }
+            Err(_) => {}
+        }
+        canvas.present();
+        ::std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 30));
+    }
+
+}
