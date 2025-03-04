@@ -23,10 +23,12 @@ pub fn main() {
     }
     println!("Freqs: {:?}", freqs);
 
+    let sample_frequency = 44100;
+
     let sdl_context = sdl2::init().unwrap();
     let audio_subsystem = sdl_context.audio().unwrap();
     let desired_spec = AudioSpecDesired {
-        freq: Some(44100),
+        freq: Some(sample_frequency),
         channels: Some(1),  // mono
         samples: None       // default sample size
     };
@@ -35,19 +37,21 @@ pub fn main() {
     match mode.as_str() {
         "S" => {
             for freq in freqs {
-                generators.push(sequence::truncate(
-                    sequence::wave_from_frequency(freq as f32),
-                    Duration::from_secs(2)));
+                generators.push(sequence::truncate(sample_frequency,
+                    Duration::from_secs(2),
+                    sequence::wave_from_frequency(
+                        sample_frequency, freq as f32)));
             }
         }
         "C" => {
             let mut chord_components = Vec::new();
             for freq in freqs {
-                chord_components.push(sequence::wave_from_frequency(freq as f32));
+                chord_components.push(sequence::wave_from_frequency(
+                    sample_frequency, freq as f32));
             }
-            generators.push(sequence::truncate(
-                sequence::chord(chord_components),
-                Duration::from_secs(2)));
+            generators.push(sequence::truncate(sample_frequency,
+                Duration::from_secs(2),
+                sequence::chord(chord_components)));
         }
         _ => {
             println!("Unknown mode: {}", mode);
@@ -62,10 +66,7 @@ pub fn main() {
                 //            offsets: [Duration::from_millis(0), Duration::from_millis(1000)],
                 //            current_offset: Duration::from_millis(0)
                 println!("Spec: {:?}", spec);
-                sequence::new_sequence(
-                    spec.freq as f32,
-                    generators,
-                    sender)
+                sequence::new_sequence(generators, sender)
             }).unwrap();
       
     device.resume();
