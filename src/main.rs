@@ -33,16 +33,15 @@ fn parse_sequence(input: &str) -> IResult<&str, Vec<f32>> {
 //use sequence::{new_sequence, wave_from_frequency};
 
 use sdl2::pixels::Color;
-//use sdl2::sys::Font;
 use sdl2::ttf::Font;
 use sdl2::video::WindowContext;
 
 // 440^1 494^1 
 
-fn make_texture<'a>(font: &Font<'a, 'static>, texture_creator: &'a TextureCreator<WindowContext>, s: &str) -> sdl2::render::Texture<'a> {
+fn make_texture<'a>(font: &Font<'a, 'static>, color: Color, texture_creator: &'a TextureCreator<WindowContext>, s: &str) -> sdl2::render::Texture<'a> {
     let surface = font
         .render(s)
-        .blended(Color::RGBA(0, 255, 0, 255))
+        .blended(color)
         .map_err(|e| e.to_string()).unwrap();
     let texture = texture_creator
         .create_texture_from_surface(&surface)
@@ -123,20 +122,28 @@ pub fn main() {
     let texture_creator = canvas.texture_creator();
     let font = ttf_context.load_font(font_path, 64).unwrap();
 
-    let prompt_texture = make_texture(&font, &texture_creator, "> ");
+    let prompt_texture = make_texture(&font, Color::RGBA(0, 255, 0, 255), &texture_creator, "> ");
     let TextureQuery { width: prompt_width, height: prompt_height, .. } = prompt_texture.query();
 
+    let mut should_exit = false;
     let mut next_program = String::new();
 
     video_subsystem.text_input().start();
     let mut event_pump = sdl_context.event_pump().unwrap();
-    'running: loop {
+    'running: while !should_exit {
         for event in event_pump.poll_iter() {
             println!("Event: {:?}", event);
             match event {
                 Event::Quit { .. } => break 'running,
                 Event::KeyDown { scancode, keymod, ..} => {
                     match scancode {
+                        // Exit on crtl-C
+                        Some(sdl2::keyboard::Scancode::C) => {
+                            if keymod.contains(sdl2::keyboard::Mod::LCTRLMOD)
+                                || keymod.contains(sdl2::keyboard::Mod::RCTRLMOD) {
+                                should_exit = true;
+                            }
+                        },
                         Some(sdl2::keyboard::Scancode::Return) => {
                         },
                         Some(sdl2::keyboard::Scancode::Backspace) => {
@@ -174,7 +181,7 @@ pub fn main() {
                 canvas.clear();
                 canvas.copy(&prompt_texture, None, Some(sdl2::rect::Rect::new(10, 10, prompt_width, prompt_height))).unwrap();
                 if next_program.len() > 0 {
-                    let text_texture = make_texture(&font, &texture_creator, &next_program);
+                    let text_texture = make_texture(&font, Color::RGBA(0, 255, 0, 255), &texture_creator, &next_program);
                     let TextureQuery { width: text_width, height: text_height, .. } = text_texture.query();
                     canvas.copy(&text_texture, None, Some(sdl2::rect::Rect::new(prompt_width as i32, 10, text_width, text_height))).unwrap();
                 }
