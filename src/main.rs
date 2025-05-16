@@ -1,40 +1,122 @@
 mod sequence;
 
+use core::panic;
 use std::time::Duration;
-use std::io::{self, Write};
 
 extern crate sdl2;
 use sdl2::event::Event;
 use sdl2::audio::AudioSpecDesired;
 use sdl2::render::{TextureCreator, TextureQuery};
+use sdl2::pixels::Color;
+use sdl2::ttf::Font;
+use sdl2::video::WindowContext;
+
+use sequence::sequence;
+use crate::sequence::chord;
+use crate::sequence::Generator;
 
 use nom::{
     IResult,
     Parser,
-    character::complete::{char, multispace1},
+    branch::alt,
+    combinator::eof,
+    character::complete::{char, multispace0, multispace1},
     number::complete::float,
-    sequence::delimited,
+    sequence::{delimited, terminated},
     multi::separated_list0,
 };
 
-fn parse_sequence(input: &str) -> IResult<&str, Vec<f32>> {
-    let mut parser = delimited(
+// TODO make this a
+const sample_frequency : i32 = 44100;
+
+fn parse_generator(input: &str) -> IResult<&str, Box<dyn Generator>> {
+    let (i, generator) = 
+    delimited(
+        multispace0,
+        alt((
+            parse_chord,
+            parse_sequence,
+            parse_tone,
+        )),
+        multispace0).parse(input)?;
+    return Ok((i, generator));
+}
+
+fn parse_tone(input: &str) -> IResult<&str, Box<dyn Generator>> {
+    let (rest, freq) = float.parse(input)?;
+    println!("Parsed freq: {:?}", freq);
+
+    /*
+        let mut chord_components = Vec::new();
+    for freq in freqs {
+        chord_components.push(sequence::wave_from_frequency(
+            sample_frequency, freq as f32));
+    }
+    generators.push(sequence::truncate(sample_frequency,
+        Duration::from_secs(5),
+        sequence::chord(chord_components)));
+
+
+        generators.push(sequence::truncate(sample_frequency,
+            Duration::from_secs(2),
+            sequence::wave_from_frequency(
+            sample_frequency, freq)));
+    }
+
+        /*sequence::wave_from_frequency(sample_frequency, freq)))); */
+
+     */
+    return Ok((rest, Box::new(sequence::truncate(sample_frequency,
+        Duration::from_secs(2),
+        sequence::wave_from_frequency(
+        sample_frequency, freq)))));
+}
+
+fn parse_chord(input: &str) -> IResult<&str, Box<dyn Generator>> {
+    let (rest, generators) = delimited(
+        char('<'),
+        separated_list0(
+            multispace1,
+            parse_generator,
+        ),
+        char('>')
+    ).parse(input)?;
+    let res = generators.into_iter().map(|s| *s as _).collect();
+    return Ok((rest, Box::new(chord(res))));
+}
+
+fn parse_sequence(input: &str) -> IResult<&str, Box<dyn Generator>> {
+    let (rest, generators) = delimited(
         char('['),
         separated_list0(
             multispace1,
-            float
+            parse_generator,
         ),
         char(']')
-    );
-    return parser.parse(input);
+    ).parse(input)?;
+    return Ok((rest, Box::new(sequence(generators))));
 }
 
-//use std::time::Duration;
-//use sequence::{new_sequence, wave_from_frequency};
-
-use sdl2::pixels::Color;
-use sdl2::ttf::Font;
-use sdl2::video::WindowContext;
+fn parse_program(input: &str) -> Result<Box<dyn Generator>, nom::error::Error<&str>> {
+    match terminated(
+            parse_generator,
+            eof).parse(input) {
+        Ok((_, generator)) => {
+            return Ok(generator);
+        },
+        Err(nom::Err::Error(e)) => {
+            println!("Error on parsing input: {:?}", e);
+            return Err(e);
+        }
+        Err(nom::Err::Incomplete(_)) => {
+            panic!("Incomplete error on input");
+        }
+        Err(nom::Err::Failure(e)) => {
+            println!("Failed to parse input: {:?}", e);
+            return Err(e);
+        }
+    }
+}
 
 // 440^1 494^1 
 
@@ -50,8 +132,6 @@ fn make_texture<'a>(font: &Font<'a, 'static>, color: Color, texture_creator: &'a
 }
 
 pub fn main() {
-    let sample_frequency = 44100;
-
     let sdl_context = sdl2::init().unwrap();
     let audio_subsystem = sdl_context.audio().unwrap();
     let desired_spec = AudioSpecDesired {
@@ -60,51 +140,16 @@ pub fn main() {
         samples: None       // default sample size
     };
 
-    let mut input = String::new();
-    print!("> ");
-    io::stdout().flush().unwrap();
-    io::stdin().read_line(&mut input).unwrap();
 
-    let mut freqs = Vec::new();
-    match parse_sequence(&input.trim()) {
-        Ok((_, fs)) => {
-            println!("Parsed freqs: {:?}", fs);
-            freqs.extend(fs);
-        },
-        Err(e) => println!("Failed to parse input: {:?}", e),
-    }
-
-    let mut generators = Vec::new();
-    // Chord
-    let mut chord_components = Vec::new();
-            for freq in freqs {
-                chord_components.push(sequence::wave_from_frequency(
-                    sample_frequency, freq as f32));
-            }
-            generators.push(sequence::truncate(sample_frequency,
-                Duration::from_secs(2),
-                sequence::chord(chord_components)));
-    /*
-    // Sequence
-    for freq in freqs {
-        generators.push(sequence::truncate(sample_frequency,
-            Duration::from_secs(2),
-            sequence::wave_from_frequency(
-                sample_frequency, freq)));
-    }
-    */
-
-    let (sender, receiver) = std::sync::mpsc::channel();
+    let (sample_sender, sample_receiver) = std::sync::mpsc::channel();
+    let (generator_sender, generator_receiver) = std::sync::mpsc::channel();
 
     let device = 
         audio_subsystem.open_playback(None, &desired_spec, 
             |spec| {
-                //            offsets: [Duration::from_millis(0), Duration::from_millis(1000)],
-                //            current_offset: Duration::from_millis(0)
                 println!("Spec: {:?}", spec);
-                sequence::new_sequence(generators, sender)
+                sequence::new_sequencer(generator_receiver, sample_sender)
             }).unwrap();
-      
     device.resume();
 
     let video_subsystem = sdl_context.video().unwrap();
@@ -122,17 +167,18 @@ pub fn main() {
     let texture_creator = canvas.texture_creator();
     let font = ttf_context.load_font(font_path, 64).unwrap();
 
-    let prompt_texture = make_texture(&font, Color::RGBA(0, 255, 0, 255), &texture_creator, "> ");
+    let prompt_texture = make_texture(&font, Color::RGBA(0, 255, 255, 255), &texture_creator, "... ");
     let TextureQuery { width: prompt_width, height: prompt_height, .. } = prompt_texture.query();
 
     let mut should_exit = false;
+    let mut current_program = String::new();
     let mut next_program = String::new();
 
     video_subsystem.text_input().start();
     let mut event_pump = sdl_context.event_pump().unwrap();
     'running: while !should_exit {
         for event in event_pump.poll_iter() {
-            println!("Event: {:?}", event);
+            println!("Event: {:?} with next_program = {}", event, next_program);
             match event {
                 Event::Quit { .. } => break 'running,
                 Event::KeyDown { scancode, keymod, ..} => {
@@ -145,6 +191,18 @@ pub fn main() {
                             }
                         },
                         Some(sdl2::keyboard::Scancode::Return) => {
+                            // Parse the next program, create a generator and send it offset
+                            // to the audio device 
+                            if let Ok(generator) = parse_program(&next_program) {
+                                generator_sender.send(generator).unwrap();
+                                current_program = next_program.clone();
+                                next_program.clear();
+                            } else {
+                                println!("Failed to parse input: {:?}", next_program);
+                            }
+                        },
+                        Some(sdl2::keyboard::Scancode::Up) => {
+                            next_program = current_program.clone();
                         },
                         Some(sdl2::keyboard::Scancode::Backspace) => {
                             // If the option key is down, clear the last word
@@ -157,11 +215,11 @@ pub fn main() {
                                         next_program.clear();
                                     }
                                 } else {
-                                    // No non-whitespace
+                                    // No non-whitespace characters, so clear the whole string
                                     next_program.clear();
                                 }
                             } else {
-                                    next_program.pop();
+                                next_program.pop();
                             }
                         },
                         _ => {}
@@ -175,17 +233,28 @@ pub fn main() {
             }
         }
 
-        match receiver.recv_timeout(Duration::new(0, 1_000_000)) {
+        match sample_receiver.recv_timeout(Duration::new(0, 1_000_000)) {
             Ok(out) => {
                 canvas.set_draw_color(Color::RGB(0, 0, 0));
                 canvas.clear();
-                canvas.copy(&prompt_texture, None, Some(sdl2::rect::Rect::new(10, 10, prompt_width, prompt_height))).unwrap();
-                if next_program.len() > 0 {
-                    let text_texture = make_texture(&font, Color::RGBA(0, 255, 0, 255), &texture_creator, &next_program);
+
+                let mut y = 10;
+                if current_program.len() > 0 {
+                    let text_texture = make_texture(&font, Color::RGBA(0, 255, 0, 255), &texture_creator, &current_program);
                     let TextureQuery { width: text_width, height: text_height, .. } = text_texture.query();
-                    canvas.copy(&text_texture, None, Some(sdl2::rect::Rect::new(prompt_width as i32, 10, text_width, text_height))).unwrap();
+                    canvas.copy(&text_texture, None, Some(sdl2::rect::Rect::new(prompt_width as i32, y, text_width, text_height))).unwrap();
+                    y += text_height as i32;
                 }
 
+                canvas.copy(&prompt_texture, None, Some(sdl2::rect::Rect::new(10, y, prompt_width, prompt_height))).unwrap();
+
+                if next_program.len() > 0 {
+                    let text_texture = make_texture(&font, Color::RGBA(0, 255, 255, 255), &texture_creator, &next_program);
+                    let TextureQuery { width: text_width, height: text_height, .. } = text_texture.query();
+                    canvas.copy(&text_texture, None, Some(sdl2::rect::Rect::new(prompt_width as i32, y, text_width, text_height))).unwrap();
+                }
+
+                // Draw the waveform
                 let x_scale = width as f32 / out.len() as f32;
                 canvas.set_draw_color(Color::RGB(0, 255, 0));
                 for (i, f) in out.iter().enumerate() {

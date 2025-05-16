@@ -3,7 +3,7 @@ extern crate sdl2;
 use std::collections::VecDeque;
 use std::f32::consts::PI;
 use std::time::Duration;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Receiver,Sender};
 
 use sdl2::audio::AudioCallback;
 
@@ -144,36 +144,24 @@ struct Envelope {
 }
  */
 
- pub struct Sequence<'a> {
-    generators: VecDeque<Box<dyn Generator + Send + 'a>>,
-    sender: Sender<Vec<f32>>,
-    send_counter: u32
+pub struct SequenceGenerator<'a> {
+    generators: VecDeque<Box<dyn Generator + 'a>>,
 }
 
-pub fn new_sequence<'a>(generators: Vec<impl Generator + Send + 'a>,
-    sender: Sender<Vec<f32>>) -> Sequence<'a> {
-    return Sequence {
-        generators: generators.into_iter().map(|g| Box::new(g) as _).collect(),
-        sender: sender,
-        send_counter: 0
+pub fn sequence<'a>(generators: Vec<impl Generator + 'a>) -> SequenceGenerator<'a> {
+    return SequenceGenerator {
+        generators: generators.into_iter().map(|g| Box::new(g) as _).collect()
     };
 }
 
-// TODO add metrics
-
-impl <'a> AudioCallback for Sequence<'a> {
-    type Channel = f32;
-
-    fn callback(&mut self, out: &mut [f32]) {
+impl <'a> Generator for SequenceGenerator<'a> {
+    fn generate(&mut self, out: &mut [f32]) -> GeneratorResult {
         use GeneratorResult::*;
-        for x in out.iter_mut() {
-            *x = 0.0;
-        }
         let mut remaining = out.len();
         while remaining > 0 {
             match self.generators.pop_front() {
                 None => {
-                    remaining = 0;
+                    return Finished(out.len() - remaining);
                 },
                 Some(mut generator) => {
                     let offset = out.len() - remaining;
@@ -183,8 +171,66 @@ impl <'a> AudioCallback for Sequence<'a> {
                         },
                         More => {
                             self.generators.push_front(generator);
-                            remaining = 0;
+                            return More;
                         }
+                    }
+                }
+            }
+        }
+        return Finished(out.len());
+    }
+}
+
+ pub struct Sequencer<'a> {
+    generator_receiver: Receiver<Box<dyn Generator + Send + 'a>>,
+    generator: Option<Box<dyn Generator + Send + 'a>>,
+    sample_sender: Sender<Vec<f32>>,
+    send_counter: u32
+}
+
+pub fn new_sequencer<'a>(
+    generator_receiver: Receiver<Box<dyn Generator + Send + 'a>>,
+    sample_sender: Sender<Vec<f32>>) -> Sequencer<'a> {
+    return Sequencer {
+        generator_receiver: generator_receiver,
+        generator: None,
+        sample_sender: sample_sender,
+        send_counter: 0
+    };
+}
+
+// TODO add metrics
+
+impl <'a> AudioCallback for Sequencer<'a> {
+    type Channel = f32;
+
+    fn callback(&mut self, out: &mut [f32]) {
+        for x in out.iter_mut() {
+            *x = 0.0;
+        }
+        let mut generated = 0;
+        let mut recv_allowed = true;
+        while generated < out.len() && recv_allowed{
+            if self.generator.is_none() && recv_allowed {
+                recv_allowed = false;
+                match self.generator_receiver.try_recv() {
+                    Ok(generator) => {
+                        self.generator = Some(generator);
+                        recv_allowed = true;
+                    },
+                    Err(_) => {
+                    }
+                }
+            }
+            if self.generator.is_some() {
+                match self.generator.as_mut().unwrap().generate(out) {
+                    GeneratorResult::Finished(size) => {
+                        println!("Finished generating {} samples out of {}", size, out.len());
+                        self.generator = None;
+                        generated += size;
+                    },
+                    GeneratorResult::More => {
+                        generated = out.len();
                     }
                 }
             }
@@ -193,7 +239,7 @@ impl <'a> AudioCallback for Sequence<'a> {
         if self.send_counter == 0 {
             let mut copy: Vec<f32> = Vec::with_capacity(out.len());
             out.clone_into(&mut copy);
-            self.sender.send(copy).unwrap();
+            self.sample_sender.send(copy).unwrap();
             self.send_counter = 5
             ;
         } else {
