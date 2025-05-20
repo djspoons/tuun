@@ -11,10 +11,6 @@ use sdl2::pixels::Color;
 use sdl2::ttf::Font;
 use sdl2::video::WindowContext;
 
-use sequence::sequence;
-use crate::sequence::chord;
-use crate::sequence::Generator;
-
 use nom::{
     IResult,
     Parser,
@@ -22,87 +18,70 @@ use nom::{
     combinator::eof,
     character::complete::{char, multispace0, multispace1},
     number::complete::float,
-    sequence::{delimited, terminated},
+    sequence::{delimited, preceded, terminated},
     multi::separated_list0,
 };
 
 // TODO make this a
 const sample_frequency : i32 = 44100;
 
-fn parse_generator(input: &str) -> IResult<&str, Box<dyn Generator>> {
-    let (i, generator) = 
-    delimited(
-        multispace0,
-        alt((
-            parse_chord,
-            parse_sequence,
-            parse_tone,
-        )),
-        multispace0).parse(input)?;
-    return Ok((i, generator));
+enum Node {
+    SineWave { frequency: f32 },
+    Truncated { duration: Duration, node: Box<Node> },
+    Chord(Vec<Node>),
+    Sequence(Vec<Node>),
 }
 
-fn parse_tone(input: &str) -> IResult<&str, Box<dyn Generator>> {
+fn parse_node(input: &str) -> IResult<&str, Node> {
+    let (i, node) = alt((
+        parse_chord,
+        parse_sequence,
+        parse_tone,
+    )).parse(input)?;
+    return Ok((i, node));
+}
+
+fn parse_tone(input: &str) -> IResult<&str, Node> {
     let (rest, freq) = float.parse(input)?;
     println!("Parsed freq: {:?}", freq);
-
-    /*
-        let mut chord_components = Vec::new();
-    for freq in freqs {
-        chord_components.push(sequence::wave_from_frequency(
-            sample_frequency, freq as f32));
-    }
-    generators.push(sequence::truncate(sample_frequency,
-        Duration::from_secs(5),
-        sequence::chord(chord_components)));
-
-
-        generators.push(sequence::truncate(sample_frequency,
-            Duration::from_secs(2),
-            sequence::wave_from_frequency(
-            sample_frequency, freq)));
-    }
-
-        /*sequence::wave_from_frequency(sample_frequency, freq)))); */
-
-     */
-    return Ok((rest, Box::new(sequence::truncate(sample_frequency,
-        Duration::from_secs(2),
-        sequence::wave_from_frequency(
-        sample_frequency, freq)))));
+    return Ok((rest, Node::Truncated{duration: Duration::from_secs(2), 
+        node: Box::new(Node::SineWave { frequency: freq })}));
 }
 
-fn parse_chord(input: &str) -> IResult<&str, Box<dyn Generator>> {
-    let (rest, generators) = delimited(
+fn parse_chord(input: &str) -> IResult<&str, Node> {
+    let (rest, nodes) = delimited(
         char('<'),
         separated_list0(
             multispace1,
-            parse_generator,
+            parse_node,
         ),
-        char('>')
+        char('>'),
     ).parse(input)?;
-    let res = generators.into_iter().map(|s| *s as _).collect();
-    return Ok((rest, Box::new(chord(res))));
+    return Ok((rest, Node::Chord(nodes)));
 }
 
-fn parse_sequence(input: &str) -> IResult<&str, Box<dyn Generator>> {
-    let (rest, generators) = delimited(
-        char('['),
+fn parse_sequence(input: &str) -> IResult<&str, Node> {
+    let (rest, nodes) = delimited(
+        terminated(char('['), multispace0),
         separated_list0(
             multispace1,
-            parse_generator,
+            parse_node,
         ),
-        char(']')
+        preceded(multispace0, char(']')),
     ).parse(input)?;
-    return Ok((rest, Box::new(sequence(generators))));
+    return Ok((rest, Node::Sequence(nodes)));
 }
 
-fn parse_program(input: &str) -> Result<Box<dyn Generator>, nom::error::Error<&str>> {
+fn parse_program(input: &str) -> Result<Node, nom::error::Error<&str>> {
     match terminated(
-            parse_generator,
-            eof).parse(input) {
-        Ok((_, generator)) => {
-            return Ok(generator);
+        delimited(
+            multispace0,
+            parse_node,
+            multispace0),
+        eof,
+    ).parse(input) {
+        Ok((_, node)) => {
+            return Ok(node);
         },
         Err(nom::Err::Error(e)) => {
             println!("Error on parsing input: {:?}", e);
@@ -117,8 +96,6 @@ fn parse_program(input: &str) -> Result<Box<dyn Generator>, nom::error::Error<&s
         }
     }
 }
-
-// 440^1 494^1 
 
 fn make_texture<'a>(font: &Font<'a, 'static>, color: Color, texture_creator: &'a TextureCreator<WindowContext>, s: &str) -> sdl2::render::Texture<'a> {
     let surface = font
@@ -142,13 +119,13 @@ pub fn main() {
 
 
     let (sample_sender, sample_receiver) = std::sync::mpsc::channel();
-    let (generator_sender, generator_receiver) = std::sync::mpsc::channel();
+    let (node_sender, node_receiver) = std::sync::mpsc::channel();
 
     let device = 
         audio_subsystem.open_playback(None, &desired_spec, 
             |spec| {
                 println!("Spec: {:?}", spec);
-                sequence::new_sequencer(generator_receiver, sample_sender)
+                sequence::new_sequencer(sample_frequency, node_receiver, sample_sender)
             }).unwrap();
     device.resume();
 
@@ -191,10 +168,10 @@ pub fn main() {
                             }
                         },
                         Some(sdl2::keyboard::Scancode::Return) => {
-                            // Parse the next program, create a generator and send it offset
+                            // Parse the next program, create a node and send it offset
                             // to the audio device 
-                            if let Ok(generator) = parse_program(&next_program) {
-                                generator_sender.send(generator).unwrap();
+                            if let Ok(node) = parse_program(&next_program) {
+                                node_sender.send(node).unwrap();
                                 current_program = next_program.clone();
                                 next_program.clear();
                             } else {

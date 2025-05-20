@@ -7,6 +7,8 @@ use std::sync::mpsc::{Receiver,Sender};
 
 use sdl2::audio::AudioCallback;
 
+use crate::Node;
+
 pub enum GeneratorResult {
     Finished(usize), // number of samples filled
     More
@@ -49,20 +51,20 @@ pub fn _wave_from_midi_number(sample_frequency: i32, note: u8) -> SineWaveGenera
     );
 }
 
-pub struct FiniteGenerator<'a> {
+pub struct FiniteGenerator {
     remaining: u64,
-    generator: Box<dyn Generator + 'a>
+    generator: Box<dyn Generator>,
 }
 
-pub fn truncate<'a>(sample_frequency: i32, duration: Duration, generator: impl Generator + 'a) -> 
-    FiniteGenerator<'a> {
+pub fn truncate(sample_frequency: i32, duration: Duration, generator: Box<dyn Generator>) ->
+    FiniteGenerator {
     return FiniteGenerator {
         remaining: (duration.as_secs() as u64) * (sample_frequency as u64),
-        generator: Box::new(generator)
-    };
+        generator: generator,
+};
 }
 
-impl <'a> Generator for FiniteGenerator<'a> {
+impl <'a> Generator for FiniteGenerator {
     fn generate(&mut self, out: &mut [f32]) -> GeneratorResult {
         use GeneratorResult::*;
         if self.remaining <= out.len() as u64 {
@@ -96,18 +98,18 @@ impl <'a> Generator for FiniteGenerator<'a> {
     }
 }
 
-pub struct ChordGenerator<'a> {
-    generators: Vec<Box<dyn Generator + 'a>>
+pub struct ChordGenerator {
+    generators: Vec<Box<dyn Generator>>
 }
 
-pub fn chord<'a>(generators: Vec<impl Generator + 'a>) -> ChordGenerator<'a> {
+pub fn chord(generators: Vec<Box<dyn Generator>>) -> ChordGenerator {
     return ChordGenerator {
         // TODO why the 'as _'?!?
-        generators: generators.into_iter().map(|g| Box::new(g) as _).collect()
+        generators: generators,
     };
 }
 
-impl <'a> Generator for ChordGenerator<'a> {
+impl Generator for ChordGenerator {
     fn generate(&mut self, out: &mut [f32]) -> GeneratorResult {
         use GeneratorResult::*;
         let n = self.generators.len() as f32;
@@ -144,17 +146,17 @@ struct Envelope {
 }
  */
 
-pub struct SequenceGenerator<'a> {
-    generators: VecDeque<Box<dyn Generator + 'a>>,
+pub struct SequenceGenerator {
+    generators: VecDeque<Box<dyn Generator>>,
 }
 
-pub fn sequence<'a>(generators: Vec<impl Generator + 'a>) -> SequenceGenerator<'a> {
+pub fn sequence(generators: Vec<Box<dyn Generator>>) -> SequenceGenerator {
     return SequenceGenerator {
-        generators: generators.into_iter().map(|g| Box::new(g) as _).collect()
+        generators: generators.into_iter().map(|g| g as _).collect()
     };
 }
 
-impl <'a> Generator for SequenceGenerator<'a> {
+impl <'a> Generator for SequenceGenerator {
     fn generate(&mut self, out: &mut [f32]) -> GeneratorResult {
         use GeneratorResult::*;
         let mut remaining = out.len();
@@ -181,18 +183,48 @@ impl <'a> Generator for SequenceGenerator<'a> {
     }
 }
 
- pub struct Sequencer<'a> {
-    generator_receiver: Receiver<Box<dyn Generator + Send + 'a>>,
-    generator: Option<Box<dyn Generator + Send + 'a>>,
+fn from_node<'a>(sample_frequency: i32, node: Node) -> Box<dyn Generator + 'a> {
+    use Node::*;
+    match node {
+        SineWave { frequency } => {
+            return Box::new(wave_from_frequency(sample_frequency, frequency));
+        },
+        Truncated { duration, node } => {
+            return Box::new(truncate(sample_frequency, duration,
+                 from_node(sample_frequency, *node)));
+        },
+        Sequence ( nodes ) => {
+            let mut generators = Vec::new();
+            for node in nodes {
+                generators.push(from_node(sample_frequency, node));
+            }
+            return Box::new(sequence(generators));
+        },
+        Chord ( nodes ) => {
+            let mut generators = Vec::new();
+            for node in nodes {
+                generators.push(from_node(sample_frequency, node));
+            }
+            return Box::new(chord(generators));
+        }
+    }
+}
+
+ pub struct Sequencer {
+    sample_frequency: i32,
+    node_receiver: Receiver<Node>,
+    generator: Option<Box<dyn Generator>>,
     sample_sender: Sender<Vec<f32>>,
     send_counter: u32
 }
 
-pub fn new_sequencer<'a>(
-    generator_receiver: Receiver<Box<dyn Generator + Send + 'a>>,
-    sample_sender: Sender<Vec<f32>>) -> Sequencer<'a> {
+pub fn new_sequencer(
+    sample_frequency: i32,
+    node_receiver: Receiver<Node>,
+    sample_sender: Sender<Vec<f32>>) -> Sequencer {
     return Sequencer {
-        generator_receiver: generator_receiver,
+        sample_frequency: sample_frequency,
+        node_receiver: node_receiver,
         generator: None,
         sample_sender: sample_sender,
         send_counter: 0
@@ -201,7 +233,7 @@ pub fn new_sequencer<'a>(
 
 // TODO add metrics
 
-impl <'a> AudioCallback for Sequencer<'a> {
+impl <'a> AudioCallback for Sequencer {
     type Channel = f32;
 
     fn callback(&mut self, out: &mut [f32]) {
@@ -213,9 +245,9 @@ impl <'a> AudioCallback for Sequencer<'a> {
         while generated < out.len() && recv_allowed{
             if self.generator.is_none() && recv_allowed {
                 recv_allowed = false;
-                match self.generator_receiver.try_recv() {
-                    Ok(generator) => {
-                        self.generator = Some(generator);
+                match self.node_receiver.try_recv() {
+                    Ok(node) => {
+                        self.generator = Some(from_node(self.sample_frequency, node));
                         recv_allowed = true;
                     },
                     Err(_) => {
