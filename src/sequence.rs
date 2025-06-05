@@ -7,6 +7,7 @@ use std::sync::mpsc::{Receiver,Sender};
 
 use sdl2::audio::AudioCallback;
 
+use crate::{Command, FloatExpr};
 use crate::Node;
 
 pub enum GeneratorResult {
@@ -46,7 +47,7 @@ impl Generator for SineWaveGenerator {
 
 pub fn _wave_from_midi_number(sample_frequency: i32, note: u8) -> SineWaveGenerator {
     println!("Note: {} {}", note, 440.0 * 2.0f32.powf((note as f32 - 69.0) / 12.0));
-    return wave_from_frequency(sample_frequency, 
+    return wave_from_frequency(sample_frequency,
         440.0 * 2.0f32.powf((note as f32 - 69.0) / 12.0),
     );
 }
@@ -183,11 +184,24 @@ impl <'a> Generator for SequenceGenerator {
     }
 }
 
+fn eval_float_expr(expr: FloatExpr) -> f32 {
+    match expr {
+        FloatExpr::Value(value) => value,
+        FloatExpr::Multiply(a, b ) => {
+            eval_float_expr(*a) * eval_float_expr(*b)
+        },
+        FloatExpr::Divide(a, b) => {
+            eval_float_expr(*a) / eval_float_expr(*b)
+        },
+    }
+}
+
 fn from_node<'a>(sample_frequency: i32, node: Node) -> Box<dyn Generator + 'a> {
     use Node::*;
     match node {
         SineWave { frequency } => {
-            return Box::new(wave_from_frequency(sample_frequency, frequency));
+            return Box::new(wave_from_frequency(sample_frequency, 
+                eval_float_expr(frequency)));
         },
         Truncated { duration, node } => {
             return Box::new(truncate(sample_frequency, duration,
@@ -212,7 +226,8 @@ fn from_node<'a>(sample_frequency: i32, node: Node) -> Box<dyn Generator + 'a> {
 
  pub struct Sequencer {
     sample_frequency: i32,
-    node_receiver: Receiver<Node>,
+    beats_per_minute: i32,
+    command_receiver: Receiver<Command>,
     generator: Option<Box<dyn Generator>>,
     sample_sender: Sender<Vec<f32>>,
     send_counter: u32
@@ -220,11 +235,13 @@ fn from_node<'a>(sample_frequency: i32, node: Node) -> Box<dyn Generator + 'a> {
 
 pub fn new_sequencer(
     sample_frequency: i32,
-    node_receiver: Receiver<Node>,
+    beats_per_minute: i32,
+    command_receiver: Receiver<Command>,
     sample_sender: Sender<Vec<f32>>) -> Sequencer {
     return Sequencer {
         sample_frequency: sample_frequency,
-        node_receiver: node_receiver,
+        beats_per_minute: beats_per_minute,
+        command_receiver: command_receiver,
         generator: None,
         sample_sender: sample_sender,
         send_counter: 0
@@ -245,8 +262,8 @@ impl <'a> AudioCallback for Sequencer {
         while generated < out.len() && recv_allowed{
             if self.generator.is_none() && recv_allowed {
                 recv_allowed = false;
-                match self.node_receiver.try_recv() {
-                    Ok(node) => {
+                match self.command_receiver.try_recv() {
+                    Ok(Command::PlayOnce{ node, beat }) => {
                         self.generator = Some(from_node(self.sample_frequency, node));
                         recv_allowed = true;
                     },

@@ -11,39 +11,83 @@ use sdl2::pixels::Color;
 use sdl2::ttf::Font;
 use sdl2::video::WindowContext;
 
+use clap::Parser as ClapParser;
+
 use nom::{
     IResult,
     Parser,
     branch::alt,
-    combinator::eof,
+    combinator::{eof, map},
     character::complete::{char, multispace0, multispace1},
     number::complete::float,
     sequence::{delimited, preceded, terminated},
-    multi::separated_list0,
+    multi::{many0, separated_list0},
 };
 
-// TODO make this a
-const sample_frequency : i32 = 44100;
-
+enum FloatExpr {
+    Value(f32),
+    Multiply(Box<FloatExpr>, Box<FloatExpr>),
+    Divide(Box<FloatExpr>, Box<FloatExpr>),
+}
 enum Node {
-    SineWave { frequency: f32 },
+    SineWave { frequency: FloatExpr},
     Truncated { duration: Duration, node: Box<Node> },
     Chord(Vec<Node>),
     Sequence(Vec<Node>),
 }
 
 fn parse_node(input: &str) -> IResult<&str, Node> {
-    let (i, node) = alt((
+    let (rest, node) = alt((
         parse_chord,
         parse_sequence,
         parse_tone,
     )).parse(input)?;
-    return Ok((i, node));
+    return Ok((rest, node));
+}
+
+fn parse_float_literal(input: &str) -> IResult<&str, FloatExpr> {
+    let (rest, value) = float.parse(input)?;
+    println!("Parsed float literal: {} with rest {}", value, rest);
+    return Ok((rest, FloatExpr::Value(value)));
+}
+
+fn parse_float_term(input: &str) -> IResult<&str, FloatExpr> {
+    let (rest, value) =
+        map((parse_float_factor,
+            many0(
+                (delimited(multispace0,alt((char('*'), char('/'))), multispace0),
+                parse_float_factor),
+            )), |(factor, op_factors)| {
+            let mut result = factor;
+            for (op, factor) in op_factors {
+                result = match op {
+                    '*' => FloatExpr::Multiply(Box::new(result), Box::new(factor)),
+                    '/' => FloatExpr::Divide(Box::new(result), Box::new(factor)),
+                    _ => panic!("Unexpected operator: {}", op),
+                };
+            }
+            return result;
+        }).parse(input)?;
+    return Ok((rest, value));
+}
+
+fn parse_float_factor(input: &str) -> IResult<&str, FloatExpr> {
+    let (rest, value) = alt((
+        parse_float_literal,
+        delimited(
+            (char('('), multispace0),
+            parse_float_term,
+            (multispace0, char(')')),
+        ),
+    )).parse(input)?;
+    return Ok((rest, value));
 }
 
 fn parse_tone(input: &str) -> IResult<&str, Node> {
-    let (rest, freq) = float.parse(input)?;
-    println!("Parsed freq: {:?}", freq);
+    let (rest, freq) = preceded(
+        char('$'),
+        parse_float_factor
+    ).parse(input)?;
     return Ok((rest, Node::Truncated{duration: Duration::from_secs(2), 
         node: Box::new(Node::SineWave { frequency: freq })}));
 }
@@ -97,6 +141,13 @@ fn parse_program(input: &str) -> Result<Node, nom::error::Error<&str>> {
     }
 }
 
+enum Command {
+    PlayOnce {
+        node: Node,
+        beat: i32, // Offset in beats from the beginning
+    },
+}
+
 fn make_texture<'a>(font: &Font<'a, 'static>, color: Color, texture_creator: &'a TextureCreator<WindowContext>, s: &str) -> sdl2::render::Texture<'a> {
     let surface = font
         .render(s)
@@ -108,24 +159,39 @@ fn make_texture<'a>(font: &Font<'a, 'static>, color: Color, texture_creator: &'a
     return texture;
 }
 
+#[derive(ClapParser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    #[arg(long = "bpm", default_value_t = 90)]
+    beats_per_minute: i32,
+    #[arg(long, default_value_t = 44100)]
+    sample_frequency: i32,
+    #[arg(short, long, default_value = "")]
+    program: String,
+}
+
 pub fn main() {
+    let args = Args::parse();
+
     let sdl_context = sdl2::init().unwrap();
     let audio_subsystem = sdl_context.audio().unwrap();
     let desired_spec = AudioSpecDesired {
-        freq: Some(sample_frequency),
+        freq: Some(args.sample_frequency),
         channels: Some(1),  // mono
         samples: None       // default sample size
     };
 
-
     let (sample_sender, sample_receiver) = std::sync::mpsc::channel();
-    let (node_sender, node_receiver) = std::sync::mpsc::channel();
+    let (command_sender, command_receiver) = std::sync::mpsc::channel();
 
     let device = 
         audio_subsystem.open_playback(None, &desired_spec, 
             |spec| {
                 println!("Spec: {:?}", spec);
-                sequence::new_sequencer(sample_frequency, node_receiver, sample_sender)
+                sequence::new_sequencer(args.sample_frequency,
+                    args.beats_per_minute,
+                    command_receiver,
+                    sample_sender)
             }).unwrap();
     device.resume();
 
@@ -149,7 +215,7 @@ pub fn main() {
 
     let mut should_exit = false;
     let mut current_program = String::new();
-    let mut next_program = String::new();
+    let mut next_program = args.program.clone();
 
     video_subsystem.text_input().start();
     let mut event_pump = sdl_context.event_pump().unwrap();
@@ -171,7 +237,7 @@ pub fn main() {
                             // Parse the next program, create a node and send it offset
                             // to the audio device 
                             if let Ok(node) = parse_program(&next_program) {
-                                node_sender.send(node).unwrap();
+                                command_sender.send(Command::PlayOnce{node, beat: 0}).unwrap();
                                 current_program = next_program.clone();
                                 next_program.clear();
                             } else {
