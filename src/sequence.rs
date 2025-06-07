@@ -48,6 +48,7 @@ impl Generator for SineWaveGenerator {
 pub fn _wave_from_midi_number(sample_frequency: i32, note: u8) -> SineWaveGenerator {
     println!("Note: {} {}", note, 440.0 * 2.0f32.powf((note as f32 - 69.0) / 12.0));
     return wave_from_frequency(sample_frequency,
+        // 12-TET
         440.0 * 2.0f32.powf((note as f32 - 69.0) / 12.0),
     );
 }
