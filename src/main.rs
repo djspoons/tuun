@@ -2,6 +2,8 @@ mod sequence;
 
 use core::panic;
 use std::time::Duration;
+use std::ops::Range;
+use std::cell::RefCell;
 
 extern crate sdl2;
 use sdl2::event::Event;
@@ -14,29 +16,125 @@ use sdl2::video::WindowContext;
 use clap::Parser as ClapParser;
 
 use nom::{
-    IResult,
     Parser,
     branch::alt,
-    combinator::{eof, map},
-    character::complete::{char, multispace0, multispace1},
+    combinator::{map, cut, all_consuming},
+    character::complete::{multispace0, multispace1},
     number::complete::float,
-    sequence::{delimited, preceded, terminated},
+    sequence::{delimited, preceded},
     multi::{many0, separated_list0},
 };
 
+type LocatedSpan<'a> = nom_locate::LocatedSpan<&'a str, ParseState<'a>>;
+type IResult<'a, T> = nom::IResult<LocatedSpan<'a>, T>;
+
+trait ToRange {
+    fn to_range(&self) -> Range<usize>;
+}
+
+impl<'a> ToRange for LocatedSpan<'a> {
+    fn to_range(&self) -> Range<usize> {
+        let start = self.location_offset();
+        let end = start + self.fragment().len();
+        start..end
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParseError {
+    range: Range<usize>,
+    message: Option<String>,
+}
+
+impl<'a> ParseError {
+    fn new(span: &LocatedSpan, message: String) -> Self {
+        Self { range: span.to_range(), message: Some(message) }
+    }
+
+    //pub fn span(&self) -> &Span { &self.span }
+    pub fn range(&self) -> Range<usize> { self.range.clone() }
+
+    // pub fn line(&self) -> u32 { self.span().location_line() }
+
+    // pub fn offset(&self) -> usize { self.span().location_offset() }
+}
+
+impl<'a> nom::error::ParseError<LocatedSpan<'a>> for ParseError {
+    fn from_error_kind(input: LocatedSpan<'a>, kind: nom::error::ErrorKind) -> Self {
+        Self::new(&input, format!("parse error {:?}", kind))
+    }
+
+    fn append(_input: LocatedSpan<'a>, _kind: nom::error::ErrorKind, other: Self) -> Self {
+        other
+    }
+
+    // fn from_char(input: Span<'a>, c: char) -> Self {
+    //     Self::new(format!("unexpected character '{}'", c), input)
+    // }
+}
+
+/// Carried around in the `LocatedSpan::extra` field in
+/// between `nom` parsers.
+#[derive(Clone, Debug)]
+struct ParseState<'a>(&'a RefCell<Vec<ParseError>>);
+
+impl<'a> ParseState<'a> {
+    /// Pushes an error onto the errors stack from within a `nom`
+    /// parser combinator while still allowing parsing to continue.
+    fn report_error(&self, error: ParseError) {
+        self.0.borrow_mut().push(error);
+    }
+}
+
+/// https://eyalkalderon.com/blog/nom-error-recovery/
+/// Evaluate `parser` and wrap the result in a `Some(_)`. Otherwise,
+/// emit the  provided `error_msg` and return a `None` while allowing
+/// parsing to continue.
+fn expect<'a, F, E, T>(parser: F, error_msg: E) -> impl Fn(LocatedSpan<'a>) -> IResult<Option<T>>
+where
+    F: Fn(LocatedSpan<'a>) -> IResult<T>,
+    E: ToString,
+{
+    move |input: LocatedSpan| match parser(input) {
+        Ok((remaining, out)) =>
+            Ok((remaining, Some(out))),
+        Err(nom::Err::Error(e)) |
+        Err(nom::Err::Failure(e)) => {
+            let input = e.input;
+            let err = ParseError::new(&input, error_msg.to_string());
+            input.extra.report_error(err); // Push error onto stack.
+            Ok((input, None)) // Parsing failed, but keep going.
+        },
+        Err(err) => Err(err),
+    }
+}
+
+// Wrap nom's char to avoid FnMut
+fn char(c: char) -> impl Fn(LocatedSpan) -> IResult<char> {
+    move |input: LocatedSpan| {
+        let (rest, value) = nom::character::complete::char(c).parse(input)?;
+        return Ok((rest, value));
+    }
+}
+
+#[derive(Debug)]
 enum FloatExpr {
     Value(f32),
     Multiply(Box<FloatExpr>, Box<FloatExpr>),
     Divide(Box<FloatExpr>, Box<FloatExpr>),
+    Error,
 }
+
+#[derive(Debug)]
 enum Node {
     SineWave { frequency: FloatExpr},
     Truncated { duration: Duration, node: Box<Node> },
     Chord(Vec<Node>),
     Sequence(Vec<Node>),
+    Error,
 }
 
-fn parse_node(input: &str) -> IResult<&str, Node> {
+fn parse_node(input: LocatedSpan) -> IResult<Node> {
     let (rest, node) = alt((
         parse_chord,
         parse_sequence,
@@ -45,98 +143,105 @@ fn parse_node(input: &str) -> IResult<&str, Node> {
     return Ok((rest, node));
 }
 
-fn parse_float_literal(input: &str) -> IResult<&str, FloatExpr> {
+fn parse_float_literal(input: LocatedSpan) -> IResult<FloatExpr> {
     let (rest, value) = float.parse(input)?;
     println!("Parsed float literal: {} with rest {}", value, rest);
     return Ok((rest, FloatExpr::Value(value)));
 }
 
-fn parse_float_term(input: &str) -> IResult<&str, FloatExpr> {
+fn parse_float_term(input: LocatedSpan) -> IResult<FloatExpr> {
     let (rest, value) =
         map((parse_float_factor,
             many0(
                 (delimited(multispace0,alt((char('*'), char('/'))), multispace0),
-                parse_float_factor),
+                expect(parse_float_factor, "expected number expression after operator"))
             )), |(factor, op_factors)| {
             let mut result = factor;
             for (op, factor) in op_factors {
-                result = match op {
-                    '*' => FloatExpr::Multiply(Box::new(result), Box::new(factor)),
-                    '/' => FloatExpr::Divide(Box::new(result), Box::new(factor)),
-                    _ => panic!("Unexpected operator: {}", op),
+                let expr_op = match op {
+                    '*' => FloatExpr::Multiply,
+                    '/' => FloatExpr::Divide,
+                    _ => panic!("Impossible operator: {}", op),
                 };
+                result = expr_op(Box::new(result), Box::new(factor.unwrap_or(FloatExpr::Error)))
             }
             return result;
         }).parse(input)?;
     return Ok((rest, value));
 }
 
-fn parse_float_factor(input: &str) -> IResult<&str, FloatExpr> {
+fn parse_float_factor(input: LocatedSpan) -> IResult<FloatExpr> {
     let (rest, value) = alt((
         parse_float_literal,
         delimited(
             (char('('), multispace0),
             parse_float_term,
-            (multispace0, char(')')),
+            (multispace0, expect(char(')'), "expected ')'")),
         ),
     )).parse(input)?;
     return Ok((rest, value));
 }
 
-fn parse_tone(input: &str) -> IResult<&str, Node> {
+fn parse_tone(input: LocatedSpan) -> IResult<Node> {
     let (rest, freq) = preceded(
         char('$'),
-        parse_float_factor
+        expect(parse_float_factor, "expected number expression after $"),
     ).parse(input)?;
-    return Ok((rest, Node::Truncated{duration: Duration::from_secs(2), 
-        node: Box::new(Node::SineWave { frequency: freq })}));
+    return Ok((rest, Node::Truncated{duration: Duration::from_secs(1), 
+        node: Box::new(Node::SineWave { frequency: freq.unwrap_or(FloatExpr::Error) })}));
 }
 
-fn parse_chord(input: &str) -> IResult<&str, Node> {
+fn parse_chord(input: LocatedSpan) -> IResult<Node> {
     let (rest, nodes) = delimited(
-        char('<'),
-        separated_list0(
+        (char('<'), multispace0),
+        cut(separated_list0(
             multispace1,
             parse_node,
-        ),
-        char('>'),
+        )),
+        (multispace0, expect(char('>'), "expected '>'")),
     ).parse(input)?;
     return Ok((rest, Node::Chord(nodes)));
 }
 
-fn parse_sequence(input: &str) -> IResult<&str, Node> {
+fn parse_sequence(input: LocatedSpan) -> IResult<Node> {
     let (rest, nodes) = delimited(
-        terminated(char('['), multispace0),
-        separated_list0(
+        (char('['), multispace0),
+        cut(separated_list0(
             multispace1,
             parse_node,
-        ),
-        preceded(multispace0, char(']')),
+        )),
+        (multispace0, expect(char(']'), "expected ']'")),
     ).parse(input)?;
     return Ok((rest, Node::Sequence(nodes)));
 }
 
-fn parse_program(input: &str) -> Result<Node, nom::error::Error<&str>> {
-    match terminated(
+fn parse_program(input: &str) -> Result<Node, Vec<ParseError>> {
+    let errors = RefCell::new(Vec::new());
+    let span = LocatedSpan::new_extra(input, ParseState(&errors));
+    let result = all_consuming(
         delimited(
             multispace0,
             parse_node,
             multispace0),
-            eof,
-    ).parse(input) {
+    ).parse(span);
+    if errors.borrow().len() > 0 {
+        println!("Got result {:?} and errors {:?}", match result { Ok((_, node)) => node, _ => Node::Error}, errors.borrow());
+        return Err(errors.into_inner());
+    }
+    match result {
         Ok((_, node)) => {
             return Ok(node);
         },
         Err(nom::Err::Error(e)) => {
             println!("Error on parsing input: {:?}", e);
-            return Err(e);
+            return Err(vec![ParseError::new(&e.input, "unable to parse input".to_string())]);
         }
         Err(nom::Err::Incomplete(_)) => {
             panic!("Incomplete error on input");
         }
         Err(nom::Err::Failure(e)) => {
             println!("Failed to parse input: {:?}", e);
-            return Err(e);
+            return Err(vec![ParseError::new(&e.input, "unable to parse input".to_string())]);
         }
     }
 }
@@ -166,14 +271,14 @@ struct Args {
     beats_per_minute: i32,
     #[arg(long, default_value_t = 44100)]
     sample_frequency: i32,
-    #[arg(short, long, default_value = "")]
-    program: String,
+    #[arg(short, long = "program", default_value = "", number_of_values = 1)]
+    programs: Vec<String>,
 }
 
 #[derive(Debug)]
 enum Mode {
     Select { index: usize },
-    Edit { index: usize },
+    Edit { index: usize, has_error: bool },
     Exit,
 }
 
@@ -216,14 +321,14 @@ pub fn main() {
     let texture_creator = canvas.texture_creator();
     let font = ttf_context.load_font(font_path, 64).unwrap();
 
-    let prompt_texture = make_texture(&font, Color::RGBA(0, 255, 0, 255), &texture_creator, " → ");
+    let prompt_texture = make_texture(&font, Color::RGBA(0, 255, 0, 255), &texture_creator, " ▸ ");
     let TextureQuery { width: prompt_width, height: prompt_height, .. } = prompt_texture.query();
-    let cursor_texture = make_texture(&font, Color::RGBA(0, 255, 255, 255), &texture_creator, "‸");
-    let TextureQuery { width: cursor_width, height: cursor_height, .. } = cursor_texture.query();
 
-    let mut programs = vec![String::new(); 5];
-    programs[0] = args.program.clone();
-    let mut mode = Mode::Edit { index: 0 };
+    let mut programs = args.programs;
+    while programs.len() < 5 {
+        programs.push(String::new());
+    }
+    let mut mode = Mode::Select { index: 0 };
 
     video_subsystem.text_input().start();
     let mut event_pump = sdl_context.event_pump().unwrap();
@@ -244,17 +349,20 @@ pub fn main() {
                 let mut y = 10;
                 for (i, program) in programs.iter().enumerate() {
                     let mut color = Color::RGBA(0, 255, 0, 255);
-                    if let Mode::Edit { index } = mode {
-                        if index == i {
-                            color = Color::RGBA(0, 255, 255, 255);
+                    match mode {
+                        Mode::Edit { index, .. } => {
+                            if index == i {
+                                color = Color::RGBA(0, 255, 255, 255);
+                            }
                         }
+                        Mode::Select { index } => {
+                            if index == i {
+                                canvas.copy(&prompt_texture, None, Some(sdl2::rect::Rect::new(0, y, prompt_width,   prompt_height))).unwrap();
+                            }
+                        },
+                        _ => (),
                     }
-                    canvas.set_draw_color(color);
-                    if let Mode::Select { index } = mode {
-                        if index == i {
-                            canvas.copy(&prompt_texture, None, Some(sdl2::rect::Rect::new(0, y, prompt_width, prompt_height))).unwrap();
-                        }
-                    }
+
                     let mut cursor_x = prompt_width as i32;
                     if !program.is_empty() {
                         let text_texture = make_texture(&font, color, &texture_creator, program);
@@ -262,8 +370,15 @@ pub fn main() {
                         canvas.copy(&text_texture, None, Some(sdl2::rect::Rect::new(prompt_width as i32, y, text_width, text_height))).unwrap();
                         cursor_x += text_width as i32;
                     }
-                    if let Mode::Edit { index } = mode {
+                    if let Mode::Edit { index, has_error } = mode {
                         if index == i {
+                            color = if has_error {
+                                Color::RGBA(255, 0, 0, 255)
+                            } else {
+                                Color::RGBA(0, 255, 255, 255)
+                            };
+                            let cursor_texture = make_texture(&font, color, &texture_creator, "‸");
+                            let TextureQuery { width: cursor_width, height: cursor_height, .. } = cursor_texture.query();
                             canvas.copy(&cursor_texture, None, Some(sdl2::rect::Rect::new(cursor_x, y, cursor_width, cursor_height))).unwrap();
                         }
                     }
@@ -286,6 +401,13 @@ pub fn main() {
     }
 }
 
+fn edit_mode_from_program(index: usize, program: &str) -> Mode {
+    match parse_program(program) {
+        Ok(_) => Mode::Edit { index, has_error: false },
+        Err(_) => Mode::Edit { index, has_error: true },
+    }
+}
+
 fn process_event(event: Event, mode: Mode, programs: &mut Vec<String>, command_sender: &std::sync::mpsc::Sender<Command>) -> Mode {
     match event {
         Event::Quit { .. } => return Mode::Exit,
@@ -301,7 +423,7 @@ fn process_event(event: Event, mode: Mode, programs: &mut Vec<String>, command_s
                     }
                 },
                 (Mode::Select { index }, Some(sdl2::keyboard::Scancode::Return)) => {
-                    return Mode::Edit { index };
+                    return edit_mode_from_program(index, &programs[index]);
                 },
                 (Mode::Select { index }, Some(sdl2::keyboard::Scancode::Up)) => {
                     return Mode::Select { index: (index + programs.len() - 1) % programs.len() };
@@ -309,17 +431,21 @@ fn process_event(event: Event, mode: Mode, programs: &mut Vec<String>, command_s
                 (Mode::Select { index }, Some(sdl2::keyboard::Scancode::Down)) => {
                     return  Mode::Select { index: (index + 1) % programs.len() };
                 },
-                (Mode::Edit { index }, Some(sdl2::keyboard::Scancode::Return)) => {
+                (Mode::Edit { index, .. }, Some(sdl2::keyboard::Scancode::Return)) => {
                     let program = &programs[index];
-                    if let Ok(node) = parse_program(program) {
-                        command_sender.send(Command::PlayOnce{node, beat: 0}).unwrap();
-                        return Mode::Select { index };
-                    } else {
-                        println!("Failed to parse input: {:?}", program);
-                        return Mode::Select { index };
+                    match parse_program(program) {
+                        Ok(node) => {
+                            command_sender.send(Command::PlayOnce{node, beat: 0}).unwrap();
+                            return Mode::Select { index };
+                        },
+                        Err(errors) => {
+                            // If there are errors, we stay in edit mode
+                            println!("Errors while parsing input: {:?}", errors);
+                            return Mode::Edit { index, has_error: true };
+                        }
                     }
                 },
-                (Mode::Edit { index }, Some(sdl2::keyboard::Scancode::Backspace)) => {
+                (Mode::Edit { index, .. }, Some(sdl2::keyboard::Scancode::Backspace)) => {
                     // If the option key is down, clear the last word
                     let mut program = programs[index].clone();
                     if keymod.contains(sdl2::keyboard::Mod::LALTMOD) {
@@ -338,9 +464,9 @@ fn process_event(event: Event, mode: Mode, programs: &mut Vec<String>, command_s
                         program.pop();
                     }
                     programs[index] = program;
-                    return Mode::Edit { index: index };
+                    return edit_mode_from_program(index, &programs[index]);
                 },
-                (Mode::Edit { index }, Some(sdl2::keyboard::Scancode::Escape)) => {
+                (Mode::Edit { index, .. }, Some(sdl2::keyboard::Scancode::Escape)) => {
                     return Mode::Select { index: index };
                 },
                 (mode, _) => return mode,
@@ -353,9 +479,9 @@ fn process_event(event: Event, mode: Mode, programs: &mut Vec<String>, command_s
                     // TODO change mode in some cases
                     return mode;
                 }
-                Mode::Edit { index } => {
+                Mode::Edit { index, .. } => {
                     programs[index].push_str(&text);
-                    return mode;
+                    return edit_mode_from_program(index, &programs[index]);
                 },
                 _ => {
                     println!("Unexpected text input in mode: {:?}", mode);

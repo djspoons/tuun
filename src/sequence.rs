@@ -194,6 +194,9 @@ fn eval_float_expr(expr: FloatExpr) -> f32 {
         FloatExpr::Divide(a, b) => {
             eval_float_expr(*a) / eval_float_expr(*b)
         },
+        FloatExpr::Error => {
+            panic!("Error in float expression evaluation");
+        },
     }
 }
 
@@ -221,7 +224,11 @@ fn from_node<'a>(sample_frequency: i32, node: Node) -> Box<dyn Generator + 'a> {
                 generators.push(from_node(sample_frequency, node));
             }
             return Box::new(chord(generators));
-        }
+        },
+        Error => {
+            panic!("Error in node conversion");
+        },
+
     }
 }
 
