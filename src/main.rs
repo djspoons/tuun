@@ -19,7 +19,7 @@ use nom::{
     Parser,
     branch::alt,
     combinator::{map, cut, all_consuming},
-    character::complete::{multispace0, multispace1},
+    character::complete::{char, multispace0, multispace1},
     number::complete::float,
     sequence::{delimited, preceded},
     multi::{many0, separated_list0},
@@ -90,9 +90,9 @@ impl<'a> ParseState<'a> {
 /// Evaluate `parser` and wrap the result in a `Some(_)`. Otherwise,
 /// emit the  provided `error_msg` and return a `None` while allowing
 /// parsing to continue.
-fn expect<'a, F, E, T>(parser: F, error_msg: E) -> impl Fn(LocatedSpan<'a>) -> IResult<Option<T>>
+fn expect<'a, F, E, T>(mut parser: F, error_msg: E) -> impl FnMut(LocatedSpan<'a>) -> IResult<Option<T>>
 where
-    F: Fn(LocatedSpan<'a>) -> IResult<T>,
+    F: FnMut(LocatedSpan<'a>) -> IResult<T>,
     E: ToString,
 {
     move |input: LocatedSpan| match parser(input) {
@@ -106,14 +106,6 @@ where
             Ok((input, None)) // Parsing failed, but keep going.
         },
         Err(err) => Err(err),
-    }
-}
-
-// Wrap nom's char to avoid FnMut
-fn char(c: char) -> impl Fn(LocatedSpan) -> IResult<char> {
-    move |input: LocatedSpan| {
-        let (rest, value) = nom::character::complete::char(c).parse(input)?;
-        return Ok((rest, value));
     }
 }
 
