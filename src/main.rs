@@ -270,9 +270,11 @@ struct Args {
 #[derive(Debug)]
 enum Mode {
     Select { index: usize },
-    Edit { index: usize, has_error: bool },
+    Edit { index: usize, errors: Vec<ParseError> },
     Exit,
 }
+
+const NUM_PROGRAMS: usize = 5;
 
 pub fn main() {
     let args = Args::parse();
@@ -312,12 +314,18 @@ pub fn main() {
         |e| e.to_string()).unwrap();
     let texture_creator = canvas.texture_creator();
     let font = ttf_context.load_font(font_path, 64).unwrap();
+    const INACTIVE_COLOR: Color = Color::RGBA(0, 255, 0, 255);
+    const EDIT_COLOR: Color = Color::RGBA(0, 255, 255, 255);
+    const ERROR_COLOR: Color = Color::RGBA(255, 0, 0, 255);
 
-    let prompt_texture = make_texture(&font, Color::RGBA(0, 255, 0, 255), &texture_creator, " ▸ ");
-    let TextureQuery { width: prompt_width, height: prompt_height, .. } = prompt_texture.query();
+    let prompt_texture = make_texture(&font, INACTIVE_COLOR, &texture_creator, " ▸ ");
+    let TextureQuery { width: prompt_width, height: line_height, .. } = prompt_texture.query();
+    let number_texture = make_texture(&font, INACTIVE_COLOR, &texture_creator, "① " );
+    let TextureQuery { width: number_width, .. } = number_texture.query();
+    let nav_width = prompt_width + number_width;
 
     let mut programs = args.programs;
-    while programs.len() < 5 {
+    while programs.len() < NUM_PROGRAMS {
         programs.push(String::new());
     }
     let mut mode = Mode::Select { index: 0 };
@@ -340,41 +348,59 @@ pub fn main() {
 
                 let mut y = 10;
                 for (i, program) in programs.iter().enumerate() {
-                    let mut color = Color::RGBA(0, 255, 0, 255);
+                    let color = match mode {
+                        Mode::Edit { index, .. } if i == index => EDIT_COLOR,
+                        _ => INACTIVE_COLOR,
+                    };
+                    let number = char::from_u32(0x2460 + i as u32).unwrap().to_string();
+                    let number_texture = make_texture(&font, color, &texture_creator, &number);
+                    let TextureQuery { width: number_width, .. } = number_texture.query();
                     match mode {
-                        Mode::Edit { index, .. } => {
-                            if index == i {
-                                color = Color::RGBA(0, 255, 255, 255);
-                            }
-                        }
-                        Mode::Select { index } => {
-                            if index == i {
-                                canvas.copy(&prompt_texture, None, Some(sdl2::rect::Rect::new(0, y, prompt_width,   prompt_height))).unwrap();
+                        Mode::Edit { index, ref errors } => {
+                            canvas.copy(&number_texture, None, Some(sdl2::rect::Rect::new(prompt_width as i32, y, number_width, line_height))).unwrap();
+                            if i != index && !program.is_empty() {
+                                let text_texture = make_texture(&font, INACTIVE_COLOR, &texture_creator, program);
+                                let TextureQuery { width: text_width, height: text_height, .. } = text_texture.query();
+                                canvas.copy(&text_texture, None, Some(sdl2::rect::Rect::new(nav_width as i32, y, text_width, text_height))).unwrap();
+                            } else if i == index {
+                                // Loop over each character in program and check to see if it's in any of the error
+                                // ranges
+                                let mut x = nav_width as i32;
+                                for (j, c) in program.chars().enumerate() {
+                                    let color = if errors.iter().any(|e| e.range().contains(&j)) {
+                                        ERROR_COLOR
+                                    } else {
+                                        EDIT_COLOR
+                                    };
+                                    let char_texture = make_texture(&font, color, &texture_creator, &c.to_string());
+                                    let TextureQuery { width: char_width, height: char_height, .. } = char_texture.query();
+                                    canvas.copy(&char_texture, None, Some(sdl2::rect::Rect::new(x, y, char_width, char_height))).unwrap();
+                                    x += char_width as i32;
+                                }
+                                let color = if !errors.is_empty() {
+                                    ERROR_COLOR
+                                } else {
+                                    EDIT_COLOR
+                                };
+                                let cursor_texture = make_texture(&font, color, &texture_creator, "‸");
+                                let TextureQuery { width: cursor_width, height: cursor_height, .. } = cursor_texture.query();
+                                canvas.copy(&cursor_texture, None, Some(sdl2::rect::Rect::new(x, y, cursor_width, cursor_height))).unwrap();
                             }
                         },
-                        _ => (),
+                        Mode::Select { index } => {
+                            if index == i {
+                                canvas.copy(&prompt_texture, None, Some(sdl2::rect::Rect::new(0, y, prompt_width, line_height))).unwrap();
+                            }
+                            canvas.copy(&number_texture, None, Some(sdl2::rect::Rect::new(prompt_width as i32, y, number_width, line_height))).unwrap();
+                            if !program.is_empty() {
+                                let text_texture = make_texture(&font, INACTIVE_COLOR, &texture_creator, program);
+                                let TextureQuery { width: text_width, height: text_height, .. } = text_texture.query();
+                                canvas.copy(&text_texture, None, Some(sdl2::rect::Rect::new(nav_width as i32, y, text_width, text_height))).unwrap();
+                            }
+                        },
+                        Mode::Exit => (),
                     }
-
-                    let mut cursor_x = prompt_width as i32;
-                    if !program.is_empty() {
-                        let text_texture = make_texture(&font, color, &texture_creator, program);
-                        let TextureQuery { width: text_width, height: text_height, .. } = text_texture.query();
-                        canvas.copy(&text_texture, None, Some(sdl2::rect::Rect::new(prompt_width as i32, y, text_width, text_height))).unwrap();
-                        cursor_x += text_width as i32;
-                    }
-                    if let Mode::Edit { index, has_error } = mode {
-                        if index == i {
-                            color = if has_error {
-                                Color::RGBA(255, 0, 0, 255)
-                            } else {
-                                Color::RGBA(0, 255, 255, 255)
-                            };
-                            let cursor_texture = make_texture(&font, color, &texture_creator, "‸");
-                            let TextureQuery { width: cursor_width, height: cursor_height, .. } = cursor_texture.query();
-                            canvas.copy(&cursor_texture, None, Some(sdl2::rect::Rect::new(cursor_x, y, cursor_width, cursor_height))).unwrap();
-                        }
-                    }
-                    y += prompt_height as i32;
+                    y += line_height as i32;
                 }
 
                 // Draw the waveform
@@ -395,8 +421,8 @@ pub fn main() {
 
 fn edit_mode_from_program(index: usize, program: &str) -> Mode {
     match parse_program(program) {
-        Ok(_) => Mode::Edit { index, has_error: false },
-        Err(_) => Mode::Edit { index, has_error: true },
+        Ok(_) => Mode::Edit { index, errors: Vec::new() },
+        Err(errors) => Mode::Edit { index, errors },
     }
 }
 
@@ -433,7 +459,7 @@ fn process_event(event: Event, mode: Mode, programs: &mut Vec<String>, command_s
                         Err(errors) => {
                             // If there are errors, we stay in edit mode
                             println!("Errors while parsing input: {:?}", errors);
-                            return Mode::Edit { index, has_error: true };
+                            return Mode::Edit { index, errors };
                         }
                     }
                 },
@@ -468,6 +494,16 @@ fn process_event(event: Event, mode: Mode, programs: &mut Vec<String>, command_s
         Event::TextInput { text, ..} => {
             match mode {
                 Mode::Select { .. } => {
+                    // If the text is a number less than NUM_PROGRAMS, update the index
+                    if let Ok(index) = text.parse::<usize>() {
+                        if index <= NUM_PROGRAMS {
+                            return Mode::Select { index: index - 1};
+                        } else {
+                            println!("Invalid program index: {}", index);
+                        }
+                    } else {
+                        println!("Invalid input for program selection: {}", text);
+                    }
                     // TODO change mode in some cases
                     return mode;
                 }
