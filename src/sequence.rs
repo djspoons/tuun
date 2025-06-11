@@ -1,14 +1,13 @@
-extern crate sdl2;
-
 use std::collections::VecDeque;
 use std::f32::consts::PI;
 use std::time::Duration;
 use std::sync::mpsc::{Receiver,Sender};
 
+extern crate sdl2;
 use sdl2::audio::AudioCallback;
 
-use crate::{Command, FloatExpr};
-use crate::Node;
+use crate::Command;
+use crate::parser::{Node, FloatExpr};
 
 pub enum GeneratorResult {
     Finished(usize), // number of samples filled
@@ -201,7 +200,7 @@ fn eval_float_expr(expr: FloatExpr) -> f32 {
 }
 
 fn from_node<'a>(sample_frequency: i32, node: Node) -> Box<dyn Generator + 'a> {
-    use Node::*;
+    use Node::{SineWave, Truncated, Sequence, Chord, Error};
     match node {
         SineWave { frequency } => {
             return Box::new(wave_from_frequency(sample_frequency, 
