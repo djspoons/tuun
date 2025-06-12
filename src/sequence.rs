@@ -7,7 +7,7 @@ extern crate sdl2;
 use sdl2::audio::AudioCallback;
 
 use crate::Command;
-use crate::parser::{Node, FloatExpr};
+use crate::parser::Expr;
 
 pub enum GeneratorResult {
     Finished(usize), // number of samples filled
@@ -184,40 +184,66 @@ impl <'a> Generator for SequenceGenerator {
     }
 }
 
-fn eval_float_expr(expr: FloatExpr) -> f32 {
+fn eval_as_float(expr: Expr) -> f32 {
+    use Expr::{Float, Variable, Multiply, Divide, Application, Tuple, Error};
     match expr {
-        FloatExpr::Value(value) => value,
-        FloatExpr::Multiply(a, b ) => {
-            eval_float_expr(*a) * eval_float_expr(*b)
+        Float(value) => value,
+        Multiply(a, b ) => {
+            eval_as_float(*a) * eval_as_float(*b)
         },
-        FloatExpr::Divide(a, b) => {
-            eval_float_expr(*a) / eval_float_expr(*b)
+        Divide(a, b) => {
+            eval_as_float(*a) / eval_as_float(*b)
         },
-        FloatExpr::Error => {
+        Application(f, a) => {
+            match (*f, *a) {
+                (Variable(v), Tuple(mut tuple)) if v == "pow" => {
+                    if tuple.len() != 2 {
+                        panic!("Power expression must have exactly two arguments");
+                    }
+                    let exponent = eval_as_float(tuple.remove(1));
+                    let base = eval_as_float(tuple.remove(0));
+
+                    return base.powf(exponent);
+                },
+                _ => {
+                    panic!("Expected power expression with two arguments");
+                }
+            }
+        },
+        Tuple(mut exprs) if exprs.len() == 1 => {
+            return eval_as_float(exprs.remove(0));
+        },
+        Error => {
             panic!("Error in float expression evaluation");
         },
+        _ => {
+            panic!("Expected a float expression, got {:?}", expr);
+        }
     }
 }
 
-fn from_node<'a>(sample_frequency: i32, node: Node) -> Box<dyn Generator + 'a> {
-    use Node::{SineWave, Truncated, Sequence, Chord, Error};
-    match node {
+fn from_node<'a>(sample_frequency: i32, expr: Expr) -> Box<dyn Generator + 'a> {
+    use Expr::{SineWave, Truncated, Amplified, Sequence, Chord, Error};
+    match expr {
         SineWave { frequency } => {
             return Box::new(wave_from_frequency(sample_frequency, 
-                eval_float_expr(frequency)));
+                eval_as_float(*frequency)));
         },
-        Truncated { duration, node } => {
+        Truncated { duration, tone } => {
             return Box::new(truncate(sample_frequency, duration,
-                 from_node(sample_frequency, *node)));
+                 from_node(sample_frequency, *tone)));
         },
-        Sequence ( nodes ) => {
+        Amplified { gain, tone } => {
+            panic!("unimplemented");
+        }
+        Sequence (exprs) => {
             let mut generators = Vec::new();
-            for node in nodes {
-                generators.push(from_node(sample_frequency, node));
+            for expr in exprs {
+                generators.push(from_node(sample_frequency, expr));
             }
             return Box::new(sequence(generators));
         },
-        Chord ( nodes ) => {
+        Chord (nodes) => {
             let mut generators = Vec::new();
             for node in nodes {
                 generators.push(from_node(sample_frequency, node));
@@ -227,7 +253,9 @@ fn from_node<'a>(sample_frequency: i32, node: Node) -> Box<dyn Generator + 'a> {
         Error => {
             panic!("Error in node conversion");
         },
-
+        _ => {
+            panic!("Expected a node expression, got {:?}", expr);
+        }
     }
 }
 

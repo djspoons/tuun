@@ -96,115 +96,152 @@ where
     }
 }
 
-#[derive(Debug)]
-pub enum FloatExpr {
-    Value(f32),
-    Multiply(Box<FloatExpr>, Box<FloatExpr>),
-    Divide(Box<FloatExpr>, Box<FloatExpr>),
+#[derive(Debug, PartialEq)]
+pub enum Expr {
+    // Primitives
+    Float(f32),
+    Variable(String),
+    // Operations
+    Multiply(Box<Expr>, Box<Expr>),
+    Divide(Box<Expr>, Box<Expr>),
+    Application(Box<Expr>, Box<Expr>),
+    // Tones
+    SineWave { frequency: Box<Expr> },
+    Truncated { duration: Duration, tone: Box<Expr> },
+    Amplified { gain: Box<Expr>, tone: Box<Expr> },
+    // Compounds
+    Chord(Vec<Expr>),
+    Sequence(Vec<Expr>),
+    Tuple(Vec<Expr>),
     Error,
 }
 
-#[derive(Debug)]
-pub enum Node {
-    SineWave { frequency: FloatExpr},
-    Truncated { duration: Duration, node: Box<Node> },
-    Chord(Vec<Node>),
-    Sequence(Vec<Node>),
-    Error,
+fn parse_literal(input: LocatedSpan) -> IResult<Expr> {
+    let (rest, value) = float.parse(input)?;
+    return Ok((rest, Expr::Float(value)));
 }
 
-fn parse_node(input: LocatedSpan) -> IResult<Node> {
-    let (rest, node) = alt((
+fn parse_variable(input: LocatedSpan) -> IResult<Expr> {
+    let (rest, value) = nom::character::complete::alpha1.parse(input)?;
+    return Ok((rest, Expr::Variable(value.to_string())));
+}
+
+fn parse_primitive(input: LocatedSpan) -> IResult<Expr> {
+    let (rest, value) = alt((
+        parse_literal,
+        parse_variable,
         parse_chord,
         parse_sequence,
-        parse_tone,
+        parse_tuple,
+        // TODO generalize symbol application
+        preceded(
+            char('$'),
+            expect(parse_primitive, "expected expression after $")).map(
+                |expr| Expr::Truncated{
+                    duration: Duration::from_secs(1), 
+                    tone: Box::new(Expr::SineWave {
+                         frequency: Box::new(expr.unwrap_or(Expr::Error))
+                        })
+                    })
     )).parse(input)?;
-    return Ok((rest, node));
+    return Ok((rest, value));
 }
 
-fn parse_float_literal(input: LocatedSpan) -> IResult<FloatExpr> {
-    let (rest, value) = float.parse(input)?;
-    println!("Parsed float literal: {} with rest {}", value, rest);
-    return Ok((rest, FloatExpr::Value(value)));
+fn parse_application(input: LocatedSpan) -> IResult<Expr> {
+    let (rest, expr) = map(
+        (
+            parse_primitive,
+            many0(preceded(
+                multispace0,
+                parse_primitive,
+            )),
+        ),
+        |(func, args)| {
+            let mut result = func;
+            for arg in args {
+                result = Expr::Application(Box::new(result), Box::new(arg));
+            }
+            return result;
+        },
+    ).parse(input)?;
+    return Ok((rest, expr));
 }
 
-fn parse_float_term(input: LocatedSpan) -> IResult<FloatExpr> {
+fn parse_multiplicative(input: LocatedSpan) -> IResult<Expr> {
     let (rest, value) =
-        map((parse_float_factor,
+        map((parse_application,
             many0(
                 (delimited(multispace0,alt((char('*'), char('/'))), multispace0),
-                expect(parse_float_factor, "expected number expression after operator"))
+                expect(parse_application, "expected expression after operator"))
             )), |(factor, op_factors)| {
             let mut result = factor;
             for (op, factor) in op_factors {
                 let expr_op = match op {
-                    '*' => FloatExpr::Multiply,
-                    '/' => FloatExpr::Divide,
+                    '*' => Expr::Multiply,
+                    '/' => Expr::Divide,
                     _ => panic!("Impossible operator: {}", op),
                 };
-                result = expr_op(Box::new(result), Box::new(factor.unwrap_or(FloatExpr::Error)))
+                result = expr_op(Box::new(result), Box::new(factor.unwrap_or(Expr::Error)))
             }
             return result;
         }).parse(input)?;
     return Ok((rest, value));
 }
 
-fn parse_float_factor(input: LocatedSpan) -> IResult<FloatExpr> {
-    let (rest, value) = alt((
-        parse_float_literal,
-        delimited(
-            (char('('), multispace0),
-            parse_float_term,
-            (multispace0, expect(char(')'), "expected ')'")),
-        ),
-    )).parse(input)?;
-    return Ok((rest, value));
-}
-
-fn parse_tone(input: LocatedSpan) -> IResult<Node> {
-    let (rest, freq) = preceded(
-        char('$'),
-        expect(parse_float_factor, "expected number expression after $"),
-    ).parse(input)?;
-    return Ok((rest, Node::Truncated{duration: Duration::from_secs(1), 
-        node: Box::new(Node::SineWave { frequency: freq.unwrap_or(FloatExpr::Error) })}));
-}
-
-fn parse_chord(input: LocatedSpan) -> IResult<Node> {
-    let (rest, nodes) = delimited(
+fn parse_chord(input: LocatedSpan) -> IResult<Expr> {
+    let (rest, exprs) = delimited(
         (char('<'), multispace0),
         cut(separated_list0(
             multispace1,
-            parse_node,
+            parse_primitive,
         )),
         (multispace0, expect(char('>'), "expected '>'")),
     ).parse(input)?;
-    return Ok((rest, Node::Chord(nodes)));
+    return Ok((rest, Expr::Chord(exprs)));
 }
 
-fn parse_sequence(input: LocatedSpan) -> IResult<Node> {
-    let (rest, nodes) = delimited(
+fn parse_sequence(input: LocatedSpan) -> IResult<Expr> {
+    let (rest, exprs) = delimited(
         (char('['), multispace0),
         cut(separated_list0(
             multispace1,
-            parse_node,
+            parse_primitive,
         )),
         (multispace0, expect(char(']'), "expected ']'")),
     ).parse(input)?;
-    return Ok((rest, Node::Sequence(nodes)));
+    return Ok((rest, Expr::Sequence(exprs)));
 }
 
-pub fn parse_program(input: &str) -> Result<Node, Vec<ParseError>> {
+fn parse_tuple(input: LocatedSpan) -> IResult<Expr> {
+    let (rest, exprs) = delimited(
+        (char('('), multispace0),
+        separated_list0(
+            (multispace0, char(','), multispace0),
+            parse_expr,
+        ),
+        (multispace0, expect(char(')'), "expected ')'")),
+    ).parse(input)?;
+    return Ok((rest, Expr::Tuple(exprs)));
+}
+
+fn parse_expr(input: LocatedSpan) -> IResult<Expr> {
+    let (rest, expr) = alt((
+        parse_multiplicative,
+    )).parse(input)?;
+    return Ok((rest, expr));
+}
+
+pub fn parse_program(input: &str) -> Result<Expr, Vec<ParseError>> {
     let errors = RefCell::new(Vec::new());
     let span = LocatedSpan::new_extra(input, ParseState(&errors));
     let result = all_consuming(
         delimited(
             multispace0,
-            parse_node,
+            parse_expr,
             multispace0),
     ).parse(span);
     if errors.borrow().len() > 0 {
-        println!("Got result {:?} and errors {:?}", match result { Ok((_, node)) => node, _ => Node::Error}, errors.borrow());
+        println!("Got result {:?} and errors {:?}", match result { Ok((_, node)) => node, _ => Expr::Error}, errors.borrow());
         return Err(errors.into_inner());
     }
     match result {

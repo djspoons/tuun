@@ -15,7 +15,7 @@ mod sequence;
 
 enum Command {
     PlayOnce {
-        node: parser::Node,
+        node: parser::Expr,
         beat: i32, // Offset in beats from the beginning
     },
 }
