@@ -15,7 +15,7 @@ mod sequence;
 
 enum Command {
     PlayOnce {
-        node: parser::Expr,
+        expr: parser::Expr,
         beat: i32, // Offset in beats from the beginning
     },
 }
@@ -45,7 +45,7 @@ struct Args {
 #[derive(Debug)]
 enum Mode {
     Select { index: usize },
-    Edit { index: usize, errors: Vec<parser::ParseError> },
+    Edit { index: usize, errors: Vec<parser::Error> },
     Exit,
 }
 
@@ -109,7 +109,7 @@ pub fn main() {
     let mut event_pump = sdl_context.event_pump().unwrap();
     loop {
         for event in event_pump.poll_iter() {
-            println!("Event: {:?} with mode {:?}", event, mode);
+            //println!("Event: {:?} with mode {:?}", event, mode);
             mode = process_event(event, mode, &mut programs, &command_sender);
             if let Mode::Exit = mode {
                 return;
@@ -227,9 +227,20 @@ fn process_event(event: Event, mode: Mode, programs: &mut Vec<String>, command_s
                 (Mode::Edit { index, .. }, Some(sdl2::keyboard::Scancode::Return)) => {
                     let program = &programs[index];
                     match parser::parse_program(program) {
-                        Ok(node) => {
-                            command_sender.send(Command::PlayOnce{node, beat: 0}).unwrap();
-                            return Mode::Select { index };
+                        Ok(expr) => {
+                            println!("Parser returned: {:?}", &expr);
+                            match parser::simplify(&Vec::new(), expr) {
+                                Ok(expr) => {
+                                    println!("Simplify returned: {:?}", &expr);
+                                    command_sender.send(Command::PlayOnce{expr, beat: 0}).unwrap();
+                                    return Mode::Select { index };
+                                }
+                                Err(error) => {
+                                    // If there are errors, we stay in edit mode
+                                    println!("Errors while simplifying input: {:?}", error);
+                                    return Mode::Edit { index, errors: vec![error] };
+                                }
+                            }
                         },
                         Err(errors) => {
                             // If there are errors, we stay in edit mode

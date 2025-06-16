@@ -184,77 +184,38 @@ impl <'a> Generator for SequenceGenerator {
     }
 }
 
-fn eval_as_float(expr: Expr) -> f32 {
-    use Expr::{Float, Variable, Multiply, Divide, Application, Tuple, Error};
-    match expr {
-        Float(value) => value,
-        Multiply(a, b ) => {
-            eval_as_float(*a) * eval_as_float(*b)
-        },
-        Divide(a, b) => {
-            eval_as_float(*a) / eval_as_float(*b)
-        },
-        Application(f, a) => {
-            match (*f, *a) {
-                (Variable(v), Tuple(mut tuple)) if v == "pow" => {
-                    if tuple.len() != 2 {
-                        panic!("Power expression must have exactly two arguments");
-                    }
-                    let exponent = eval_as_float(tuple.remove(1));
-                    let base = eval_as_float(tuple.remove(0));
-
-                    return base.powf(exponent);
-                },
-                _ => {
-                    panic!("Expected power expression with two arguments");
-                }
-            }
-        },
-        Tuple(mut exprs) if exprs.len() == 1 => {
-            return eval_as_float(exprs.remove(0));
-        },
-        Error => {
-            panic!("Error in float expression evaluation");
-        },
-        _ => {
-            panic!("Expected a float expression, got {:?}", expr);
-        }
-    }
-}
-
-fn from_node<'a>(sample_frequency: i32, expr: Expr) -> Box<dyn Generator + 'a> {
-    use Expr::{SineWave, Truncated, Amplified, Sequence, Chord, Error};
+fn from_expr<'a>(sample_frequency: i32, expr: Expr) -> Option<Box<dyn Generator + 'a>> {
+    use Expr::{SineWave, Truncated, Amplified, Sequence, Chord};
     match expr {
         SineWave { frequency } => {
-            return Box::new(wave_from_frequency(sample_frequency, 
-                eval_as_float(*frequency)));
+            if let Expr::Float(value) = *frequency {
+                return Some(Box::new(wave_from_frequency(sample_frequency, value)));
+            }
+            return None;
         },
-        Truncated { duration, tone } => {
-            return Box::new(truncate(sample_frequency, duration,
-                 from_node(sample_frequency, *tone)));
+        Truncated { duration, waveform } => {
+            return Some(Box::new(truncate(sample_frequency, duration,
+                 from_expr(sample_frequency, *waveform)?)));
         },
-        Amplified { gain, tone } => {
+        Amplified { gain, waveform } => {
             panic!("unimplemented");
         }
         Sequence (exprs) => {
             let mut generators = Vec::new();
             for expr in exprs {
-                generators.push(from_node(sample_frequency, expr));
+                generators.push(from_expr(sample_frequency, expr)?);
             }
-            return Box::new(sequence(generators));
+            return Some(Box::new(sequence(generators)));
         },
         Chord (nodes) => {
             let mut generators = Vec::new();
             for node in nodes {
-                generators.push(from_node(sample_frequency, node));
+                generators.push(from_expr(sample_frequency, node)?);
             }
-            return Box::new(chord(generators));
-        },
-        Error => {
-            panic!("Error in node conversion");
+            return Some(Box::new(chord(generators)));
         },
         _ => {
-            panic!("Expected a node expression, got {:?}", expr);
+            None
         }
     }
 }
@@ -298,8 +259,11 @@ impl <'a> AudioCallback for Sequencer {
             if self.generator.is_none() && recv_allowed {
                 recv_allowed = false;
                 match self.command_receiver.try_recv() {
-                    Ok(Command::PlayOnce{ node, beat }) => {
-                        self.generator = Some(from_node(self.sample_frequency, node));
+                    Ok(Command::PlayOnce{ expr, beat }) => {
+                        self.generator = from_expr(self.sample_frequency, expr);
+                        if let None = self.generator {
+                            println!("Failed to convert expression to generator");
+                        }
                         recv_allowed = true;
                     },
                     Err(_) => {
