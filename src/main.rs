@@ -38,8 +38,8 @@ struct Args {
     beats_per_minute: i32,
     #[arg(long, default_value_t = 44100)]
     sample_frequency: i32,
-    #[arg(short, long = "program", default_value = "", number_of_values = 1)]
-    programs: Vec<String>,
+    #[arg(short, long = "buffer", default_value = "", number_of_values = 1)]
+    buffers: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -49,7 +49,7 @@ enum Mode {
     Exit,
 }
 
-const NUM_PROGRAMS: usize = 5;
+const NUM_BUFFERS: usize = 5;
 
 pub fn main() {
     let args = Args::parse();
@@ -99,9 +99,9 @@ pub fn main() {
     let TextureQuery { width: number_width, .. } = number_texture.query();
     let nav_width = prompt_width + number_width;
 
-    let mut programs = args.programs;
-    while programs.len() < NUM_PROGRAMS {
-        programs.push(String::new());
+    let mut buffers = args.buffers;
+    while buffers.len() < NUM_BUFFERS {
+        buffers.push(String::new());
     }
     let mut mode = Mode::Select { index: 0 };
 
@@ -110,7 +110,7 @@ pub fn main() {
     loop {
         for event in event_pump.poll_iter() {
             //println!("Event: {:?} with mode {:?}", event, mode);
-            mode = process_event(event, mode, &mut programs, &command_sender);
+            mode = process_event(event, mode, &mut buffers, &command_sender);
             if let Mode::Exit = mode {
                 return;
             }
@@ -122,7 +122,7 @@ pub fn main() {
                 canvas.clear();
 
                 let mut y = 10;
-                for (i, program) in programs.iter().enumerate() {
+                for (i, buffer) in buffers.iter().enumerate() {
                     let color = match mode {
                         Mode::Edit { index, .. } if i == index => EDIT_COLOR,
                         _ => INACTIVE_COLOR,
@@ -133,15 +133,15 @@ pub fn main() {
                     match mode {
                         Mode::Edit { index, ref errors } => {
                             canvas.copy(&number_texture, None, Some(sdl2::rect::Rect::new(prompt_width as i32, y, number_width, line_height))).unwrap();
-                            if i != index && !program.is_empty() {
-                                let text_texture = make_texture(&font, INACTIVE_COLOR, &texture_creator, program);
+                            if i != index && !buffer.is_empty() {
+                                let text_texture = make_texture(&font, INACTIVE_COLOR, &texture_creator, buffer);
                                 let TextureQuery { width: text_width, height: text_height, .. } = text_texture.query();
                                 canvas.copy(&text_texture, None, Some(sdl2::rect::Rect::new(nav_width as i32, y, text_width, text_height))).unwrap();
                             } else if i == index {
-                                // Loop over each character in program and check to see if it's in any of the error
+                                // Loop over each character in buffer and check to see if it's in any of the error
                                 // ranges
                                 let mut x = nav_width as i32;
-                                for (j, c) in program.chars().enumerate() {
+                                for (j, c) in buffer.chars().enumerate() {
                                     let color = if errors.iter().any(|e| e.range().contains(&j)) {
                                         ERROR_COLOR
                                     } else {
@@ -167,8 +167,8 @@ pub fn main() {
                                 canvas.copy(&prompt_texture, None, Some(sdl2::rect::Rect::new(0, y, prompt_width, line_height))).unwrap();
                             }
                             canvas.copy(&number_texture, None, Some(sdl2::rect::Rect::new(prompt_width as i32, y, number_width, line_height))).unwrap();
-                            if !program.is_empty() {
-                                let text_texture = make_texture(&font, INACTIVE_COLOR, &texture_creator, program);
+                            if !buffer.is_empty() {
+                                let text_texture = make_texture(&font, INACTIVE_COLOR, &texture_creator, buffer);
                                 let TextureQuery { width: text_width, height: text_height, .. } = text_texture.query();
                                 canvas.copy(&text_texture, None, Some(sdl2::rect::Rect::new(nav_width as i32, y, text_width, text_height))).unwrap();
                             }
@@ -194,14 +194,14 @@ pub fn main() {
     }
 }
 
-fn edit_mode_from_program(index: usize, program: &str) -> Mode {
-    match parser::parse_program(program) {
+fn edit_mode_from_buffer(index: usize, buffer: &str) -> Mode {
+    match parser::parse_program(buffer) {
         Ok(_) => Mode::Edit { index, errors: Vec::new() },
         Err(errors) => Mode::Edit { index, errors },
     }
 }
 
-fn process_event(event: Event, mode: Mode, programs: &mut Vec<String>, command_sender: &std::sync::mpsc::Sender<Command>) -> Mode {
+fn process_event(event: Event, mode: Mode, buffers: &mut Vec<String>, command_sender: &std::sync::mpsc::Sender<Command>) -> Mode {
     match event {
         Event::Quit { .. } => return Mode::Exit,
         Event::KeyDown { scancode, keymod, ..} => {
@@ -216,17 +216,17 @@ fn process_event(event: Event, mode: Mode, programs: &mut Vec<String>, command_s
                     }
                 },
                 (Mode::Select { index }, Some(sdl2::keyboard::Scancode::Return)) => {
-                    return edit_mode_from_program(index, &programs[index]);
+                    return edit_mode_from_buffer(index, &buffers[index]);
                 },
                 (Mode::Select { index }, Some(sdl2::keyboard::Scancode::Up)) => {
-                    return Mode::Select { index: (index + programs.len() - 1) % programs.len() };
+                    return Mode::Select { index: (index + buffers.len() - 1) % buffers.len() };
                 },
                 (Mode::Select { index }, Some(sdl2::keyboard::Scancode::Down)) => {
-                    return  Mode::Select { index: (index + 1) % programs.len() };
+                    return  Mode::Select { index: (index + 1) % buffers.len() };
                 },
                 (Mode::Edit { index, .. }, Some(sdl2::keyboard::Scancode::Return)) => {
-                    let program = &programs[index];
-                    match parser::parse_program(program) {
+                    let buffer = &buffers[index];
+                    match parser::parse_program(buffer) {
                         Ok(expr) => {
                             println!("Parser returned: {:?}", &expr);
                             match parser::simplify(&Vec::new(), expr) {
@@ -251,24 +251,24 @@ fn process_event(event: Event, mode: Mode, programs: &mut Vec<String>, command_s
                 },
                 (Mode::Edit { index, .. }, Some(sdl2::keyboard::Scancode::Backspace)) => {
                     // If the option key is down, clear the last word
-                    let mut program = programs[index].clone();
+                    let mut buffer = buffers[index].clone();
                     if keymod.contains(sdl2::keyboard::Mod::LALTMOD) {
-                        if let Some(char_index) = program.rfind(|e| !char::is_whitespace(e)) {
-                            if let Some(space_index) = program[..char_index].rfind(char::is_whitespace) {
+                        if let Some(char_index) = buffer.rfind(|e| !char::is_whitespace(e)) {
+                            if let Some(space_index) = buffer[..char_index].rfind(char::is_whitespace) {
                                 // Remove everything after that whitespace
-                                program.truncate(space_index);
+                                buffer.truncate(space_index);
                             } else {
-                                program.clear();
+                                buffer.clear();
                             }
                         } else {
                             // No non-whitespace characters, so clear the whole string
-                            program.clear();
+                            buffer.clear();
                         }
                     } else {
-                        program.pop();
+                        buffer.pop();
                     }
-                    programs[index] = program;
-                    return edit_mode_from_program(index, &programs[index]);
+                    buffers[index] = buffer;
+                    return edit_mode_from_buffer(index, &buffers[index]);
                 },
                 (Mode::Edit { index, .. }, Some(sdl2::keyboard::Scancode::Escape)) => {
                     return Mode::Select { index: index };
@@ -280,22 +280,22 @@ fn process_event(event: Event, mode: Mode, programs: &mut Vec<String>, command_s
         Event::TextInput { text, ..} => {
             match mode {
                 Mode::Select { .. } => {
-                    // If the text is a number less than NUM_PROGRAMS, update the index
+                    // If the text is a number less than NUM_BUFFERS, update the index
                     if let Ok(index) = text.parse::<usize>() {
-                        if index <= NUM_PROGRAMS {
+                        if index <= NUM_BUFFERS {
                             return Mode::Select { index: index - 1};
                         } else {
-                            println!("Invalid program index: {}", index);
+                            println!("Invalid buffer index: {}", index);
                         }
                     } else {
-                        println!("Invalid input for program selection: {}", text);
+                        println!("Invalid input for buffer selection: {}", text);
                     }
                     // TODO change mode in some cases
                     return mode;
                 }
                 Mode::Edit { index, .. } => {
-                    programs[index].push_str(&text);
-                    return edit_mode_from_program(index, &programs[index]);
+                    buffers[index].push_str(&text);
+                    return edit_mode_from_buffer(index, &buffers[index]);
                 },
                 _ => {
                     println!("Unexpected text input in mode: {:?}", mode);
