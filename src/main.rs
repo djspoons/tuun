@@ -13,6 +13,15 @@ use clap::Parser as ClapParser;
 mod parser;
 mod sequence;
 
+fn parse_key_value(s: &str) -> Result<(String, String), String> {
+    let parts: Vec<&str> = s.splitn(2, '=').collect();
+    if parts.len() == 2 {
+        Ok((parts[0].to_string(), parts[1].to_string()))
+    } else {
+        Err(format!("Invalid key-value pair: {}", s))
+    }
+}
+
 enum Command {
     PlayOnce {
         expr: parser::Expr,
@@ -40,6 +49,8 @@ struct Args {
     sample_frequency: i32,
     #[arg(short, long = "buffer", default_value = "", number_of_values = 1)]
     buffers: Vec<String>,
+    #[arg(short, long = "context", value_parser = parse_key_value, number_of_values = 1)]
+    context: Vec<(String, String)>,
 }
 
 #[derive(Debug)]
@@ -99,6 +110,26 @@ pub fn main() {
     let TextureQuery { width: number_width, .. } = number_texture.query();
     let nav_width = prompt_width + number_width;
 
+    let mut context: Vec<(String, parser::Expr)> = Vec::new();
+    context.push(("pow".to_string(), parser::Expr::BuiltIn(parser::BuiltInFn::Power)));
+
+    for (name, expr) in args.context {
+        match parser::parse_program(&expr) {
+            Ok(parsed_expr) => {
+                match parser::simplify(&context, parsed_expr) {
+                    Ok(expr) => {
+                        println!("Context expression for {}: {:?}", name, expr);
+                        context.push((name.trim().to_string(), expr));
+                    },
+                    Err(error) => println!("Error simplifying context expression for {}: {:?}", name, error),
+                }
+            },
+            Err(errors) => {
+                println!("Error parsing context expression for {}: {:?}", name, errors);
+            }
+        }
+    }
+
     let mut buffers = args.buffers;
     while buffers.len() < NUM_BUFFERS {
         buffers.push(String::new());
@@ -110,7 +141,7 @@ pub fn main() {
     loop {
         for event in event_pump.poll_iter() {
             //println!("Event: {:?} with mode {:?}", event, mode);
-            mode = process_event(event, mode, &mut buffers, &command_sender);
+            mode = process_event(&context, event, mode, &mut buffers, &command_sender);
             if let Mode::Exit = mode {
                 return;
             }
@@ -201,7 +232,7 @@ fn edit_mode_from_buffer(index: usize, buffer: &str) -> Mode {
     }
 }
 
-fn process_event(event: Event, mode: Mode, buffers: &mut Vec<String>, command_sender: &std::sync::mpsc::Sender<Command>) -> Mode {
+fn process_event(context: &Vec<(String, parser::Expr)>, event: Event, mode: Mode, buffers: &mut Vec<String>, command_sender: &std::sync::mpsc::Sender<Command>) -> Mode {
     match event {
         Event::Quit { .. } => return Mode::Exit,
         Event::KeyDown { scancode, keymod, ..} => {
@@ -229,7 +260,7 @@ fn process_event(event: Event, mode: Mode, buffers: &mut Vec<String>, command_se
                     match parser::parse_program(buffer) {
                         Ok(expr) => {
                             println!("Parser returned: {:?}", &expr);
-                            match parser::simplify(&Vec::new(), expr) {
+                            match parser::simplify(&context, expr) {
                                 Ok(expr) => {
                                     println!("Simplify returned: {:?}", &expr);
                                     command_sender.send(Command::PlayOnce{expr, beat: 0}).unwrap();

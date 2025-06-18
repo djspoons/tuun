@@ -98,11 +98,17 @@ where
 }
 
 #[derive(Debug, PartialEq, Clone)]
+pub enum BuiltInFn {
+    Power, // float * float -> float
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub enum Expr {
     // Primitives
     Float(f32),
-    Function { name: String, args: Vec<String>, body: Box<Expr> },
+    Function { arguments: Vec<String>, body: Box<Expr> },
     Variable(String),
+    BuiltIn(BuiltInFn),
     // Waveforms
     SineWave { frequency: Box<Expr> },
     Truncated { duration: Duration, waveform: Box<Expr> },
@@ -135,18 +141,17 @@ fn parse_identifier(input: LocatedSpan) -> IResult<String> {
 
 fn parse_function(input: LocatedSpan) -> IResult<Expr> {
     let (rest, expr) =
-        ((preceded((tag("fn"), multispace1), parse_identifier),
-            delimited(
-            (multispace0, char('('), multispace0),
+        ((delimited(
+            (tag("fn"), multispace1, char('('), multispace0),
             separated_list0(
                 (multispace0, char(','), multispace0),
                 parse_identifier),
             (multispace0, char(')'))),
             (multispace0, expect(char('='), "expected '='"), multispace0),
             parse_expr,
-        )).map(|(name, args, _, body)| {
-            let args = args.into_iter().map(|s| s.to_string()).collect();
-            Expr::Function { name: name.to_string(), args, body: Box::new(body) }
+        )).map(|(arguments, _, body)| {
+            let arguments = arguments.into_iter().map(|s| s.to_string()).collect();
+            Expr::Function { arguments, body: Box::new(body) }
         }).parse(input)?;
     return Ok((rest, expr));
 }
@@ -189,9 +194,9 @@ fn parse_application(input: LocatedSpan) -> IResult<Expr> {
                 parse_primitive,
             )),
         ),
-        |(func, args)| {
+        |(func, arguments)| {
             let mut result = func;
-            for arg in args {
+            for arg in arguments {
                 result = Expr::Application { function: Box::new(result), argument: Box::new(arg) };
             }
             return result;
@@ -300,18 +305,18 @@ pub fn parse_program(input: &str) -> Result<Expr, Vec<Error>> {
 
 fn substitute(context: &Vec<(String, Expr)>, expr: Expr) -> Expr {
     use Expr::{
-        Float, Function, Variable, SineWave, Truncated, Amplified,
+        Float, Function, Variable, BuiltIn, SineWave, Truncated, Amplified,
         Multiply, Divide, Application, Chord, Sequence, Tuple,
     };
     match expr {
         Float(_) => expr,
-        Function { name, args, body } => {
+        Function { arguments, body } => {
             let mut context = context.clone();
-            for arg in &args {
+            for arg in &arguments {
                 context.push((arg.clone(), Expr::Variable(arg.clone())));
             }
             let body = substitute(&context, *body);
-            Expr::Function { name, args, body: Box::new(body) }
+            Expr::Function { arguments, body: Box::new(body) }
         },
         Variable(name) => {
             for (var_name, value) in context.iter().rev() {
@@ -321,6 +326,7 @@ fn substitute(context: &Vec<(String, Expr)>, expr: Expr) -> Expr {
             }
             Expr::Variable(name)
         },
+        BuiltIn { .. } => expr,
         SineWave { frequency } => {
             let frequency = substitute(context, *frequency);
             Expr::SineWave { frequency: Box::new(frequency) }
@@ -362,7 +368,7 @@ fn substitute(context: &Vec<(String, Expr)>, expr: Expr) -> Expr {
 
 fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
     use Expr::{
-        Float, Function, Variable, SineWave, Truncated, Amplified,
+        Float, Function, Variable, BuiltIn, SineWave, Truncated, Amplified,
         Multiply, Divide, Application, Chord, Sequence, Tuple,
     };
     match expr {
@@ -374,6 +380,7 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
                 message: format!("Variable '{}' not found in context", name),
             })
         },
+        BuiltIn { .. } => Ok(expr),
         Multiply(left, right) => {
             let left = simplify_closed(*left)?;
             let right = simplify_closed(*right)?;
@@ -396,31 +403,45 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
                 message: "Cannot divide non-float expressions".to_string(),
             })
         },
-        Application { function, argument: actual } => {
+        Application { function, argument } => {
             let function = simplify_closed(*function)?;
-            if let Function { name, args: formals, body } = function {
-                let actual = simplify_closed(*actual)?;
-                match (formals, actual) {
-                    (formals, Expr::Tuple(actual_args)) if formals.len() == actual_args.len() => {
-                        let context: Vec<_> = formals.into_iter().zip(actual_args).map(|(formal, actual)| (formal, actual)).collect();
-                        return simplify(&context, *body);
+            let argument = simplify_closed(*argument)?;
+            match (function, argument) {
+                (Function { arguments: formals, body }, actual) =>
+                    match (formals, actual) {
+                        (formals, Expr::Tuple(actual_arguments)) if formals.len() == actual_arguments.len() => {
+                            let context = formals.into_iter().zip(actual_arguments).map(|(formal, actual)| (formal, actual)).collect();
+                            return simplify(&context, *body);
+                        },
+                        (formals, expr) if formals.len() == 1 => {
+                            let context = vec![(formals[0].clone(), expr)];
+                            return simplify(&context, *body);
+                        }
+                        _ => {
+                            return Err(Error {
+                                range: 0..0, // fix range?
+                                message: "Mismatched number of arguments".to_string(),
+                            });
+                        }
                     },
-                    (formals, expr) if formals.len() == 1 => {
-                        let context = vec![(formals[0].clone(), expr)];
-                        return simplify(&context, *body);
+                (BuiltIn(BuiltInFn::Power), Tuple(mut actuals)) if actuals.len() == 2 => {
+                    if let Float(exponent) = actuals.remove(1) {
+                        if let Float(base) = actuals.remove(0) {
+                            return Ok(Float(base.powf(exponent)));
+                        }
                     }
-                    _ => {
-                        return Err(Error {
-                            range: 0..0, // fix range?
-                            message: "Mismatched number of arguments".to_string(),
-                        });
-                    }
+                    return Err(Error {
+                        range: 0..0, // fix range?
+                        message: "Built-in function 'power' requires two float arguments".to_string(),
+                    });
+                }
+                _ => {
+                    return Err(Error {
+                        range: 0..0, // fix range?
+                        message: "Invalid application".to_string(),
+                    });
                 }
             }
-            Err(Error {
-                range: 0..0, // fix range?
-                message: "Cannot apply non-function expression".to_string(),
-            })
         },
         SineWave { frequency } => {
             let frequency = simplify_closed(*frequency)?;
@@ -461,4 +482,62 @@ pub fn simplify(context: &Vec<(String, Expr)>, mut expr: Expr) -> Result<Expr, E
     expr = substitute(context, expr);
     println!("Substitute returned {:?}", &expr);
     return simplify_closed(expr);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_literal() {
+        let input = "3.14";
+        let result = parse_program(input);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Expr::Float(3.14));
+    }
+
+    #[test]
+    fn test_parse_variable() {
+        let input = "x";
+        let result = parse_program(input);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Expr::Variable("x".to_string()));
+    }
+
+    #[test]
+    fn test_parse_multiplication() {
+        let input = "2 * 3.5";
+        let result = parse_program(input);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Expr::Multiply(Box::new(Expr::Float(2.0)), Box::new(Expr::Float(3.5))));
+    }
+
+    #[test]
+    fn test_parse_chord() {
+        let input = "<x y z>";
+        let result = parse_program(input);
+        assert!(result.is_ok());
+        if let Expr::Chord(exprs) = result.unwrap() {
+            assert_eq!(exprs.len(), 3);
+            assert!(matches!(exprs[0], Expr::Variable(_)));
+            assert!(matches!(exprs[1], Expr::Variable(_)));
+            assert!(matches!(exprs[2], Expr::Variable(_)));
+        } else {
+            panic!("Expected a Chord expression");
+        }
+    }
+
+    #[test]
+    fn test_parse_function() {
+        let input = "fn (x) = x";
+        let result = parse_program(input);
+        assert!(result.is_ok());
+        if let Expr::Function { arguments, body} = result.unwrap() {
+            //assert!(matches!(name, "id".to_string()));
+            //assert!(matches!(arguments, vec!["x"]));
+            //assert!(matches!(body, Expr::Variable("x")));
+        } else {
+            panic!("Expected a Function expression");
+        }
+    }
 }
