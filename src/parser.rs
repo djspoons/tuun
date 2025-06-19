@@ -30,17 +30,20 @@ impl<'a> ToRange for LocatedSpan<'a> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Error {
-    range: Range<usize>,
+    range: Option<Range<usize>>,
     message: String,
 }
 
 impl<'a> Error {
-    fn new(span: &LocatedSpan, message: String) -> Self {
-        Self { range: span.to_range(), message }
+    fn new(message: String) -> Self {
+        Self { range: None, message }
+    }
+    fn new_from_span(span: &LocatedSpan, message: String) -> Self {
+        Self { range: Some(span.to_range()), message }
     }
 
     //pub fn span(&self) -> &Span { &self.span }
-    pub fn range(&self) -> Range<usize> { self.range.clone() }
+    pub fn range(&self) -> Option<Range<usize>> { self.range.clone() }
 
     // pub fn line(&self) -> u32 { self.span().location_line() }
 
@@ -49,7 +52,7 @@ impl<'a> Error {
 
 impl<'a> nom::error::ParseError<LocatedSpan<'a>> for Error {
     fn from_error_kind(input: LocatedSpan<'a>, kind: nom::error::ErrorKind) -> Self {
-        Self::new(&input, format!("parse error {:?}", kind))
+        Self::new_from_span(&input, format!("parse error {:?}", kind))
     }
 
     fn append(_input: LocatedSpan<'a>, _kind: nom::error::ErrorKind, other: Self) -> Self {
@@ -89,7 +92,7 @@ where
         Err(nom::Err::Error(e)) |
         Err(nom::Err::Failure(e)) => {
             let input = e.input;
-            let err = Error::new(&input, error_msg.to_string());
+            let err = Error::new_from_span(&input, error_msg.to_string());
             input.extra.report_error(err); // Push error onto stack.
             Ok((input, None)) // Parsing failed, but keep going.
         },
@@ -100,6 +103,7 @@ where
 #[derive(Debug, PartialEq, Clone)]
 pub enum BuiltInFn {
     Power, // float * float -> float
+    Amplify, // float * waveform -> waveform
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -112,7 +116,6 @@ pub enum Expr {
     // Waveforms
     SineWave { frequency: Box<Expr> },
     Truncated { duration: Duration, waveform: Box<Expr> },
-    Amplified { gain: Box<Expr>, waveform: Box<Expr> },
     Chord(Vec<Expr>),
     Sequence(Vec<Expr>),
     // Operations
@@ -291,21 +294,21 @@ pub fn parse_program(input: &str) -> Result<Expr, Vec<Error>> {
         },
         Err(nom::Err::Error(e)) => {
             println!("Error on parsing input: {:?}", e);
-            return Err(vec![Error::new(&e.input, "unable to parse input".to_string())]);
+            return Err(vec![Error::new_from_span(&e.input, "unable to parse input".to_string())]);
         }
         Err(nom::Err::Incomplete(_)) => {
             panic!("Incomplete error on input");
         }
         Err(nom::Err::Failure(e)) => {
             println!("Failed to parse input: {:?}", e);
-            return Err(vec![Error::new(&e.input, "unable to parse input".to_string())]);
+            return Err(vec![Error::new_from_span(&e.input, "unable to parse input".to_string())]);
         }
     }
 }
 
 fn substitute(context: &Vec<(String, Expr)>, expr: Expr) -> Expr {
     use Expr::{
-        Float, Function, Variable, BuiltIn, SineWave, Truncated, Amplified,
+        Float, Function, Variable, BuiltIn, SineWave, Truncated,
         Multiply, Divide, Application, Chord, Sequence, Tuple,
     };
     match expr {
@@ -335,11 +338,6 @@ fn substitute(context: &Vec<(String, Expr)>, expr: Expr) -> Expr {
             let waveform = substitute(context, *waveform);
             Expr::Truncated { duration, waveform: Box::new(waveform) }
         },
-        Amplified { gain, waveform } => {
-            let gain = substitute(context, *gain);
-            let waveform = substitute(context, *waveform);
-            Expr::Amplified { gain: Box::new(gain), waveform: Box::new(waveform) }
-        },
         Multiply(left, right) => {
             let left = substitute(context, *left);
             let right = substitute(context, *right);
@@ -368,17 +366,14 @@ fn substitute(context: &Vec<(String, Expr)>, expr: Expr) -> Expr {
 
 fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
     use Expr::{
-        Float, Function, Variable, BuiltIn, SineWave, Truncated, Amplified,
+        Float, Function, Variable, BuiltIn, SineWave, Truncated,
         Multiply, Divide, Application, Chord, Sequence, Tuple,
     };
     match expr {
         Float(_) => Ok(expr),
         Function { .. } => Ok(expr),
         Variable(name) => {
-            Err(Error {
-                range: 0..0, // TODO fix range?
-                message: format!("Variable '{}' not found in context", name),
-            })
+            Err(Error::new(format!("Variable '{}' not found in context", name)))
         },
         BuiltIn { .. } => Ok(expr),
         Multiply(left, right) => {
@@ -387,10 +382,7 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
             if let (Float(l), Float(r)) = (left, right) {
                 return Ok(Expr::Float(l * r));
             }
-            Err(Error {
-                range: 0..0, // TODO fix range?
-                message: "Cannot multiply non-float expressions".to_string(),
-            })
+            Err(Error::new("Cannot multiply non-float expressions".to_string()))
         },
         Divide(left, right) => {
             let left = simplify_closed(*left)?;
@@ -398,10 +390,7 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
             if let (Float(l), Float(r)) = (left, right) {
                 return Ok(Float(l / r));
             }
-            Err(Error {
-                range: 0..0, // TODO fix range?
-                message: "Cannot divide non-float expressions".to_string(),
-            })
+            Err(Error::new("Cannot divide non-float expressions".to_string()))
         },
         Application { function, argument } => {
             let function = simplify_closed(*function)?;
@@ -418,10 +407,7 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
                             return simplify(&context, *body);
                         }
                         _ => {
-                            return Err(Error {
-                                range: 0..0, // fix range?
-                                message: "Mismatched number of arguments".to_string(),
-                            });
+                            return Err(Error::new("Mismatched number of arguments".to_string()))
                         }
                     },
                 (BuiltIn(BuiltInFn::Power), Tuple(mut actuals)) if actuals.len() == 2 => {
@@ -430,16 +416,14 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
                             return Ok(Float(base.powf(exponent)));
                         }
                     }
-                    return Err(Error {
-                        range: 0..0, // fix range?
-                        message: "Built-in function 'power' requires two float arguments".to_string(),
-                    });
-                }
+                    return Err(Error::new("Built-in function 'power' requires two float arguments".to_string()))
+                },
+                (BuiltIn(BuiltInFn::Amplify), Tuple(mut actuals)) if actuals.len() == 2 => {
+                    return Ok(Application { function: Box::new(BuiltIn(BuiltInFn::Amplify)), 
+                        argument: Box::new(Tuple(actuals)) });
+                },
                 _ => {
-                    return Err(Error {
-                        range: 0..0, // fix range?
-                        message: "Invalid application".to_string(),
-                    });
+                    return Err(Error::new("Invalid application".to_string()))
                 }
             }
         },
@@ -451,11 +435,6 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
             let waveform = simplify_closed(*waveform)?;
             return Ok(Truncated { duration, waveform: Box::new(waveform) });
         },
-        Amplified { gain, waveform } => {
-            let gain = simplify_closed(*gain)?;
-            let waveform: Expr = simplify_closed(*waveform)?;
-            return Ok(Amplified { gain: Box::new(gain), waveform: Box::new(waveform) });
-        }
 
         Chord (exprs) => {
             return Ok(Chord(
@@ -473,7 +452,7 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
             ));
         }
 
-        Expr::Error => Err(Error { range: 0..0, message: "found error".to_string() }),
+        Expr::Error => Err(Error::new("found error".to_string())),
     }
 }
 

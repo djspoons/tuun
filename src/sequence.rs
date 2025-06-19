@@ -7,7 +7,7 @@ extern crate sdl2;
 use sdl2::audio::AudioCallback;
 
 use crate::Command;
-use crate::parser::Expr;
+use crate::parser::{BuiltInFn, Expr};
 
 pub enum GeneratorResult {
     Finished(usize), // number of samples filled
@@ -44,12 +44,45 @@ impl Generator for SineWaveGenerator {
     }
 }
 
-pub fn _wave_from_midi_number(sample_frequency: i32, note: u8) -> SineWaveGenerator {
+fn _wave_from_midi_number(sample_frequency: i32, note: u8) -> SineWaveGenerator {
     println!("Note: {} {}", note, 440.0 * 2.0f32.powf((note as f32 - 69.0) / 12.0));
     return wave_from_frequency(sample_frequency,
         // 12-TET
         440.0 * 2.0f32.powf((note as f32 - 69.0) / 12.0),
     );
+}
+
+struct AmplifyingGenerator {
+    gain: f32,
+    generator: Box<dyn Generator>,
+}
+
+fn amplify(gain: f32, generator: Box<dyn Generator>) ->
+    AmplifyingGenerator {
+    return AmplifyingGenerator {
+        gain: gain,
+        generator: generator,
+};
+}
+
+impl <'a> Generator for AmplifyingGenerator {
+    fn generate(&mut self, out: &mut [f32]) -> GeneratorResult {
+        use GeneratorResult::*;
+        match self.generator.generate(out) {
+            Finished(size) => {
+                for x in out.iter_mut() {
+                    *x *= self.gain;
+                }
+                return Finished(size);
+            },
+            More => {
+                for x in out.iter_mut() {
+                    *x *= self.gain;
+                }
+                return More;
+            }
+        }
+    }
 }
 
 pub struct FiniteGenerator {
@@ -99,11 +132,11 @@ impl <'a> Generator for FiniteGenerator {
     }
 }
 
-pub struct ChordGenerator {
+struct ChordGenerator {
     generators: Vec<Box<dyn Generator>>
 }
 
-pub fn chord(generators: Vec<Box<dyn Generator>>) -> ChordGenerator {
+fn chord(generators: Vec<Box<dyn Generator>>) -> ChordGenerator {
     return ChordGenerator {
         // TODO why the 'as _'?!?
         generators: generators,
@@ -147,11 +180,11 @@ struct Envelope {
 }
  */
 
-pub struct SequenceGenerator {
+struct SequenceGenerator {
     generators: VecDeque<Box<dyn Generator>>,
 }
 
-pub fn sequence(generators: Vec<Box<dyn Generator>>) -> SequenceGenerator {
+fn sequence(generators: Vec<Box<dyn Generator>>) -> SequenceGenerator {
     return SequenceGenerator {
         generators: generators.into_iter().map(|g| g as _).collect()
     };
@@ -185,8 +218,25 @@ impl <'a> Generator for SequenceGenerator {
 }
 
 fn from_expr<'a>(sample_frequency: i32, expr: Expr) -> Option<Box<dyn Generator + 'a>> {
-    use Expr::{SineWave, Truncated, Amplified, Sequence, Chord};
+    use Expr::{Float, Tuple, Application, BuiltIn, SineWave, Truncated, Sequence, Chord};
+    use BuiltInFn::Amplify;
+    println!("from_expr called with expr {:?}", expr);
     match expr {
+        Application {function, argument } => {
+            match (*function, *argument) {
+                (BuiltIn(Amplify), Tuple(arguments)) if arguments.len() == 2 => {
+                    if let (Float(gain), waveform) = (&arguments[0], &arguments[1]) {
+                        println!("Amplifying with gain {} and expr {:?}", gain, waveform);
+                        return Some(Box::new(amplify(*gain,
+                            from_expr(sample_frequency, waveform.clone())?)));
+                    }
+                },
+                _ => {
+                    return None;
+                }
+            }
+            return None;
+        }
         SineWave { frequency } => {
             if let Expr::Float(value) = *frequency {
                 return Some(Box::new(wave_from_frequency(sample_frequency, value)));
@@ -197,9 +247,6 @@ fn from_expr<'a>(sample_frequency: i32, expr: Expr) -> Option<Box<dyn Generator 
             return Some(Box::new(truncate(sample_frequency, duration,
                  from_expr(sample_frequency, *waveform)?)));
         },
-        Amplified { gain, waveform } => {
-            panic!("unimplemented");
-        }
         Sequence (exprs) => {
             let mut generators = Vec::new();
             for expr in exprs {

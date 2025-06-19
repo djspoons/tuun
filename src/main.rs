@@ -112,6 +112,7 @@ pub fn main() {
 
     let mut context: Vec<(String, parser::Expr)> = Vec::new();
     context.push(("pow".to_string(), parser::Expr::BuiltIn(parser::BuiltInFn::Power)));
+    context.push(("A".to_string(), parser::Expr::BuiltIn(parser::BuiltInFn::Amplify)));
 
     for (name, expr) in args.context {
         match parser::parse_program(&expr) {
@@ -173,7 +174,10 @@ pub fn main() {
                                 // ranges
                                 let mut x = nav_width as i32;
                                 for (j, c) in buffer.chars().enumerate() {
-                                    let color = if errors.iter().any(|e| e.range().contains(&j)) {
+                                    let color = if errors.iter().any(|e| match e.range() { 
+                                        Some(range) if range.contains(&j) => true,
+                                        _ => false,
+                                    }) {
                                         ERROR_COLOR
                                     } else {
                                         EDIT_COLOR
