@@ -306,6 +306,40 @@ pub fn parse_program(input: &str) -> Result<Expr, Vec<Error>> {
     }
 }
 
+pub fn parse_context(input: &str) -> Result<Vec<(String, Expr)>, Vec<Error>> {
+    let errors = RefCell::new(Vec::new());
+    let span = LocatedSpan::new_extra(input, ParseState(&errors));
+    let result = all_consuming(
+        separated_list0(
+            (multispace0, char(','), multispace0),
+              (delimited(
+                    multispace0,
+                   parse_identifier,
+                    (multispace0, char('='), multispace0)),
+                delimited(
+                    multispace0,
+                    parse_expr,
+                    multispace0),
+                )
+            ),
+        ).parse(span);
+    if errors.borrow().len() > 0 {
+        return Err(errors.into_inner());
+    }
+    match result {
+        Ok((_, context)) => Ok(context),
+        Err(nom::Err::Error(e)) => {
+            println!("Error on parsing context: {:?}", e);
+            Err(vec![Error::new_from_span(&e.input, "unable to parse context".to_string())])
+        }
+        Err(nom::Err::Incomplete(_)) => panic!("Incomplete error on context parsing"),
+        Err(nom::Err::Failure(e)) => {
+            println!("Failed to parse context: {:?}", e);
+            Err(vec![Error::new_from_span(&e.input, "unable to parse context".to_string())])
+        }
+    }
+}
+
 fn substitute(context: &Vec<(String, Expr)>, expr: Expr) -> Expr {
     use Expr::{
         Float, Function, Variable, BuiltIn, SineWave, Truncated,
@@ -418,7 +452,7 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
                     }
                     return Err(Error::new("Built-in function 'power' requires two float arguments".to_string()))
                 },
-                (BuiltIn(BuiltInFn::Amplify), Tuple(mut actuals)) if actuals.len() == 2 => {
+                (BuiltIn(BuiltInFn::Amplify), Tuple(actuals)) if actuals.len() == 2 => {
                     return Ok(Application { function: Box::new(BuiltIn(BuiltInFn::Amplify)), 
                         argument: Box::new(Tuple(actuals)) });
                 },

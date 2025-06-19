@@ -13,15 +13,6 @@ use clap::Parser as ClapParser;
 mod parser;
 mod sequence;
 
-fn parse_key_value(s: &str) -> Result<(String, String), String> {
-    let parts: Vec<&str> = s.splitn(2, '=').collect();
-    if parts.len() == 2 {
-        Ok((parts[0].to_string(), parts[1].to_string()))
-    } else {
-        Err(format!("Invalid key-value pair: {}", s))
-    }
-}
-
 enum Command {
     PlayOnce {
         expr: parser::Expr,
@@ -49,8 +40,8 @@ struct Args {
     sample_frequency: i32,
     #[arg(short, long = "buffer", default_value = "", number_of_values = 1)]
     buffers: Vec<String>,
-    #[arg(short, long = "context", value_parser = parse_key_value, number_of_values = 1)]
-    context: Vec<(String, String)>,
+    #[arg(short = 'C', long = "context_file")]
+    context: String,
 }
 
 #[derive(Debug)]
@@ -58,6 +49,33 @@ enum Mode {
     Select { index: usize },
     Edit { index: usize, errors: Vec<parser::Error> },
     Exit,
+}
+
+fn load_context(file: &String) -> Vec<(String, parser::Expr)> {
+    let mut context: Vec<(String, parser::Expr)> = Vec::new();
+    context.push(("pow".to_string(), parser::Expr::BuiltIn(parser::BuiltInFn::Power)));
+    context.push(("A".to_string(), parser::Expr::BuiltIn(parser::BuiltInFn::Amplify)));
+    if file != "" {
+        let raw_context = std::fs::read_to_string(file).unwrap();
+        match parser::parse_context(&raw_context) {
+            Ok(parsed_exprs) => {
+                for (name, parsed_expr) in parsed_exprs {
+                    match parser::simplify(&context, parsed_expr) {
+                        Ok(expr) => {
+                            println!("Context expression for {}: {:?}", &name, expr);
+                            context.push((name.trim().to_string(), expr));
+                        },
+                        Err(error) => println!("Error simplifying context expression for {}: {:?}", name, error),
+                    }
+                }
+            },
+            Err(errors) => {
+                println!("Errors parsing context: {:?}", errors);
+            }
+        }
+    }
+    println!("Loaded context: {:?}", &context);
+    return context;
 }
 
 const NUM_BUFFERS: usize = 5;
@@ -110,28 +128,8 @@ pub fn main() {
     let TextureQuery { width: number_width, .. } = number_texture.query();
     let nav_width = prompt_width + number_width;
 
-    let mut context: Vec<(String, parser::Expr)> = Vec::new();
-    context.push(("pow".to_string(), parser::Expr::BuiltIn(parser::BuiltInFn::Power)));
-    context.push(("A".to_string(), parser::Expr::BuiltIn(parser::BuiltInFn::Amplify)));
-
-    for (name, expr) in args.context {
-        match parser::parse_program(&expr) {
-            Ok(parsed_expr) => {
-                match parser::simplify(&context, parsed_expr) {
-                    Ok(expr) => {
-                        println!("Context expression for {}: {:?}", name, expr);
-                        context.push((name.trim().to_string(), expr));
-                    },
-                    Err(error) => println!("Error simplifying context expression for {}: {:?}", name, error),
-                }
-            },
-            Err(errors) => {
-                println!("Error parsing context expression for {}: {:?}", name, errors);
-            }
-        }
-    }
-
-    let mut buffers = args.buffers;
+    let mut context = load_context(&args.context);
+    let mut buffers = args.buffers.clone();
     while buffers.len() < NUM_BUFFERS {
         buffers.push(String::new());
     }
@@ -142,7 +140,7 @@ pub fn main() {
     loop {
         for event in event_pump.poll_iter() {
             //println!("Event: {:?} with mode {:?}", event, mode);
-            mode = process_event(&context, event, mode, &mut buffers, &command_sender);
+            (context, mode) = process_event(&args, context, event, mode, &mut buffers, &command_sender);
             if let Mode::Exit = mode {
                 return;
             }
@@ -236,28 +234,28 @@ fn edit_mode_from_buffer(index: usize, buffer: &str) -> Mode {
     }
 }
 
-fn process_event(context: &Vec<(String, parser::Expr)>, event: Event, mode: Mode, buffers: &mut Vec<String>, command_sender: &std::sync::mpsc::Sender<Command>) -> Mode {
+fn process_event(args: &Args, mut context: Vec<(String, parser::Expr)>, event: Event, mode: Mode, buffers: &mut Vec<String>, command_sender: &std::sync::mpsc::Sender<Command>) -> (Vec<(String, parser::Expr)>, Mode)  {
     match event {
-        Event::Quit { .. } => return Mode::Exit,
+        Event::Quit { .. } => return (context, Mode::Exit),
         Event::KeyDown { scancode, keymod, ..} => {
             match (mode, scancode) {
                 // Exit on control-C
                 (mode, Some(sdl2::keyboard::Scancode::C)) => {
                     if keymod.contains(sdl2::keyboard::Mod::LCTRLMOD)
                     || keymod.contains(sdl2::keyboard::Mod::RCTRLMOD) {
-                        return Mode::Exit;
+                        return (context, Mode::Exit);
                     } else {
-                        return mode;
+                        return (context, mode);
                     }
                 },
                 (Mode::Select { index }, Some(sdl2::keyboard::Scancode::Return)) => {
-                    return edit_mode_from_buffer(index, &buffers[index]);
+                    return (context, edit_mode_from_buffer(index, &buffers[index]));
                 },
                 (Mode::Select { index }, Some(sdl2::keyboard::Scancode::Up)) => {
-                    return Mode::Select { index: (index + buffers.len() - 1) % buffers.len() };
+                    return (context, Mode::Select { index: (index + buffers.len() - 1) % buffers.len() });
                 },
                 (Mode::Select { index }, Some(sdl2::keyboard::Scancode::Down)) => {
-                    return  Mode::Select { index: (index + 1) % buffers.len() };
+                    return (context, Mode::Select { index: (index + 1) % buffers.len() });
                 },
                 (Mode::Edit { index, .. }, Some(sdl2::keyboard::Scancode::Return)) => {
                     let buffer = &buffers[index];
@@ -268,19 +266,19 @@ fn process_event(context: &Vec<(String, parser::Expr)>, event: Event, mode: Mode
                                 Ok(expr) => {
                                     println!("Simplify returned: {:?}", &expr);
                                     command_sender.send(Command::PlayOnce{expr, beat: 0}).unwrap();
-                                    return Mode::Select { index };
+                                    return (context, Mode::Select { index });
                                 }
                                 Err(error) => {
                                     // If there are errors, we stay in edit mode
                                     println!("Errors while simplifying input: {:?}", error);
-                                    return Mode::Edit { index, errors: vec![error] };
+                                    return (context, Mode::Edit { index, errors: vec![error] });
                                 }
                             }
                         },
                         Err(errors) => {
                             // If there are errors, we stay in edit mode
                             println!("Errors while parsing input: {:?}", errors);
-                            return Mode::Edit { index, errors };
+                            return (context, Mode::Edit { index, errors });
                         }
                     }
                 },
@@ -303,12 +301,12 @@ fn process_event(context: &Vec<(String, parser::Expr)>, event: Event, mode: Mode
                         buffer.pop();
                     }
                     buffers[index] = buffer;
-                    return edit_mode_from_buffer(index, &buffers[index]);
+                    return (context, edit_mode_from_buffer(index, &buffers[index]));
                 },
                 (Mode::Edit { index, .. }, Some(sdl2::keyboard::Scancode::Escape)) => {
-                    return Mode::Select { index: index };
+                    return (context, Mode::Select { index: index });
                 },
-                (mode, _) => return mode,
+                (mode, _) => return (context, mode),
             }
 
         },
@@ -318,26 +316,28 @@ fn process_event(context: &Vec<(String, parser::Expr)>, event: Event, mode: Mode
                     // If the text is a number less than NUM_BUFFERS, update the index
                     if let Ok(index) = text.parse::<usize>() {
                         if index <= NUM_BUFFERS {
-                            return Mode::Select { index: index - 1};
+                            return (context, Mode::Select { index: index - 1});
                         } else {
                             println!("Invalid buffer index: {}", index);
                         }
+                    } else if text == "r" {
+                        context = load_context(&args.context);
                     } else {
                         println!("Invalid input for buffer selection: {}", text);
                     }
                     // TODO change mode in some cases
-                    return mode;
+                    return (context, mode);
                 }
                 Mode::Edit { index, .. } => {
                     buffers[index].push_str(&text);
-                    return edit_mode_from_buffer(index, &buffers[index]);
+                    return (context, edit_mode_from_buffer(index, &buffers[index]));
                 },
                 _ => {
                     println!("Unexpected text input in mode: {:?}", mode);
-                    return mode;
+                    return (context, mode);
                 }
             }
         },
-        _ => { return mode; }
+        _ => { return (context, mode); }
     }
 }
