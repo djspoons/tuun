@@ -37,7 +37,7 @@ impl Generator for SineWaveGenerator {
     fn generate(&mut self, out: &mut [f32]) -> GeneratorResult {
         for (i, f) in out.iter_mut().enumerate() {
             let t_secs = (i + self.offset) as f32 / self.sample_frequency as f32;
-            *f = (2.0 * PI * self.tone_frequency * t_secs).sin();
+            *f = (2.0 * PI * self.tone_frequency * t_secs).cos();
         }
         self.offset += out.len();
         return GeneratorResult::More;
