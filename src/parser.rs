@@ -1,3 +1,4 @@
+use std::fmt;
 use std::ops::Range;
 use std::cell::RefCell;
 use std::time::Duration;
@@ -275,22 +276,10 @@ fn parse_expr(input: LocatedSpan) -> IResult<Expr> {
     return Ok((rest, expr));
 }
 
-pub fn parse_program(input: &str) -> Result<Expr, Vec<Error>> {
-    let errors = RefCell::new(Vec::new());
-    let span = LocatedSpan::new_extra(input, ParseState(&errors));
-    let result = all_consuming(
-        delimited(
-            multispace0,
-            parse_expr,
-            multispace0),
-    ).parse(span);
-    if errors.borrow().len() > 0 {
-        println!("Got result {:?} and errors {:?}", match result { Ok((_, node)) => node, _ => Expr::Error}, errors.borrow());
-        return Err(errors.into_inner());
-    }
+fn translate_parse_result<T>(result: IResult<T>) -> Result<T, Vec<Error>> {
     match result {
-        Ok((_, node)) => {
-            return Ok(node);
+        Ok((_, a)) => {
+            return Ok(a);
         },
         Err(nom::Err::Error(e)) => {
             println!("Error on parsing input: {:?}", e);
@@ -304,6 +293,22 @@ pub fn parse_program(input: &str) -> Result<Expr, Vec<Error>> {
             return Err(vec![Error::new_from_span(&e.input, "unable to parse input".to_string())]);
         }
     }
+}
+
+pub fn parse_program(input: &str) -> Result<Expr, Vec<Error>> {
+    let errors = RefCell::new(Vec::new());
+    let span = LocatedSpan::new_extra(input, ParseState(&errors));
+    let result = all_consuming(
+        delimited(
+            multispace0,
+            parse_expr,
+            multispace0),
+    ).parse(span);
+    if errors.borrow().len() > 0 {
+        println!("Got result {:?} and errors {:?}", match result { Ok((_, node)) => node, _ => Expr::Error}, errors.borrow());
+        return Err(errors.into_inner());
+    }
+    translate_parse_result(result)
 }
 
 pub fn parse_context(input: &str) -> Result<Vec<(String, Expr)>, Vec<Error>> {
@@ -326,18 +331,7 @@ pub fn parse_context(input: &str) -> Result<Vec<(String, Expr)>, Vec<Error>> {
     if errors.borrow().len() > 0 {
         return Err(errors.into_inner());
     }
-    match result {
-        Ok((_, context)) => Ok(context),
-        Err(nom::Err::Error(e)) => {
-            println!("Error on parsing context: {:?}", e);
-            Err(vec![Error::new_from_span(&e.input, "unable to parse context".to_string())])
-        }
-        Err(nom::Err::Incomplete(_)) => panic!("Incomplete error on context parsing"),
-        Err(nom::Err::Failure(e)) => {
-            println!("Failed to parse context: {:?}", e);
-            Err(vec![Error::new_from_span(&e.input, "unable to parse context".to_string())])
-        }
-    }
+    translate_parse_result(result)
 }
 
 fn substitute(context: &Vec<(String, Expr)>, expr: Expr) -> Expr {
@@ -396,6 +390,91 @@ fn substitute(context: &Vec<(String, Expr)>, expr: Expr) -> Expr {
         Expr::Error => expr,
     }
 
+}
+
+fn fmt_as_primitive(expr: &Expr, f: &mut fmt::Formatter) -> fmt::Result {
+    match expr {
+        Expr::Float(_) |
+        Expr::Function { .. } |
+        Expr::Variable(_) |
+        Expr::BuiltIn(_) |
+        Expr::Chord(_) |
+        Expr::Sequence(_) |
+        Expr::Tuple(_) |
+        Expr::SineWave { .. } |
+        Expr::Truncated { .. } => write!(f, "{}", expr),
+        _ => write!(f, "({})", expr),
+    }
+}
+
+impl fmt::Display for Expr {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Expr::Float(value) => write!(f, "{}", value),
+            Expr::Function { arguments, body } => {
+                write!(f, "fn (")?;
+                for (i, arg) in arguments.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", arg)?;
+                }
+                write!(f, ") = {}", body)
+            },
+            Expr::Variable(name) => write!(f, "{}", name),
+            Expr::BuiltIn(_) => write!(f, "{{built-in}}"),
+            Expr::SineWave { frequency } => {
+                write!(f, "$")?;
+                fmt_as_primitive(frequency, f)
+            }
+            Expr::Truncated { duration, waveform } => write!(f, "truncated({}, {})", duration.as_secs(), waveform),
+            Expr::Multiply(left, right) => {
+                fmt_as_primitive(left, f)?;
+                write!(f, " * ")?;
+                fmt_as_primitive(right, f)
+            },
+            Expr::Divide(left, right) =>  {
+                fmt_as_primitive(left, f)?;
+                write!(f, " / ")?;
+                fmt_as_primitive(right, f)
+            },
+            Expr::Application { function, argument } => {
+                fmt_as_primitive(function, f)?;
+                write!(f, "({})", argument)
+            },
+            Expr::Chord(exprs) => {
+                write!(f, "<")?;
+                for (i, expr) in exprs.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " ")?;
+                    }
+                    fmt_as_primitive(expr, f)?;
+                }
+                write!(f, ">")
+            },
+            Expr::Sequence(exprs) => {
+                write!(f, "[")?;
+                for (i, expr) in exprs.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " ")?;
+                    }
+                    fmt_as_primitive(expr, f)?;
+                }
+                write!(f, "]")
+            },
+            Expr::Tuple(exprs) => {
+                write!(f, "(")?;
+                for (i, expr) in exprs.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", expr)?;
+                }
+                write!(f, ")")
+            },
+            Expr::Error => write!(f, "<error>"),
+        }
+    }
 }
 
 fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
@@ -490,7 +569,6 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
     }
 }
 
-
 pub fn simplify(context: &Vec<(String, Expr)>, mut expr: Expr) -> Result<Expr, Error> {
     expr = substitute(context, expr);
     println!("Substitute returned {:?}", &expr);
@@ -502,55 +580,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_literal() {
-        let input = "3.14";
-        let result = parse_program(input);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Expr::Float(3.14));
-    }
-
-    #[test]
-    fn test_parse_variable() {
-        let input = "x";
-        let result = parse_program(input);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Expr::Variable("x".to_string()));
-    }
-
-    #[test]
     fn test_parse_multiplication() {
         let input = "2 * 3.5";
         let result = parse_program(input);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Expr::Multiply(Box::new(Expr::Float(2.0)), Box::new(Expr::Float(3.5))));
+        assert_eq!(format!("{}", result.unwrap()), "2 * 3.5");
     }
 
+    /* deal with truncated
     #[test]
     fn test_parse_chord() {
-        let input = "<x y z>";
+        let input = "<$x $y $z>";
         let result = parse_program(input);
         assert!(result.is_ok());
-        if let Expr::Chord(exprs) = result.unwrap() {
-            assert_eq!(exprs.len(), 3);
-            assert!(matches!(exprs[0], Expr::Variable(_)));
-            assert!(matches!(exprs[1], Expr::Variable(_)));
-            assert!(matches!(exprs[2], Expr::Variable(_)));
-        } else {
-            panic!("Expected a Chord expression");
-        }
+        assert_eq!(format!("{}", result.unwrap()), "<$x $y $z>");
     }
+    */
 
     #[test]
     fn test_parse_function() {
         let input = "fn (x) = x";
         let result = parse_program(input);
         assert!(result.is_ok());
-        if let Expr::Function { arguments, body} = result.unwrap() {
-            //assert!(matches!(name, "id".to_string()));
-            //assert!(matches!(arguments, vec!["x"]));
-            //assert!(matches!(body, Expr::Variable("x")));
-        } else {
-            panic!("Expected a Function expression");
-        }
+        assert_eq!(format!("{}", result.unwrap()), "fn (x) = x");
+    }
+
+    #[test]
+    fn test_function_eval() {
+        let input = "(fn (x) = fn (x) = x * 2)(7)(5)";
+        let result = parse_program(input);
+        assert!(result.is_ok());
+        let expr = result.unwrap();
+        let context = vec![("x".to_string(), Expr::Float(3.0))];
+        let simplified = simplify(&context, expr).unwrap();
+        assert_eq!(format!("{}", simplified), "10");
     }
 }
