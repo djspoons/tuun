@@ -179,7 +179,7 @@ fn parse_primitive(input: LocatedSpan) -> IResult<Expr> {
             char('$'),
             expect(parse_primitive, "expected expression after $")).map(
                 |expr| Expr::Truncated{
-                    duration: Duration::from_secs(1), 
+                    duration: Duration::from_secs(2),
                     waveform: Box::new(Expr::SineWave {
                          frequency: Box::new(expr.unwrap_or(Expr::Error))
                         })

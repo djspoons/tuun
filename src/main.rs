@@ -8,6 +8,9 @@ use sdl2::pixels::Color;
 use sdl2::ttf::Font;
 use sdl2::video::WindowContext;
 
+use realfft::RealFftPlanner;
+use realfft::num_complex::ComplexFloat;
+
 use clap::Parser as ClapParser;
 
 mod parser;
@@ -78,7 +81,7 @@ fn load_context(file: &String) -> Vec<(String, parser::Expr)> {
     return context;
 }
 
-const NUM_BUFFERS: usize = 5;
+const NUM_BUFFERS: usize = 8;
 
 pub fn main() {
     let args = Args::parse();
@@ -106,8 +109,8 @@ pub fn main() {
 
     let video_subsystem = sdl_context.video().unwrap();
     let ttf_context = sdl2::ttf::init().map_err(|e| e.to_string()).unwrap();
-    let width = 1200;
-    let height = 600;
+    let width = 1500;
+    let height = 1000;
     let font_path = "/Library/Fonts/Arial Unicode.ttf";
     let window = video_subsystem
         .window("tuunel", width, height)
@@ -213,12 +216,41 @@ pub fn main() {
 
                 // Draw the waveform
                 let x_scale = width as f32 / out.len() as f32;
+                let waveform_height = height * 3 / 5;
                 canvas.set_draw_color(Color::RGB(0, 255, 0));
                 for (i, f) in out.iter().enumerate() {
                     let x = (i as f32 * x_scale) as i32;
-                    let y = (f * (height as f32 / 2.4) + (height as f32 / 2.0)) as i32;
+                    let y = (f * (waveform_height as f32 / 2.4) + (waveform_height as f32 / 2.0)) as i32;
                     canvas.draw_point((x, y)).unwrap();
                 }
+
+                // Draw the spectra
+                let mut planner = RealFftPlanner::<f32>::new();
+                let fft = planner.plan_fft_forward(out.len());
+                let mut input = fft.make_input_vec();
+                for (i, f) in out.iter().enumerate() {
+                    input[i] = *f;
+                }
+                let mut spectrum = fft.make_output_vec();
+                if let Err(e) = fft.process(&mut input, &mut spectrum) {
+                    println!("Error processing FFT: {}", e);
+                } else {
+                    let spectrum_height = height - waveform_height;
+                    let y_scale = -(out.len() as f32).sqrt();
+                    canvas.set_draw_color(Color::RGB(255, 0, 0));
+                    let mut last_y = (waveform_height + 300) as i32;
+                    for (i, f) in spectrum.iter().enumerate() {
+                        let x = ((i * 10) as f32 * x_scale) as i32;
+                        let y = (f.abs() / y_scale
+                            * (spectrum_height as f32 / 10.0) + (waveform_height + 300) as f32) as i32;
+                        canvas.draw_line(
+                            (x, last_y),
+                            (x+9, y)
+                        ).unwrap();
+                        last_y = y;
+                    }
+                }
+
                 canvas.present();
             }
             Err(_) => {}
@@ -316,24 +348,22 @@ fn process_event(args: &Args, mut context: Vec<(String, parser::Expr)>, event: E
                     // If the text is a number less than NUM_BUFFERS, update the index
                     if let Ok(index) = text.parse::<usize>() {
                         if index <= NUM_BUFFERS {
-                            return (context, Mode::Select { index: index - 1});
+                            return (context, Mode::Select { index: (index + NUM_BUFFERS - 1) % NUM_BUFFERS});
                         } else {
                             println!("Invalid buffer index: {}", index);
                         }
                     } else if text == "r" {
                         context = load_context(&args.context);
                     } else {
-                        println!("Invalid input for buffer selection: {}", text);
+                        println!("Invalid command in select mode: {}", text);
                     }
-                    // TODO change mode in some cases
                     return (context, mode);
                 }
                 Mode::Edit { index, .. } => {
                     buffers[index].push_str(&text);
                     return (context, edit_mode_from_buffer(index, &buffers[index]));
                 },
-                _ => {
-                    println!("Unexpected text input in mode: {:?}", mode);
+                Mode::Exit => {
                     return (context, mode);
                 }
             }

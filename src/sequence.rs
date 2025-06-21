@@ -37,7 +37,7 @@ impl Generator for SineWaveGenerator {
     fn generate(&mut self, out: &mut [f32]) -> GeneratorResult {
         for (i, f) in out.iter_mut().enumerate() {
             let t_secs = (i + self.offset) as f32 / self.sample_frequency as f32;
-            *f = (2.0 * PI * self.tone_frequency * t_secs).cos();
+            *f = (2.0 * PI * self.tone_frequency * t_secs).sin();
         }
         self.offset += out.len();
         return GeneratorResult::More;
@@ -95,7 +95,7 @@ pub fn truncate(sample_frequency: i32, duration: Duration, generator: Box<dyn Ge
     return FiniteGenerator {
         remaining: (duration.as_secs() as u64) * (sample_frequency as u64),
         generator: generator,
-};
+    };
 }
 
 impl <'a> Generator for FiniteGenerator {
@@ -146,7 +146,6 @@ fn chord(generators: Vec<Box<dyn Generator>>) -> ChordGenerator {
 impl Generator for ChordGenerator {
     fn generate(&mut self, out: &mut [f32]) -> GeneratorResult {
         use GeneratorResult::*;
-        let n = self.generators.len() as f32;
         let mut result = Finished(0);
         for generator in self.generators.iter_mut() {
             let mut tmp = vec![0.0; out.len()];
@@ -164,7 +163,7 @@ impl Generator for ChordGenerator {
                 }
             }
             for (i, x) in tmp.iter().enumerate() {
-                out[i] += x / n;
+                out[i] += x;
             }
         }
         return result;
