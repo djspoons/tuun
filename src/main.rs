@@ -120,7 +120,7 @@ pub fn main() {
     let device = audio_subsystem
         .open_playback(None, &desired_spec, |spec| {
             println!("Spec: {:?}", spec);
-            sequence::new_sequencer(
+            sequence::new_tracker(
                 args.sample_frequency,
                 args.beats_per_minute,
                 command_receiver,
