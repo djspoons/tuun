@@ -1,15 +1,15 @@
 use std::time::Duration;
 
 extern crate sdl2;
-use sdl2::event::Event;
 use sdl2::audio::AudioSpecDesired;
-use sdl2::render::{TextureCreator, TextureQuery};
+use sdl2::event::Event;
 use sdl2::pixels::Color;
+use sdl2::render::{TextureCreator, TextureQuery};
 use sdl2::ttf::Font;
 use sdl2::video::WindowContext;
 
-use realfft::RealFftPlanner;
 use realfft::num_complex::ComplexFloat;
+use realfft::RealFftPlanner;
 
 use clap::Parser as ClapParser;
 
@@ -23,14 +23,21 @@ enum Command {
     },
 }
 
-fn make_texture<'a>(font: &Font<'a, 'static>, color: Color, texture_creator: &'a TextureCreator<WindowContext>, s: &str) -> sdl2::render::Texture<'a> {
+fn make_texture<'a>(
+    font: &Font<'a, 'static>,
+    color: Color,
+    texture_creator: &'a TextureCreator<WindowContext>,
+    s: &str,
+) -> sdl2::render::Texture<'a> {
     let surface = font
         .render(s)
         .blended(color)
-        .map_err(|e| e.to_string()).unwrap();
+        .map_err(|e| e.to_string())
+        .unwrap();
     let texture = texture_creator
         .create_texture_from_surface(&surface)
-        .map_err(|e| e.to_string()).unwrap();
+        .map_err(|e| e.to_string())
+        .unwrap();
     return texture;
 }
 
@@ -49,15 +56,26 @@ struct Args {
 
 #[derive(Debug)]
 enum Mode {
-    Select { index: usize },
-    Edit { index: usize, errors: Vec<parser::Error> },
+    Select {
+        index: usize,
+    },
+    Edit {
+        index: usize,
+        errors: Vec<parser::Error>,
+    },
     Exit,
 }
 
 fn load_context(file: &String) -> Vec<(String, parser::Expr)> {
     let mut context: Vec<(String, parser::Expr)> = Vec::new();
-    context.push(("pow".to_string(), parser::Expr::BuiltIn(parser::BuiltInFn::Power)));
-    context.push(("A".to_string(), parser::Expr::BuiltIn(parser::BuiltInFn::Amplify)));
+    context.push((
+        "pow".to_string(),
+        parser::Expr::BuiltIn(parser::BuiltInFn::Power),
+    ));
+    context.push((
+        "A".to_string(),
+        parser::Expr::BuiltIn(parser::BuiltInFn::Amplify),
+    ));
     if file != "" {
         let raw_context = std::fs::read_to_string(file).unwrap();
         match parser::parse_context(&raw_context) {
@@ -67,11 +85,14 @@ fn load_context(file: &String) -> Vec<(String, parser::Expr)> {
                         Ok(expr) => {
                             println!("Context expression for {}: {:?}", &name, expr);
                             context.push((name.trim().to_string(), expr));
-                        },
-                        Err(error) => println!("Error simplifying context expression for {}: {:?}", name, error),
+                        }
+                        Err(error) => println!(
+                            "Error simplifying context expression for {}: {:?}",
+                            name, error
+                        ),
                     }
                 }
-            },
+            }
             Err(errors) => {
                 println!("Errors parsing context: {:?}", errors);
             }
@@ -89,22 +110,24 @@ pub fn main() {
     let audio_subsystem = sdl_context.audio().unwrap();
     let desired_spec = AudioSpecDesired {
         freq: Some(args.sample_frequency),
-        channels: Some(1),  // mono
-        samples: None       // default sample size
+        channels: Some(1), // mono
+        samples: None,     // default sample size
     };
 
     let (sample_sender, sample_receiver) = std::sync::mpsc::channel();
     let (command_sender, command_receiver) = std::sync::mpsc::channel();
 
-    let device = 
-        audio_subsystem.open_playback(None, &desired_spec, 
-            |spec| {
-                println!("Spec: {:?}", spec);
-                sequence::new_sequencer(args.sample_frequency,
-                    args.beats_per_minute,
-                    command_receiver,
-                    sample_sender)
-            }).unwrap();
+    let device = audio_subsystem
+        .open_playback(None, &desired_spec, |spec| {
+            println!("Spec: {:?}", spec);
+            sequence::new_sequencer(
+                args.sample_frequency,
+                args.beats_per_minute,
+                command_receiver,
+                sample_sender,
+            )
+        })
+        .unwrap();
     device.resume();
 
     let video_subsystem = sdl_context.video().unwrap();
@@ -116,9 +139,13 @@ pub fn main() {
         .window("tuunel", width, height)
         .position_centered()
         .build()
-        .map_err(|e| e.to_string()).unwrap();
-    let mut canvas = window.into_canvas().build().map_err(
-        |e| e.to_string()).unwrap();
+        .map_err(|e| e.to_string())
+        .unwrap();
+    let mut canvas = window
+        .into_canvas()
+        .build()
+        .map_err(|e| e.to_string())
+        .unwrap();
     let texture_creator = canvas.texture_creator();
     let font = ttf_context.load_font(font_path, 64).unwrap();
     const INACTIVE_COLOR: Color = Color::RGBA(0, 255, 0, 255);
@@ -126,9 +153,16 @@ pub fn main() {
     const ERROR_COLOR: Color = Color::RGBA(255, 0, 0, 255);
 
     let prompt_texture = make_texture(&font, INACTIVE_COLOR, &texture_creator, " ▸ ");
-    let TextureQuery { width: prompt_width, height: line_height, .. } = prompt_texture.query();
-    let number_texture = make_texture(&font, INACTIVE_COLOR, &texture_creator, "① " );
-    let TextureQuery { width: number_width, .. } = number_texture.query();
+    let TextureQuery {
+        width: prompt_width,
+        height: line_height,
+        ..
+    } = prompt_texture.query();
+    let number_texture = make_texture(&font, INACTIVE_COLOR, &texture_creator, "① ");
+    let TextureQuery {
+        width: number_width,
+        ..
+    } = number_texture.query();
     let nav_width = prompt_width + number_width;
 
     let mut context = load_context(&args.context);
@@ -143,7 +177,8 @@ pub fn main() {
     loop {
         for event in event_pump.poll_iter() {
             //println!("Event: {:?} with mode {:?}", event, mode);
-            (context, mode) = process_event(&args, context, event, mode, &mut buffers, &command_sender);
+            (context, mode) =
+                process_event(&args, context, event, mode, &mut buffers, &command_sender);
             if let Mode::Exit = mode {
                 return;
             }
@@ -162,20 +197,50 @@ pub fn main() {
                     };
                     let number = char::from_u32(0x2460 + i as u32).unwrap().to_string();
                     let number_texture = make_texture(&font, color, &texture_creator, &number);
-                    let TextureQuery { width: number_width, .. } = number_texture.query();
+                    let TextureQuery {
+                        width: number_width,
+                        ..
+                    } = number_texture.query();
                     match mode {
                         Mode::Edit { index, ref errors } => {
-                            canvas.copy(&number_texture, None, Some(sdl2::rect::Rect::new(prompt_width as i32, y, number_width, line_height))).unwrap();
+                            canvas
+                                .copy(
+                                    &number_texture,
+                                    None,
+                                    Some(sdl2::rect::Rect::new(
+                                        prompt_width as i32,
+                                        y,
+                                        number_width,
+                                        line_height,
+                                    )),
+                                )
+                                .unwrap();
                             if i != index && !buffer.is_empty() {
-                                let text_texture = make_texture(&font, INACTIVE_COLOR, &texture_creator, buffer);
-                                let TextureQuery { width: text_width, height: text_height, .. } = text_texture.query();
-                                canvas.copy(&text_texture, None, Some(sdl2::rect::Rect::new(nav_width as i32, y, text_width, text_height))).unwrap();
+                                let text_texture =
+                                    make_texture(&font, INACTIVE_COLOR, &texture_creator, buffer);
+                                let TextureQuery {
+                                    width: text_width,
+                                    height: text_height,
+                                    ..
+                                } = text_texture.query();
+                                canvas
+                                    .copy(
+                                        &text_texture,
+                                        None,
+                                        Some(sdl2::rect::Rect::new(
+                                            nav_width as i32,
+                                            y,
+                                            text_width,
+                                            text_height,
+                                        )),
+                                    )
+                                    .unwrap();
                             } else if i == index {
                                 // Loop over each character in buffer and check to see if it's in any of the error
                                 // ranges
                                 let mut x = nav_width as i32;
                                 for (j, c) in buffer.chars().enumerate() {
-                                    let color = if errors.iter().any(|e| match e.range() { 
+                                    let color = if errors.iter().any(|e| match e.range() {
                                         Some(range) if range.contains(&j) => true,
                                         _ => false,
                                     }) {
@@ -183,9 +248,29 @@ pub fn main() {
                                     } else {
                                         EDIT_COLOR
                                     };
-                                    let char_texture = make_texture(&font, color, &texture_creator, &c.to_string());
-                                    let TextureQuery { width: char_width, height: char_height, .. } = char_texture.query();
-                                    canvas.copy(&char_texture, None, Some(sdl2::rect::Rect::new(x, y, char_width, char_height))).unwrap();
+                                    let char_texture = make_texture(
+                                        &font,
+                                        color,
+                                        &texture_creator,
+                                        &c.to_string(),
+                                    );
+                                    let TextureQuery {
+                                        width: char_width,
+                                        height: char_height,
+                                        ..
+                                    } = char_texture.query();
+                                    canvas
+                                        .copy(
+                                            &char_texture,
+                                            None,
+                                            Some(sdl2::rect::Rect::new(
+                                                x,
+                                                y,
+                                                char_width,
+                                                char_height,
+                                            )),
+                                        )
+                                        .unwrap();
                                     x += char_width as i32;
                                 }
                                 let color = if !errors.is_empty() {
@@ -193,22 +278,76 @@ pub fn main() {
                                 } else {
                                     EDIT_COLOR
                                 };
-                                let cursor_texture = make_texture(&font, color, &texture_creator, "‸");
-                                let TextureQuery { width: cursor_width, height: cursor_height, .. } = cursor_texture.query();
-                                canvas.copy(&cursor_texture, None, Some(sdl2::rect::Rect::new(x, y, cursor_width, cursor_height))).unwrap();
+                                let cursor_texture =
+                                    make_texture(&font, color, &texture_creator, "‸");
+                                let TextureQuery {
+                                    width: cursor_width,
+                                    height: cursor_height,
+                                    ..
+                                } = cursor_texture.query();
+                                canvas
+                                    .copy(
+                                        &cursor_texture,
+                                        None,
+                                        Some(sdl2::rect::Rect::new(
+                                            x,
+                                            y,
+                                            cursor_width,
+                                            cursor_height,
+                                        )),
+                                    )
+                                    .unwrap();
                             }
-                        },
+                        }
                         Mode::Select { index } => {
                             if index == i {
-                                canvas.copy(&prompt_texture, None, Some(sdl2::rect::Rect::new(0, y, prompt_width, line_height))).unwrap();
+                                canvas
+                                    .copy(
+                                        &prompt_texture,
+                                        None,
+                                        Some(sdl2::rect::Rect::new(
+                                            0,
+                                            y,
+                                            prompt_width,
+                                            line_height,
+                                        )),
+                                    )
+                                    .unwrap();
                             }
-                            canvas.copy(&number_texture, None, Some(sdl2::rect::Rect::new(prompt_width as i32, y, number_width, line_height))).unwrap();
+                            canvas
+                                .copy(
+                                    &number_texture,
+                                    None,
+                                    Some(sdl2::rect::Rect::new(
+                                        prompt_width as i32,
+                                        y,
+                                        number_width,
+                                        line_height,
+                                    )),
+                                )
+                                .unwrap();
                             if !buffer.is_empty() {
-                                let text_texture = make_texture(&font, INACTIVE_COLOR, &texture_creator, buffer);
-                                let TextureQuery { width: text_width, height: text_height, .. } = text_texture.query();
-                                canvas.copy(&text_texture, None, Some(sdl2::rect::Rect::new(nav_width as i32, y, text_width, text_height))).unwrap();
+                                let text_texture =
+                                    make_texture(&font, INACTIVE_COLOR, &texture_creator, buffer);
+                                let TextureQuery {
+                                    width: text_width,
+                                    height: text_height,
+                                    ..
+                                } = text_texture.query();
+                                canvas
+                                    .copy(
+                                        &text_texture,
+                                        None,
+                                        Some(sdl2::rect::Rect::new(
+                                            nav_width as i32,
+                                            y,
+                                            text_width,
+                                            text_height,
+                                        )),
+                                    )
+                                    .unwrap();
                             }
-                        },
+                        }
                         Mode::Exit => (),
                     }
                     y += line_height as i32;
@@ -220,7 +359,8 @@ pub fn main() {
                 canvas.set_draw_color(Color::RGB(0, 255, 0));
                 for (i, f) in out.iter().enumerate() {
                     let x = (i as f32 * x_scale) as i32;
-                    let y = (f * (waveform_height as f32 / 2.4) + (waveform_height as f32 / 2.0)) as i32;
+                    let y = (f * (waveform_height as f32 / 2.4) + (waveform_height as f32 / 2.0))
+                        as i32;
                     canvas.draw_point((x, y)).unwrap();
                 }
 
@@ -241,12 +381,10 @@ pub fn main() {
                     let mut last_y = (waveform_height + 300) as i32;
                     for (i, f) in spectrum.iter().enumerate() {
                         let x = ((i * 10) as f32 * x_scale) as i32;
-                        let y = (f.abs() / y_scale
-                            * (spectrum_height as f32 / 10.0) + (waveform_height + 300) as f32) as i32;
-                        canvas.draw_line(
-                            (x, last_y),
-                            (x+9, y)
-                        ).unwrap();
+                        let y = (f.abs() / y_scale * (spectrum_height as f32 / 10.0)
+                            + (waveform_height + 300) as f32)
+                            as i32;
+                        canvas.draw_line((x, last_y), (x + 9, y)).unwrap();
                         last_y = y;
                     }
                 }
@@ -261,34 +399,57 @@ pub fn main() {
 
 fn edit_mode_from_buffer(index: usize, buffer: &str) -> Mode {
     match parser::parse_program(buffer) {
-        Ok(_) => Mode::Edit { index, errors: Vec::new() },
+        Ok(_) => Mode::Edit {
+            index,
+            errors: Vec::new(),
+        },
         Err(errors) => Mode::Edit { index, errors },
     }
 }
 
-fn process_event(args: &Args, mut context: Vec<(String, parser::Expr)>, event: Event, mode: Mode, buffers: &mut Vec<String>, command_sender: &std::sync::mpsc::Sender<Command>) -> (Vec<(String, parser::Expr)>, Mode)  {
+fn process_event(
+    args: &Args,
+    mut context: Vec<(String, parser::Expr)>,
+    event: Event,
+    mode: Mode,
+    buffers: &mut Vec<String>,
+    command_sender: &std::sync::mpsc::Sender<Command>,
+) -> (Vec<(String, parser::Expr)>, Mode) {
     match event {
         Event::Quit { .. } => return (context, Mode::Exit),
-        Event::KeyDown { scancode, keymod, ..} => {
+        Event::KeyDown {
+            scancode, keymod, ..
+        } => {
             match (mode, scancode) {
                 // Exit on control-C
                 (mode, Some(sdl2::keyboard::Scancode::C)) => {
                     if keymod.contains(sdl2::keyboard::Mod::LCTRLMOD)
-                    || keymod.contains(sdl2::keyboard::Mod::RCTRLMOD) {
+                        || keymod.contains(sdl2::keyboard::Mod::RCTRLMOD)
+                    {
                         return (context, Mode::Exit);
                     } else {
                         return (context, mode);
                     }
-                },
+                }
                 (Mode::Select { index }, Some(sdl2::keyboard::Scancode::Return)) => {
                     return (context, edit_mode_from_buffer(index, &buffers[index]));
-                },
+                }
                 (Mode::Select { index }, Some(sdl2::keyboard::Scancode::Up)) => {
-                    return (context, Mode::Select { index: (index + buffers.len() - 1) % buffers.len() });
-                },
+                    return (
+                        context,
+                        Mode::Select {
+                            index: (index + buffers.len() - 1) % buffers.len(),
+                        },
+                    );
+                }
                 (Mode::Select { index }, Some(sdl2::keyboard::Scancode::Down)) => {
-                    return (context, Mode::Select { index: (index + 1) % buffers.len() });
-                },
+                    return (
+                        context,
+                        Mode::Select {
+                            index: (index + 1) % buffers.len(),
+                        },
+                    );
+                }
                 (Mode::Edit { index, .. }, Some(sdl2::keyboard::Scancode::Return)) => {
                     let buffer = &buffers[index];
                     match parser::parse_program(buffer) {
@@ -297,29 +458,39 @@ fn process_event(args: &Args, mut context: Vec<(String, parser::Expr)>, event: E
                             match parser::simplify(&context, expr) {
                                 Ok(expr) => {
                                     println!("Simplify returned: {:?}", &expr);
-                                    command_sender.send(Command::PlayOnce{expr, beat: 0}).unwrap();
+                                    command_sender
+                                        .send(Command::PlayOnce { expr, beat: 0 })
+                                        .unwrap();
                                     return (context, Mode::Select { index });
                                 }
                                 Err(error) => {
                                     // If there are errors, we stay in edit mode
                                     println!("Errors while simplifying input: {:?}", error);
-                                    return (context, Mode::Edit { index, errors: vec![error] });
+                                    return (
+                                        context,
+                                        Mode::Edit {
+                                            index,
+                                            errors: vec![error],
+                                        },
+                                    );
                                 }
                             }
-                        },
+                        }
                         Err(errors) => {
                             // If there are errors, we stay in edit mode
                             println!("Errors while parsing input: {:?}", errors);
                             return (context, Mode::Edit { index, errors });
                         }
                     }
-                },
+                }
                 (Mode::Edit { index, .. }, Some(sdl2::keyboard::Scancode::Backspace)) => {
                     // If the option key is down, clear the last word
                     let mut buffer = buffers[index].clone();
                     if keymod.contains(sdl2::keyboard::Mod::LALTMOD) {
                         if let Some(char_index) = buffer.rfind(|e| !char::is_whitespace(e)) {
-                            if let Some(space_index) = buffer[..char_index].rfind(char::is_whitespace) {
+                            if let Some(space_index) =
+                                buffer[..char_index].rfind(char::is_whitespace)
+                            {
                                 // Remove everything after that whitespace
                                 buffer.truncate(space_index);
                             } else {
@@ -334,21 +505,25 @@ fn process_event(args: &Args, mut context: Vec<(String, parser::Expr)>, event: E
                     }
                     buffers[index] = buffer;
                     return (context, edit_mode_from_buffer(index, &buffers[index]));
-                },
+                }
                 (Mode::Edit { index, .. }, Some(sdl2::keyboard::Scancode::Escape)) => {
                     return (context, Mode::Select { index: index });
-                },
+                }
                 (mode, _) => return (context, mode),
             }
-
-        },
-        Event::TextInput { text, ..} => {
+        }
+        Event::TextInput { text, .. } => {
             match mode {
                 Mode::Select { .. } => {
                     // If the text is a number less than NUM_BUFFERS, update the index
                     if let Ok(index) = text.parse::<usize>() {
                         if index <= NUM_BUFFERS {
-                            return (context, Mode::Select { index: (index + NUM_BUFFERS - 1) % NUM_BUFFERS});
+                            return (
+                                context,
+                                Mode::Select {
+                                    index: (index + NUM_BUFFERS - 1) % NUM_BUFFERS,
+                                },
+                            );
                         } else {
                             println!("Invalid buffer index: {}", index);
                         }
@@ -362,12 +537,14 @@ fn process_event(args: &Args, mut context: Vec<(String, parser::Expr)>, event: E
                 Mode::Edit { index, .. } => {
                     buffers[index].push_str(&text);
                     return (context, edit_mode_from_buffer(index, &buffers[index]));
-                },
+                }
                 Mode::Exit => {
                     return (context, mode);
                 }
             }
-        },
-        _ => { return (context, mode); }
+        }
+        _ => {
+            return (context, mode);
+        }
     }
 }

@@ -1,11 +1,11 @@
 use std::f32::consts::PI;
-use std::sync::mpsc::{Receiver,Sender};
+use std::sync::mpsc::{Receiver, Sender};
 
 extern crate sdl2;
 use sdl2::audio::AudioCallback;
 
-use crate::Command;
 use crate::parser::{BuiltInFn, Expr};
+use crate::Command;
 
 pub trait Generator: Send {
     fn generate(&mut self, out: &mut [f32]);
@@ -15,14 +15,14 @@ pub trait Generator: Send {
 pub struct SineWaveGenerator {
     offset: usize, // in samples
     sample_frequency: i32,
-    tone_frequency: f32
+    tone_frequency: f32,
 }
 
 pub fn wave_from_frequency(sample_frequency: i32, tone_frequency: f32) -> SineWaveGenerator {
     return SineWaveGenerator {
         offset: 0,
         sample_frequency: sample_frequency,
-        tone_frequency: tone_frequency
+        tone_frequency: tone_frequency,
     };
 }
 
@@ -50,15 +50,14 @@ struct AmplifyingGenerator {
     generator: Box<dyn Generator>,
 }
 
-fn amplify(gain: f32, generator: Box<dyn Generator>) ->
-    AmplifyingGenerator {
+fn amplify(gain: f32, generator: Box<dyn Generator>) -> AmplifyingGenerator {
     return AmplifyingGenerator {
         gain: gain,
         generator: generator,
     };
 }
 
-impl <'a> Generator for AmplifyingGenerator {
+impl<'a> Generator for AmplifyingGenerator {
     fn generate(&mut self, out: &mut [f32]) {
         self.generator.generate(out);
         for x in out.iter_mut() {
@@ -88,8 +87,12 @@ fn chord(bounded: Vec<BoundedGenerator>) -> ChordGenerator {
 
 impl Generator for ChordGenerator {
     fn generate(&mut self, out: &mut [f32]) {
-        for BoundedGenerator { generator, total_samples, ..}
-            in &mut self.bounded {
+        for BoundedGenerator {
+            generator,
+            total_samples,
+            ..
+        } in &mut self.bounded
+        {
             match total_samples {
                 None => {
                     let mut tmp = vec![0.0; out.len()];
@@ -97,7 +100,7 @@ impl Generator for ChordGenerator {
                     for (i, x) in tmp.iter().enumerate() {
                         out[i] += x;
                     }
-                },
+                }
 
                 Some(total_samples) => {
                     if self.offset < *total_samples as usize {
@@ -108,7 +111,7 @@ impl Generator for ChordGenerator {
                             out[i] += x;
                         }
                     }
-                },
+                }
             }
         }
         self.offset += out.len(); // for the next call to generate
@@ -132,16 +135,21 @@ fn sequence(bounded: Vec<BoundedGenerator>) -> SequenceGenerator {
     };
 }
 
-impl <'a> Generator for SequenceGenerator {
+impl<'a> Generator for SequenceGenerator {
     fn generate(&mut self, mut out: &mut [f32]) {
         // local_offset is the offset within the current generator, starting with the first
         let mut local_offset = self.offset;
         self.offset += out.len(); // for the next call to generate
-        for BoundedGenerator { generator, total_samples, samples_before_next } in &mut self.bounded {
+        for BoundedGenerator {
+            generator,
+            total_samples,
+            samples_before_next,
+        } in &mut self.bounded
+        {
             match total_samples {
                 None => {
                     generator.generate(out);
-                },
+                }
                 Some(total_samples) => {
                     if local_offset < *total_samples {
                         let len = *total_samples - local_offset;
@@ -151,12 +159,12 @@ impl <'a> Generator for SequenceGenerator {
                             out[i] += x;
                         }
                     }
-                },
+                }
             }
             match samples_before_next {
                 None => {
                     return;
-                },
+                }
                 Some(samples_before_next) => {
                     if local_offset + out.len() > *samples_before_next {
                         if local_offset < *samples_before_next {
@@ -168,28 +176,34 @@ impl <'a> Generator for SequenceGenerator {
                     } else {
                         return;
                     }
-                },
+                }
             }
         }
     }
 }
 
 fn from_expr(sample_frequency: i32, expr: Expr) -> Option<BoundedGenerator> {
-    use Expr::{Float, Tuple, Application, BuiltIn, SineWave, Truncated, Sequence, Chord};
     use BuiltInFn::Amplify;
+    use Expr::{Application, BuiltIn, Chord, Float, Sequence, SineWave, Truncated, Tuple};
     println!("from_expr called with expr {:?}", expr);
     match expr {
-        Application {function, argument } => {
+        Application { function, argument } => {
             match (*function, *argument) {
                 (BuiltIn(Amplify), Tuple(arguments)) if arguments.len() == 2 => {
                     if let (Float(gain), waveform) = (&arguments[0], &arguments[1]) {
                         println!("Amplifying with gain {} and expr {:?}", gain, waveform);
-                        let BoundedGenerator { generator, total_samples, samples_before_next } = from_expr(sample_frequency, waveform.clone())?;
-                        return Some(BoundedGenerator{
-                            generator: Box::new(amplify(*gain, generator)), total_samples, samples_before_next
+                        let BoundedGenerator {
+                            generator,
+                            total_samples,
+                            samples_before_next,
+                        } = from_expr(sample_frequency, waveform.clone())?;
+                        return Some(BoundedGenerator {
+                            generator: Box::new(amplify(*gain, generator)),
+                            total_samples,
+                            samples_before_next,
                         });
                     }
-                },
+                }
                 _ => {
                     return None;
                 }
@@ -199,22 +213,25 @@ fn from_expr(sample_frequency: i32, expr: Expr) -> Option<BoundedGenerator> {
         SineWave { frequency } => {
             if let Expr::Float(value) = *frequency {
                 return Some(BoundedGenerator {
-                        generator: Box::new(wave_from_frequency(sample_frequency, value)),
-                        total_samples: None,
-                        samples_before_next: None,
+                    generator: Box::new(wave_from_frequency(sample_frequency, value)),
+                    total_samples: None,
+                    samples_before_next: None,
                 });
             }
             return None;
-        },
+        }
         Truncated { duration, waveform } => {
-            let BoundedGenerator { generator, samples_before_next, .. } = from_expr(sample_frequency, *waveform.clone())?;
+            let BoundedGenerator {
+                generator,
+                ..
+            } = from_expr(sample_frequency, *waveform.clone())?;
             return Some(BoundedGenerator {
                 generator,
                 total_samples: Some(duration.as_secs() as usize * sample_frequency as usize),
                 samples_before_next: Some(duration.as_secs() as usize * sample_frequency as usize),
             });
-        },
-        Sequence (exprs) => {
+        }
+        Sequence(exprs) => {
             let mut generators: Vec<BoundedGenerator> = Vec::new();
             let mut offset = 0usize;
             let mut total_samples = 0usize;
@@ -225,11 +242,11 @@ fn from_expr(sample_frequency: i32, expr: Expr) -> Option<BoundedGenerator> {
                         total_samples = offset + samples;
                         offset += samples_before_next;
                         generators.push(generator);
-                    },
+                    }
                     (None, Some(samples_before_next)) => {
                         offset += samples_before_next;
                         generators.push(generator);
-                    },
+                    }
                     (_, None) => {
                         println!("Warning: sequence generator used with unbounded component");
                         generators.push(generator);
@@ -238,7 +255,7 @@ fn from_expr(sample_frequency: i32, expr: Expr) -> Option<BoundedGenerator> {
                             total_samples: None,
                             samples_before_next: None,
                         });
-                    },
+                    }
                 }
             }
             return Some(BoundedGenerator {
@@ -246,8 +263,8 @@ fn from_expr(sample_frequency: i32, expr: Expr) -> Option<BoundedGenerator> {
                 total_samples: Some(total_samples),
                 samples_before_next: Some(offset),
             });
-        },
-        Chord (exprs) => {
+        }
+        Chord(exprs) => {
             let mut generators = Vec::new();
             let mut total_samples = Some(0usize);
             let mut samples_before_next = Some(0usize);
@@ -256,18 +273,18 @@ fn from_expr(sample_frequency: i32, expr: Expr) -> Option<BoundedGenerator> {
                 match (total_samples, generator.total_samples) {
                     (Some(t), Some(s)) => {
                         total_samples = Some(s.max(t));
-                    },
+                    }
                     (_, _) => {
                         total_samples = None;
-                    },
+                    }
                 }
                 match (samples_before_next, generator.samples_before_next) {
                     (Some(s), Some(t)) => {
                         samples_before_next = Some(s.max(t));
-                    },
+                    }
                     (_, _) => {
                         samples_before_next = None;
-                    },
+                    }
                 }
                 generators.push(generator);
             }
@@ -276,7 +293,7 @@ fn from_expr(sample_frequency: i32, expr: Expr) -> Option<BoundedGenerator> {
                 total_samples: total_samples,
                 samples_before_next: samples_before_next,
             });
-        },
+        }
         _ => {
             println!("Unsupported expression in from_expr: {:?}", expr);
             None
@@ -284,33 +301,34 @@ fn from_expr(sample_frequency: i32, expr: Expr) -> Option<BoundedGenerator> {
     }
 }
 
- pub struct Sequencer {
+pub struct Sequencer {
     sample_frequency: i32,
-    beats_per_minute: i32,
+    _beats_per_minute: i32,
     command_receiver: Receiver<Command>,
     generator: Option<BoundedGenerator>,
     sample_sender: Sender<Vec<f32>>,
-    send_counter: u32
+    send_counter: u32,
 }
 
 pub fn new_sequencer(
     sample_frequency: i32,
     beats_per_minute: i32,
     command_receiver: Receiver<Command>,
-    sample_sender: Sender<Vec<f32>>) -> Sequencer {
+    sample_sender: Sender<Vec<f32>>,
+) -> Sequencer {
     return Sequencer {
         sample_frequency: sample_frequency,
-        beats_per_minute: beats_per_minute,
+        _beats_per_minute: beats_per_minute,
         command_receiver: command_receiver,
         generator: None,
         sample_sender: sample_sender,
-        send_counter: 0
+        send_counter: 0,
     };
 }
 
 // TODO add metrics
 
-impl <'a> AudioCallback for Sequencer {
+impl<'a> AudioCallback for Sequencer {
     type Channel = f32;
 
     fn callback(&mut self, out: &mut [f32]) {
@@ -323,34 +341,41 @@ impl <'a> AudioCallback for Sequencer {
             if self.generator.is_none() && recv_allowed {
                 recv_allowed = false;
                 match self.command_receiver.try_recv() {
-                    Ok(Command::PlayOnce{ expr, beat }) => {
+                    Ok(Command::PlayOnce { expr, beat: _beat }) => {
                         self.generator = from_expr(self.sample_frequency, expr);
                         if let None = self.generator {
                             println!("Failed to convert expression to generator");
                         }
                         recv_allowed = true;
-                    },
-                    Err(_) => {
                     }
+                    Err(_) => {}
                 }
             }
             match &mut self.generator {
-                Some(BoundedGenerator { generator, total_samples: None, ..}) => {
+                Some(BoundedGenerator {
+                    generator,
+                    total_samples: None,
+                    ..
+                }) => {
                     generator.generate(out);
                     generated += out.len();
-                },
-                Some(BoundedGenerator { generator, total_samples: Some(total_samples), ..}) => {
+                }
+                Some(BoundedGenerator {
+                    generator,
+                    total_samples: Some(total_samples),
+                    ..
+                }) => {
                     if *total_samples <= out.len() {
                         generator.generate(&mut out[..*total_samples]);
                         generated += *total_samples;
                         self.generator = None;
-
                     } else {
                         generator.generate(out);
                         generated += out.len();
-                        self.generator.as_mut().unwrap().total_samples = Some(*total_samples - generated);
+                        self.generator.as_mut().unwrap().total_samples =
+                            Some(*total_samples - generated);
                     }
-                },
+                }
                 None => (),
             }
         }
@@ -359,8 +384,7 @@ impl <'a> AudioCallback for Sequencer {
             let mut copy: Vec<f32> = Vec::with_capacity(out.len());
             out.clone_into(&mut copy);
             self.sample_sender.send(copy).unwrap();
-            self.send_counter = 5
-            ;
+            self.send_counter = 5;
         } else {
             self.send_counter -= 1;
         }
@@ -388,7 +412,7 @@ mod tests {
         return Box::new(ConstGenerator { value: f });
     }
 
-    fn generate_samples(generator: &mut dyn Generator, size: usize, out: &mut[f32]) {
+    fn generate_samples(generator: &mut dyn Generator, size: usize, out: &mut [f32]) {
         for n in 0..out.len() / size {
             generator.generate(&mut out[n * size..(n + 1) * size]);
         }
@@ -396,16 +420,32 @@ mod tests {
 
     #[test]
     fn test_chord() {
-        let desired = vec![1.875, 1.875, 1.875, 1.875,
-                                     1.875, 0.875, 0.875, 0.875,
-                                     0.75, 0.75, 0.25, 0.25,
-                                     0.25, 0.25, 0.25, 0.0];
+        let desired = vec![
+            1.875, 1.875, 1.875, 1.875, 1.875, 0.875, 0.875, 0.875, 0.75, 0.75, 0.25, 0.25, 0.25,
+            0.25, 0.25, 0.0,
+        ];
         for size in [1, 2, 4, 8, 16] {
             let mut chord_gen = chord(vec![
-                BoundedGenerator { generator: const_gen(1.0), total_samples: Some(5), samples_before_next: None },
-                BoundedGenerator { generator: const_gen(0.5), total_samples: Some(10), samples_before_next: None },
-                BoundedGenerator { generator: const_gen(0.25), total_samples: Some(15), samples_before_next: None },
-                BoundedGenerator { generator: const_gen(0.125), total_samples: Some(8), samples_before_next: None },
+                BoundedGenerator {
+                    generator: const_gen(1.0),
+                    total_samples: Some(5),
+                    samples_before_next: None,
+                },
+                BoundedGenerator {
+                    generator: const_gen(0.5),
+                    total_samples: Some(10),
+                    samples_before_next: None,
+                },
+                BoundedGenerator {
+                    generator: const_gen(0.25),
+                    total_samples: Some(15),
+                    samples_before_next: None,
+                },
+                BoundedGenerator {
+                    generator: const_gen(0.125),
+                    total_samples: Some(8),
+                    samples_before_next: None,
+                },
             ]);
             let mut out = vec![0.0; 16];
             println!("Generating chord with size {}", size);
@@ -416,15 +456,26 @@ mod tests {
 
     #[test]
     fn test_sequence() {
-        let desired = vec![1.0, 1.5, 1.5, 1.5,
-                                     1.5, 0.5, 0.5, 0.5,
-                                     0.5, 0.75, 0.75, 0.25,
-                                     0.25, 0.25, 0.0, 0.0];
+        let desired = vec![
+            1.0, 1.5, 1.5, 1.5, 1.5, 0.5, 0.5, 0.5, 0.5, 0.75, 0.75, 0.25, 0.25, 0.25, 0.0, 0.0,
+        ];
         for size in [1, 2, 4, 8, 16] {
             let mut seq_gen = sequence(vec![
-                BoundedGenerator { generator: const_gen(1.0), total_samples: Some(5), samples_before_next: Some(1) },
-                BoundedGenerator { generator: const_gen(0.5), total_samples: Some(10), samples_before_next: Some(8) },
-                BoundedGenerator { generator: const_gen(0.25), total_samples: Some(5), samples_before_next: Some(5) },
+                BoundedGenerator {
+                    generator: const_gen(1.0),
+                    total_samples: Some(5),
+                    samples_before_next: Some(1),
+                },
+                BoundedGenerator {
+                    generator: const_gen(0.5),
+                    total_samples: Some(10),
+                    samples_before_next: Some(8),
+                },
+                BoundedGenerator {
+                    generator: const_gen(0.25),
+                    total_samples: Some(5),
+                    samples_before_next: Some(5),
+                },
             ]);
             let mut out = vec![0.0; 16];
             println!("Generating sequence with size {}", size);
