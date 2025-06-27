@@ -2,5 +2,11 @@
     "cSpell.words": [
         "freqs",
         "multispace"
-    ]
+    ],
+    "rust-analyzer.runnables.extraEnv": {
+        "LIBRARY_PATH": "/opt/homebrew/lib",
+    },
+    "lldb.adapterEnv": {
+        "LIBRARY_PATH": "/opt/homebrew/lib",
+    },
 }
