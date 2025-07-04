@@ -75,6 +75,10 @@ fn load_context(file: &String) -> Vec<(String, parser::Expr)> {
     ));
 
     context.push((
+        "$".to_string(),
+        parser::Expr::BuiltIn(parser::BuiltInFn::SineWave),
+    ));
+    context.push((
         "amp".to_string(),
         parser::Expr::BuiltIn(parser::BuiltInFn::Amplify),
     ));

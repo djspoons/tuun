@@ -90,44 +90,6 @@ impl Generator for LinearRamp {
     }
 }
 
-fn _new_attack(
-    length: usize, // in samples
-    generator: Box<dyn Generator>,
-) -> Box<dyn Generator> {
-    return Box::new(LinearRamp {
-        initial_level: 0.0,
-        length,
-        final_level: 1.0,
-        generator,
-    });
-}
-
-fn _new_decay(
-    length: usize, // in samples
-    sustain_level: f32,
-    generator: Box<dyn Generator>,
-) -> Box<dyn Generator> {
-    return Box::new(LinearRamp {
-        initial_level: 1.0,
-        length,
-        final_level: sustain_level,
-        generator,
-    });
-}
-
-fn _new_release(
-    sustain_level: f32,
-    length: usize, // in samples
-    generator: Box<dyn Generator>,
-) -> Box<dyn Generator> {
-    return Box::new(LinearRamp {
-        initial_level: sustain_level,
-        length,
-        final_level: 0.0,
-        generator,
-    });
-}
-
 /*
  * Sustain is a time-dependent filter that amplifies the portion of a waveform starting at the
  * next_offset of the underlying generator and continuing for the given length.
@@ -156,14 +118,6 @@ impl Generator for Sustain {
             Some(offset) => Some(offset + self.length),
         }
     }
-}
-
-fn _new_sustain(level: f32, length: usize, generator: Box<dyn Generator>) -> Box<dyn Generator> {
-    return Box::new(Sustain {
-        level,
-        length,
-        generator,
-    });
 }
 
 /*
@@ -302,13 +256,11 @@ fn from_expr(sample_frequency: i32, expr: Expr) -> Option<Box<dyn Generator>> {
     match expr {
         Application { function, argument } => {
             match (*function, *argument) {
-                (BuiltIn(BuiltInFn::SineWave), Tuple(arguments)) if arguments.len() == 1 => {
-                    if let Float(tone_frequency) = arguments[0] {
-                        return Some(Box::new(SineWave {
-                            sample_frequency,
-                            tone_frequency,
-                        }));
-                    }
+                (BuiltIn(BuiltInFn::SineWave), Float(tone_frequency)) => {
+                    return Some(Box::new(SineWave {
+                        sample_frequency,
+                        tone_frequency,
+                    }));
                 }
                 (BuiltIn(BuiltInFn::Amplify), Tuple(arguments)) if arguments.len() == 2 => {
                     if let (Float(level), waveform) = (&arguments[0], &arguments[1]) {

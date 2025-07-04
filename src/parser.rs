@@ -6,7 +6,7 @@ use nom::{
     branch::alt,
     bytes::complete::tag,
     character::complete::{alpha1, char, multispace0, multispace1},
-    combinator::{all_consuming, cut, map, not, peek},
+    combinator::{all_consuming, cut, map, not, peek, recognize},
     multi::{many0, separated_list0},
     number::complete::float,
     sequence::{delimited, preceded},
@@ -159,14 +159,6 @@ pub enum Expr {
     Error,
 }
 
-#[allow(non_snake_case)]
-fn BuiltInApplication(fn_name: BuiltInFn, arguments: Vec<Expr>) -> Expr {
-    Expr::Application {
-        function: Box::new(Expr::BuiltIn(fn_name)),
-        argument: Box::new(Expr::Tuple(arguments)),
-    }
-}
-
 fn parse_literal(input: LocatedSpan) -> IResult<Expr> {
     #[rustfmt::skip]
     let (rest, value) = float.parse(input)?;
@@ -178,7 +170,11 @@ fn parse_identifier(input: LocatedSpan) -> IResult<String> {
     let (rest, value) =
         preceded(
             peek(not(tag("fn"))),
-            alt((alpha1, tag("_"))),
+            recognize(
+                (
+                    alpha1,
+                    many0(alt((alpha1, tag("_")))),
+                ))
         ).parse(input)?;
     return Ok((rest, value.to_string()));
 }
@@ -204,7 +200,10 @@ fn parse_function(input: LocatedSpan) -> IResult<Expr> {
 fn parse_variable(input: LocatedSpan) -> IResult<Expr> {
     #[rustfmt::skip]
     let (rest, value) =
-        parse_identifier.parse(input)?;
+        alt((
+            parse_identifier,
+            tag("$").map(|s: LocatedSpan| s.fragment().to_string()),
+        )).parse(input)?;
     return Ok((rest, Expr::Variable(value.to_string())));
 }
 
@@ -217,14 +216,6 @@ fn parse_primitive(input: LocatedSpan) -> IResult<Expr> {
         parse_chord,
         parse_sequence,
         parse_tuple,
-        // TODO generalize symbol application
-        preceded(
-            char('$'),
-            expect(parse_primitive, "expected expression after $"),
-        )
-        .map(|expr| BuiltInApplication(BuiltInFn::SineWave,
-                    vec![expr.unwrap_or(Expr::Error)],
-            ))
     )).parse(input)?;
     return Ok((rest, value));
 }
@@ -235,7 +226,6 @@ fn parse_application(input: LocatedSpan) -> IResult<Expr> {
         (
             parse_primitive,
             many0(preceded(
-                // TODO maybe require parens? and not allow space?
                 multispace0,
                 parse_primitive,
             )),
@@ -243,9 +233,13 @@ fn parse_application(input: LocatedSpan) -> IResult<Expr> {
         |(func, arguments)| {
             let mut result = func;
             for arg in arguments {
+                let arg = match arg {
+                    Expr::Tuple(mut exprs) if exprs.len() == 1 => Box::new(exprs.remove(0)),
+                    _ => Box::new(arg),
+                };
                 result = Expr::Application {
                     function: Box::new(result),
-                    argument: Box::new(arg),
+                    argument: arg
                 };
             }
             return result;
@@ -285,8 +279,8 @@ fn parse_chord(input: LocatedSpan) -> IResult<Expr> {
     let (rest, exprs) = delimited(
         (char('<'), multispace0),
         cut(separated_list0(
-            multispace1,
-            parse_primitive,
+            (multispace0, char(','), multispace0),
+            parse_expr,
         )),
         (multispace0, expect(char('>'), "expected '>'")),
     ).parse(input)?;
@@ -298,8 +292,8 @@ fn parse_sequence(input: LocatedSpan) -> IResult<Expr> {
     let (rest, exprs) = delimited(
         (char('['), multispace0),
         cut(separated_list0(
-            multispace1,
-            parse_primitive,
+            (multispace0, char(','), multispace0),
+            parse_expr,
         )),
         (multispace0, expect(char(']'), "expected ']'")),
     ).parse(input)?;
@@ -324,10 +318,44 @@ fn parse_tuple(input: LocatedSpan) -> IResult<Expr> {
 
 fn parse_expr(input: LocatedSpan) -> IResult<Expr> {
     #[rustfmt::skip]
-    let (rest, expr) = alt((
-        parse_multiplicative,
-    )).parse(input)?;
-    return Ok((rest, expr));
+    let (rest, expr) = map(
+        (
+            parse_multiplicative,
+            many0(preceded(
+                    delimited(multispace0, char('|'), multispace0),
+                    expect(parse_application, "expected expression after | operator"),
+                )),
+        ),
+        |(argument, pipe_exprs)| {
+            let mut expr = argument;
+            for pipe_expr in pipe_exprs {
+                match pipe_expr {
+                    Some(Expr::Application { function, argument }) => {
+                        match *argument {
+                            Expr::Tuple(mut exprs) => {
+                                exprs.push(expr);
+                                expr = Expr::Application {
+                                    function,
+                                    argument: Box::new(Expr::Tuple(exprs)),
+                                };
+                            }
+                            argument => {
+                                expr = Expr::Application {
+                                    function,
+                                    argument: Box::new(Expr::Tuple(vec![argument, expr])),
+                                };
+                            }
+                        }
+                    }
+                    _ => {
+                        return Err(Expr::Error); // If we encounter an error, we return an error expression.
+                    }
+                }
+            }
+            return Ok(expr);
+        }
+    ).parse(input)?;
+    return Ok((rest, expr.unwrap_or(Expr::Error)));
 }
 
 fn translate_parse_result<T>(result: IResult<T>) -> Result<T, Vec<Error>> {
@@ -459,7 +487,6 @@ fn substitute(context: &Vec<(String, Expr)>, expr: Expr) -> Expr {
 fn fmt_as_primitive(expr: &Expr, f: &mut fmt::Formatter) -> fmt::Result {
     match expr {
         Expr::Float(_)
-        | Expr::Function { .. }
         | Expr::Variable(_)
         | Expr::BuiltIn(_)
         | Expr::Chord(_)
@@ -625,8 +652,7 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
                 }
                 (
                     BuiltIn(
-                        builtin_fn @ (BuiltInFn::SineWave
-                        | BuiltInFn::Amplify
+                        builtin_fn @ (BuiltInFn::Amplify
                         | BuiltInFn::Seq
                         | BuiltInFn::Fin
                         | BuiltInFn::LinearRamp
@@ -637,6 +663,12 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
                     return Ok(Application {
                         function: Box::new(BuiltIn(builtin_fn)),
                         argument: Box::new(Tuple(actuals)),
+                    });
+                }
+                (function @ BuiltIn(BuiltInFn::SineWave), argument @ Float(_)) => {
+                    return Ok(Application {
+                        function: Box::new(function),
+                        argument: Box::new(argument),
                     });
                 }
                 _ => {
@@ -684,6 +716,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_parse_variable() {
+        let input = "my_var";
+        let result = parse_program(input);
+        assert!(result.is_ok());
+        assert_eq!(format!("{}", result.unwrap()), "my_var");
+
+        let input = "$";
+        let result = parse_program(input);
+        assert!(result.is_ok());
+        assert_eq!(format!("{}", result.unwrap()), "$");
+    }
+
+    #[test]
     fn test_parse_multiplication() {
         let input = "2 * 3.5";
         let result = parse_program(input);
@@ -710,6 +755,22 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_pipe() {
+        let input = "2 * 3 | (fn (x, y) = x * y)(4)";
+        let result = parse_program(input);
+        assert!(result.is_ok());
+        assert_eq!(
+            format!("{}", result.unwrap()),
+            "(fn (x, y) = x * y)(4, 2 * 3)"
+        );
+
+        let input = "$200 | S(0.5, .25)";
+        let result = parse_program(input);
+        assert!(result.is_ok());
+        assert_eq!(format!("{}", result.unwrap()), "S(0.5, 0.25, $(200))");
+    }
+
+    #[test]
     fn test_function_eval() {
         let input = "(fn (x) = fn (x) = x * 2)(7)(5)";
         let result = parse_program(input);
@@ -718,5 +779,13 @@ mod tests {
         let context = vec![("x".to_string(), Expr::Float(3.0))];
         let simplified = simplify(&context, expr).unwrap();
         assert_eq!(format!("{}", simplified), "10");
+
+        let input = "(fn (x) = fn (y, z) = x * 2 * y * z)(3)(4, 5)";
+        let result = parse_program(input);
+        assert!(result.is_ok());
+        let expr = result.unwrap();
+        let context = vec![("x".to_string(), Expr::Float(9.0))];
+        let simplified = simplify(&context, expr).unwrap();
+        assert_eq!(format!("{}", simplified), "120");
     }
 }
