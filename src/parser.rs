@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 use std::fmt;
 use std::ops::Range;
-use std::time::Duration;
 
 use nom::{
     branch::alt,
@@ -112,8 +111,27 @@ where
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum BuiltInFn {
-    Power,   // float * float -> float
-    Amplify, // float * waveform -> waveform
+    // Arithmetic
+    Power, // float * float -> float
+    // Waveforms
+    SineWave,   // float(frequency) -> waveform
+    Amplify,    // float(level) * waveform -> waveform
+    Seq,        // float(duration) * waveform -> waveform
+    Fin,        // float(duration) * waveform -> waveform
+    LinearRamp, // float(initial_level) * float(duration) * float(final_level) * waveform -> waveform
+    Sustain,    // float(level) * float(duration) * waveform -> waveform
+}
+
+fn builtin_arity(builtin_fn: &BuiltInFn) -> usize {
+    match builtin_fn {
+        BuiltInFn::Power => 2,
+        BuiltInFn::SineWave => 1,
+        BuiltInFn::Amplify => 2,
+        BuiltInFn::Seq => 2,
+        BuiltInFn::Fin => 2,
+        BuiltInFn::LinearRamp => 4,
+        BuiltInFn::Sustain => 3,
+    }
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -126,16 +144,6 @@ pub enum Expr {
     },
     Variable(String),
     BuiltIn(BuiltInFn),
-    // Waveforms
-    SineWave {
-        frequency: Box<Expr>,
-    },
-    Truncated {
-        duration: Duration,
-        waveform: Box<Expr>,
-    },
-    Chord(Vec<Expr>),
-    Sequence(Vec<Expr>),
     // Operations
     Multiply(Box<Expr>, Box<Expr>),
     Divide(Box<Expr>, Box<Expr>),
@@ -144,9 +152,19 @@ pub enum Expr {
         argument: Box<Expr>,
     },
     // Compounds
+    Chord(Vec<Expr>),
+    Sequence(Vec<Expr>),
     Tuple(Vec<Expr>),
     // Error
     Error,
+}
+
+#[allow(non_snake_case)]
+fn BuiltInApplication(fn_name: BuiltInFn, arguments: Vec<Expr>) -> Expr {
+    Expr::Application {
+        function: Box::new(Expr::BuiltIn(fn_name)),
+        argument: Box::new(Expr::Tuple(arguments)),
+    }
 }
 
 fn parse_literal(input: LocatedSpan) -> IResult<Expr> {
@@ -160,7 +178,7 @@ fn parse_identifier(input: LocatedSpan) -> IResult<String> {
     let (rest, value) =
         preceded(
             peek(not(tag("fn"))),
-            alpha1,
+            alt((alpha1, tag("_"))),
         ).parse(input)?;
     return Ok((rest, value.to_string()));
 }
@@ -204,12 +222,9 @@ fn parse_primitive(input: LocatedSpan) -> IResult<Expr> {
             char('$'),
             expect(parse_primitive, "expected expression after $"),
         )
-        .map(|expr| Expr::Truncated {
-            duration: Duration::from_secs(2),
-            waveform: Box::new(Expr::SineWave {
-                frequency: Box::new(expr.unwrap_or(Expr::Error)),
-            }),
-        }),
+        .map(|expr| BuiltInApplication(BuiltInFn::SineWave,
+                    vec![expr.unwrap_or(Expr::Error)],
+            ))
     )).parse(input)?;
     return Ok((rest, value));
 }
@@ -390,8 +405,7 @@ pub fn parse_context(input: &str) -> Result<Vec<(String, Expr)>, Vec<Error>> {
 
 fn substitute(context: &Vec<(String, Expr)>, expr: Expr) -> Expr {
     use Expr::{
-        Application, BuiltIn, Chord, Divide, Float, Function, Multiply, Sequence, SineWave,
-        Truncated, Tuple, Variable,
+        Application, BuiltIn, Chord, Divide, Float, Function, Multiply, Sequence, Tuple, Variable,
     };
     match expr {
         Float(_) => expr,
@@ -415,19 +429,6 @@ fn substitute(context: &Vec<(String, Expr)>, expr: Expr) -> Expr {
             Expr::Variable(name)
         }
         BuiltIn { .. } => expr,
-        SineWave { frequency } => {
-            let frequency = substitute(context, *frequency);
-            Expr::SineWave {
-                frequency: Box::new(frequency),
-            }
-        }
-        Truncated { duration, waveform } => {
-            let waveform = substitute(context, *waveform);
-            Expr::Truncated {
-                duration,
-                waveform: Box::new(waveform),
-            }
-        }
         Multiply(left, right) => {
             let left = substitute(context, *left);
             let right = substitute(context, *right);
@@ -463,9 +464,7 @@ fn fmt_as_primitive(expr: &Expr, f: &mut fmt::Formatter) -> fmt::Result {
         | Expr::BuiltIn(_)
         | Expr::Chord(_)
         | Expr::Sequence(_)
-        | Expr::Tuple(_)
-        | Expr::SineWave { .. }
-        | Expr::Truncated { .. } => write!(f, "{}", expr),
+        | Expr::Tuple(_) => write!(f, "{}", expr),
         _ => write!(f, "({})", expr),
     }
 }
@@ -485,14 +484,7 @@ impl fmt::Display for Expr {
                 write!(f, ") = {}", body)
             }
             Expr::Variable(name) => write!(f, "{}", name),
-            Expr::BuiltIn(_) => write!(f, "{{built-in}}"),
-            Expr::SineWave { frequency } => {
-                write!(f, "$")?;
-                fmt_as_primitive(frequency, f)
-            }
-            Expr::Truncated { duration, waveform } => {
-                write!(f, "truncated({}, {})", duration.as_secs(), waveform)
-            }
+            Expr::BuiltIn(builtin_fn) => write!(f, "{}", builtin_fn),
             Expr::Multiply(left, right) => {
                 fmt_as_primitive(left, f)?;
                 write!(f, " * ")?;
@@ -505,7 +497,13 @@ impl fmt::Display for Expr {
             }
             Expr::Application { function, argument } => {
                 fmt_as_primitive(function, f)?;
-                write!(f, "({})", argument)
+                if let Expr::Tuple(_) = &**argument {
+                    fmt_as_primitive(argument, f)
+                } else {
+                    write!(f, "(")?;
+                    fmt_as_primitive(argument, f)?;
+                    write!(f, ")")
+                }
             }
             Expr::Chord(exprs) => {
                 write!(f, "<")?;
@@ -542,10 +540,23 @@ impl fmt::Display for Expr {
     }
 }
 
+impl fmt::Display for BuiltInFn {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            BuiltInFn::Power => write!(f, "power"),
+            BuiltInFn::SineWave => write!(f, "sine_wave"),
+            BuiltInFn::Amplify => write!(f, "amplify"),
+            BuiltInFn::Seq => write!(f, "seq"),
+            BuiltInFn::Fin => write!(f, "fin"),
+            BuiltInFn::LinearRamp => write!(f, "linear_ramp"),
+            BuiltInFn::Sustain => write!(f, "sustain"),
+        }
+    }
+}
+
 fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
     use Expr::{
-        Application, BuiltIn, Chord, Divide, Float, Function, Multiply, Sequence, SineWave,
-        Truncated, Tuple, Variable,
+        Application, BuiltIn, Chord, Divide, Float, Function, Multiply, Sequence, Tuple, Variable,
     };
     match expr {
         Float(_) => Ok(expr),
@@ -612,29 +623,27 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
                         "Built-in function 'power' requires two float arguments".to_string(),
                     ));
                 }
-                (BuiltIn(BuiltInFn::Amplify), Tuple(actuals)) if actuals.len() == 2 => {
+                (
+                    BuiltIn(
+                        builtin_fn @ (BuiltInFn::SineWave
+                        | BuiltInFn::Amplify
+                        | BuiltInFn::Seq
+                        | BuiltInFn::Fin
+                        | BuiltInFn::LinearRamp
+                        | BuiltInFn::Sustain),
+                    ),
+                    Tuple(actuals),
+                ) if actuals.len() == builtin_arity(&builtin_fn) => {
                     return Ok(Application {
-                        function: Box::new(BuiltIn(BuiltInFn::Amplify)),
+                        function: Box::new(BuiltIn(builtin_fn)),
                         argument: Box::new(Tuple(actuals)),
                     });
                 }
-                _ => return Err(Error::new("Invalid application".to_string())),
+                _ => {
+                    return Err(Error::new("invalid application".to_string()));
+                }
             }
         }
-        SineWave { frequency } => {
-            let frequency = simplify_closed(*frequency)?;
-            return Ok(SineWave {
-                frequency: Box::new(frequency),
-            });
-        }
-        Truncated { duration, waveform } => {
-            let waveform = simplify_closed(*waveform)?;
-            return Ok(Truncated {
-                duration,
-                waveform: Box::new(waveform),
-            });
-        }
-
         Chord(exprs) => {
             return Ok(Chord(
                 exprs
@@ -666,7 +675,7 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
 
 pub fn simplify(context: &Vec<(String, Expr)>, mut expr: Expr) -> Result<Expr, Error> {
     expr = substitute(context, expr);
-    println!("Substitute returned {:?}", &expr);
+    println!("Substitute returned {}", &expr);
     return simplify_closed(expr);
 }
 

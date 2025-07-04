@@ -68,13 +68,31 @@ enum Mode {
 
 fn load_context(file: &String) -> Vec<(String, parser::Expr)> {
     let mut context: Vec<(String, parser::Expr)> = Vec::new();
+
     context.push((
         "pow".to_string(),
         parser::Expr::BuiltIn(parser::BuiltInFn::Power),
     ));
+
     context.push((
-        "A".to_string(),
+        "amp".to_string(),
         parser::Expr::BuiltIn(parser::BuiltInFn::Amplify),
+    ));
+    context.push((
+        "seq".to_string(),
+        parser::Expr::BuiltIn(parser::BuiltInFn::Seq),
+    ));
+    context.push((
+        "fin".to_string(),
+        parser::Expr::BuiltIn(parser::BuiltInFn::Fin),
+    ));
+    context.push((
+        "linear_ramp".to_string(),
+        parser::Expr::BuiltIn(parser::BuiltInFn::LinearRamp),
+    ));
+    context.push((
+        "S".to_string(),
+        parser::Expr::BuiltIn(parser::BuiltInFn::Sustain),
     ));
     if file != "" {
         let raw_context = std::fs::read_to_string(file).unwrap();

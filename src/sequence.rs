@@ -31,24 +31,15 @@ impl Generator for SineWave {
     }
 }
 
-/*
-struct Envelope {
-    attack: f32,
-    decay: f32,
-    sustain: f32,
-    release: f32
-}
- */
-
-struct Amplifier {
-    gain: f32,
+struct Amplify {
+    level: f32,
     generator: Box<dyn Generator>,
 }
-impl<'a> Generator for Amplifier {
+impl Generator for Amplify {
     fn generate(&self, offset: usize, out: &mut [f32]) {
         self.generator.generate(offset, out);
         for x in out.iter_mut() {
-            *x *= self.gain;
+            *x *= self.level;
         }
     }
     fn samples(&self) -> Option<usize> {
@@ -59,25 +50,154 @@ impl<'a> Generator for Amplifier {
     }
 }
 
-struct Finite {
+/*
+ * LinearRamp is a time-dependent filter that modifies the given generator, starting after the
+ * next_offset of that generator. The output is multiplied by a linear ramp that starts at
+ * initial_level and ends at final_level. If the generator has no next_offset then the ramp
+ * starts at the beginning of the output.
+ */
+struct LinearRamp {
+    initial_level: f32,
+    length: usize, // length in samples
+    final_level: f32,
     generator: Box<dyn Generator>,
-    samples: usize,
+}
+impl Generator for LinearRamp {
+    fn generate(&self, offset: usize, out: &mut [f32]) {
+        self.generator.generate(offset, out);
+        let inner_offset = self.generator.next_offset().unwrap_or(0);
+        let level_diff = (self.final_level - self.initial_level).abs();
+        let mut offset = offset;
+        for x in out.iter_mut() {
+            if offset >= inner_offset && offset < inner_offset + self.length {
+                let mut progress: f32 = (offset - inner_offset) as f32 / self.length as f32;
+                if self.final_level < self.initial_level {
+                    progress = 1.0 - progress;
+                }
+                *x *= progress * level_diff;
+            }
+            offset += 1;
+        }
+    }
+    fn samples(&self) -> Option<usize> {
+        self.generator.samples()
+    }
+    fn next_offset(&self) -> Option<usize> {
+        match self.generator.next_offset() {
+            None => Some(self.length),
+            Some(offset) => Some(offset + self.length),
+        }
+    }
+}
+
+fn _new_attack(
+    length: usize, // in samples
+    generator: Box<dyn Generator>,
+) -> Box<dyn Generator> {
+    return Box::new(LinearRamp {
+        initial_level: 0.0,
+        length,
+        final_level: 1.0,
+        generator,
+    });
+}
+
+fn _new_decay(
+    length: usize, // in samples
+    sustain_level: f32,
+    generator: Box<dyn Generator>,
+) -> Box<dyn Generator> {
+    return Box::new(LinearRamp {
+        initial_level: 1.0,
+        length,
+        final_level: sustain_level,
+        generator,
+    });
+}
+
+fn _new_release(
+    sustain_level: f32,
+    length: usize, // in samples
+    generator: Box<dyn Generator>,
+) -> Box<dyn Generator> {
+    return Box::new(LinearRamp {
+        initial_level: sustain_level,
+        length,
+        final_level: 0.0,
+        generator,
+    });
+}
+
+/*
+ * Sustain is a time-dependent filter that amplifies the portion of a waveform starting at the
+ * next_offset of the underlying generator and continuing for the given length.
+ */
+struct Sustain {
+    level: f32,
+    length: usize, // length in samples
+    generator: Box<dyn Generator>,
+}
+impl Generator for Sustain {
+    fn generate(&self, offset: usize, out: &mut [f32]) {
+        self.generator.generate(offset, out);
+        let inner_offset = self.generator.next_offset().unwrap_or(0);
+        for (i, x) in out.iter_mut().enumerate() {
+            if i + offset >= inner_offset && i + offset < inner_offset + self.length {
+                *x *= self.level;
+            }
+        }
+    }
+    fn samples(&self) -> Option<usize> {
+        self.generator.samples()
+    }
+    fn next_offset(&self) -> Option<usize> {
+        match self.generator.next_offset() {
+            None => Some(self.length),
+            Some(offset) => Some(offset + self.length),
+        }
+    }
+}
+
+fn _new_sustain(level: f32, length: usize, generator: Box<dyn Generator>) -> Box<dyn Generator> {
+    return Box::new(Sustain {
+        level,
+        length,
+        generator,
+    });
+}
+
+/*
+ * Seq sets the next_offset to the given value (ignoring next_offset of the underlying generator).
+*/
+struct Seq {
+    generator: Box<dyn Generator>,
     next_offset: usize,
 }
-impl Generator for Finite {
+impl Generator for Seq {
     fn generate(&self, offset: usize, out: &mut [f32]) {
-        if offset + out.len() < self.samples {
-            self.generator.generate(offset, out);
-        } else if offset < self.samples {
-            let len = self.samples - offset;
-            self.generator.generate(offset, &mut out[..len]);
-        }
+        self.generator.generate(offset, out);
+    }
+    fn samples(&self) -> Option<usize> {
+        self.generator.samples()
+    }
+    fn next_offset(&self) -> Option<usize> {
+        Some(self.next_offset)
+    }
+}
+
+struct Fin {
+    generator: Box<dyn Generator>,
+    samples: usize,
+}
+impl Generator for Fin {
+    fn generate(&self, offset: usize, out: &mut [f32]) {
+        self.generator.generate(offset, out);
     }
     fn samples(&self) -> Option<usize> {
         Some(self.samples)
     }
     fn next_offset(&self) -> Option<usize> {
-        Some(self.next_offset)
+        self.generator.next_offset()
     }
 }
 
@@ -177,16 +297,69 @@ impl<'a> Generator for Sequence {
 }
 
 fn from_expr(sample_frequency: i32, expr: Expr) -> Option<Box<dyn Generator>> {
-    use Expr::{Application, BuiltIn, Float, Truncated, Tuple};
+    use Expr::{Application, BuiltIn, Float, Tuple};
     println!("from_expr called with expr {:?}", expr);
     match expr {
         Application { function, argument } => {
             match (*function, *argument) {
+                (BuiltIn(BuiltInFn::SineWave), Tuple(arguments)) if arguments.len() == 1 => {
+                    if let Float(tone_frequency) = arguments[0] {
+                        return Some(Box::new(SineWave {
+                            sample_frequency,
+                            tone_frequency,
+                        }));
+                    }
+                }
                 (BuiltIn(BuiltInFn::Amplify), Tuple(arguments)) if arguments.len() == 2 => {
-                    if let (Float(gain), waveform) = (&arguments[0], &arguments[1]) {
+                    if let (Float(level), waveform) = (&arguments[0], &arguments[1]) {
                         let generator = from_expr(sample_frequency, waveform.clone())?;
-                        return Some(Box::new(Amplifier {
-                            gain: *gain,
+                        return Some(Box::new(Amplify {
+                            level: *level,
+                            generator,
+                        }));
+                    }
+                }
+
+                (BuiltIn(BuiltInFn::Seq), Tuple(arguments)) if arguments.len() == 2 => {
+                    if let (Float(duration), waveform) = (&arguments[0], &arguments[1]) {
+                        let generator = from_expr(sample_frequency, waveform.clone())?;
+                        return Some(Box::new(Seq {
+                            generator,
+                            next_offset: *duration as usize * sample_frequency as usize,
+                        }));
+                    }
+                }
+                (BuiltIn(BuiltInFn::Fin), Tuple(arguments)) if arguments.len() == 2 => {
+                    if let (Float(duration), waveform) = (&arguments[0], &arguments[1]) {
+                        let generator = from_expr(sample_frequency, waveform.clone())?;
+                        return Some(Box::new(Fin {
+                            generator,
+                            samples: *duration as usize * sample_frequency as usize,
+                        }));
+                    }
+                }
+
+                (BuiltIn(BuiltInFn::LinearRamp), Tuple(arguments)) if arguments.len() == 4 => {
+                    if let (Float(initial_level), Float(duration), Float(final_level), waveform) =
+                        (&arguments[0], &arguments[1], &arguments[2], &arguments[3])
+                    {
+                        let generator = from_expr(sample_frequency, waveform.clone())?;
+                        return Some(Box::new(LinearRamp {
+                            initial_level: *initial_level,
+                            length: (*duration * sample_frequency as f32) as usize,
+                            final_level: *final_level,
+                            generator,
+                        }));
+                    }
+                }
+                (BuiltIn(BuiltInFn::Sustain), Tuple(arguments)) if arguments.len() == 3 => {
+                    if let (Float(level), Float(duration), waveform) =
+                        (&arguments[0], &arguments[1], &arguments[2])
+                    {
+                        let generator = from_expr(sample_frequency, waveform.clone())?;
+                        return Some(Box::new(Sustain {
+                            level: *level,
+                            length: (*duration * sample_frequency as f32) as usize,
                             generator,
                         }));
                     }
@@ -196,24 +369,6 @@ fn from_expr(sample_frequency: i32, expr: Expr) -> Option<Box<dyn Generator>> {
                 }
             }
             return None;
-        }
-        Expr::SineWave { frequency } => {
-            if let Expr::Float(tone_frequency) = *frequency {
-                return Some(Box::new(SineWave {
-                    sample_frequency,
-                    tone_frequency,
-                }));
-            }
-            return None;
-        }
-        // TODO split this case into "finite" and "with next offset"
-        Truncated { duration, waveform } => {
-            let generator = from_expr(sample_frequency, *waveform.clone())?;
-            return Some(Box::new(Finite {
-                generator,
-                samples: duration.as_secs() as usize * sample_frequency as usize,
-                next_offset: duration.as_secs() as usize * sample_frequency as usize,
-            }));
         }
         Expr::Chord(exprs) => {
             let mut generators = Vec::new();
@@ -403,13 +558,15 @@ mod tests {
             }
         }
     }
-    fn const_gen(f: f32) -> Box<dyn Generator> {
-        return Box::new(ConstGenerator { value: f });
+    fn const_gen(value: f32) -> Box<dyn Generator> {
+        return Box::new(ConstGenerator { value });
     }
-    fn finite_const_gen(f: f32, samples: usize, next_offset: usize) -> Box<dyn Generator> {
-        return Box::new(Finite {
-            generator: const_gen(f),
-            samples,
+    fn finite_const_gen(value: f32, samples: usize, next_offset: usize) -> Box<dyn Generator> {
+        return Box::new(Seq {
+            generator: Box::new(Fin {
+                samples,
+                generator: const_gen(value),
+            }),
             next_offset,
         });
     }
