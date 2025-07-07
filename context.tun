@@ -3,6 +3,8 @@ fs = fn (dur, w) = fin(dur, seq(dur, w)),
 A = fn (dur, w) = linear_ramp(0.0, dur, 1.0, w),
 D = fn (dur, level, w) = linear_ramp(1.0, dur, level, w),
 R = fn (level, dur, w) = linear_ramp(level, dur, 0.0, w),
+ADSR = fn (attack_dur, decay_dur, sustain_level, sustain_dur, release_dur, w) =
+  w | A(attack_dur) | D(decay_dur, sustain_level) | S(sustain_level, sustain_dur) | R(sustain_level, release_dur),
 
 over = fn (x, freq) = amp(1/x, $(freq*x)),
 hrm = fn (freq) = <$freq, over(3, freq), over(5, freq), over(7, freq), over(9, freq)>,
@@ -12,15 +14,4 @@ step = fn (freq,n) = freq * pow(2, n/12),
 purethird = fn (freq) = <(hrm(freq)), (hrm(freq * 5/4))>,
 equalthird = fn (freq) = <(hrm(freq)), (hrm(step(freq, 4)))>,
 
-Pone = fs(1, <$697, $1209>),
-Ptwo = fs(1, <$697, $1336>),
-Pthree = fs(1, <$697, $1447>),
-Pfour = fs(1, <$770, $1209>),
-Pfive = fs(1, <$770, $1336>),
-Psix = fs(1, <$770, $1447>),
-Pseven = fs(1, <$852, $1209>),
-Peight = fs(1, <$852, $1336>),
-Pnine = fs(1, <$852, $1447>),
-Pstar = fs(1, <$941, $1209>),
-Pzero = fs(1, <$941, $1336>),
-Ppound = fs(1, <$941, $1447>)
+harmonica = fn (freq) = hrm(freq) | ADSR(.13, .33, .5, 1, .13) | fs(1.6)

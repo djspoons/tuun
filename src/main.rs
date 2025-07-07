@@ -102,10 +102,11 @@ fn load_context(file: &String) -> Vec<(String, parser::Expr)> {
         let raw_context = std::fs::read_to_string(file).unwrap();
         match parser::parse_context(&raw_context) {
             Ok(parsed_exprs) => {
+                println!("Parsed context:");
                 for (name, parsed_expr) in parsed_exprs {
                     match parser::simplify(&context, parsed_expr) {
                         Ok(expr) => {
-                            println!("Context expression for {}: {:?}", &name, expr);
+                            println!("   {}", &name);
                             context.push((name.trim().to_string(), expr));
                         }
                         Err(error) => println!(
@@ -120,7 +121,6 @@ fn load_context(file: &String) -> Vec<(String, parser::Expr)> {
             }
         }
     }
-    println!("Loaded context: {:?}", &context);
     return context;
 }
 

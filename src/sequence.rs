@@ -66,15 +66,12 @@ impl Generator for LinearRamp {
     fn generate(&self, offset: usize, out: &mut [f32]) {
         self.generator.generate(offset, out);
         let inner_offset = self.generator.next_offset().unwrap_or(0);
-        let level_diff = (self.final_level - self.initial_level).abs();
+        let level_diff = self.final_level - self.initial_level;
         let mut offset = offset;
         for x in out.iter_mut() {
             if offset >= inner_offset && offset < inner_offset + self.length {
-                let mut progress: f32 = (offset - inner_offset) as f32 / self.length as f32;
-                if self.final_level < self.initial_level {
-                    progress = 1.0 - progress;
-                }
-                *x *= progress * level_diff;
+                let progress: f32 = (offset - inner_offset) as f32 / self.length as f32;
+                *x *= self.initial_level + (progress * level_diff);
             }
             offset += 1;
         }
@@ -124,8 +121,8 @@ impl Generator for Sustain {
  * Seq sets the next_offset to the given value (ignoring next_offset of the underlying generator).
 */
 struct Seq {
-    generator: Box<dyn Generator>,
     next_offset: usize,
+    generator: Box<dyn Generator>,
 }
 impl Generator for Seq {
     fn generate(&self, offset: usize, out: &mut [f32]) {
@@ -140,12 +137,17 @@ impl Generator for Seq {
 }
 
 struct Fin {
-    generator: Box<dyn Generator>,
     samples: usize,
+    generator: Box<dyn Generator>,
 }
 impl Generator for Fin {
     fn generate(&self, offset: usize, out: &mut [f32]) {
-        self.generator.generate(offset, out);
+        if offset + out.len() < self.samples {
+            self.generator.generate(offset, out);
+        } else if offset < self.samples {
+            self.generator
+                .generate(offset, &mut out[..self.samples - offset]);
+        }
     }
     fn samples(&self) -> Option<usize> {
         Some(self.samples)
@@ -276,8 +278,8 @@ fn from_expr(sample_frequency: i32, expr: Expr) -> Option<Box<dyn Generator>> {
                     if let (Float(duration), waveform) = (&arguments[0], &arguments[1]) {
                         let generator = from_expr(sample_frequency, waveform.clone())?;
                         return Some(Box::new(Seq {
-                            generator,
                             next_offset: *duration as usize * sample_frequency as usize,
+                            generator,
                         }));
                     }
                 }
@@ -285,8 +287,8 @@ fn from_expr(sample_frequency: i32, expr: Expr) -> Option<Box<dyn Generator>> {
                     if let (Float(duration), waveform) = (&arguments[0], &arguments[1]) {
                         let generator = from_expr(sample_frequency, waveform.clone())?;
                         return Some(Box::new(Fin {
-                            generator,
                             samples: *duration as usize * sample_frequency as usize,
+                            generator,
                         }));
                     }
                 }
@@ -515,17 +517,79 @@ mod tests {
     }
     fn finite_const_gen(value: f32, samples: usize, next_offset: usize) -> Box<dyn Generator> {
         return Box::new(Seq {
+            next_offset,
             generator: Box::new(Fin {
                 samples,
                 generator: const_gen(value),
             }),
-            next_offset,
         });
     }
 
     fn generate_samples(generator: &dyn Generator, size: usize, out: &mut [f32]) {
         for n in 0..out.len() / size {
             generator.generate(n * size, &mut out[n * size..(n + 1) * size]);
+        }
+    }
+
+    #[test]
+    fn test_amplify() {
+        let amp_gen = Amplify {
+            level: 2.0,
+            generator: finite_const_gen(1.0, 5, 5),
+        };
+        let desired = vec![2.0, 2.0, 2.0, 2.0, 2.0, 0.0, 0.0, 0.0];
+        for size in [1, 2, 4, 8] {
+            let mut out = vec![0.0; 8];
+            println!("Generating amplify with buffer size {}", size);
+            generate_samples(&amp_gen, size, &mut out);
+            assert_eq!(out, desired);
+        }
+    }
+
+    #[test]
+    fn test_linear_ramp() {
+        let ramp_gen = LinearRamp {
+            initial_level: 0.0,
+            length: 4,
+            final_level: 0.5,
+            generator: finite_const_gen(1.0, 6, 0),
+        };
+        let desired = vec![0.0, 0.125, 0.25, 0.375, 1.0, 1.0, 0.0, 0.0];
+        for size in [1, 2, 4, 8] {
+            let mut out = vec![0.0; 8];
+            println!("Generating linear ramp with buffer size {}", size);
+            generate_samples(&ramp_gen, size, &mut out);
+            assert_eq!(out, desired);
+        }
+
+        let ramp_gen = LinearRamp {
+            initial_level: 1.0,
+            length: 4,
+            final_level: 0.5,
+            generator: finite_const_gen(1.0, 5, 0),
+        };
+        let desired = vec![1.0, 0.875, 0.75, 0.625, 1.0, 0.0, 0.0, 0.0];
+        for size in [1, 2, 4, 8] {
+            let mut out = vec![0.0; 8];
+            println!("Generating linear ramp with buffer size {}", size);
+            generate_samples(&ramp_gen, size, &mut out);
+            assert_eq!(out, desired);
+        }
+    }
+
+    #[test]
+    fn test_sustain() {
+        let sustain_gen = Sustain {
+            level: 0.5,
+            length: 4,
+            generator: finite_const_gen(1.0, 5, 3),
+        };
+        let desired = vec![1.0, 1.0, 1.0, 0.5, 0.5, 0.0, 0.0, 0.0];
+        for size in [1, 2, 4, 8] {
+            let mut out = vec![0.0; 8];
+            println!("Generating sustain with buffer size {}", size);
+            generate_samples(&sustain_gen, size, &mut out);
+            assert_eq!(out, desired);
         }
     }
 

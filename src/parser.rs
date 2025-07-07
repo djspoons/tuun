@@ -707,7 +707,6 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
 
 pub fn simplify(context: &Vec<(String, Expr)>, mut expr: Expr) -> Result<Expr, Error> {
     expr = substitute(context, expr);
-    println!("Substitute returned {}", &expr);
     return simplify_closed(expr);
 }
 
