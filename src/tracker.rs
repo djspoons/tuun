@@ -164,13 +164,14 @@ struct Chord {
 }
 impl Generator for Chord {
     fn generate(&self, offset: usize, out: &mut [f32]) {
+        let n = self.generators.len() as f32;
         for generator in &self.generators {
             match generator.samples() {
                 None => {
                     let mut tmp = vec![0.0; out.len()];
                     generator.generate(offset, &mut tmp);
                     for (i, x) in tmp.iter().enumerate() {
-                        out[i] += x;
+                        out[i] += x / n;
                     }
                 }
                 Some(samples) => {
@@ -179,7 +180,7 @@ impl Generator for Chord {
                         let mut tmp = vec![0.0; out.len().min(len)];
                         generator.generate(offset, &mut tmp);
                         for (i, x) in tmp.iter().enumerate() {
-                            out[i] += x;
+                            out[i] += x / n;
                         }
                     }
                 }
