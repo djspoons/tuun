@@ -14,7 +14,7 @@ use realfft::RealFftPlanner;
 use clap::Parser as ClapParser;
 
 mod parser;
-mod sequence;
+mod tracker;
 
 enum Command {
     PlayOnce {
@@ -142,7 +142,7 @@ pub fn main() {
     let device = audio_subsystem
         .open_playback(None, &desired_spec, |spec| {
             println!("Spec: {:?}", spec);
-            sequence::new_tracker(
+            tracker::new_tracker(
                 args.sample_frequency,
                 args.beats_per_minute,
                 command_receiver,
