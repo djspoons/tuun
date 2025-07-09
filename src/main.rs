@@ -13,12 +13,13 @@ use realfft::RealFftPlanner;
 
 use clap::Parser as ClapParser;
 
+mod builtins;
 mod parser;
 mod tracker;
 
 enum Command {
     PlayOnce {
-        expr: parser::Expr,
+        waveform: tracker::Waveform,
         beat: i32, // Offset in beats from the beginning
     },
 }
@@ -68,36 +69,7 @@ enum Mode {
 
 fn load_context(file: &String) -> Vec<(String, parser::Expr)> {
     let mut context: Vec<(String, parser::Expr)> = Vec::new();
-
-    context.push((
-        "pow".to_string(),
-        parser::Expr::BuiltIn(parser::BuiltInFn::Power),
-    ));
-
-    context.push((
-        "$".to_string(),
-        parser::Expr::BuiltIn(parser::BuiltInFn::SineWave),
-    ));
-    context.push((
-        "amp".to_string(),
-        parser::Expr::BuiltIn(parser::BuiltInFn::Amplify),
-    ));
-    context.push((
-        "seq".to_string(),
-        parser::Expr::BuiltIn(parser::BuiltInFn::Seq),
-    ));
-    context.push((
-        "fin".to_string(),
-        parser::Expr::BuiltIn(parser::BuiltInFn::Fin),
-    ));
-    context.push((
-        "linear_ramp".to_string(),
-        parser::Expr::BuiltIn(parser::BuiltInFn::LinearRamp),
-    ));
-    context.push((
-        "S".to_string(),
-        parser::Expr::BuiltIn(parser::BuiltInFn::Sustain),
-    ));
+    builtins::add_standard_context(&mut context);
     if file != "" {
         let raw_context = std::fs::read_to_string(file).unwrap();
         match parser::parse_context(&raw_context) {
@@ -476,14 +448,30 @@ fn process_event(
                     let buffer = &buffers[index];
                     match parser::parse_program(buffer) {
                         Ok(expr) => {
-                            println!("Parser returned: {:?}", &expr);
+                            println!("Parser returned: {:}", &expr);
                             match parser::simplify(&context, expr) {
                                 Ok(expr) => {
-                                    println!("Simplify returned: {:?}", &expr);
-                                    command_sender
-                                        .send(Command::PlayOnce { expr, beat: 0 })
-                                        .unwrap();
-                                    return (context, Mode::Select { index });
+                                    println!("Simplify returned: {:}", &expr);
+                                    if let parser::Expr::Waveform(waveform) = expr {
+                                        command_sender
+                                            .send(Command::PlayOnce { waveform, beat: 0 })
+                                            .unwrap();
+                                        return (context, Mode::Select { index });
+                                    } else {
+                                        println!(
+                                            "Expression is not a waveform, cannot play: {:}",
+                                            expr
+                                        );
+                                        return (
+                                            context,
+                                            Mode::Edit {
+                                                index,
+                                                errors: vec![parser::Error::new(
+                                                    "Expression is not a waveform".to_string(),
+                                                )],
+                                            },
+                                        );
+                                    }
                                 }
                                 Err(error) => {
                                     // If there are errors, we stay in edit mode

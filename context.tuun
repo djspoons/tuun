@@ -1,17 +1,17 @@
-fs = fn (dur, w) = fin(dur, seq(dur, w)),
+fs = fn (dur) => fn (w) => w | fin(dur) | seq(dur),
 
-A = fn (dur, w) = linear_ramp(0.0, dur, 1.0, w),
-D = fn (dur, level, w) = linear_ramp(1.0, dur, level, w),
-R = fn (level, dur, w) = linear_ramp(level, dur, 0.0, w),
-ADSR = fn (attack_dur, decay_dur, sustain_level, sustain_dur, release_dur, w) =
-  w | A(attack_dur) | D(decay_dur, sustain_level) | S(sustain_level, sustain_dur) | R(sustain_level, release_dur),
+A = fn (dur) => linear_ramp(0.0, dur, 1.0),
+D = fn (dur, level) => linear_ramp(1.0, dur, level),
+R = fn (level, dur) => linear_ramp(level, dur, 0.0),
+ADSR = fn (attack_dur, decay_dur, sustain_level, sustain_dur, release_dur) =>
+  A(attack_dur) | D(decay_dur, sustain_level) | S(sustain_level, sustain_dur) | R(sustain_level, release_dur),
 
-over = fn (x, freq) = amp(1/x, $(freq*x)),
-hrm = fn (freq) = <$freq, over(3, freq), over(5, freq), over(7, freq), over(9, freq)>,
-mar = fn (freq) = <$freq, over(2.76, freq), over(5.40, freq), over(8.93, freq)>,
+over = fn (x, freq) => $(freq*x) | amp(1/x),
+hrm = fn (freq) => <($freq, over(3, freq), over(5, freq), over(7, freq), over(9, freq))>,
+mar = fn (freq) => <($freq, over(2.76, freq), over(5.40, freq), over(8.93, freq))>,
 
-step = fn (freq,n) = freq * pow(2, n/12),
-purethird = fn (freq) = <(hrm(freq)), (hrm(freq * 5/4))>,
-equalthird = fn (freq) = <(hrm(freq)), (hrm(step(freq, 4)))>,
+step = fn (freq,n) => freq * pow(2, n/12),
+purethird = fn (freq) => <(hrm(freq), hrm(freq * 5/4))>,
+equalthird = fn (freq) => <(hrm(freq), hrm(step(freq, 4)))>,
 
-harmonica = fn (freq) = hrm(freq) | ADSR(.13, .33, .5, 1, .13) | fs(1.6)
+harmonica = fn (dur) => fn (freq) => hrm(freq) | ADSR(.13, .33, .5, 1, .13) | fs(1.6)
