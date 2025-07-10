@@ -6,7 +6,7 @@ use std::{cell::RefCell, rc::Rc};
 use nom::{
     branch::alt,
     bytes::complete::tag,
-    character::complete::{alpha1, char, multispace0},
+    character::complete::{alpha1, char, multispace0, multispace1},
     combinator::{all_consuming, map, recognize, verify},
     multi::{many0, separated_list0},
     number::complete::float,
@@ -14,7 +14,6 @@ use nom::{
     Parser,
 };
 
-use crate::builtins;
 use crate::tracker;
 
 type LocatedSpan<'a> = nom_locate::LocatedSpan<&'a str, ParseState<'a>>;
@@ -150,14 +149,34 @@ fn parse_literal(input: LocatedSpan) -> IResult<Expr> {
 fn parse_identifier(input: LocatedSpan) -> IResult<String> {
     #[rustfmt::skip]
     let (rest, value) =
-        verify(recognize(
-            (
-                alpha1,
-                many0(alt((alpha1, tag("_")))),
-            )),
-            |s: &LocatedSpan| *s.fragment() != "fn",
-        ).parse(input)?;
+        alt((
+            verify(recognize((
+                    alpha1,
+                    many0(alt((alpha1, tag("_")))),
+                )),
+                |s: &LocatedSpan| *s.fragment() != "fn" &&
+                    *s.fragment() != "let" && *s.fragment() != "in",
+            ),
+            parse_unary_operator,
+        )).parse(input)?;
     return Ok((rest, value.to_string()));
+}
+
+// TODO unary -
+
+fn parse_unary_operator(input: LocatedSpan) -> IResult<LocatedSpan> {
+    #[rustfmt::skip]
+    let (rest, value) =
+        alt((
+            tag("!"),
+            tag("@"),
+            tag("#"),
+            tag("$"),
+            tag("%"),
+            tag("&"),
+            tag("?"),
+        )).parse(input)?;
+    return Ok((rest, value));
 }
 
 fn parse_function(input: LocatedSpan) -> IResult<Expr> {
@@ -178,14 +197,47 @@ fn parse_function(input: LocatedSpan) -> IResult<Expr> {
     return Ok((rest, expr));
 }
 
-fn parse_variable(input: LocatedSpan) -> IResult<Expr> {
+fn parse_bindings(input: LocatedSpan) -> IResult<Vec<(String, Expr)>> {
     #[rustfmt::skip]
-    let (rest, value) =
-        alt((
-            parse_identifier,
-            tag("$").map(|s: LocatedSpan| s.fragment().to_string()),
-        )).parse(input)?;
-    return Ok((rest, Expr::Variable(value.to_string())));
+    let (rest, bindings) =
+        separated_list0(
+        (multispace0, char(','), multispace0),
+          (delimited( // TODO maybe some extra whitespace here?
+                multispace0,
+               parse_identifier,
+                (multispace0, char('='), multispace0)),
+            delimited(
+                multispace0,
+                parse_expr,
+                multispace0),
+            )
+        ).parse(input)?;
+    return Ok((rest, bindings));
+}
+
+fn parse_let(input: LocatedSpan) -> IResult<Expr> {
+    #[rustfmt::skip]
+    let (rest, expr) =
+        (delimited(
+            tag("let"),
+            parse_bindings,
+            (expect(tag("in"), "expected 'in'"), multispace1),
+        ),
+        expect(parse_expr, "expected expression after 'in'")
+        ).map(|(bindings, expr)| {
+            let mut expr = expr.unwrap_or(Expr::Error("parse error".to_string()));
+            for (name, binding) in bindings.into_iter().rev() {
+                expr = Expr::Application {
+                    function: Box::new(Expr::Function {
+                        arguments: vec![name],
+                        body: Box::new(expr),
+                    }),
+                    arguments: Box::new(binding),
+                }
+            }
+            expr
+        }).parse(input)?;
+    return Ok((rest, expr));
 }
 
 fn parse_primitive(input: LocatedSpan) -> IResult<Expr> {
@@ -193,7 +245,15 @@ fn parse_primitive(input: LocatedSpan) -> IResult<Expr> {
     let (rest, value) = alt((
         parse_literal,
         parse_function,
-        parse_variable,
+        parse_let,
+        // Should come before identifiers, since operators also match the identifier rule
+        (parse_unary_operator, parse_primitive).map(
+            |(op, expr)| Expr::Application {
+                function: Box::new(Expr::Variable(op.fragment().to_string())),
+                arguments: Box::new(expr),
+            },
+        ),
+        parse_identifier.map(Expr::Variable),
         parse_chord,
         parse_sequence,
         parse_tuple,
@@ -231,24 +291,17 @@ fn parse_multiplicative(input: LocatedSpan) -> IResult<Expr> {
         (
             parse_application,
             many0((
-                delimited(multispace0, alt((char('*'), char('/'))), multispace0),
+                delimited(multispace0, alt((tag("*"), tag("/"))), multispace0),
                 expect(parse_application, "expected expression after operator"),
             )),
         ),
         |(factor, op_factors)| {
             let mut expr = factor;
             for (op, factor) in op_factors {
-                let builtin = Expr::BuiltIn{
-                    name: op.to_string(),
-                    function: match op {
-                        '*' => Rc::new(builtins::multiply),
-                        '/' => Rc::new(builtins::divide),
-                        _ => panic!("Impossible operator: {}", op),
-                    }
-                };
                 expr = Expr::Application {
-                    function: Box::new(builtin),
-                    arguments: Box::new(Expr::Tuple(vec![expr, factor.unwrap_or(Expr::Error("parse error".to_string()))])),
+                    function: Box::new(Expr::Variable(op.fragment().to_string())),
+                    arguments: Box::new(Expr::Tuple(vec![
+                        expr, factor.unwrap_or(Expr::Error("parse error".to_string()))])),
                 };
             }
             return expr;
@@ -263,23 +316,15 @@ fn parse_additive(input: LocatedSpan) -> IResult<Expr> {
         (
             parse_multiplicative,
             many0((
-                delimited(multispace0, alt((char('+'), char('-'))), multispace0),
+                delimited(multispace0, alt((tag("+"), tag("-"))), multispace0),
                 expect(parse_multiplicative, "expected expression after operator"),
             )),
         ),
         |(term, op_terms)| {
             let mut expr = term;
             for (op, term) in op_terms {
-                let builtin = Expr::BuiltIn{
-                    name: op.to_string(),
-                    function: match op {
-                        '+' => Rc::new(builtins::add),
-                        '-' => Rc::new(builtins::subtract),
-                        _ => panic!("Impossible operator: {}", op),
-                    }
-                };
                 expr = Expr::Application {
-                    function: Box::new(builtin),
+                    function: Box::new(Expr::Variable(op.fragment().to_string())),
                     arguments: Box::new(Expr::Tuple(vec![expr, term.unwrap_or(Expr::Error("parse error".to_string()))])),
                 };
             }
@@ -299,10 +344,7 @@ fn parse_chord(input: LocatedSpan) -> IResult<Expr> {
     return Ok((
         rest,
         Expr::Application {
-            function: Box::new(Expr::BuiltIn {
-                name: "chord".to_string(),
-                function: Rc::new(builtins::chord),
-            }),
+            function: Box::new(Expr::Variable(("_chord").to_string())),
             arguments: Box::new(expr),
         },
     ));
@@ -318,10 +360,7 @@ fn parse_sequence(input: LocatedSpan) -> IResult<Expr> {
     return Ok((
         rest,
         Expr::Application {
-            function: Box::new(Expr::BuiltIn {
-                name: "sequence".to_string(),
-                function: Rc::new(builtins::sequence),
-            }),
+            function: Box::new(Expr::Variable(("_sequence").to_string())),
             arguments: Box::new(expr),
         },
     ));
@@ -426,21 +465,7 @@ pub fn parse_program(input: &str) -> Result<Expr, Vec<Error>> {
 pub fn parse_context(input: &str) -> Result<Vec<(String, Expr)>, Vec<Error>> {
     let errors = RefCell::new(Vec::new());
     let span = LocatedSpan::new_extra(input, ParseState(&errors));
-    #[rustfmt::skip]
-    let result = all_consuming(
-        separated_list0(
-            (multispace0, char(','), multispace0),
-              (delimited(
-                    multispace0,
-                   parse_identifier,
-                    (multispace0, char('='), multispace0)),
-                delimited(
-                    multispace0,
-                    parse_expr,
-                    multispace0),
-                )
-            ),
-        ).parse(span);
+    let result = all_consuming(parse_bindings).parse(span);
     if errors.borrow().len() > 0 {
         return Err(errors.into_inner());
     }
@@ -488,9 +513,14 @@ fn substitute(context: &Vec<(String, Expr)>, expr: Expr) -> Expr {
     }
 }
 
-fn fmt_as_primitive(expr: &Expr, f: &mut fmt::Formatter) -> fmt::Result {
+fn fmt_with_parens(expr: &Expr, f: &mut fmt::Formatter) -> fmt::Result {
     match expr {
-        Expr::Float(_) | Expr::Variable(_) | Expr::BuiltIn { .. } | Expr::Tuple(_) => {
+        Expr::Float(_)
+        | Expr::Waveform(_)
+        | Expr::Variable(_)
+        | Expr::BuiltIn { .. }
+        | Expr::Application { .. }
+        | Expr::Tuple(_) => {
             write!(f, "{}", expr)
         }
         _ => write!(f, "({})", expr),
@@ -520,13 +550,11 @@ impl fmt::Display for Expr {
                 function,
                 arguments,
             } => {
-                fmt_as_primitive(function, f)?;
+                fmt_with_parens(function, f)?;
                 if let Expr::Tuple(_) = &**arguments {
-                    fmt_as_primitive(arguments, f)
+                    write!(f, "{}", arguments)
                 } else {
-                    write!(f, "(")?;
-                    fmt_as_primitive(arguments, f)?;
-                    write!(f, ")")
+                    write!(f, "({})", arguments)
                 }
             }
             Expr::Tuple(exprs) => {
@@ -626,6 +654,7 @@ pub fn simplify(context: &Vec<(String, Expr)>, mut expr: Expr) -> Result<Expr, E
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::builtins;
 
     #[test]
     fn test_parse_variable() {
@@ -665,7 +694,7 @@ mod tests {
         let input = "<($x, $y, $z)>";
         let result = parse_program(input);
         assert!(result.is_ok());
-        assert_eq!(format!("{}", result.unwrap()), "chord($(x), $(y), $(z))");
+        assert_eq!(format!("{}", result.unwrap()), "_chord($(x), $(y), $(z))");
     }
 
     #[test]
@@ -677,13 +706,37 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_let() {
+        let input = "let x = 1, y = x + 1 in 2 * y";
+        let result = parse_program(input);
+        assert!(result.is_ok());
+        assert_eq!(
+            format!("{}", result.unwrap()),
+            "(fn (x) => (fn (y) => *(2, y))(+(x, 1)))(1)"
+        );
+    }
+
+    #[test]
+    fn test_parse_application() {
+        let input = "(fn (x) => x * 2)(3)";
+        let result = parse_program(input);
+        assert!(result.is_ok());
+        assert_eq!(format!("{}", result.unwrap()), "(fn (x) => *(x, 2))(3)");
+
+        let input = "Q$#70";
+        let result = parse_program(input);
+        assert!(result.is_ok());
+        assert_eq!(format!("{}", result.unwrap()), "Q($(#(70)))");
+    }
+
+    #[test]
     fn test_parse_pipe() {
         let input = "2 * 3 | (fn (x) => fn(y) => x * y)(4)";
         let result = parse_program(input);
         assert!(result.is_ok());
         assert_eq!(
             format!("{}", result.unwrap()),
-            "((fn (x) => fn (y) => *(x, y))(4))((*(2, 3)))"
+            "(fn (x) => fn (y) => *(x, y))(4)(*(2, 3))"
         );
 
         let input = "$200 | S(0.5, .25) | R(0.5, 1)";
@@ -691,18 +744,35 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             format!("{}", result.unwrap()),
-            "(R(0.5, 1))(((S(0.5, 0.25))(($(200)))))"
+            "R(0.5, 1)(S(0.5, 0.25)($(200)))"
         );
     }
 
     #[test]
     fn test_function_eval() {
+        let context = vec![
+            (
+                "+".to_string(),
+                Expr::BuiltIn {
+                    name: "+".to_string(),
+                    function: Rc::new(builtins::add),
+                },
+            ),
+            (
+                "*".to_string(),
+                Expr::BuiltIn {
+                    name: "*".to_string(),
+                    function: Rc::new(builtins::multiply),
+                },
+            ),
+            ("x".to_string(), Expr::Float(9.0)),
+        ];
+
         let input = "(fn (x) => fn (x) => x * 2)(7)(5)";
         let result = parse_program(input);
         assert!(result.is_ok());
         let expr = result.unwrap();
         println!("Parsed expression: {}", expr);
-        let context = vec![("x".to_string(), Expr::Float(3.0))];
         let simplified = simplify(&context, expr).unwrap();
         assert_eq!(format!("{}", simplified), "10");
 
@@ -710,7 +780,6 @@ mod tests {
         let result = parse_program(input);
         assert!(result.is_ok());
         let expr = result.unwrap();
-        let context = vec![("x".to_string(), Expr::Float(9.0))];
         let simplified = simplify(&context, expr).unwrap();
         assert_eq!(format!("{}", simplified), "29");
     }

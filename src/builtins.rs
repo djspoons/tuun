@@ -142,7 +142,13 @@ pub fn sequence(arguments: &mut Vec<Expr>) -> Expr {
 
 pub fn add_standard_context(context: &mut Vec<(String, Expr)>) {
     let builtins: Vec<(&str, fn(&mut Vec<Expr>) -> Expr)> = vec![
+        ("+", add),
+        ("-", subtract),
+        ("*", multiply),
+        ("/", divide),
         ("pow", power),
+        ("_chord", chord),
+        ("_sequence", sequence),
         ("$", sine_wave),
         ("amp", amplify),
         ("seq", seq),
