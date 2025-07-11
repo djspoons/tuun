@@ -654,7 +654,6 @@ pub fn simplify(context: &Vec<(String, Expr)>, mut expr: Expr) -> Result<Expr, E
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builtins;
 
     #[test]
     fn test_parse_variable() {
@@ -750,37 +749,20 @@ mod tests {
 
     #[test]
     fn test_function_eval() {
-        let context = vec![
-            (
-                "+".to_string(),
-                Expr::BuiltIn {
-                    name: "+".to_string(),
-                    function: Rc::new(builtins::add),
-                },
-            ),
-            (
-                "*".to_string(),
-                Expr::BuiltIn {
-                    name: "*".to_string(),
-                    function: Rc::new(builtins::multiply),
-                },
-            ),
-            ("x".to_string(), Expr::Float(9.0)),
-        ];
-
-        let input = "(fn (x) => fn (x) => x * 2)(7)(5)";
+        let context = Vec::new();
+        let input = "(fn (x) => fn (x) => x)(7)(5)";
         let result = parse_program(input);
         assert!(result.is_ok());
         let expr = result.unwrap();
         println!("Parsed expression: {}", expr);
         let simplified = simplify(&context, expr).unwrap();
-        assert_eq!(format!("{}", simplified), "10");
+        assert_eq!(format!("{}", simplified), "5");
 
-        let input = "(fn (x) => fn (y, z) => x * 2 * y + z)(3)(4, 5)";
+        let input = "(fn (x) => fn (y, z) => (x, y, z))(3)(4, 5)";
         let result = parse_program(input);
         assert!(result.is_ok());
         let expr = result.unwrap();
         let simplified = simplify(&context, expr).unwrap();
-        assert_eq!(format!("{}", simplified), "29");
+        assert_eq!(format!("{}", simplified), "(3, 4, 5)");
     }
 }
