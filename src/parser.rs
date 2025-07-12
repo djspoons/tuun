@@ -7,7 +7,7 @@ use nom::{
     branch::alt,
     bytes::complete::tag,
     character::complete::{alpha1, char, multispace0, multispace1},
-    combinator::{all_consuming, map, recognize, verify},
+    combinator::{all_consuming, map, not, peek, recognize, verify},
     multi::{many0, separated_list0},
     number::complete::float,
     sequence::{delimited, preceded},
@@ -75,6 +75,15 @@ impl<'a> nom::error::ParseError<LocatedSpan<'a>> for Error {
     // }
 }
 
+impl ToString for Error {
+    fn to_string(&self) -> String {
+        match &self.range {
+            Some(range) => format!("{} at {}..{}", self.message, range.start, range.end),
+            None => self.message.clone(),
+        }
+    }
+}
+
 /// Carried around in the `LocatedSpan::extra` field in
 /// between `nom` parsers.
 #[derive(Clone, Debug)]
@@ -112,9 +121,16 @@ where
     }
 }
 
-pub type BuiltInFn = Rc<dyn Fn(&mut Vec<Expr>) -> Expr>;
-
 #[derive(Clone)]
+pub struct BuiltInFn(pub Rc<dyn Fn(&mut Vec<Expr>) -> Expr>);
+
+impl std::fmt::Debug for BuiltInFn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "BuiltInFn(...)")
+    }
+}
+
+#[derive(Clone, Debug)]
 pub enum Expr {
     // Values
     Float(f32),
@@ -132,17 +148,23 @@ pub enum Expr {
     Variable(String),
     Application {
         function: Box<Expr>,
-        arguments: Box<Expr>, // TODO simplify by always using Tuple?
+        arguments: Box<Expr>, // TODO singular? or Vec<Expr>?
     },
     // Compound expressions
     Tuple(Vec<Expr>),
+    List(Vec<Expr>),
     // Errors
     Error(String),
 }
 
 fn parse_literal(input: LocatedSpan) -> IResult<Expr> {
     #[rustfmt::skip]
-    let (rest, value) = float.parse(input)?;
+    let (rest, value) =
+        // Handle parsing negative floats ourselves
+        preceded(
+            not(peek(char('-'))),
+            float,
+        ).parse(input)?;
     return Ok((rest, Expr::Float(value)));
 }
 
@@ -162,8 +184,6 @@ fn parse_identifier(input: LocatedSpan) -> IResult<String> {
     return Ok((rest, value.to_string()));
 }
 
-// TODO unary -
-
 fn parse_unary_operator(input: LocatedSpan) -> IResult<LocatedSpan> {
     #[rustfmt::skip]
     let (rest, value) =
@@ -174,6 +194,7 @@ fn parse_unary_operator(input: LocatedSpan) -> IResult<LocatedSpan> {
             tag("$"),
             tag("%"),
             tag("&"),
+            tag("-"),
             tag("?"),
         )).parse(input)?;
     return Ok((rest, value));
@@ -225,7 +246,7 @@ fn parse_let(input: LocatedSpan) -> IResult<Expr> {
         ),
         expect(parse_expr, "expected expression after 'in'")
         ).map(|(bindings, expr)| {
-            let mut expr = expr.unwrap_or(Expr::Error("parse error".to_string()));
+            let mut expr = expr.unwrap_or(Expr::Error("_".to_string()));
             for (name, binding) in bindings.into_iter().rev() {
                 expr = Expr::Application {
                     function: Box::new(Expr::Function {
@@ -257,6 +278,7 @@ fn parse_primitive(input: LocatedSpan) -> IResult<Expr> {
         parse_chord,
         parse_sequence,
         parse_tuple,
+        parse_list
     )).parse(input)?;
     return Ok((rest, value));
 }
@@ -268,7 +290,14 @@ fn parse_application(input: LocatedSpan) -> IResult<Expr> {
             parse_primitive,
             many0(preceded(
                 multispace0,
-                parse_primitive,
+                preceded(
+                    // Maybe sort of a hack, but don't allow unary operators
+                    // in the middle of an application (require parens instead)
+                    // ... or maybe just disallow '-'? Or something else?
+                    // TODO fix this so we can use unary operators in the middle of applications
+                    not(peek(parse_unary_operator)),
+                    parse_primitive,
+                )
             )),
         ),
         |(func, exprs)| {
@@ -301,7 +330,7 @@ fn parse_multiplicative(input: LocatedSpan) -> IResult<Expr> {
                 expr = Expr::Application {
                     function: Box::new(Expr::Variable(op.fragment().to_string())),
                     arguments: Box::new(Expr::Tuple(vec![
-                        expr, factor.unwrap_or(Expr::Error("parse error".to_string()))])),
+                        expr, factor.unwrap_or(Expr::Error("_".to_string()))])),
                 };
             }
             return expr;
@@ -325,7 +354,7 @@ fn parse_additive(input: LocatedSpan) -> IResult<Expr> {
             for (op, term) in op_terms {
                 expr = Expr::Application {
                     function: Box::new(Expr::Variable(op.fragment().to_string())),
-                    arguments: Box::new(Expr::Tuple(vec![expr, term.unwrap_or(Expr::Error("parse error".to_string()))])),
+                    arguments: Box::new(Expr::Tuple(vec![expr, term.unwrap_or(Expr::Error("_".to_string()))])),
                 };
             }
             return expr;
@@ -337,9 +366,9 @@ fn parse_additive(input: LocatedSpan) -> IResult<Expr> {
 fn parse_chord(input: LocatedSpan) -> IResult<Expr> {
     #[rustfmt::skip]
     let (rest, expr) = delimited(
-        (char('<'), multispace0),
+        (char('{'), multispace0),
         parse_expr,
-        (multispace0, expect(char('>'), "expected '>'")),
+        (multispace0, expect(char('}'), "expected '}'")),
     ).parse(input)?;
     return Ok((
         rest,
@@ -353,9 +382,9 @@ fn parse_chord(input: LocatedSpan) -> IResult<Expr> {
 fn parse_sequence(input: LocatedSpan) -> IResult<Expr> {
     #[rustfmt::skip]
     let (rest, expr) = delimited(
-        (char('['), multispace0),
+        (char('<'), multispace0),
         parse_expr,
-        (multispace0, expect(char(']'), "expected ']'")),
+        (multispace0, expect(char('>'), "expected ']'")),
     ).parse(input)?;
     return Ok((
         rest,
@@ -374,12 +403,25 @@ fn parse_tuple(input: LocatedSpan) -> IResult<Expr> {
             (multispace0, char(','), multispace0),
             parse_expr,
         ),
-        (multispace0, expect(char(')'), "expected ')'")),
+        (multispace0, expect(char(')'), "expected ')' at end of tuple")),
     ).parse(input)?;
     if exprs.len() == 1 {
         return Ok((rest, exprs.pop().unwrap()));
     }
     return Ok((rest, Expr::Tuple(exprs)));
+}
+
+fn parse_list(input: LocatedSpan) -> IResult<Expr> {
+    #[rustfmt::skip]
+    let (rest, exprs) = delimited(
+        (char('['), multispace0),
+        separated_list0(
+            (multispace0, char(','), multispace0),
+            parse_expr,
+        ),
+        (multispace0, expect(char(']'), "expected ')' at end of list")),
+    ).parse(input)?;
+    return Ok((rest, Expr::List(exprs)));
 }
 
 fn parse_expr(input: LocatedSpan) -> IResult<Expr> {
@@ -403,7 +445,7 @@ fn parse_expr(input: LocatedSpan) -> IResult<Expr> {
                         }
                     }
                     None => {
-                        expr = Expr::Error("parse error".to_string());
+                        expr = Expr::Error("_".to_string());
                     }
                 }
             }
@@ -453,7 +495,7 @@ pub fn parse_program(input: &str) -> Result<Expr, Vec<Error>> {
             "Got result {:} and errors {:?}",
             match result {
                 Ok((_, node)) => node,
-                _ => Expr::Error("parse error".to_string()),
+                _ => Expr::Error("_".to_string()),
             },
             errors.borrow()
         );
@@ -473,7 +515,7 @@ pub fn parse_context(input: &str) -> Result<Vec<(String, Expr)>, Vec<Error>> {
 }
 
 fn substitute(context: &Vec<(String, Expr)>, expr: Expr) -> Expr {
-    use Expr::{Application, BuiltIn, Float, Function, Tuple, Variable};
+    use Expr::{Application, BuiltIn, Float, Function, List, Tuple, Variable};
     match expr {
         Float(_) => expr,
         Expr::Waveform(waveform) => Expr::Waveform(waveform),
@@ -495,7 +537,7 @@ fn substitute(context: &Vec<(String, Expr)>, expr: Expr) -> Expr {
                     return value.clone();
                 }
             }
-            Expr::Variable(name)
+            Expr::Error(format!("Variable '{}' not found in context", name))
         }
         Application {
             function,
@@ -509,6 +551,7 @@ fn substitute(context: &Vec<(String, Expr)>, expr: Expr) -> Expr {
             }
         }
         Tuple(exprs) => Expr::Tuple(exprs.into_iter().map(|e| substitute(context, e)).collect()),
+        List(exprs) => Expr::List(exprs.into_iter().map(|e| substitute(context, e)).collect()),
         Expr::Error(_) => expr,
     }
 }
@@ -567,15 +610,26 @@ impl fmt::Display for Expr {
                 }
                 write!(f, ")")
             }
+            Expr::List(exprs) => {
+                write!(f, "[")?;
+                for (i, expr) in exprs.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", expr)?;
+                }
+                write!(f, "]")
+            }
             Expr::Error(s) => write!(f, "{}", s),
         }
     }
 }
 
 fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
-    use Expr::{Application, BuiltIn, Float, Function, Tuple, Variable};
+    use Expr::{Application, BuiltIn, Float, Function, List, Tuple, Variable, Waveform};
     match expr {
         Float(_) => Ok(expr),
+        Waveform(_) => Ok(expr),
         Function { .. } => Ok(expr),
         Variable(name) => Err(Error::new(format!(
             "Variable '{}' not found in context",
@@ -614,7 +668,7 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
                 },
                 (BuiltIn { function, .. }, Tuple(actuals)) => {
                     let mut arguments = actuals;
-                    let result = function(&mut arguments);
+                    let result = function.0(&mut arguments);
                     return match result {
                         Expr::Error(s) => Err(Error::new(s)),
                         _ => Ok(result),
@@ -622,14 +676,17 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
                 }
                 (BuiltIn { function, .. }, actual) => {
                     let mut argument = vec![actual];
-                    let result = function(&mut argument);
+                    let result = function.0(&mut argument);
                     return match result {
                         Expr::Error(s) => Err(Error::new(s)),
                         _ => Ok(result),
                     };
                 }
-                _ => {
-                    return Err(Error::new("invalid application".to_string()));
+                (function, actuals) => {
+                    return Err(Error::new(format!(
+                        "Invalid application: {} {}",
+                        function, actuals
+                    )));
                 }
             }
         }
@@ -641,7 +698,14 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
                     .collect::<Result<Vec<_>, _>>()?,
             ));
         }
-        Expr::Waveform(_) => Ok(expr),
+        List(exprs) => {
+            return Ok(List(
+                exprs
+                    .into_iter()
+                    .map(|e| simplify_closed(e))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ));
+        }
         Expr::Error(s) => Err(Error::new(s)),
     }
 }
@@ -690,10 +754,10 @@ mod tests {
 
     #[test]
     fn test_parse_chord() {
-        let input = "<($x, $y, $z)>";
+        let input = "{[$x, $y, $z]}";
         let result = parse_program(input);
         assert!(result.is_ok());
-        assert_eq!(format!("{}", result.unwrap()), "_chord($(x), $(y), $(z))");
+        assert_eq!(format!("{}", result.unwrap()), "_chord([$(x), $(y), $(z)])");
     }
 
     #[test]
@@ -722,7 +786,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(format!("{}", result.unwrap()), "(fn (x) => *(x, 2))(3)");
 
-        let input = "Q$#70";
+        let input = "Q($#70)";
         let result = parse_program(input);
         assert!(result.is_ok());
         assert_eq!(format!("{}", result.unwrap()), "Q($(#(70)))");

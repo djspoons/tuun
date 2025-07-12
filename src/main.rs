@@ -69,9 +69,21 @@ enum Mode {
 
 fn load_context(file: &String) -> Vec<(String, parser::Expr)> {
     let mut context: Vec<(String, parser::Expr)> = Vec::new();
-    builtins::add_standard_context(&mut context);
+    builtins::add_prelude(&mut context);
     if file != "" {
         let raw_context = std::fs::read_to_string(file).unwrap();
+        // Strip out comments (that is any after // on a line)
+        let raw_context: String = raw_context
+            .lines()
+            .map(|line| {
+                if let Some(comment_index) = line.find("//") {
+                    &line[..comment_index]
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<&str>>()
+            .join("\n");
         match parser::parse_context(&raw_context) {
             Ok(parsed_exprs) => {
                 println!("Parsed context:");
@@ -141,7 +153,7 @@ pub fn main() {
         .map_err(|e| e.to_string())
         .unwrap();
     let texture_creator = canvas.texture_creator();
-    let font = ttf_context.load_font(font_path, 64).unwrap();
+    let font = ttf_context.load_font(font_path, 48).unwrap();
     const INACTIVE_COLOR: Color = Color::RGBA(0, 255, 0, 255);
     const EDIT_COLOR: Color = Color::RGBA(0, 255, 255, 255);
     const ERROR_COLOR: Color = Color::RGBA(255, 0, 0, 255);

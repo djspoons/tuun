@@ -7,11 +7,49 @@ ADSR = fn (attack_dur, decay_dur, sustain_level, sustain_dur, release_dur) =>
   A(attack_dur) | D(decay_dur, sustain_level) | S(sustain_level, sustain_dur) | R(sustain_level, release_dur),
 
 over = fn (x, freq) => $(freq*x) | amp(1/x),
-hrm = fn (freq) => <($freq, over(3, freq), over(5, freq), over(7, freq), over(9, freq))>,
-mar = fn (freq) => <($freq, over(2.76, freq), over(5.40, freq), over(8.93, freq))>,
+hrm = fn (freq) => {[$freq, over(3, freq), over(5, freq), over(7, freq), over(9, freq)]},
+mar = fn (freq) => {[$freq, over(2.76, freq), over(5.40, freq), over(8.93, freq)]},
 
 step = fn (freq,n) => freq * pow(2, n/12),
-purethird = fn (freq) => <(hrm(freq), hrm(freq * 5/4))>,
-equalthird = fn (freq) => <(hrm(freq), hrm(step(freq, 4)))>,
+justthird = fn (freq) => {[hrm(freq), hrm(freq * 5/4)]},
+equalthird = fn (freq) => {[hrm(freq), hrm(step(freq, 4))]},
 
-harmonica = fn (dur) => fn (freq) => hrm(freq) | ADSR(.13, .33, .5, 1, .13) | fs(1.6)
+// Instruments
+harmonica = fn (dur, freq) => hrm(freq) | A(.13) | D(.33, .5) | S(.5, dur - .51) | R(.5, .33) | fin(dur),
+// don't need fin with ~. and would be nice to add | seq(0) to indicate unseq'd... or not
+
+// Convert from MIDI note numbers to frequency
+# = fn (m) => pow(2, (m - 69) / 12) * 440,
+
+beats_per_measure = 4, // beats
+Q = beats_per_measure / 4,
+H = beats_per_measure / 2,
+W = beats_per_measure,
+
+major_triad = fn (root) => fn(fw) => [fw(#root), fw(#(root + 4)), fw(#(root + 7))],
+// major_triad = fn (root, dur, inst) => [inst(dur, #root), inst(dur, #(root + 4)), inst(dur, #(root + 7))],
+minor_triad = fn (root) => fn(fw) => [fw(#root), fw(#(root + 3)), fw(#(root + 7))],
+
+I = fn(key) => fn(inst) => fn(dur) => {major_triad(key)(fn(freq) => inst(dur, freq))} | seq(dur),
+// I = fn(key) => fn(inst) => fn(dur) => {major_triad(key, dur, inst)} | seq(dur),
+II = fn(key) => fn(inst) => fn(dur) => {major_triad(key + 2)(fn(freq) => inst(dur, freq))} | seq(dur),
+III = fn(key) => fn(inst) => fn(dur) => {major_triad(key + 4)(fn(freq) => inst(dur, freq))} | seq(dur),
+i = fn(key) => fn(inst) => fn(dur) => {minor_triad(key)(fn(freq) => inst(dur, freq))} | seq(dur),
+
+// In the key of C
+I = I(60),
+II = II(60),
+III = III(60),
+i = i(60),
+
+// Played on a harmonica
+I = I(harmonica),
+II = II(harmonica),
+III = III(harmonica),
+i = i(harmonica),
+
+// Just notes on harmonica
+Hh = fn (freq) => harmonica(H, freq) | seq(H)
+
+// <[I H, III H, i H]>
+// <[Hh(#67), Hh(#69)]>
