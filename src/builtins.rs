@@ -4,14 +4,14 @@ use crate::parser::{simplify, BuiltInFn, Expr};
 use crate::tracker::Waveform;
 use Expr::{Application, BuiltIn, Error, Float, List, Tuple};
 
-pub fn plus(arguments: &mut Vec<Expr>) -> Expr {
+pub fn plus(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
         [Float(a), Float(b)] => Expr::Float(a + b),
         _ => Expr::Error("Invalid arguments for plus".to_string()),
     }
 }
 
-pub fn minus(arguments: &mut Vec<Expr>) -> Expr {
+pub fn minus(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
         [Float(a)] => Expr::Float(-a),
         [Float(a), Float(b)] => Expr::Float(a - b),
@@ -19,28 +19,28 @@ pub fn minus(arguments: &mut Vec<Expr>) -> Expr {
     }
 }
 
-pub fn times(arguments: &mut Vec<Expr>) -> Expr {
+pub fn times(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
         [Float(a), Float(b)] => Expr::Float(a * b),
         _ => Expr::Error("Invalid arguments for times".to_string()),
     }
 }
 
-pub fn divide(arguments: &mut Vec<Expr>) -> Expr {
+pub fn divide(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
         [Float(a), Float(b)] => Expr::Float(a / b),
         _ => Expr::Error("Invalid arguments for divide".to_string()),
     }
 }
 
-pub fn power(arguments: &mut Vec<Expr>) -> Expr {
+pub fn power(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
         [Float(base), Float(exponent)] => Expr::Float(base.powf(exponent)),
         _ => Expr::Error("Invalid arguments for power".to_string()),
     }
 }
 
-pub fn map(arguments: &mut Vec<Expr>) -> Expr {
+pub fn map(arguments: Vec<Expr>) -> Expr {
     match &arguments[..] {
         [function, List(exprs)] => {
             let mut results = Vec::new();
@@ -64,7 +64,7 @@ pub fn map(arguments: &mut Vec<Expr>) -> Expr {
     }
 }
 
-pub fn reduce(arguments: &mut Vec<Expr>) -> Expr {
+pub fn reduce(arguments: Vec<Expr>) -> Expr {
     match &arguments[..] {
         [function, accum, List(exprs)] => {
             let context = vec![];
@@ -88,7 +88,7 @@ pub fn reduce(arguments: &mut Vec<Expr>) -> Expr {
     }
 }
 
-pub fn sine_wave(arguments: &mut Vec<Expr>) -> Expr {
+pub fn sine_wave(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
         [Float(frequency)] => Expr::Waveform(Waveform::SineWave { frequency }),
         _ => Expr::Error("Invalid argument for sine_wave".to_string()),
@@ -96,7 +96,7 @@ pub fn sine_wave(arguments: &mut Vec<Expr>) -> Expr {
 }
 
 fn filter(f: impl Fn(Box<Waveform>) -> Waveform + 'static) -> BuiltInFn {
-    BuiltInFn(Rc::new(move |arguments: &mut Vec<Expr>| -> Expr {
+    BuiltInFn(Rc::new(move |mut arguments: Vec<Expr>| -> Expr {
         if arguments.len() != 1 {
             return Expr::Error("Expected waveform".to_string());
         }
@@ -108,7 +108,7 @@ fn filter(f: impl Fn(Box<Waveform>) -> Waveform + 'static) -> BuiltInFn {
     }))
 }
 
-pub fn amplify(arguments: &mut Vec<Expr>) -> Expr {
+pub fn amplify(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
         [Float(level)] => BuiltIn {
             name: format!("amp({})", level),
@@ -118,7 +118,7 @@ pub fn amplify(arguments: &mut Vec<Expr>) -> Expr {
     }
 }
 
-pub fn seq(arguments: &mut Vec<Expr>) -> Expr {
+pub fn seq(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
         [Float(duration)] => BuiltIn {
             name: format!("seq({})", duration),
@@ -128,7 +128,7 @@ pub fn seq(arguments: &mut Vec<Expr>) -> Expr {
     }
 }
 
-pub fn fin(arguments: &mut Vec<Expr>) -> Expr {
+pub fn fin(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
         [Float(duration)] => BuiltIn {
             name: format!("seq({})", duration),
@@ -138,7 +138,7 @@ pub fn fin(arguments: &mut Vec<Expr>) -> Expr {
     }
 }
 
-pub fn linear_ramp(arguments: &mut Vec<Expr>) -> Expr {
+pub fn linear_ramp(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
         [Float(initial_level), Float(duration), Float(final_level)] => BuiltIn {
             name: format!("linear_ramp({})", duration),
@@ -153,7 +153,7 @@ pub fn linear_ramp(arguments: &mut Vec<Expr>) -> Expr {
     }
 }
 
-pub fn sustain(arguments: &mut Vec<Expr>) -> Expr {
+pub fn sustain(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
         [Float(level), Float(duration)] => BuiltIn {
             name: format!("S({})", duration),
@@ -167,7 +167,7 @@ pub fn sustain(arguments: &mut Vec<Expr>) -> Expr {
     }
 }
 
-pub fn chord(arguments: &mut Vec<Expr>) -> Expr {
+pub fn chord(arguments: Vec<Expr>) -> Expr {
     match &arguments[..] {
         [List(exprs)] => {
             let mut waveforms = Vec::<Waveform>::new();
@@ -183,7 +183,7 @@ pub fn chord(arguments: &mut Vec<Expr>) -> Expr {
     }
 }
 
-pub fn sequence(arguments: &mut Vec<Expr>) -> Expr {
+pub fn sequence(arguments: Vec<Expr>) -> Expr {
     match &arguments[..] {
         [List(exprs)] => {
             let mut waveforms = Vec::<Waveform>::new();
@@ -201,7 +201,7 @@ pub fn sequence(arguments: &mut Vec<Expr>) -> Expr {
 }
 
 pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
-    let builtins: Vec<(&str, fn(&mut Vec<Expr>) -> Expr)> = vec![
+    let builtins: Vec<(&str, fn(Vec<Expr>) -> Expr)> = vec![
         ("+", plus),
         ("-", minus),
         ("*", times),
@@ -238,7 +238,7 @@ mod tests {
     #[test]
     fn test_map() {
         let exprs = vec![Float(2.0), Float(3.0), Float(4.0)];
-        let result = map(&mut vec![
+        let result = map(vec![
             BuiltIn {
                 name: "minus".to_string(),
                 function: BuiltInFn(Rc::new(minus)),
@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn test_reduce() {
         let exprs = vec![Float(2.0), Float(3.0), Float(4.0)];
-        let result = reduce(&mut vec![
+        let result = reduce(vec![
             BuiltIn {
                 name: "plus".to_string(),
                 function: BuiltInFn(Rc::new(plus)),

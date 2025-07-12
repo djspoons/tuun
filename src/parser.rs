@@ -122,7 +122,7 @@ where
 }
 
 #[derive(Clone)]
-pub struct BuiltInFn(pub Rc<dyn Fn(&mut Vec<Expr>) -> Expr>);
+pub struct BuiltInFn(pub Rc<dyn Fn(Vec<Expr>) -> Expr>);
 
 impl std::fmt::Debug for BuiltInFn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -667,16 +667,14 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
                     _ => return Err(Error::new("Mismatched number of arguments".to_string())),
                 },
                 (BuiltIn { function, .. }, Tuple(actuals)) => {
-                    let mut arguments = actuals;
-                    let result = function.0(&mut arguments);
+                    let result = function.0(actuals);
                     return match result {
                         Expr::Error(s) => Err(Error::new(s)),
                         _ => Ok(result),
                     };
                 }
                 (BuiltIn { function, .. }, actual) => {
-                    let mut argument = vec![actual];
-                    let result = function.0(&mut argument);
+                    let result = function.0(vec![actual]);
                     return match result {
                         Expr::Error(s) => Err(Error::new(s)),
                         _ => Ok(result),
