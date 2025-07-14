@@ -16,9 +16,10 @@ pub enum Waveform {
     SineWave {
         frequency: f32,
     },
-    Amplify {
-        level: f32,
-        waveform: Box<Waveform>,
+    Const(f32),
+    Linear {
+        initial_value: f32,
+        slope: f32, // slope in value per second
     },
     Fin {
         duration: f32, // duration in seconds
@@ -31,41 +32,41 @@ pub enum Waveform {
         duration: f32, // duration in seconds
         waveform: Box<Waveform>,
     },
-    /*
-     * LinearRamp is a time-dependent filter that modifies the given waveform, starting after the
-     * next_offset of that waveform. The output is multiplied by a linear ramp that starts at
-     * initial_level and ends at final_level. If the waveform has no next_offset then the ramp
-     * starts at the beginning of the output.
-     */
-    LinearRamp {
-        initial_level: f32,
-        duration: f32, // duration in seconds
-        final_level: f32,
-        waveform: Box<Waveform>,
-    },
-    /*
-     * Sustain is a time-dependent filter that amplifies the portion of a waveform starting at the
-     * next_offset of the underlying waveform and continuing for the given length. If the waveform
-     * has no next_offset then the sustain starts at the beginning of the output.
-     */
-    Sustain {
-        level: f32,
-        duration: f32, // duration in seconds
-        waveform: Box<Waveform>,
-    },
-    Chord(Vec<Waveform>),
-    /*
-     * Play the waveforms in sequence, starting each after next_offset of the previous generator.
-     * If a given waveform doesn't provide next_offset then no subsequent waveforms will be played.
-     */
-    Sequence(Vec<Waveform>),
-    // Used for testing at the moment
-    #[allow(dead_code)]
-    Const(f32),
+    Sum(Box<Waveform>, Box<Waveform>),
+    DotProduct(Box<Waveform>, Box<Waveform>),
+}
+
+fn half_binary_op(
+    sample_frequency: i32,
+    offset: usize,
+    out: &mut [f32],
+    w: &Waveform,
+    op: fn(f32, f32) -> f32,
+) {
+    match w.samples(sample_frequency) {
+        None => {
+            let mut tmp = vec![0.0; out.len()];
+            w.generate(sample_frequency, offset, &mut tmp);
+            for (i, x) in tmp.iter().enumerate() {
+                out[i] = op(out[i], *x);
+            }
+        }
+        Some(samples) => {
+            if offset < samples {
+                let len = samples - offset;
+                let mut tmp = vec![0.0; out.len().min(len)];
+                w.generate(sample_frequency, offset, &mut tmp);
+                for (i, x) in tmp.iter().enumerate() {
+                    out[i] = op(out[i], *x);
+                }
+            }
+        }
+    }
 }
 
 impl Waveform {
-    fn generate(&self, sample_frequency: i32, offset: usize, out: &mut [f32]) {
+    // TODO better to return the buffer?
+    fn generate(&self, sample_frequency: i32, mut offset: usize, mut out: &mut [f32]) {
         match self {
             Waveform::SineWave { frequency } => {
                 for (i, f) in out.iter_mut().enumerate() {
@@ -73,10 +74,17 @@ impl Waveform {
                     *f = (2.0 * PI * frequency * t_secs).sin();
                 }
             }
-            Waveform::Amplify { level, waveform } => {
-                waveform.generate(sample_frequency, offset, out);
+            Waveform::Const(value) => {
                 for x in out.iter_mut() {
-                    *x *= level;
+                    *x = *value;
+                }
+            }
+            Waveform::Linear {
+                initial_value,
+                slope,
+            } => {
+                for (i, x) in out.iter_mut().enumerate() {
+                    *x = initial_value + slope * ((i + offset) as f32 / sample_frequency as f32);
                 }
             }
             Waveform::Fin { duration, waveform } => {
@@ -90,108 +98,48 @@ impl Waveform {
             Waveform::Seq { waveform, .. } => {
                 waveform.generate(sample_frequency, offset, out);
             }
-            Waveform::LinearRamp {
-                initial_level,
-                duration,
-                final_level,
-                waveform,
-            } => {
-                waveform.generate(sample_frequency, offset, out);
-                let length = (duration * sample_frequency as f32) as usize;
-                let inner_offset = waveform.next_offset(sample_frequency).unwrap_or(0);
-                let level_diff = final_level - initial_level;
-                let mut offset = offset;
-                for x in out.iter_mut() {
-                    if offset >= inner_offset && offset < inner_offset + length {
-                        let progress: f32 = (offset - inner_offset) as f32 / length as f32;
-                        *x *= initial_level + (progress * level_diff);
+            Waveform::Sum(a, b) => {
+                half_binary_op(sample_frequency, offset, out, a, |x, y| x + y);
+                let next_offset = a.next_offset(sample_frequency);
+                if next_offset < offset + out.len() {
+                    if offset < next_offset {
+                        out = &mut out[(next_offset - offset)..];
+                        offset = 0;
+                    } else {
+                        offset -= next_offset;
                     }
-                    offset += 1;
+                } else {
+                    return;
                 }
+                half_binary_op(sample_frequency, offset, out, b, |x, y| x + y);
             }
-            Waveform::Sustain {
-                level,
-                duration,
-                waveform,
-            } => {
-                waveform.generate(sample_frequency, offset, out);
-                let length = (duration * sample_frequency as f32) as usize;
-                let inner_offset = waveform.next_offset(sample_frequency).unwrap_or(0);
-                for (i, x) in out.iter_mut().enumerate() {
-                    if i + offset >= inner_offset && i + offset < inner_offset + length {
-                        *x *= level;
-                    }
-                }
-            }
-            Waveform::Chord(waveforms) => {
-                let n = waveforms.len() as f32;
-                for waveform in waveforms {
-                    match waveform.samples(sample_frequency) {
-                        None => {
-                            let mut tmp = vec![0.0; out.len()];
-                            waveform.generate(sample_frequency, offset, &mut tmp);
-                            for (i, x) in tmp.iter().enumerate() {
-                                out[i] += x / n;
-                            }
-                        }
-                        Some(samples) => {
-                            if offset < samples {
-                                let len = samples - offset;
-                                let mut tmp = vec![0.0; out.len().min(len)];
-                                waveform.generate(sample_frequency, offset, &mut tmp);
-                                for (i, x) in tmp.iter().enumerate() {
-                                    out[i] += x / n;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            Waveform::Sequence(waveforms) => {
-                let mut out = out;
-                // local_offset is the offset within the current waveform, starting with the first
-                let mut local_offset = offset;
-                for waveform in waveforms {
-                    match waveform.samples(sample_frequency) {
-                        None => {
-                            waveform.generate(sample_frequency, offset, out);
-                        }
-                        Some(samples) => {
-                            if local_offset < samples {
-                                let len = samples - local_offset;
-                                // We could optimize the case local_offset + next_offset is greater than
-                                // out.len() in which case we don't need to allocate a tmp.
-                                let mut tmp = vec![0.0; out.len().min(len)];
-                                waveform.generate(sample_frequency, local_offset, &mut tmp);
-                                for (i, x) in tmp.iter().enumerate() {
-                                    out[i] += x;
-                                }
-                            }
-                        }
-                    }
-                    match waveform.next_offset(sample_frequency) {
-                        None => {
+
+            Waveform::DotProduct(a, b) => {
+                let samples = self.samples(sample_frequency);
+                match samples {
+                    Some(samples) => {
+                        if offset >= samples {
                             return;
                         }
-                        Some(next_offset) => {
-                            if local_offset + out.len() > next_offset {
-                                if local_offset < next_offset {
-                                    out = &mut out[(next_offset - local_offset)..];
-                                    local_offset = 0;
-                                } else {
-                                    local_offset -= next_offset;
-                                }
-                            } else {
-                                return;
-                            }
+                        if offset + out.len() > samples {
+                            out = &mut out[..samples - offset];
                         }
                     }
+                    None => {}
                 }
-            }
-            Waveform::Const(value) => {
-                for x in out.iter_mut() {
-                    *x = *value;
+                half_binary_op(sample_frequency, offset, out, a, |x, y| x + y);
+                let next_offset = a.next_offset(sample_frequency);
+                if next_offset < offset + out.len() {
+                    if offset < next_offset {
+                        out = &mut out[(next_offset - offset)..];
+                        offset = 0;
+                    } else {
+                        offset -= next_offset;
+                    }
+                } else {
+                    return;
                 }
+                half_binary_op(sample_frequency, offset, out, b, |x, y| x * y);
             }
         }
     }
@@ -199,112 +147,46 @@ impl Waveform {
     fn samples(&self, sample_frequency: i32) -> Option<usize> {
         match self {
             Waveform::SineWave { .. } => None,
-            Waveform::Amplify { waveform, .. } => waveform.samples(sample_frequency),
+            Waveform::Const { .. } => None,
+            Waveform::Linear { .. } => None,
             Waveform::Fin { duration, .. } => Some((duration * sample_frequency as f32) as usize),
             Waveform::Seq { waveform, .. } => waveform.samples(sample_frequency),
-            Waveform::LinearRamp { waveform, .. } => waveform.samples(sample_frequency),
-            Waveform::Sustain { waveform, .. } => waveform.samples(sample_frequency),
-            Waveform::Chord(waveforms) => {
-                let mut samples = Some(0usize);
-                for waveform in waveforms {
-                    match (samples, waveform.samples(sample_frequency)) {
-                        (Some(s), Some(t)) => {
-                            samples = Some(s.max(t));
-                        }
-                        (_, _) => {
-                            samples = None;
-                        }
+            Waveform::Sum(a, b) => {
+                match (a.samples(sample_frequency), b.samples(sample_frequency)) {
+                    (None, None) => None,
+                    (Some(_), None) => None,
+                    (None, Some(_)) => None,
+                    (Some(a_samples), Some(b_samples)) => {
+                        Some(a_samples.max(a.next_offset(sample_frequency) + b_samples))
                     }
                 }
-                return samples;
             }
-            Waveform::Sequence(waveforms) => {
-                let (samples, _) =
-                    samples_and_next_offset_for_sequence(sample_frequency, waveforms);
-                return samples;
+            Waveform::DotProduct(a, b) => {
+                match (a.samples(sample_frequency), b.samples(sample_frequency)) {
+                    (None, None) => None,
+                    (Some(a_samples), None) => Some(a_samples),
+                    (None, Some(b_samples)) => Some(b_samples + a.next_offset(sample_frequency)),
+                    (Some(a_samples), Some(b_samples)) => {
+                        Some(a_samples.min(a.next_offset(sample_frequency) + b_samples))
+                    }
+                }
             }
-            Waveform::Const(_) => None,
         }
     }
 
-    fn next_offset(&self, sample_frequency: i32) -> Option<usize> {
+    fn next_offset(&self, sample_frequency: i32) -> usize {
         match self {
-            Waveform::SineWave { .. } => None,
-            Waveform::Amplify { waveform, .. } => waveform.next_offset(sample_frequency),
+            Waveform::SineWave { .. } => 0,
+            Waveform::Const { .. } => 0,
+            Waveform::Linear { .. } => 0,
             Waveform::Fin { waveform, .. } => waveform.next_offset(sample_frequency),
-            Waveform::Seq { duration, .. } => Some((duration * sample_frequency as f32) as usize),
-            Waveform::LinearRamp {
-                duration, waveform, ..
-            } => Some(
-                (duration * sample_frequency as f32) as usize
-                    + waveform.next_offset(sample_frequency).unwrap_or(0),
-            ),
-            Waveform::Sustain {
-                duration, waveform, ..
-            } => Some(
-                (duration * sample_frequency as f32) as usize
-                    + waveform.next_offset(sample_frequency).unwrap_or(0),
-            ),
-            Waveform::Chord(waveforms) => {
-                let mut next_offset = Some(0usize);
-                for waveform in waveforms {
-                    match (next_offset, waveform.next_offset(sample_frequency)) {
-                        (Some(s), Some(t)) => {
-                            next_offset = Some(s.max(t));
-                        }
-                        (_, _) => {
-                            next_offset = None;
-                        }
-                    }
-                }
-                return next_offset;
-            }
-            Waveform::Sequence(waveforms) => {
-                let (_, next_offset) =
-                    samples_and_next_offset_for_sequence(sample_frequency, waveforms);
-                return next_offset;
-            }
-            Waveform::Const(_) => None,
-        }
-    }
-}
-
-fn samples_and_next_offset_for_sequence(
-    sample_frequency: i32,
-    waveforms: &[Waveform],
-) -> (Option<usize>, Option<usize>) {
-    let mut samples = Some(0usize);
-    let mut next_offset = Some(0usize);
-    for waveform in waveforms {
-        let new_samples = waveform.samples(sample_frequency);
-        let new_next_offset = waveform.next_offset(sample_frequency);
-        match (samples, new_samples, next_offset) {
-            (Some(old_samples), Some(s), Some(old_next_offset)) => {
-                samples = Some(old_samples.max(old_next_offset + s));
-            }
-            (_, None, _) => {
-                samples = None;
-            }
-            (None, _, _) => {} // Samples is already None
-            (_, _, None) => {
-                panic!("Unexpected case in sequence construction");
-            }
-        }
-        match (next_offset, new_next_offset) {
-            (Some(old_next_offset), Some(t)) => {
-                next_offset = Some(old_next_offset + t);
-            }
-            (_, None) => {
-                return (samples, None);
-            }
-            (None, _) => {
-                panic!("Unexpected case in sequence construction");
+            Waveform::Seq { duration, .. } => (duration * sample_frequency as f32) as usize,
+            Waveform::Sum(a, b) | Waveform::DotProduct(a, b) => {
+                a.next_offset(sample_frequency) + b.next_offset(sample_frequency)
             }
         }
     }
-    return (samples, next_offset);
 }
-
 pub struct Tracker {
     sample_frequency: i32,
     _beats_per_minute: i32,
@@ -395,13 +277,14 @@ impl<'a> AudioCallback for Tracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use Waveform::{Const, DotProduct, Fin, Linear, Seq, Sum};
 
     fn finite_const_gen(value: f32, fin_duration: f32, seq_duration: f32) -> Waveform {
-        return Waveform::Seq {
+        return Seq {
             duration: seq_duration,
-            waveform: Box::new(Waveform::Fin {
+            waveform: Box::new(Fin {
                 duration: fin_duration,
-                waveform: Box::new(Waveform::Const(value)),
+                waveform: Box::new(Const(value)),
             }),
         };
     }
@@ -413,101 +296,135 @@ mod tests {
     }
 
     #[test]
-    fn test_amplify() {
-        let amp_gen = Waveform::Amplify {
-            level: 2.0,
-            waveform: Box::new(finite_const_gen(1.0, 5.0, 5.0)),
+    fn test_linear() {
+        let w1 = Linear {
+            initial_value: 10.0,
+            slope: -1.0,
         };
-        let desired = vec![2.0, 2.0, 2.0, 2.0, 2.0, 0.0, 0.0, 0.0];
+        let desired = vec![10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0];
         for size in [1, 2, 4, 8] {
             let mut out = vec![0.0; 8];
-            println!("Generating amplify with buffer size {}", size);
-            generate_samples(&amp_gen, size, &mut out);
+            generate_samples(&w1, size, &mut out);
             assert_eq!(out, desired);
         }
-    }
 
-    #[test]
-    fn test_linear_ramp() {
-        let ramp_gen = Waveform::LinearRamp {
-            initial_level: 0.0,
+        let w2 = Fin {
             duration: 4.0,
-            final_level: 0.5,
-            waveform: Box::new(finite_const_gen(1.0, 6.0, 0.0)),
+            waveform: Box::new(DotProduct(
+                Box::new(Const(3.0)),
+                Box::new(Sum(
+                    Box::new(Seq {
+                        duration: 4.0,
+                        waveform: Box::new(Fin {
+                            duration: 4.0,
+                            waveform: Box::new(Linear {
+                                initial_value: 0.0,
+                                slope: 0.5,
+                            }),
+                        }),
+                    }),
+                    Box::new(Const(1.0)),
+                )),
+            )),
         };
-        let desired = vec![0.0, 0.125, 0.25, 0.375, 1.0, 1.0, 0.0, 0.0];
+        let desired = vec![0.0, 1.5, 3.0, 4.5, 0.0, 0.0, 0.0, 0.0];
         for size in [1, 2, 4, 8] {
             let mut out = vec![0.0; 8];
-            println!("Generating linear ramp with buffer size {}", size);
-            generate_samples(&ramp_gen, size, &mut out);
-            assert_eq!(out, desired);
-        }
-
-        let ramp_gen = Waveform::LinearRamp {
-            initial_level: 1.0,
-            duration: 4.0,
-            final_level: 0.5,
-            waveform: Box::new(finite_const_gen(1.0, 5.0, 0.0)),
-        };
-        let desired = vec![1.0, 0.875, 0.75, 0.625, 1.0, 0.0, 0.0, 0.0];
-        for size in [1, 2, 4, 8] {
-            let mut out = vec![0.0; 8];
-            println!("Generating linear ramp with buffer size {}", size);
-            generate_samples(&ramp_gen, size, &mut out);
+            generate_samples(&w2, size, &mut out);
             assert_eq!(out, desired);
         }
     }
 
     #[test]
-    fn test_sustain() {
-        let sustain_gen = Waveform::Sustain {
-            level: 0.5,
-            duration: 4.0,
-            waveform: Box::new(finite_const_gen(1.0, 5.0, 3.0)),
-        };
-        let desired = vec![1.0, 1.0, 1.0, 0.5, 0.5, 0.0, 0.0, 0.0];
+    fn test_sum() {
+        let w1 = Sum(
+            Box::new(finite_const_gen(1.0, 5.0, 2.0)),
+            Box::new(finite_const_gen(1.0, 5.0, 2.0)),
+        );
+        assert_eq!(w1.next_offset(1), 4);
+        assert_eq!(w1.samples(1), Some(7));
+        let desired = vec![1.0, 1.0, 2.0, 2.0, 2.0, 1.0, 1.0, 0.0];
         for size in [1, 2, 4, 8] {
             let mut out = vec![0.0; 8];
-            println!("Generating sustain with buffer size {}", size);
-            generate_samples(&sustain_gen, size, &mut out);
+            generate_samples(&w1, size, &mut out);
+            assert_eq!(out, desired);
+        }
+
+        let w2 = Fin {
+            duration: 8.0,
+            waveform: Box::new(Sum(
+                Box::new(Seq {
+                    duration: 0.0,
+                    waveform: Box::new(Const(1.0)),
+                }),
+                Box::new(Sum(
+                    Box::new(Seq {
+                        duration: 0.0,
+                        waveform: Box::new(Const(2.0)),
+                    }),
+                    Box::new(Fin {
+                        duration: 0.0,
+                        waveform: Box::new(Const(0.0)),
+                    }),
+                )),
+            )),
+        };
+        let desired = vec![3.0; 8];
+        for size in [1, 2, 4, 8] {
+            let mut out = vec![0.0; 8];
+            generate_samples(&w2, size, &mut out);
             assert_eq!(out, desired);
         }
     }
 
     #[test]
-    fn test_chord() {
-        let chord_gen = Waveform::Chord(vec![
-            finite_const_gen(4.0, 5.0, 5.0),
-            finite_const_gen(2.0, 10.0, 10.0),
-            finite_const_gen(1.0, 15.0, 15.0),
-            finite_const_gen(0.5, 8.0, 8.0),
-        ]);
-        let desired = vec![
-            1.875, 1.875, 1.875, 1.875, 1.875, 0.875, 0.875, 0.875, 0.75, 0.75, 0.25, 0.25, 0.25,
-            0.25, 0.25, 0.0,
-        ];
-        for size in [1, 2, 4, 8, 16] {
-            let mut out = vec![0.0; 16];
-            println!("Generating chord with buffer size {}", size);
-            generate_samples(&chord_gen, size, &mut out);
+    fn test_dot_product() {
+        let w1 = DotProduct(
+            Box::new(finite_const_gen(3.0, 8.0, 2.0)),
+            Box::new(finite_const_gen(2.0, 5.0, 2.0)),
+        );
+        assert_eq!(w1.next_offset(1), 4);
+        assert_eq!(w1.samples(1), Some(7));
+        let desired = vec![3.0, 3.0, 6.0, 6.0, 6.0, 6.0, 6.0, 0.0];
+        for size in [1, 2, 4, 8] {
+            let mut out = vec![0.0; 8];
+            generate_samples(&w1, size, &mut out);
             assert_eq!(out, desired);
         }
-    }
 
-    #[test]
-    fn test_sequence() {
-        let seq_gen = Waveform::Sequence(vec![
-            finite_const_gen(1.0, 5.0, 1.0),
-            finite_const_gen(0.5, 10.0, 8.0),
-            finite_const_gen(0.25, 5.0, 5.0),
-        ]);
-        let desired = vec![
-            1.0, 1.5, 1.5, 1.5, 1.5, 0.5, 0.5, 0.5, 0.5, 0.75, 0.75, 0.25, 0.25, 0.25, 0.0, 0.0,
-        ];
-        for size in [1, 2, 4, 8, 16] {
-            let mut out = vec![0.0; 16];
-            println!("Generating sequence with buffer size {}", size);
-            generate_samples(&seq_gen, size, &mut out);
+        let dot2 = DotProduct(
+            Box::new(finite_const_gen(3.0, 5.0, 2.0)),
+            Box::new(finite_const_gen(2.0, 5.0, 2.0)),
+        );
+        let desired = vec![3.0, 3.0, 6.0, 6.0, 6.0, 0.0, 0.0, 0.0];
+        for size in [1, 2, 4, 8] {
+            let mut out = vec![0.0; 8];
+            generate_samples(&dot2, size, &mut out);
+            assert_eq!(out, desired);
+        }
+
+        let dot3 = Fin {
+            duration: 8.0,
+            waveform: Box::new(DotProduct(Box::new(Const(3.0)), Box::new(Const(2.0)))),
+        };
+        let desired = vec![6.0; 8];
+        for size in [1, 2, 4, 8] {
+            let mut out = vec![0.0; 8];
+            generate_samples(&dot3, size, &mut out);
+            assert_eq!(out, desired);
+        }
+
+        let dot4 = DotProduct(
+            Box::new(Seq {
+                duration: 1.0,
+                waveform: Box::new(Const(3.0)),
+            }),
+            Box::new(finite_const_gen(2.0, 5.0, 5.0)),
+        );
+        let desired = vec![3.0, 6.0, 6.0, 6.0, 6.0, 6.0, 0.0, 0.0];
+        for size in [1, 2, 4, 8] {
+            let mut out = vec![0.0; 8];
+            generate_samples(&dot4, size, &mut out);
             assert_eq!(out, desired);
         }
     }

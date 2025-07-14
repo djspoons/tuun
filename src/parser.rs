@@ -174,7 +174,7 @@ fn parse_identifier(input: LocatedSpan) -> IResult<String> {
         alt((
             verify(recognize((
                     alpha1,
-                    many0(alt((alpha1, tag("_")))),
+                    many0(alt((alpha1, tag("_"), tag("#")))),
                 )),
                 |s: &LocatedSpan| *s.fragment() != "fn" &&
                     *s.fragment() != "let" && *s.fragment() != "in",
@@ -190,7 +190,6 @@ fn parse_unary_operator(input: LocatedSpan) -> IResult<LocatedSpan> {
         alt((
             tag("!"),
             tag("@"),
-            tag("#"),
             tag("$"),
             tag("%"),
             tag("&"),
@@ -320,7 +319,7 @@ fn parse_multiplicative(input: LocatedSpan) -> IResult<Expr> {
         (
             parse_application,
             many0((
-                delimited(multispace0, alt((tag("*"), tag("/"))), multispace0),
+                delimited(multispace0, alt((tag("*"), tag("/"), tag("~."))), multispace0),
                 expect(parse_application, "expected expression after operator"),
             )),
         ),
@@ -345,7 +344,7 @@ fn parse_additive(input: LocatedSpan) -> IResult<Expr> {
         (
             parse_multiplicative,
             many0((
-                delimited(multispace0, alt((tag("+"), tag("-"))), multispace0),
+                delimited(multispace0, alt((tag("+"), tag("-"), tag("~+"))), multispace0),
                 expect(parse_multiplicative, "expected expression after operator"),
             )),
         ),
@@ -784,10 +783,10 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(format!("{}", result.unwrap()), "(fn (x) => *(x, 2))(3)");
 
-        let input = "Q($#70)";
+        let input = "Q($@70)";
         let result = parse_program(input);
         assert!(result.is_ok());
-        assert_eq!(format!("{}", result.unwrap()), "Q($(#(70)))");
+        assert_eq!(format!("{}", result.unwrap()), "Q($(@(70)))");
     }
 
     #[test]

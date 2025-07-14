@@ -1,35 +1,53 @@
-fs = fn (dur) => fn (w) => w | fin(dur) | seq(dur),
+fs = fn(dur) => fn(w) => w | fin(dur) | seq(dur),
 
-A = fn (dur) => linear_ramp(0.0, dur, 1.0),
-D = fn (dur, level) => linear_ramp(1.0, dur, level),
-R = fn (level, dur) => linear_ramp(level, dur, 0.0),
-ADSR = fn (attack_dur, decay_dur, sustain_level, sustain_dur, release_dur) =>
-  A(attack_dur) | D(decay_dur, sustain_level) | S(sustain_level, sustain_dur) | R(sustain_level, release_dur),
+// Create waveforms for the four parts of the envelope.
+Aw = fn(dur) => linear(0.0, 1.0 / dur) | fin(dur) | seq(dur),
+Dw = fn(dur, level) => linear(1.0, (level - 1.0) / dur) | fin(dur) | seq(dur),
+Sw = fn(dur, level) => const(level) | fin(dur) | seq(dur),
+Rw = fn(dur, level) => linear(level, -level / dur) | fin(dur) | seq(dur),
+// Combine them to create a new filter.
+ADSR = fn(attack_dur, decay_dur, sustain_level, sustain_dur, release_dur) =>
+  fn(w) => (w | seq(0)) ~. <[Aw(attack_dur),
+                             Dw(decay_dur, sustain_level),
+                             Sw(sustain_dur, sustain_level),
+                             Rw(release_dur, sustain_level)]>,
 
-over = fn (x, freq) => $(freq*x) | amp(1/x),
-hrm = fn (freq) => {[$freq, over(3, freq), over(5, freq), over(7, freq), over(9, freq)]},
-mar = fn (freq) => {[$freq, over(2.76, freq), over(5.40, freq), over(8.93, freq)]},
+// Also, we can create component filters... though note that the first three
+// don't change the length, so they need to be combined with R (or fin).
+A = fn(dur) => fn(w) => w ~. (Aw(dur) ~+ const(1)),
+D = fn(dur, level) => fn(w) => w ~. (Dw(dur, level) ~+ const(1)),
+S = fn(dur, level) => fn(w) => w ~. (Sw(dur, level) ~+ const(1)),
+R = fn(dur, level) => fn(w) => w ~. Rw(dur, level),
 
-step = fn (freq,n) => freq * pow(2, n/12),
-justthird = fn (freq) => {[hrm(freq), hrm(freq * 5/4)]},
-equalthird = fn (freq) => {[hrm(freq), hrm(step(freq, 4))]},
+over = fn(x, freq) => $(freq*x) ~. const(1/x),
+hrm = fn(freq) => {map(fn(x) => over(x, freq), [1, 3, 5, 7, 9, 11])},
+mar = fn(freq) => {[$freq, over(2.76, freq), over(5.40, freq), over(8.93, freq)]},
+
+step = fn(freq,n) => freq * pow(2, n/12),
+just_third = fn(freq) => {[hrm(freq), hrm(freq * 5/4)]},
+equal_third = fn(freq) => {[hrm(freq), hrm(step(freq, 4))]},
 
 // Instruments
-harmonica = fn (dur, freq) => hrm(freq) | A(.13) | D(.33, .5) | S(.5, dur - .51) | R(.5, .33) | fin(dur),
-// don't need fin with ~. and would be nice to add | seq(0) to indicate unseq'd... or not
+harmonica = fn(dur, freq) =>
+  let a = 0.13,
+      d = .33,
+      r = .33,
+      s = dur - (a + d + r) in
+  hrm(freq) | ADSR(a, d, .5, s, r) | seq(dur),
 
 // Convert from MIDI note numbers to frequency
-# = fn (m) => pow(2, (m - 69) / 12) * 440,
+@ = fn(m) => pow(2, (m - 69) / 12) * 440,
 
 beats_per_measure = 4, // beats
 Q = beats_per_measure / 4,
 H = beats_per_measure / 2,
 W = beats_per_measure,
 
-major_triad = fn (root) => fn(fw) => [fw(#root), fw(#(root + 4)), fw(#(root + 7))],
-// major_triad = fn (root, dur, inst) => [inst(dur, #root), inst(dur, #(root + 4)), inst(dur, #(root + 7))],
-minor_triad = fn (root) => fn(fw) => [fw(#root), fw(#(root + 3)), fw(#(root + 7))],
+major_triad = fn(root) => fn(fw) => [fw(@root), fw(@(root + 4)), fw(@(root + 7))],
+// major_triad = fn(root, dur, inst) => [inst(dur, @root), inst(dur, @(root + 4)), inst(dur, @(root + 7))],
+minor_triad = fn(root) => fn(fw) => [fw(@root), fw(@(root + 3)), fw(@(root + 7))],
 
+// These get a little distorted... may need to scale a bit
 I = fn(key) => fn(inst) => fn(dur) => {major_triad(key)(fn(freq) => inst(dur, freq))} | seq(dur),
 // I = fn(key) => fn(inst) => fn(dur) => {major_triad(key, dur, inst)} | seq(dur),
 II = fn(key) => fn(inst) => fn(dur) => {major_triad(key + 2)(fn(freq) => inst(dur, freq))} | seq(dur),
@@ -49,7 +67,7 @@ III = III(harmonica),
 i = i(harmonica),
 
 // Just notes on harmonica
-Hh = fn (freq) => harmonica(H, freq) | seq(H)
+Hh = fn(freq) => harmonica(H, freq) | seq(H)
 
 // <[I H, III H, i H]>
-// <[Hh(#67), Hh(#69)]>
+// <[Hh(@67), Hh(@69)]>

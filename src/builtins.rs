@@ -7,7 +7,7 @@ use Expr::{Application, BuiltIn, Error, Float, List, Tuple};
 pub fn plus(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
         [Float(a), Float(b)] => Expr::Float(a + b),
-        _ => Expr::Error("Invalid arguments for plus".to_string()),
+        _ => Expr::Error("Invalid arguments for +".to_string()),
     }
 }
 
@@ -15,21 +15,21 @@ pub fn minus(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
         [Float(a)] => Expr::Float(-a),
         [Float(a), Float(b)] => Expr::Float(a - b),
-        _ => Expr::Error("Invalid arguments for minus".to_string()),
+        _ => Expr::Error("Invalid arguments for -".to_string()),
     }
 }
 
 pub fn times(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
         [Float(a), Float(b)] => Expr::Float(a * b),
-        _ => Expr::Error("Invalid arguments for times".to_string()),
+        _ => Expr::Error("Invalid arguments for *".to_string()),
     }
 }
 
 pub fn divide(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
         [Float(a), Float(b)] => Expr::Float(a / b),
-        _ => Expr::Error("Invalid arguments for divide".to_string()),
+        _ => Expr::Error("Invalid arguments for /".to_string()),
     }
 }
 
@@ -88,10 +88,27 @@ pub fn reduce(arguments: Vec<Expr>) -> Expr {
     }
 }
 
-pub fn sine_wave(arguments: Vec<Expr>) -> Expr {
+pub fn sine_waveform(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
         [Float(frequency)] => Expr::Waveform(Waveform::SineWave { frequency }),
-        _ => Expr::Error("Invalid argument for sine_wave".to_string()),
+        _ => Expr::Error("Invalid argument for $".to_string()),
+    }
+}
+
+pub fn const_waveform(arguments: Vec<Expr>) -> Expr {
+    match arguments[..] {
+        [Float(value)] => Expr::Waveform(Waveform::Const(value)),
+        _ => Expr::Error("Invalid argument for const".to_string()),
+    }
+}
+
+pub fn linear_waveform(arguments: Vec<Expr>) -> Expr {
+    match arguments[..] {
+        [Float(initial_value), Float(slope)] => Expr::Waveform(Waveform::Linear {
+            initial_value,
+            slope,
+        }),
+        _ => Expr::Error("Invalid argument for linear_waveform".to_string()),
     }
 }
 
@@ -108,13 +125,13 @@ fn filter(f: impl Fn(Box<Waveform>) -> Waveform + 'static) -> BuiltInFn {
     }))
 }
 
-pub fn amplify(arguments: Vec<Expr>) -> Expr {
+pub fn fin(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
-        [Float(level)] => BuiltIn {
-            name: format!("amp({})", level),
-            function: filter(move |waveform: Box<Waveform>| Waveform::Amplify { level, waveform }),
+        [Float(duration)] => BuiltIn {
+            name: format!("fin({})", duration),
+            function: filter(move |waveform: Box<Waveform>| Waveform::Fin { duration, waveform }),
         },
-        _ => Expr::Error("Invalid arguments for amplify".to_string()),
+        _ => Expr::Error("Invalid arguments for fin".to_string()),
     }
 }
 
@@ -128,56 +145,49 @@ pub fn seq(arguments: Vec<Expr>) -> Expr {
     }
 }
 
-pub fn fin(arguments: Vec<Expr>) -> Expr {
-    match arguments[..] {
-        [Float(duration)] => BuiltIn {
-            name: format!("seq({})", duration),
-            function: filter(move |waveform: Box<Waveform>| Waveform::Fin { duration, waveform }),
-        },
-        _ => Expr::Error("Invalid arguments for fin".to_string()),
+pub fn waveform_sum(arguments: Vec<Expr>) -> Expr {
+    match &arguments[..] {
+        [Expr::Waveform(a), Expr::Waveform(b)] => {
+            return Expr::Waveform(Waveform::Sum(Box::new(a.clone()), Box::new(b.clone())));
+        }
+        _ => return Expr::Error("Invalid argument for ~+".to_string()),
     }
 }
 
-pub fn linear_ramp(arguments: Vec<Expr>) -> Expr {
-    match arguments[..] {
-        [Float(initial_level), Float(duration), Float(final_level)] => BuiltIn {
-            name: format!("linear_ramp({})", duration),
-            function: filter(move |waveform: Box<Waveform>| Waveform::LinearRamp {
-                initial_level,
-                duration,
-                final_level,
-                waveform,
-            }),
-        },
-        _ => Expr::Error("Invalid arguments for linear_ramp".to_string()),
-    }
-}
-
-pub fn sustain(arguments: Vec<Expr>) -> Expr {
-    match arguments[..] {
-        [Float(level), Float(duration)] => BuiltIn {
-            name: format!("S({})", duration),
-            function: filter(move |waveform: Box<Waveform>| Waveform::Sustain {
-                level,
-                duration,
-                waveform,
-            }),
-        },
-        _ => Expr::Error("Invalid arguments for sustain".to_string()),
+pub fn waveform_dot_product(arguments: Vec<Expr>) -> Expr {
+    match &arguments[..] {
+        [Expr::Waveform(a), Expr::Waveform(b)] => {
+            return Expr::Waveform(Waveform::DotProduct(
+                Box::new(a.clone()),
+                Box::new(b.clone()),
+            ));
+        }
+        _ => return Expr::Error("Invalid argument for ~.".to_string()),
     }
 }
 
 pub fn chord(arguments: Vec<Expr>) -> Expr {
     match &arguments[..] {
         [List(exprs)] => {
-            let mut waveforms = Vec::<Waveform>::new();
-            for expr in exprs {
+            let mut result = Waveform::Fin {
+                duration: 0.0,
+                waveform: Box::new(Waveform::Const(0.0)),
+            };
+            for expr in exprs.iter().rev() {
                 match expr {
-                    Expr::Waveform(waveform) => waveforms.push(waveform.clone()),
-                    _ => return Expr::Error("Invalid argument for chord".to_string()),
+                    Expr::Waveform(waveform) => {
+                        result = Waveform::Sum(
+                            Box::new(Waveform::Seq {
+                                duration: 0.0,
+                                waveform: Box::new(waveform.clone()),
+                            }),
+                            Box::new(result),
+                        );
+                    }
+                    _ => return Expr::Error(format!("Invalid element in chord: {}", expr)),
                 }
             }
-            Expr::Waveform(Waveform::Chord(waveforms))
+            return Expr::Waveform(result);
         }
         _ => return Expr::Error("Invalid argument for chord".to_string()),
     }
@@ -186,14 +196,19 @@ pub fn chord(arguments: Vec<Expr>) -> Expr {
 pub fn sequence(arguments: Vec<Expr>) -> Expr {
     match &arguments[..] {
         [List(exprs)] => {
-            let mut waveforms = Vec::<Waveform>::new();
-            for expr in exprs {
+            let mut result = Waveform::Fin {
+                duration: 0.0,
+                waveform: Box::new(Waveform::Const(0.0)),
+            };
+            for expr in exprs.iter().rev() {
                 match expr {
-                    Expr::Waveform(waveform) => waveforms.push(waveform.clone()),
-                    _ => return Expr::Error(format!("Invalid element in sequence: {}", expr)),
+                    Expr::Waveform(waveform) => {
+                        result = Waveform::Sum(Box::new(waveform.clone()), Box::new(result));
+                    }
+                    _ => return Expr::Error(format!("Invalid element in chord: {}", expr)),
                 }
             }
-            Expr::Waveform(Waveform::Sequence(waveforms))
+            return Expr::Waveform(result);
         }
         [expr] => return Expr::Error(format!("Invalid argument for sequence: {}", expr)),
         _ => return Expr::Error("Invalid argument for sequence".to_string()),
@@ -209,14 +224,15 @@ pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
         ("pow", power),
         ("map", map),
         ("reduce", reduce),
+        ("$", sine_waveform),
+        ("const", const_waveform),
+        ("linear", linear_waveform),
+        ("fin", fin),
+        ("seq", seq),
+        ("~+", waveform_sum),
+        ("~.", waveform_dot_product),
         ("_chord", chord),
         ("_sequence", sequence),
-        ("$", sine_wave),
-        ("amp", amplify),
-        ("seq", seq),
-        ("fin", fin),
-        ("linear_ramp", linear_ramp),
-        ("S", sustain),
     ];
 
     for (name, function) in builtins {
