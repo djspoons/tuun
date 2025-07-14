@@ -205,7 +205,7 @@ pub fn sequence(arguments: Vec<Expr>) -> Expr {
                     Expr::Waveform(waveform) => {
                         result = Waveform::Sum(Box::new(waveform.clone()), Box::new(result));
                     }
-                    _ => return Expr::Error(format!("Invalid element in chord: {}", expr)),
+                    _ => return Expr::Error(format!("Invalid element in sequence: {}", expr)),
                 }
             }
             return Expr::Waveform(result);

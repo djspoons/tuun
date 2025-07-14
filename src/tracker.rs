@@ -40,12 +40,6 @@ impl Length {
         }
     }
 }
-/*
-impl Into<Length> for usize {
-    fn into(self) -> Length {
-        Length::Finite(self)
-    }
-}*/
 
 impl From<usize> for Length {
     fn from(n: usize) -> Self {
@@ -83,110 +77,57 @@ pub enum Waveform {
     DotProduct(Box<Waveform>, Box<Waveform>),
 }
 
-fn half_binary_op(
-    sample_frequency: i32,
-    offset: usize,
-    out: &mut [f32],
-    w: &Waveform,
-    op: fn(f32, f32) -> f32,
-) {
-    match w.length(sample_frequency) {
-        Length::Infinite => {
-            let mut tmp = vec![0.0; out.len()];
-            w.generate(sample_frequency, offset, &mut tmp);
-            for (i, x) in tmp.iter().enumerate() {
-                out[i] = op(out[i], *x);
-            }
-        }
-        Length::Finite(samples) => {
-            if offset < samples {
-                let len = samples - offset;
-                let mut tmp = vec![0.0; out.len().min(len)];
-                w.generate(sample_frequency, offset, &mut tmp);
-                for (i, x) in tmp.iter().enumerate() {
-                    out[i] = op(out[i], *x);
-                }
-            }
-        }
-    }
-}
-
 impl Waveform {
-    // TODO better to return the buffer?
-    fn generate(&self, sample_frequency: i32, mut offset: usize, mut out: &mut [f32]) {
+    fn generate(&self, sample_frequency: i32, offset: usize, desired: usize) -> Vec<f32> {
         match self {
             Waveform::SineWave { frequency } => {
+                let mut out = vec![0.0; desired];
                 for (i, f) in out.iter_mut().enumerate() {
                     let t_secs = (i + offset) as f32 / sample_frequency as f32;
                     *f = (2.0 * PI * frequency * t_secs).sin();
                 }
+                return out;
             }
             Waveform::Const(value) => {
-                for x in out.iter_mut() {
-                    *x = *value;
-                }
+                return vec![*value; desired];
             }
             Waveform::Linear {
                 initial_value,
                 slope,
             } => {
+                let mut out = vec![0.0; desired];
                 for (i, x) in out.iter_mut().enumerate() {
                     *x = initial_value + slope * ((i + offset) as f32 / sample_frequency as f32);
                 }
+                return out;
             }
             Waveform::Fin { duration, waveform } => {
-                let samples = (duration * sample_frequency as f32) as usize;
-                if offset + out.len() < samples {
-                    waveform.generate(sample_frequency, offset, out);
-                } else if offset < samples {
-                    waveform.generate(sample_frequency, offset, &mut out[..samples - offset]);
+                let length = (duration * sample_frequency as f32) as usize;
+                if offset >= length {
+                    return Vec::new(); // No samples to generate
                 }
+                return waveform.generate(sample_frequency, offset, desired.min(length - offset));
             }
             Waveform::Seq { waveform, .. } => {
-                waveform.generate(sample_frequency, offset, out);
+                return waveform.generate(sample_frequency, offset, desired);
             }
             Waveform::Sum(a, b) => {
-                half_binary_op(sample_frequency, offset, out, a, |x, y| x + y);
-                let next_offset = a.offset(sample_frequency);
-                if next_offset < offset + out.len() {
-                    if offset < next_offset {
-                        out = &mut out[(next_offset - offset)..];
-                        offset = 0;
-                    } else {
-                        offset -= next_offset;
-                    }
-                } else {
-                    return;
-                }
-                half_binary_op(sample_frequency, offset, out, b, |x, y| x + y);
+                generate_binary_op(|x, y| x + y, a, b, sample_frequency, offset, desired)
             }
-
             Waveform::DotProduct(a, b) => {
-                let length = self.length(sample_frequency);
-                match length {
-                    Length::Finite(samples) => {
-                        if offset >= samples {
-                            return;
-                        }
-                        if offset + out.len() > samples {
-                            out = &mut out[..samples - offset];
+                // Like sum, but we need to make sure we generate a length based on
+                // the shorter waveform.
+                let desired2 = match self.length(sample_frequency) {
+                    Length::Finite(length) => {
+                        if length > offset {
+                            desired.min(length - offset)
+                        } else {
+                            0
                         }
                     }
-                    Length::Infinite => {}
-                }
-                half_binary_op(sample_frequency, offset, out, a, |x, y| x + y);
-                let next_offset = a.offset(sample_frequency);
-                if next_offset < offset + out.len() {
-                    if offset < next_offset {
-                        out = &mut out[(next_offset - offset)..];
-                        offset = 0;
-                    } else {
-                        offset -= next_offset;
-                    }
-                } else {
-                    return;
-                }
-                half_binary_op(sample_frequency, offset, out, b, |x, y| x * y);
+                    Length::Infinite => desired,
+                };
+                generate_binary_op(|x, y| x * y, a, b, sample_frequency, offset, desired2)
             }
         }
     }
@@ -226,6 +167,60 @@ impl Waveform {
         }
     }
 }
+
+fn generate_binary_op(
+    op: fn(f32, f32) -> f32,
+    a: &Waveform,
+    b: &Waveform,
+    sample_frequency: i32,
+    offset: usize,
+    desired: usize,
+) -> Vec<f32> {
+    let mut left = a.generate(sample_frequency, offset, desired);
+    let next_offset = a.offset(sample_frequency);
+    if next_offset < offset + desired {
+        // There is an overlap between the desired portion and the right waveform...
+        //    1) ... and the right waveform starts after the offset
+        // or 2) ... and the right waveform starts before the offset
+
+        if offset + left.len() < next_offset {
+            // Either way, if the left side is shorter than the next offset, than extend it.
+            left.resize(next_offset - offset, 0.0);
+        }
+
+        if offset < next_offset {
+            // ... and the right waveform starts after the offset:
+            let right = b.generate(sample_frequency, 0, desired - (next_offset - offset));
+            // Merge the overlapping portion
+            for (i, x) in left[next_offset - offset..].iter_mut().enumerate() {
+                if i >= right.len() {
+                    break;
+                }
+                *x = op(*x, right[i]);
+            }
+            // If the left side is shorter than the right, than append.
+            if right.len() + next_offset > left.len() + offset {
+                left.extend_from_slice(&right[(left.len() + offset - next_offset)..]);
+            }
+        } else {
+            // ... and the right waveform starts before the offset
+            let right = b.generate(sample_frequency, offset - next_offset, desired);
+            // Merge the overlapping portion
+            for (i, x) in left.iter_mut().enumerate() {
+                if i >= right.len() {
+                    break;
+                }
+                *x = op(*x, right[i]);
+            }
+            // If the left side is shorter than the right, than append.
+            if right.len() > left.len() {
+                left.extend_from_slice(&right[left.len()..]);
+            }
+        }
+    }
+    return left;
+}
+
 pub struct Tracker {
     sample_frequency: i32,
     _beats_per_minute: i32,
@@ -279,21 +274,14 @@ impl<'a> AudioCallback for Tracker {
             }
             match &self.waveform {
                 Some((waveform, offset)) => {
-                    match waveform.length(self.sample_frequency) {
-                        Length::Finite(samples) if samples - offset < out.len() => {
-                            let tmp = &mut out[generated..samples - offset];
-                            waveform.generate(self.sample_frequency, *offset, tmp);
-                            generated += tmp.len();
-                            self.waveform = None;
-                            recv_allowed = true;
-                        }
-                        _ => {
-                            // Unbounded waveform or enough samples to fill the buffer
-                            let tmp = &mut out[generated..];
-                            waveform.generate(self.sample_frequency, *offset, tmp);
-                            generated += tmp.len();
-                            self.waveform.as_mut().unwrap().1 = offset + tmp.len();
-                        }
+                    let tmp = waveform.generate(self.sample_frequency, *offset, out.len());
+                    (out[..tmp.len()]).copy_from_slice(&tmp);
+                    generated += tmp.len();
+                    if tmp.len() < out.len() {
+                        self.waveform = None; // Finished generating this waveform
+                        recv_allowed = true; // Allow receiving new commands
+                    } else {
+                        self.waveform.as_mut().unwrap().1 = offset + tmp.len();
                     }
                 }
                 None => (),
@@ -328,9 +316,14 @@ mod tests {
         };
     }
 
-    fn generate_samples(waveform: &Waveform, size: usize, out: &mut [f32]) {
-        for n in 0..out.len() / size {
-            waveform.generate(1, n * size, &mut out[n * size..(n + 1) * size]);
+    fn run_tests(waveform: &Waveform, desired: Vec<f32>) {
+        for size in [1, 2, 4, 8] {
+            let mut out = vec![0.0; 8];
+            for n in 0..out.len() / size {
+                let tmp = waveform.generate(1, n * size, size);
+                (&mut out[n * size..(n * size + tmp.len())]).copy_from_slice(&tmp);
+            }
+            assert_eq!(out, desired);
         }
     }
 
@@ -340,12 +333,7 @@ mod tests {
             initial_value: 10.0,
             slope: -1.0,
         };
-        let desired = vec![10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0];
-        for size in [1, 2, 4, 8] {
-            let mut out = vec![0.0; 8];
-            generate_samples(&w1, size, &mut out);
-            assert_eq!(out, desired);
-        }
+        run_tests(&w1, vec![10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0]);
 
         let w2 = Fin {
             duration: 4.0,
@@ -366,12 +354,7 @@ mod tests {
                 )),
             )),
         };
-        let desired = vec![0.0, 1.5, 3.0, 4.5, 0.0, 0.0, 0.0, 0.0];
-        for size in [1, 2, 4, 8] {
-            let mut out = vec![0.0; 8];
-            generate_samples(&w2, size, &mut out);
-            assert_eq!(out, desired);
-        }
+        run_tests(&w2, vec![0.0, 1.5, 3.0, 4.5, 0.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]
@@ -382,12 +365,7 @@ mod tests {
         );
         assert_eq!(w1.offset(1), 4);
         assert_eq!(w1.length(1), Length::Finite(7));
-        let desired = vec![1.0, 1.0, 2.0, 2.0, 2.0, 1.0, 1.0, 0.0];
-        for size in [1, 2, 4, 8] {
-            let mut out = vec![0.0; 8];
-            generate_samples(&w1, size, &mut out);
-            assert_eq!(out, desired);
-        }
+        run_tests(&w1, vec![1.0, 1.0, 2.0, 2.0, 2.0, 1.0, 1.0, 0.0]);
 
         let w2 = Fin {
             duration: 8.0,
@@ -408,12 +386,13 @@ mod tests {
                 )),
             )),
         };
-        let desired = vec![3.0; 8];
-        for size in [1, 2, 4, 8] {
-            let mut out = vec![0.0; 8];
-            generate_samples(&w2, size, &mut out);
-            assert_eq!(out, desired);
-        }
+        run_tests(&w2, vec![3.0; 8]);
+
+        let w5 = Sum(
+            Box::new(finite_const_gen(3.0, 1.0, 3.0)),
+            Box::new(finite_const_gen(2.0, 2.0, 2.0)),
+        );
+        run_tests(&w5, vec![3.0, 0.0, 0.0, 2.0, 2.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]
@@ -424,47 +403,27 @@ mod tests {
         );
         assert_eq!(w1.offset(1), 4);
         assert_eq!(w1.length(1), Length::Finite(7));
-        let desired = vec![3.0, 3.0, 6.0, 6.0, 6.0, 6.0, 6.0, 0.0];
-        for size in [1, 2, 4, 8] {
-            let mut out = vec![0.0; 8];
-            generate_samples(&w1, size, &mut out);
-            assert_eq!(out, desired);
-        }
+        run_tests(&w1, vec![3.0, 3.0, 6.0, 6.0, 6.0, 6.0, 6.0, 0.0]);
 
-        let dot2 = DotProduct(
+        let w2 = DotProduct(
             Box::new(finite_const_gen(3.0, 5.0, 2.0)),
             Box::new(finite_const_gen(2.0, 5.0, 2.0)),
         );
-        let desired = vec![3.0, 3.0, 6.0, 6.0, 6.0, 0.0, 0.0, 0.0];
-        for size in [1, 2, 4, 8] {
-            let mut out = vec![0.0; 8];
-            generate_samples(&dot2, size, &mut out);
-            assert_eq!(out, desired);
-        }
+        run_tests(&w2, vec![3.0, 3.0, 6.0, 6.0, 6.0, 0.0, 0.0, 0.0]);
 
-        let dot3 = Fin {
+        let w3 = Fin {
             duration: 8.0,
             waveform: Box::new(DotProduct(Box::new(Const(3.0)), Box::new(Const(2.0)))),
         };
-        let desired = vec![6.0; 8];
-        for size in [1, 2, 4, 8] {
-            let mut out = vec![0.0; 8];
-            generate_samples(&dot3, size, &mut out);
-            assert_eq!(out, desired);
-        }
+        run_tests(&w3, vec![6.0; 8]);
 
-        let dot4 = DotProduct(
+        let w4 = DotProduct(
             Box::new(Seq {
                 duration: 1.0,
                 waveform: Box::new(Const(3.0)),
             }),
             Box::new(finite_const_gen(2.0, 5.0, 5.0)),
         );
-        let desired = vec![3.0, 6.0, 6.0, 6.0, 6.0, 6.0, 0.0, 0.0];
-        for size in [1, 2, 4, 8] {
-            let mut out = vec![0.0; 8];
-            generate_samples(&dot4, size, &mut out);
-            assert_eq!(out, desired);
-        }
+        run_tests(&w4, vec![3.0, 6.0, 6.0, 6.0, 6.0, 6.0, 0.0, 0.0]);
     }
 }
