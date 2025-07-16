@@ -78,12 +78,14 @@ pub enum Waveform {
 }
 
 impl Waveform {
-    fn generate(&self, sample_frequency: i32, offset: usize, desired: usize) -> Vec<f32> {
+    // Generate a vector of samples up to `desired` length. `position` indicates where
+    // the beginning of the result is relative to the start of the waveform.
+    fn generate(&self, sample_frequency: i32, position: usize, desired: usize) -> Vec<f32> {
         match self {
             Waveform::SineWave { frequency } => {
                 let mut out = vec![0.0; desired];
                 for (i, f) in out.iter_mut().enumerate() {
-                    let t_secs = (i + offset) as f32 / sample_frequency as f32;
+                    let t_secs = (i + position) as f32 / sample_frequency as f32;
                     *f = (2.0 * PI * frequency * t_secs).sin();
                 }
                 return out;
@@ -97,37 +99,41 @@ impl Waveform {
             } => {
                 let mut out = vec![0.0; desired];
                 for (i, x) in out.iter_mut().enumerate() {
-                    *x = initial_value + slope * ((i + offset) as f32 / sample_frequency as f32);
+                    *x = initial_value + slope * ((i + position) as f32 / sample_frequency as f32);
                 }
                 return out;
             }
             Waveform::Fin { duration, waveform } => {
                 let length = (duration * sample_frequency as f32) as usize;
-                if offset >= length {
+                if position >= length {
                     return Vec::new(); // No samples to generate
                 }
-                return waveform.generate(sample_frequency, offset, desired.min(length - offset));
+                return waveform.generate(
+                    sample_frequency,
+                    position,
+                    desired.min(length - position),
+                );
             }
             Waveform::Seq { waveform, .. } => {
-                return waveform.generate(sample_frequency, offset, desired);
+                return waveform.generate(sample_frequency, position, desired);
             }
             Waveform::Sum(a, b) => {
-                generate_binary_op(|x, y| x + y, a, b, sample_frequency, offset, desired)
+                generate_binary_op(|x, y| x + y, a, b, sample_frequency, position, desired)
             }
             Waveform::DotProduct(a, b) => {
                 // Like sum, but we need to make sure we generate a length based on
                 // the shorter waveform.
-                let desired2 = match self.length(sample_frequency) {
+                let desired = match self.length(sample_frequency) {
                     Length::Finite(length) => {
-                        if length > offset {
-                            desired.min(length - offset)
+                        if length > position {
+                            desired.min(length - position)
                         } else {
                             0
                         }
                     }
                     Length::Infinite => desired,
                 };
-                generate_binary_op(|x, y| x * y, a, b, sample_frequency, offset, desired2)
+                generate_binary_op(|x, y| x * y, a, b, sample_frequency, position, desired)
             }
         }
     }
@@ -173,38 +179,38 @@ fn generate_binary_op(
     a: &Waveform,
     b: &Waveform,
     sample_frequency: i32,
-    offset: usize,
+    position: usize,
     desired: usize,
 ) -> Vec<f32> {
-    let mut left = a.generate(sample_frequency, offset, desired);
+    let mut left = a.generate(sample_frequency, position, desired);
     let next_offset = a.offset(sample_frequency);
-    if next_offset < offset + desired {
+    if next_offset < position + desired {
         // There is an overlap between the desired portion and the right waveform...
-        //    1) ... and the right waveform starts after the offset
-        // or 2) ... and the right waveform starts before the offset
+        //    1) ... and the right waveform starts after position
+        // or 2) ... and the right waveform starts before position
 
-        if offset + left.len() < next_offset {
+        if position + left.len() < next_offset {
             // Either way, if the left side is shorter than the next offset, than extend it.
-            left.resize(next_offset - offset, 0.0);
+            left.resize(next_offset - position, 0.0);
         }
 
-        if offset < next_offset {
-            // ... and the right waveform starts after the offset:
-            let right = b.generate(sample_frequency, 0, desired - (next_offset - offset));
+        if position < next_offset {
+            // ... and the right waveform starts after position
+            let right = b.generate(sample_frequency, 0, desired - (next_offset - position));
             // Merge the overlapping portion
-            for (i, x) in left[next_offset - offset..].iter_mut().enumerate() {
+            for (i, x) in left[next_offset - position..].iter_mut().enumerate() {
                 if i >= right.len() {
                     break;
                 }
                 *x = op(*x, right[i]);
             }
             // If the left side is shorter than the right, than append.
-            if right.len() + next_offset > left.len() + offset {
-                left.extend_from_slice(&right[(left.len() + offset - next_offset)..]);
+            if right.len() + next_offset > left.len() + position {
+                left.extend_from_slice(&right[(left.len() + position - next_offset)..]);
             }
         } else {
-            // ... and the right waveform starts before the offset
-            let right = b.generate(sample_frequency, offset - next_offset, desired);
+            // ... and the right waveform starts before  position
+            let right = b.generate(sample_frequency, position - next_offset, desired);
             // Merge the overlapping portion
             for (i, x) in left.iter_mut().enumerate() {
                 if i >= right.len() {
@@ -273,15 +279,15 @@ impl<'a> AudioCallback for Tracker {
                 }
             }
             match &self.waveform {
-                Some((waveform, offset)) => {
-                    let tmp = waveform.generate(self.sample_frequency, *offset, out.len());
+                Some((waveform, position)) => {
+                    let tmp = waveform.generate(self.sample_frequency, *position, out.len());
                     (out[..tmp.len()]).copy_from_slice(&tmp);
                     generated += tmp.len();
                     if tmp.len() < out.len() {
                         self.waveform = None; // Finished generating this waveform
                         recv_allowed = true; // Allow receiving new commands
                     } else {
-                        self.waveform.as_mut().unwrap().1 = offset + tmp.len();
+                        self.waveform.as_mut().unwrap().1 = position + tmp.len();
                     }
                 }
                 None => (),
