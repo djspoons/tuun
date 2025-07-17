@@ -1,5 +1,6 @@
 use std::f32::consts::PI;
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::time::Instant;
 
 extern crate sdl2;
 use sdl2::audio::AudioCallback;
@@ -40,8 +41,6 @@ impl From<usize> for Length {
     }
 }
 
-/* XXX TODO duration in beats */
-
 #[derive(Debug, Clone)]
 pub enum Waveform {
     /*
@@ -51,34 +50,50 @@ pub enum Waveform {
         frequency: f32,
     },
     Const(f32),
+    /*
+     * Linear generates a sequence of values along a line with the given slope.
+     */
     Linear {
         initial_value: f32,
-        slope: f32, // slope in value per second
+        slope: f32, // slope in value per beat
     },
+    /*
+     * Fin generates a finite waveform that lasts for the given duration in beats.
+     */
     Fin {
-        duration: f32, // duration in seconds
+        duration: f32, // duration in beats
         waveform: Box<Waveform>,
     },
     /*
      * Seq sets the offset to the given value (ignoring offset of the underlying waveform).
      */
     Seq {
-        duration: f32, // duration in seconds
+        duration: f32, // duration in beats
         waveform: Box<Waveform>,
     },
     Sum(Box<Waveform>, Box<Waveform>),
     DotProduct(Box<Waveform>, Box<Waveform>),
 }
 
-impl Waveform {
+/*
+ * Generator converts waveforms into sequences of samples.
+ */
+struct Generator {
+    sample_frequency: i32,
+    beats_per_minute: i32,
+}
+
+impl Generator {
     // Generate a vector of samples up to `desired` length. `position` indicates where
-    // the beginning of the result is relative to the start of the waveform.
-    fn generate(&self, sample_frequency: i32, position: usize, desired: usize) -> Vec<f32> {
-        match self {
+    // the beginning of the result is relative to the start of the waveform. If fewer than
+    // 'desired' samples are generated, that indicates that this waveform has finished (and
+    // generate won't be called on it again).
+    fn generate(&self, waveform: &Waveform, position: usize, desired: usize) -> Vec<f32> {
+        match waveform {
             Waveform::SineWave { frequency } => {
                 let mut out = vec![0.0; desired];
                 for (i, f) in out.iter_mut().enumerate() {
-                    let t_secs = (i + position) as f32 / sample_frequency as f32;
+                    let t_secs = (i + position) as f32 / self.sample_frequency as f32;
                     *f = (2.0 * PI * frequency * t_secs).sin();
                 }
                 return out;
@@ -91,32 +106,33 @@ impl Waveform {
                 slope,
             } => {
                 let mut out = vec![0.0; desired];
+                let samples_per_beat =
+                    self.sample_frequency as f32 * 60.0 / (self.beats_per_minute as f32);
                 for (i, x) in out.iter_mut().enumerate() {
-                    *x = initial_value + slope * ((i + position) as f32 / sample_frequency as f32);
+                    *x = initial_value + slope * ((i + position) as f32 / samples_per_beat);
                 }
                 return out;
             }
-            Waveform::Fin { duration, waveform } => {
-                let length = (duration * sample_frequency as f32) as usize;
+            Waveform::Fin {
+                waveform: inner_waveform,
+                ..
+            } => {
+                let Length::Finite(length) = self.length(waveform) else {
+                    panic!("Finite waveform expected for Fin, got infinite");
+                };
                 if position >= length {
                     return Vec::new(); // No samples to generate
                 }
-                return waveform.generate(
-                    sample_frequency,
-                    position,
-                    desired.min(length - position),
-                );
+                return self.generate(inner_waveform, position, desired.min(length - position));
             }
             Waveform::Seq { waveform, .. } => {
-                return waveform.generate(sample_frequency, position, desired);
+                return self.generate(waveform, position, desired);
             }
-            Waveform::Sum(a, b) => {
-                generate_binary_op(|x, y| x + y, a, b, sample_frequency, position, desired)
-            }
+            Waveform::Sum(a, b) => self.generate_binary_op(|x, y| x + y, a, b, position, desired),
             Waveform::DotProduct(a, b) => {
                 // Like sum, but we need to make sure we generate a length based on
                 // the shorter waveform.
-                let new_desired = match self.length(sample_frequency) {
+                let new_desired = match self.length(waveform) {
                     Length::Finite(length) => {
                         if length > position {
                             desired.min(length - position)
@@ -126,104 +142,107 @@ impl Waveform {
                     }
                     Length::Infinite => desired,
                 };
-                generate_binary_op(|x, y| x * y, a, b, sample_frequency, position, new_desired)
+                self.generate_binary_op(|x, y| x * y, a, b, position, new_desired)
             }
         }
     }
 
-    fn length(&self, sample_frequency: i32) -> Length {
-        match self {
+    fn length(&self, waveform: &Waveform) -> Length {
+        match waveform {
             Waveform::SineWave { .. } => Length::Infinite,
             Waveform::Const { .. } => Length::Infinite,
             Waveform::Linear { .. } => Length::Infinite,
-            Waveform::Fin { duration, .. } => {
-                ((duration * sample_frequency as f32) as usize).into()
-            }
-            Waveform::Seq { waveform, .. } => waveform.length(sample_frequency),
+            Waveform::Fin { duration, .. } => ((duration
+                * samples_per_beat(self.sample_frequency, self.beats_per_minute) as f32)
+                as usize)
+                .into(),
+            Waveform::Seq { waveform, .. } => self.length(waveform),
             Waveform::Sum(a, b) => {
-                let length =
-                    Length::Finite(a.offset(sample_frequency)) + b.length(sample_frequency);
-                a.length(sample_frequency).max(length)
+                let length = Length::Finite(self.offset(a)) + self.length(b);
+                self.length(a).max(length)
             }
             Waveform::DotProduct(a, b) => {
-                let length =
-                    Length::Finite(a.offset(sample_frequency)) + b.length(sample_frequency);
-                a.length(sample_frequency).min(length)
+                let length = Length::Finite(self.offset(a)) + self.length(b);
+                self.length(a).min(length)
             }
         }
     }
 
-    fn offset(&self, sample_frequency: i32) -> usize {
-        match self {
+    fn offset(&self, waveform: &Waveform) -> usize {
+        match waveform {
             Waveform::SineWave { .. } => 0,
             Waveform::Const { .. } => 0,
             Waveform::Linear { .. } => 0,
-            Waveform::Fin { waveform, .. } => waveform.offset(sample_frequency),
-            Waveform::Seq { duration, .. } => (duration * sample_frequency as f32) as usize,
-            Waveform::Sum(a, b) | Waveform::DotProduct(a, b) => {
-                a.offset(sample_frequency) + b.offset(sample_frequency)
+            Waveform::Fin { waveform, .. } => self.offset(waveform),
+            Waveform::Seq { duration, .. } => {
+                (duration * samples_per_beat(self.sample_frequency, self.beats_per_minute) as f32)
+                    as usize
             }
+            Waveform::Sum(a, b) | Waveform::DotProduct(a, b) => self.offset(a) + self.offset(b),
         }
     }
-}
 
-fn generate_binary_op(
-    op: fn(f32, f32) -> f32,
-    a: &Waveform,
-    b: &Waveform,
-    sample_frequency: i32,
-    position: usize,
-    desired: usize,
-) -> Vec<f32> {
-    let mut left = a.generate(sample_frequency, position, desired);
+    // Generate a binary operation on two waveforms, up to 'desired' samples starting at 'position'
+    // relative to the start of the first waveform. The second waveform is offset by the
+    // offset of the first waveform. The `op` function is applied to each pair of samples.
+    fn generate_binary_op(
+        &self,
+        op: fn(f32, f32) -> f32,
+        a: &Waveform,
+        b: &Waveform,
+        position: usize,
+        desired: usize,
+    ) -> Vec<f32> {
+        let mut left = self.generate(a, position, desired);
 
-    let right_offset = a.offset(sample_frequency);
-    if right_offset >= position + desired {
-        // Make sure the left side is long enough so that we get another chance to
-        // generate the right-hand side.
-        left.resize(desired, 0.0);
-    } else {
-        // right_offset < position + desired
-        // There is an overlap between the desired portion and the right waveform...
-        //    1) ... and the right waveform starts after position
-        // or 2) ... and the right waveform starts before position
-
-        if position + left.len() < right_offset {
-            // Either way, if the left side is shorter than the next offset, than extend it.
-            left.resize(right_offset - position, 0.0);
-        }
-
-        if position < right_offset {
-            // ... and the right waveform starts after position
-            let right = b.generate(sample_frequency, 0, desired - (right_offset - position));
-            // Merge the overlapping portion
-            for (i, x) in left[right_offset - position..].iter_mut().enumerate() {
-                if i >= right.len() {
-                    break;
-                }
-                *x = op(*x, right[i]);
-            }
-            // If the left side is shorter than the right, than append.
-            if right.len() + right_offset > left.len() + position {
-                left.extend_from_slice(&right[(left.len() + position - right_offset)..]);
-            }
+        let offset = self.offset(a);
+        if offset >= position + desired {
+            // Make sure the left side is long enough so that we get another chance to
+            // generate the right-hand side.
+            left.resize(desired, 0.0);
         } else {
-            // ... and the right waveform starts before  position
-            let right = b.generate(sample_frequency, position - right_offset, desired);
-            // Merge the overlapping portion
-            for (i, x) in left.iter_mut().enumerate() {
-                if i >= right.len() {
-                    break;
-                }
-                *x = op(*x, right[i]);
+            // offset < position + desired
+            // There is an overlap between the desired portion and the right waveform...
+            //    1) ... and the right waveform starts after position
+            // or 2) ... and the right waveform starts before position
+
+            if position + left.len() < offset {
+                // Either way, if the left side is shorter than the next offset, than extend it.
+                left.resize(offset - position, 0.0);
             }
-            // If the left side is shorter than the right, than append.
-            if right.len() > left.len() {
-                left.extend_from_slice(&right[left.len()..]);
+
+            if position < offset {
+                // ... and the right waveform starts after position
+                let right = self.generate(b, 0, desired - (offset - position));
+                // Merge the overlapping portion
+                for (i, x) in left[offset - position..].iter_mut().enumerate() {
+                    if i >= right.len() {
+                        break;
+                    }
+                    *x = op(*x, right[i]);
+                }
+                // If the left side is shorter than the right, than append.
+                if right.len() + offset > left.len() + position {
+                    left.extend_from_slice(&right[(left.len() + position - offset)..]);
+                }
+            } else {
+                // ... and the right waveform starts before  position
+                let right = self.generate(b, position - offset, desired);
+                // Merge the overlapping portion
+                for (i, x) in left.iter_mut().enumerate() {
+                    if i >= right.len() {
+                        break;
+                    }
+                    *x = op(*x, right[i]);
+                }
+                // If the left side is shorter than the right, than append.
+                if right.len() > left.len() {
+                    left.extend_from_slice(&right[left.len()..]);
+                }
             }
         }
+        return left;
     }
-    return left;
 }
 
 pub enum Command {
@@ -256,6 +275,7 @@ pub struct Status {
     pub active_waveforms: Vec<ActiveWaveform>,
     pub pending_waveforms: Vec<PendingWaveform>,
     pub current_beat: u64,
+    pub next_beat_start: Instant,
     pub samples: Option<Vec<f32>>,
 }
 
@@ -292,14 +312,12 @@ pub fn new_tracker(
 }
 
 fn samples_per_beat(sample_frequency: i32, beats_per_minute: i32) -> usize {
-    // (seconds/minute) * 1/(beats/min) * (samples/sec)
+    // (seconds/minute) * 60/(beats/min) * (samples/sec)
     let seconds_per_beat = 60.0 / beats_per_minute as f32;
     (sample_frequency as f32 * seconds_per_beat) as usize
 }
 
 // TODO add metrics
-
-use std::sync::mpsc::TryRecvError;
 
 impl<'a> AudioCallback for Tracker {
     type Channel = f32;
@@ -339,6 +357,10 @@ impl<'a> AudioCallback for Tracker {
         }
 
         // Now generate!
+        let generator = Generator {
+            sample_frequency: self.sample_frequency,
+            beats_per_minute: self.beats_per_minute,
+        };
         for x in out.iter_mut() {
             *x = 0.0;
         }
@@ -388,9 +410,7 @@ impl<'a> AudioCallback for Tracker {
             let mut i = 0;
             while i < self.active_waveforms.len() {
                 let active = &mut self.active_waveforms[i];
-                let tmp = active
-                    .waveform
-                    .generate(self.sample_frequency, active.position, desired);
+                let tmp = generator.generate(&active.waveform, active.position, desired);
                 if tmp.len() > desired {
                     panic!(
                         "Generated more samples than desired: {} > {} for waveform id {} at position {}: {:?}", 
@@ -435,6 +455,11 @@ impl<'a> AudioCallback for Tracker {
                 active_waveforms: self.active_waveforms.clone(),
                 pending_waveforms: self.pending_waveforms.clone(),
                 current_beat: self.current_beat,
+                next_beat_start: Instant::now()
+                    + std::time::Duration::from_millis(
+                        (self.samples_to_next_beat as f32 / self.sample_frequency as f32 * 1000.0)
+                            as u64,
+                    ),
                 samples: None,
             })
             .unwrap();
@@ -457,10 +482,14 @@ mod tests {
     }
 
     fn run_tests(waveform: &Waveform, desired: Vec<f32>) {
+        let generator = Generator {
+            sample_frequency: 1,
+            beats_per_minute: 60,
+        };
         for size in [1, 2, 4, 8] {
             let mut out = vec![0.0; 8];
             for n in 0..out.len() / size {
-                let tmp = waveform.generate(1, n * size, size);
+                let tmp = generator.generate(waveform, n * size, size);
                 (&mut out[n * size..(n * size + tmp.len())]).copy_from_slice(&tmp);
             }
             assert_eq!(out, desired);
@@ -499,12 +528,16 @@ mod tests {
 
     #[test]
     fn test_sum() {
+        let generator = Generator {
+            sample_frequency: 1,
+            beats_per_minute: 60,
+        };
         let w1 = Sum(
             Box::new(finite_const_gen(1.0, 5.0, 2.0)),
             Box::new(finite_const_gen(1.0, 5.0, 2.0)),
         );
-        assert_eq!(w1.offset(1), 4);
-        assert_eq!(w1.length(1), Length::Finite(7));
+        assert_eq!(generator.offset(&w1), 4);
+        assert_eq!(generator.length(&w1), Length::Finite(7));
         run_tests(&w1, vec![1.0, 1.0, 2.0, 2.0, 2.0, 1.0, 1.0, 0.0]);
 
         let w2 = Fin {
@@ -536,9 +569,9 @@ mod tests {
 
         // Test a case to make sure that the sum generates enough samples, even when
         // the left-hand side is shorter and the right hasn't started yet.
-        let mut result = w5.generate(1, 0, 2);
+        let mut result = generator.generate(&w5, 0, 2);
         assert_eq!(result, vec![3.0, 0.0]);
-        result = w5.generate(1, 1, 2);
+        result = generator.generate(&w5, 1, 2);
         assert_eq!(result, vec![0.0, 0.0]);
 
         // This one is a little strange: the right-hand side doesn't generate any
@@ -548,18 +581,22 @@ mod tests {
             Box::new(finite_const_gen(3.0, 1.0, 3.0)),
             Box::new(finite_const_gen(2.0, 0.0, 0.0)),
         );
-        let result = w6.generate(1, 0, 2);
+        let result = generator.generate(&w6, 0, 2);
         assert_eq!(result, vec![3.0, 0.0]);
     }
 
     #[test]
     fn test_dot_product() {
+        let generator = Generator {
+            sample_frequency: 1,
+            beats_per_minute: 60,
+        };
         let w1 = DotProduct(
             Box::new(finite_const_gen(3.0, 8.0, 2.0)),
             Box::new(finite_const_gen(2.0, 5.0, 2.0)),
         );
-        assert_eq!(w1.offset(1), 4);
-        assert_eq!(w1.length(1), Length::Finite(7));
+        assert_eq!(generator.offset(&w1), 4);
+        assert_eq!(generator.length(&w1), Length::Finite(7));
         run_tests(&w1, vec![3.0, 3.0, 6.0, 6.0, 6.0, 6.0, 6.0, 0.0]);
 
         let w2 = DotProduct(

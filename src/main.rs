@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 extern crate sdl2;
 use sdl2::audio::AudioSpecDesired;
@@ -178,6 +178,8 @@ pub fn main() {
         pending_waveforms: Vec::new(),
         samples: None,
         current_beat: 0,
+        next_beat_start: Instant::now()
+            + Duration::from_secs_f32(1.0 / (args.beats_per_minute as f32 * 60.0)),
     };
 
     video_subsystem.text_input().start();
