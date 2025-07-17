@@ -1,8 +1,16 @@
 {
     "cSpell.words": [
+        "actuals",
         "ADSR",
         "freqs",
+        "keymod",
+        "LALTMOD",
+        "LCTRLMOD",
         "multispace",
+        "RCTRLMOD",
+        "realfft",
+        "rfind",
+        "scancode",
         "Tuun"
     ],
     "rust-analyzer.runnables.extraEnv": {

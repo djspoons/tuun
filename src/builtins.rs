@@ -66,23 +66,23 @@ pub fn map(arguments: Vec<Expr>) -> Expr {
 
 pub fn reduce(arguments: Vec<Expr>) -> Expr {
     match &arguments[..] {
-        [function, accum, List(exprs)] => {
+        [function, acc, List(exprs)] => {
             let context = vec![];
-            let mut accum = accum.clone();
+            let mut acc = acc.clone();
             for expr in exprs {
                 let result = simplify(
                     &context,
                     Application {
                         function: Box::new(function.clone()),
-                        arguments: Box::new(Tuple(vec![accum, expr.clone()])), // can we avoid this clone?
+                        arguments: Box::new(Tuple(vec![acc, expr.clone()])), // can we avoid this clone?
                     },
                 );
-                accum = match result {
+                acc = match result {
                     Ok(expr) => expr,
                     Err(err) => return Expr::Error(err.to_string()),
                 };
             }
-            accum
+            acc
         }
         _ => Expr::Error("Invalid arguments for reduce".to_string()),
     }
