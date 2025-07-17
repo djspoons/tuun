@@ -16,13 +16,7 @@ use clap::Parser as ClapParser;
 mod builtins;
 mod parser;
 mod tracker;
-
-enum Command {
-    PlayOnce {
-        waveform: tracker::Waveform,
-        beat: i32, // Offset in beats from the beginning
-    },
-}
+use tracker::Command;
 
 fn make_texture<'a>(
     font: &Font<'a, 'static>,
@@ -45,8 +39,10 @@ fn make_texture<'a>(
 #[derive(ClapParser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    #[arg(long = "bpm", default_value_t = 90)]
+    #[arg(long = "tempo", default_value_t = 90)]
     beats_per_minute: i32,
+    #[arg(long = "beats_per_measure", default_value_t = 4)]
+    beats_per_measure: i32,
     #[arg(long, default_value_t = 44100)]
     sample_frequency: i32,
     #[arg(short, long = "buffer", default_value = "", number_of_values = 1)]
@@ -120,7 +116,7 @@ pub fn main() {
         samples: None,     // default sample size
     };
 
-    let (sample_sender, sample_receiver) = std::sync::mpsc::channel();
+    let (status_sender, status_receiver) = std::sync::mpsc::channel();
     let (command_sender, command_receiver) = std::sync::mpsc::channel();
 
     let device = audio_subsystem
@@ -130,7 +126,7 @@ pub fn main() {
                 args.sample_frequency,
                 args.beats_per_minute,
                 command_receiver,
-                sample_sender,
+                status_sender,
             )
         })
         .unwrap();
@@ -177,21 +173,39 @@ pub fn main() {
         buffers.push(String::new());
     }
     let mut mode = Mode::Select { index: 0 };
+    let mut status = tracker::Status {
+        active_waveforms: Vec::new(),
+        pending_waveforms: Vec::new(),
+        samples: None,
+        current_beat: 0,
+    };
 
     video_subsystem.text_input().start();
     let mut event_pump = sdl_context.event_pump().unwrap();
     loop {
         for event in event_pump.poll_iter() {
             //println!("Event: {:?} with mode {:?}", event, mode);
-            (context, mode) =
-                process_event(&args, context, event, mode, &mut buffers, &command_sender);
+            (context, mode) = process_event(
+                &args,
+                context,
+                event,
+                mode,
+                &status,
+                &mut buffers,
+                &command_sender,
+            );
             if let Mode::Exit = mode {
                 return;
             }
         }
 
-        match sample_receiver.recv_timeout(Duration::new(0, 1_000_000)) {
-            Ok(out) => {
+        match status_receiver.recv_timeout(Duration::new(0, 1_000_000)) {
+            Ok(mut tracker_status) => {
+                //println!("Received tracker state: {:?}", tracker_status);
+                let samples = tracker_status.samples.unwrap_or(Vec::new());
+                tracker_status.samples = Some(Vec::new());
+                status = tracker_status.clone();
+
                 canvas.set_draw_color(Color::RGB(0, 0, 0));
                 canvas.clear();
 
@@ -360,10 +374,10 @@ pub fn main() {
                 }
 
                 // Draw the waveform
-                let x_scale = width as f32 / out.len() as f32;
+                let x_scale = width as f32 / samples.len() as f32;
                 let waveform_height = height * 3 / 5;
                 canvas.set_draw_color(Color::RGB(0, 255, 0));
-                for (i, f) in out.iter().enumerate() {
+                for (i, f) in samples.iter().enumerate() {
                     let x = (i as f32 * x_scale) as i32;
                     let y = (f * (waveform_height as f32 / 2.4) + (waveform_height as f32 / 2.0))
                         as i32;
@@ -372,9 +386,9 @@ pub fn main() {
 
                 // Draw the spectra
                 let mut planner = RealFftPlanner::<f32>::new();
-                let fft = planner.plan_fft_forward(out.len());
+                let fft = planner.plan_fft_forward(samples.len());
                 let mut input = fft.make_input_vec();
-                for (i, f) in out.iter().enumerate() {
+                for (i, f) in samples.iter().enumerate() {
                     input[i] = *f;
                 }
                 let mut spectrum = fft.make_output_vec();
@@ -382,7 +396,7 @@ pub fn main() {
                     println!("Error processing FFT: {}", e);
                 } else {
                     let spectrum_height = height - waveform_height;
-                    let y_scale = -(out.len() as f32).sqrt();
+                    let y_scale = -(samples.len() as f32).sqrt();
                     canvas.set_draw_color(Color::RGB(255, 0, 0));
                     let mut last_y = (waveform_height + 300) as i32;
                     for (i, f) in spectrum.iter().enumerate() {
@@ -418,6 +432,7 @@ fn process_event(
     mut context: Vec<(String, parser::Expr)>,
     event: Event,
     mode: Mode,
+    status: &tracker::Status,
     buffers: &mut Vec<String>,
     command_sender: &std::sync::mpsc::Sender<Command>,
 ) -> (Vec<(String, parser::Expr)>, Mode) {
@@ -438,6 +453,21 @@ fn process_event(
                     }
                 }
                 (Mode::Select { index }, Some(sdl2::keyboard::Scancode::Return)) => {
+                    // Check to see whether or not the current index is in the tracker's
+                    // active or pending waveforms
+                    if status
+                        .active_waveforms
+                        .iter()
+                        .any(|waveform| waveform.id == index as u32)
+                        || status
+                            .pending_waveforms
+                            .iter()
+                            .any(|waveform| waveform.id == index as u32)
+                    {
+                        // If it is, we just stay in select mode
+                        // TODO ... or maybe we shouldn't?
+                        return (context, Mode::Select { index });
+                    }
                     return (context, edit_mode_from_buffer(index, &buffers[index]));
                 }
                 (Mode::Select { index }, Some(sdl2::keyboard::Scancode::Up)) => {
@@ -466,12 +496,19 @@ fn process_event(
                                     println!("Simplify returned: {:}", &expr);
                                     if let parser::Expr::Waveform(waveform) = expr {
                                         command_sender
-                                            .send(Command::PlayOnce { waveform, beat: 0 })
+                                            .send(Command::PlayOnce {
+                                                id: index as u32,
+                                                waveform,
+                                                at_beat: ((status.current_beat + 1)
+                                                    / args.beats_per_measure as u64
+                                                    + 1)
+                                                    * args.beats_per_measure as u64,
+                                            })
                                             .unwrap();
                                         return (context, Mode::Select { index });
                                     } else {
                                         println!(
-                                            "Expression is not a waveform, cannot play: {:}",
+                                            "Expression is not a waveform, cannot play: {:#?}",
                                             expr
                                         );
                                         return (
