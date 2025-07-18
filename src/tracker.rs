@@ -276,7 +276,7 @@ pub struct Status {
     pub pending_waveforms: Vec<PendingWaveform>,
     pub current_beat: u64,
     pub next_beat_start: Instant,
-    pub samples: Option<Vec<f32>>,
+    pub buffer: Option<Vec<f32>>,
 }
 
 pub struct Tracker {
@@ -290,6 +290,7 @@ pub struct Tracker {
     pending_waveforms: Vec<PendingWaveform>,
     current_beat: u64,
     samples_to_next_beat: usize,
+    send_current_buffer: bool,
 }
 
 pub fn new_tracker(
@@ -308,6 +309,7 @@ pub fn new_tracker(
         pending_waveforms: Vec::new(),
         current_beat: 1,
         samples_to_next_beat: samples_per_beat(sample_frequency, beats_per_minute),
+        send_current_buffer: false,
     };
 }
 
@@ -348,13 +350,25 @@ impl<'a> AudioCallback for Tracker {
                 }
             }
             Ok(Command::SendCurrentBuffer) => {
-                println!("Received command to send current buffer");
+                self.send_current_buffer = true;
             }
             Err(TryRecvError::Empty) => {}
             Err(e) => {
                 println!("Error receiving command: {:?}", e);
             }
         }
+
+        let mut status_to_send = Status {
+            active_waveforms: self.active_waveforms.clone(),
+            pending_waveforms: self.pending_waveforms.clone(),
+            current_beat: self.current_beat,
+            next_beat_start: Instant::now()
+                + std::time::Duration::from_millis(
+                    (self.samples_to_next_beat as f32 / self.sample_frequency as f32 * 1000.0)
+                        as u64,
+                ),
+            buffer: None,
+        };
 
         // Now generate!
         let generator = Generator {
@@ -371,7 +385,6 @@ impl<'a> AudioCallback for Tracker {
                 self.samples_to_next_beat =
                     samples_per_beat(self.sample_frequency, self.beats_per_minute);
                 self.current_beat += 1;
-                println!("Advancing to beat {}", self.current_beat);
 
                 // If we are at the start of a beat, check to see if there any any pending waveforms
                 // that can become active waveforms.
@@ -440,29 +453,14 @@ impl<'a> AudioCallback for Tracker {
             filled += desired;
         }
 
-        /*
-        if self.send_counter == 0 {
+        if self.send_current_buffer {
             let mut copy: Vec<f32> = Vec::with_capacity(out.len());
             out.clone_into(&mut copy);
-            self.sample_sender.send(copy).unwrap();
-            self.send_counter = 5;
-        } else {
-            self.send_counter -= 1;
+            status_to_send.buffer = Some(copy);
+            self.send_current_buffer = false;
         }
-        */
-        self.status_sender
-            .send(Status {
-                active_waveforms: self.active_waveforms.clone(),
-                pending_waveforms: self.pending_waveforms.clone(),
-                current_beat: self.current_beat,
-                next_beat_start: Instant::now()
-                    + std::time::Duration::from_millis(
-                        (self.samples_to_next_beat as f32 / self.sample_frequency as f32 * 1000.0)
-                            as u64,
-                    ),
-                samples: None,
-            })
-            .unwrap();
+
+        self.status_sender.send(status_to_send).unwrap();
     }
 }
 

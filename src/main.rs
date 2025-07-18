@@ -133,9 +133,13 @@ pub fn main() {
     device.resume();
 
     let video_subsystem = sdl_context.video().unwrap();
+    let display_mode = video_subsystem
+        .current_display_mode(0)
+        .map_err(|e| e.to_string())
+        .unwrap();
+    let width = 1500.min(display_mode.w) as u32;
+    let height = 1000.min(display_mode.h - 64 /* menu bar, etc. */) as u32;
     let ttf_context = sdl2::ttf::init().map_err(|e| e.to_string()).unwrap();
-    let width = 1500;
-    let height = 1000;
     let font_path = "/Library/Fonts/Arial Unicode.ttf";
     let window = video_subsystem
         .window("tuunel", width, height)
@@ -150,8 +154,12 @@ pub fn main() {
         .unwrap();
     let texture_creator = canvas.texture_creator();
     let font = ttf_context.load_font(font_path, 48).unwrap();
-    const INACTIVE_COLOR: Color = Color::RGBA(0, 255, 0, 255);
-    const EDIT_COLOR: Color = Color::RGBA(0, 255, 255, 255);
+    let mut bold_font = ttf_context.load_font(font_path, 48).unwrap();
+    bold_font.set_style(sdl2::ttf::FontStyle::BOLD);
+    const INACTIVE_COLOR: Color = Color::RGBA(0, 255, 255, 255);
+    const ACTIVE_COLOR: Color = Color::RGBA(0, 255, 0, 255);
+    const PENDING_COLOR: Color = Color::RGBA(255, 222, 33, 255);
+    const EDIT_COLOR: Color = Color::RGBA(255, 255, 255, 255);
     const ERROR_COLOR: Color = Color::RGBA(255, 0, 0, 255);
 
     let prompt_texture = make_texture(&font, INACTIVE_COLOR, &texture_creator, " ▸ ");
@@ -176,7 +184,7 @@ pub fn main() {
     let mut status = tracker::Status {
         active_waveforms: Vec::new(),
         pending_waveforms: Vec::new(),
-        samples: None,
+        buffer: None,
         current_beat: 0,
         next_beat_start: Instant::now()
             + Duration::from_secs_f32(1.0 / (args.beats_per_minute as f32 * 60.0)),
@@ -184,6 +192,10 @@ pub fn main() {
 
     video_subsystem.text_input().start();
     let mut event_pump = sdl_context.event_pump().unwrap();
+    let mut buffer = Vec::new();
+    const BUFFER_REFRESH_INTERVAL: Duration = Duration::from_millis(200);
+    let mut next_buffer_refresh = Instant::now();
+    command_sender.send(Command::SendCurrentBuffer).unwrap();
     loop {
         for event in event_pump.poll_iter() {
             //println!("Event: {:?} with mode {:?}", event, mode);
@@ -201,24 +213,40 @@ pub fn main() {
             }
         }
 
-        match status_receiver.recv_timeout(Duration::new(0, 1_000_000)) {
-            Ok(mut tracker_status) => {
-                //println!("Received tracker state: {:?}", tracker_status);
-                let samples = tracker_status.samples.unwrap_or(Vec::new());
-                tracker_status.samples = Some(Vec::new());
-                status = tracker_status.clone();
+        if next_buffer_refresh <= Instant::now() {
+            command_sender.send(Command::SendCurrentBuffer).unwrap();
+            next_buffer_refresh = Instant::now() + BUFFER_REFRESH_INTERVAL;
+        }
+
+        match status_receiver.recv_timeout(Duration::from_millis(10)) {
+            Ok(tracker_status) => {
+                // TODO Meh...
+                status.active_waveforms = tracker_status.active_waveforms;
+                status.pending_waveforms = tracker_status.pending_waveforms;
+                status.current_beat = tracker_status.current_beat;
+                status.next_beat_start = tracker_status.next_beat_start;
+                match tracker_status.buffer {
+                    Some(b) => buffer = b,
+                    _ => (),
+                }
 
                 canvas.set_draw_color(Color::RGB(0, 0, 0));
                 canvas.clear();
 
                 let mut y = 10;
                 for (i, buffer) in buffers.iter().enumerate() {
-                    let color = match mode {
-                        Mode::Edit { index, .. } if i == index => EDIT_COLOR,
+                    let color = match (&mode, is_active(&status, i), is_pending(&status, i)) {
+                        (_, true, _) => ACTIVE_COLOR,
+                        (_, _, true) => PENDING_COLOR,
+                        (Mode::Edit { index, .. }, _, _) if i == *index => EDIT_COLOR,
                         _ => INACTIVE_COLOR,
                     };
                     let number = char::from_u32(0x2460 + i as u32).unwrap().to_string();
-                    let number_texture = make_texture(&font, color, &texture_creator, &number);
+                    let number_texture = if is_active(&status, i) {
+                        make_texture(&bold_font, color, &texture_creator, &number)
+                    } else {
+                        make_texture(&font, color, &texture_creator, &number)
+                    };
                     let TextureQuery {
                         width: number_width,
                         ..
@@ -376,10 +404,10 @@ pub fn main() {
                 }
 
                 // Draw the waveform
-                let x_scale = width as f32 / samples.len() as f32;
+                let x_scale = width as f32 / buffer.len() as f32;
                 let waveform_height = height * 3 / 5;
                 canvas.set_draw_color(Color::RGB(0, 255, 0));
-                for (i, f) in samples.iter().enumerate() {
+                for (i, f) in buffer.iter().enumerate() {
                     let x = (i as f32 * x_scale) as i32;
                     let y = (f * (waveform_height as f32 / 2.4) + (waveform_height as f32 / 2.0))
                         as i32;
@@ -388,9 +416,9 @@ pub fn main() {
 
                 // Draw the spectra
                 let mut planner = RealFftPlanner::<f32>::new();
-                let fft = planner.plan_fft_forward(samples.len());
+                let fft = planner.plan_fft_forward(buffer.len());
                 let mut input = fft.make_input_vec();
-                for (i, f) in samples.iter().enumerate() {
+                for (i, f) in buffer.iter().enumerate() {
                     input[i] = *f;
                 }
                 let mut spectrum = fft.make_output_vec();
@@ -398,7 +426,7 @@ pub fn main() {
                     println!("Error processing FFT: {}", e);
                 } else {
                     let spectrum_height = height - waveform_height;
-                    let y_scale = -(samples.len() as f32).sqrt();
+                    let y_scale = -(buffer.len() as f32).sqrt();
                     canvas.set_draw_color(Color::RGB(255, 0, 0));
                     let mut last_y = (waveform_height + 300) as i32;
                     for (i, f) in spectrum.iter().enumerate() {
@@ -411,12 +439,53 @@ pub fn main() {
                     }
                 }
 
+                // Draw the current beat
+                let current_beat = if status.next_beat_start <= Instant::now() {
+                    status.current_beat + 1
+                } else {
+                    status.current_beat
+                } % args.beats_per_measure as u64
+                    + 1;
+                let beat_texture = make_texture(
+                    &font,
+                    ACTIVE_COLOR,
+                    &texture_creator,
+                    current_beat.to_string().as_str(),
+                );
+                let TextureQuery {
+                    width: beat_width,
+                    height: beat_height,
+                    ..
+                } = beat_texture.query();
+                canvas
+                    .copy(
+                        &beat_texture,
+                        None,
+                        Some(sdl2::rect::Rect::new(
+                            width as i32 - beat_width as i32 - 20,
+                            height as i32 - beat_height as i32 - 20,
+                            beat_width,
+                            beat_height,
+                        )),
+                    )
+                    .unwrap();
+
                 canvas.present();
             }
             Err(_) => {}
         }
-        ::std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 30));
     }
+}
+
+fn is_pending(status: &tracker::Status, index: usize) -> bool {
+    status
+        .pending_waveforms
+        .iter()
+        .any(|w| w.id == index as u32)
+}
+
+fn is_active(status: &tracker::Status, index: usize) -> bool {
+    status.active_waveforms.iter().any(|w| w.id == index as u32)
 }
 
 fn edit_mode_from_buffer(index: usize, buffer: &str) -> Mode {
@@ -456,18 +525,9 @@ fn process_event(
                 }
                 (Mode::Select { index }, Some(sdl2::keyboard::Scancode::Return)) => {
                     // Check to see whether or not the current index is in the tracker's
-                    // active or pending waveforms
-                    if status
-                        .active_waveforms
-                        .iter()
-                        .any(|waveform| waveform.id == index as u32)
-                        || status
-                            .pending_waveforms
-                            .iter()
-                            .any(|waveform| waveform.id == index as u32)
-                    {
+                    // pending waveforms
+                    if is_pending(status, index) {
                         // If it is, we just stay in select mode
-                        // TODO ... or maybe we shouldn't?
                         return (context, Mode::Select { index });
                     }
                     return (context, edit_mode_from_buffer(index, &buffers[index]));
