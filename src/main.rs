@@ -45,8 +45,8 @@ struct Args {
     beats_per_measure: i32,
     #[arg(long, default_value_t = 44100)]
     sample_frequency: i32,
-    #[arg(short, long = "buffer", default_value = "", number_of_values = 1)]
-    buffers: Vec<String>,
+    #[arg(short, long = "program", default_value = "", number_of_values = 1)]
+    programs: Vec<String>,
     #[arg(short = 'C', long = "context_file")]
     context: String,
 }
@@ -104,7 +104,7 @@ fn load_context(file: &String) -> Vec<(String, parser::Expr)> {
     return context;
 }
 
-const NUM_BUFFERS: usize = 8;
+const NUM_PROGRAMS: usize = 8;
 
 pub fn main() {
     let args = Args::parse();
@@ -176,9 +176,9 @@ pub fn main() {
     let nav_width = prompt_width + number_width;
 
     let mut context = load_context(&args.context);
-    let mut buffers = args.buffers.clone();
-    while buffers.len() < NUM_BUFFERS {
-        buffers.push(String::new());
+    let mut programs = args.programs.clone();
+    while programs.len() < NUM_PROGRAMS {
+        programs.push(String::new());
     }
     let mut mode = Mode::Select { index: 0 };
     let mut status = tracker::Status {
@@ -205,7 +205,7 @@ pub fn main() {
                 event,
                 mode,
                 &status,
-                &mut buffers,
+                &mut programs,
                 &command_sender,
             );
             if let Mode::Exit = mode {
@@ -234,7 +234,7 @@ pub fn main() {
                 canvas.clear();
 
                 let mut y = 10;
-                for (i, buffer) in buffers.iter().enumerate() {
+                for (i, program) in programs.iter().enumerate() {
                     let color = match (&mode, is_active(&status, i), is_pending(&status, i)) {
                         (_, true, _) => ACTIVE_COLOR,
                         (_, _, true) => PENDING_COLOR,
@@ -265,9 +265,9 @@ pub fn main() {
                                     )),
                                 )
                                 .unwrap();
-                            if i != index && !buffer.is_empty() {
+                            if i != index && !program.is_empty() {
                                 let text_texture =
-                                    make_texture(&font, INACTIVE_COLOR, &texture_creator, buffer);
+                                    make_texture(&font, INACTIVE_COLOR, &texture_creator, program);
                                 let TextureQuery {
                                     width: text_width,
                                     height: text_height,
@@ -286,10 +286,10 @@ pub fn main() {
                                     )
                                     .unwrap();
                             } else if i == index {
-                                // Loop over each character in buffer and check to see if it's in any of the error
+                                // Loop over each character in program and check to see if it's in any of the error
                                 // ranges
                                 let mut x = nav_width as i32;
-                                for (j, c) in buffer.chars().enumerate() {
+                                for (j, c) in program.chars().enumerate() {
                                     let color = if errors.iter().any(|e| match e.range() {
                                         Some(range) if range.contains(&j) => true,
                                         _ => false,
@@ -376,9 +376,9 @@ pub fn main() {
                                     )),
                                 )
                                 .unwrap();
-                            if !buffer.is_empty() {
+                            if !program.is_empty() {
                                 let text_texture =
-                                    make_texture(&font, INACTIVE_COLOR, &texture_creator, buffer);
+                                    make_texture(&font, INACTIVE_COLOR, &texture_creator, program);
                                 let TextureQuery {
                                     width: text_width,
                                     height: text_height,
@@ -488,8 +488,8 @@ fn is_active(status: &tracker::Status, index: usize) -> bool {
     status.active_waveforms.iter().any(|w| w.id == index as u32)
 }
 
-fn edit_mode_from_buffer(index: usize, buffer: &str) -> Mode {
-    match parser::parse_program(buffer) {
+fn edit_mode_from_program(index: usize, program: &str) -> Mode {
+    match parser::parse_program(program) {
         Ok(_) => Mode::Edit {
             index,
             errors: Vec::new(),
@@ -504,7 +504,7 @@ fn process_event(
     event: Event,
     mode: Mode,
     status: &tracker::Status,
-    buffers: &mut Vec<String>,
+    programs: &mut Vec<String>,
     command_sender: &std::sync::mpsc::Sender<Command>,
 ) -> (Vec<(String, parser::Expr)>, Mode) {
     match event {
@@ -530,13 +530,13 @@ fn process_event(
                         // If it is, we just stay in select mode
                         return (context, Mode::Select { index });
                     }
-                    return (context, edit_mode_from_buffer(index, &buffers[index]));
+                    return (context, edit_mode_from_program(index, &programs[index]));
                 }
                 (Mode::Select { index }, Some(sdl2::keyboard::Scancode::Up)) => {
                     return (
                         context,
                         Mode::Select {
-                            index: (index + buffers.len() - 1) % buffers.len(),
+                            index: (index + programs.len() - 1) % programs.len(),
                         },
                     );
                 }
@@ -544,12 +544,12 @@ fn process_event(
                     return (
                         context,
                         Mode::Select {
-                            index: (index + 1) % buffers.len(),
+                            index: (index + 1) % programs.len(),
                         },
                     );
                 }
                 (Mode::Edit { index, .. }, Some(sdl2::keyboard::Scancode::Return)) => {
-                    let buffer = &buffers[index];
+                    let buffer = &programs[index];
                     match parser::parse_program(buffer) {
                         Ok(expr) => {
                             println!("Parser returned: {:}", &expr);
@@ -606,7 +606,7 @@ fn process_event(
                 }
                 (Mode::Edit { index, .. }, Some(sdl2::keyboard::Scancode::Backspace)) => {
                     // If the option key is down, clear the last word
-                    let mut buffer = buffers[index].clone();
+                    let mut buffer = programs[index].clone();
                     if keymod.contains(sdl2::keyboard::Mod::LALTMOD) {
                         if let Some(char_index) = buffer.rfind(|e| !char::is_whitespace(e)) {
                             if let Some(space_index) =
@@ -624,8 +624,8 @@ fn process_event(
                     } else {
                         buffer.pop();
                     }
-                    buffers[index] = buffer;
-                    return (context, edit_mode_from_buffer(index, &buffers[index]));
+                    programs[index] = buffer;
+                    return (context, edit_mode_from_program(index, &programs[index]));
                 }
                 (Mode::Edit { index, .. }, Some(sdl2::keyboard::Scancode::Escape)) => {
                     return (context, Mode::Select { index: index });
@@ -636,13 +636,13 @@ fn process_event(
         Event::TextInput { text, .. } => {
             match mode {
                 Mode::Select { .. } => {
-                    // If the text is a number less than NUM_BUFFERS, update the index
+                    // If the text is a number less than programs.len(), update the index
                     if let Ok(index) = text.parse::<usize>() {
-                        if index <= NUM_BUFFERS {
+                        if index <= programs.len() {
                             return (
                                 context,
                                 Mode::Select {
-                                    index: (index + NUM_BUFFERS - 1) % NUM_BUFFERS,
+                                    index: (index + programs.len() - 1) % programs.len(),
                                 },
                             );
                         } else {
@@ -656,8 +656,8 @@ fn process_event(
                     return (context, mode);
                 }
                 Mode::Edit { index, .. } => {
-                    buffers[index].push_str(&text);
-                    return (context, edit_mode_from_buffer(index, &buffers[index]));
+                    programs[index].push_str(&text);
+                    return (context, edit_mode_from_program(index, &programs[index]));
                 }
                 Mode::Exit => {
                     return (context, mode);
