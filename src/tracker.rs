@@ -47,7 +47,7 @@ pub enum Waveform {
      * SineWave is a sinusoidal wave generator with the given frequency.
      */
     SineWave {
-        frequency: f32,
+        frequency: Box<Waveform>,
     },
     Const(f32),
     /*
@@ -93,10 +93,10 @@ impl Generator {
     fn generate(&self, waveform: &Waveform, position: usize, desired: usize) -> Vec<f32> {
         match waveform {
             Waveform::SineWave { frequency } => {
-                let mut out = vec![0.0; desired];
+                let mut out = self.generate(frequency, position, desired);
                 for (i, f) in out.iter_mut().enumerate() {
                     let t_secs = (i + position) as f32 / self.sample_frequency as f32;
-                    *f = (2.0 * PI * frequency * t_secs).sin();
+                    *f = (2.0 * PI * *f * t_secs).sin();
                 }
                 return out;
             }

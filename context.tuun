@@ -1,11 +1,11 @@
 fs = fn(dur) => fn(w) => w | fin(dur) | seq(dur),
 
-amp = fn(level) => fn(w) => w ~. const(level),
+amp = fn(level) => fn(w) => w ~. level,
 
 // Create waveforms for the four parts of the envelope.
 Aw = fn(dur) => linear(0.0, 1.0 / dur) | fin(dur) | seq(dur),
 Dw = fn(dur, level) => linear(1.0, (level - 1.0) / dur) | fin(dur) | seq(dur),
-Sw = fn(dur, level) => const(level) | fin(dur) | seq(dur),
+Sw = fn(dur, level) => level | fin(dur) | seq(dur),
 Rw = fn(dur, level) => linear(level, -level / dur) | fin(dur) | seq(dur),
 // Combine them to create a new filter.
 ADSR = fn(attack_dur, decay_dur, sustain_level, sustain_dur, release_dur) =>
@@ -16,12 +16,12 @@ ADSR = fn(attack_dur, decay_dur, sustain_level, sustain_dur, release_dur) =>
 
 // Also, we can create component filters... though note that the first three
 // don't change the length, so they need to be combined with R (or fin).
-A = fn(dur) => fn(w) => w ~. (Aw(dur) ~+ const(1)),
-D = fn(dur, level) => fn(w) => w ~. (Dw(dur, level) ~+ const(1)),
-S = fn(dur, level) => fn(w) => w ~. (Sw(dur, level) ~+ const(1)),
+A = fn(dur) => fn(w) => w ~. (Aw(dur) ~+ 1),
+D = fn(dur, level) => fn(w) => w ~. (Dw(dur, level) ~+ 1),
+S = fn(dur, level) => fn(w) => w ~. (Sw(dur, level) ~+ 1),
 R = fn(dur, level) => fn(w) => w ~. Rw(dur, level),
 
-over = fn(x, freq) => $(freq*x) ~. const(1/x),
+over = fn(x, freq) => $(freq*x) ~. (1/x),
 hrm = fn(freq) => {map(fn(x) => over(x, freq), [1, 3, 5, 7, 9, 11])},
 mar = fn(freq) => {[$freq, over(2.76, freq), over(5.40, freq), over(8.93, freq)]},
 

@@ -73,7 +73,7 @@ impl Renderer {
         let height = 1000.min(display_mode.h - 64 /* menu bar, etc. */) as u32;
         //        let ttf_context = sdl2::ttf::init().map_err(|e| e.to_string()).unwrap();
         let window = video_subsystem
-            .window("tuunel", width, height)
+            .window("Tuun", width, height)
             .position_centered()
             .build()
             .map_err(|e| e.to_string())

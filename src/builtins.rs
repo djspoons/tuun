@@ -89,16 +89,14 @@ pub fn reduce(arguments: Vec<Expr>) -> Expr {
 }
 
 pub fn sine_waveform(arguments: Vec<Expr>) -> Expr {
-    match arguments[..] {
-        [Float(frequency)] => Expr::Waveform(Waveform::SineWave { frequency }),
+    match &arguments[..] {
+        [Expr::Waveform(a)] => Expr::Waveform(Waveform::SineWave {
+            frequency: Box::new(a.clone()),
+        }),
+        [Float(value)] => Expr::Waveform(Waveform::SineWave {
+            frequency: Box::new(Waveform::Const(*value)),
+        }),
         _ => Expr::Error("Invalid argument for $".to_string()),
-    }
-}
-
-pub fn const_waveform(arguments: Vec<Expr>) -> Expr {
-    match arguments[..] {
-        [Float(value)] => Expr::Waveform(Waveform::Const(value)),
-        _ => Expr::Error("Invalid argument for const".to_string()),
     }
 }
 
@@ -119,7 +117,8 @@ fn filter(f: impl Fn(Box<Waveform>) -> Waveform + 'static) -> BuiltInFn {
         }
         let waveform = arguments.remove(0);
         match waveform {
-            Expr::Waveform(waveform) => Expr::Waveform(f(Box::new(waveform))),
+            Expr::Waveform(a) => Expr::Waveform(f(Box::new(a))),
+            Expr::Float(value) => Expr::Waveform(f(Box::new(Waveform::Const(value)))),
             _ => Expr::Error("Invalid waveform".to_string()),
         }
     }))
@@ -145,25 +144,32 @@ pub fn seq(arguments: Vec<Expr>) -> Expr {
     }
 }
 
-pub fn waveform_sum(arguments: Vec<Expr>) -> Expr {
-    match &arguments[..] {
-        [Expr::Waveform(a), Expr::Waveform(b)] => {
-            return Expr::Waveform(Waveform::Sum(Box::new(a.clone()), Box::new(b.clone())));
-        }
-        _ => return Expr::Error("Invalid argument for ~+".to_string()),
+fn waveform_binary_op(
+    mut arguments: Vec<Expr>,
+    op: fn(Box<Waveform>, Box<Waveform>) -> Waveform,
+) -> Expr {
+    if arguments.len() != 2 {
+        return Expr::Error("Expected two waveforms".to_string());
     }
+    let a = match arguments.remove(0) {
+        Expr::Waveform(a) => Box::new(a),
+        Float(value) => Box::new(Waveform::Const(value)),
+        _ => return Expr::Error("First argument must be a waveform or float".to_string()),
+    };
+    let b = match arguments.remove(0) {
+        Expr::Waveform(b) => Box::new(b),
+        Float(value) => Box::new(Waveform::Const(value)),
+        _ => return Expr::Error("Second argument must be a waveform or float".to_string()),
+    };
+    return Expr::Waveform(op(a, b));
+}
+
+pub fn waveform_sum(arguments: Vec<Expr>) -> Expr {
+    return waveform_binary_op(arguments, Waveform::Sum);
 }
 
 pub fn waveform_dot_product(arguments: Vec<Expr>) -> Expr {
-    match &arguments[..] {
-        [Expr::Waveform(a), Expr::Waveform(b)] => {
-            return Expr::Waveform(Waveform::DotProduct(
-                Box::new(a.clone()),
-                Box::new(b.clone()),
-            ));
-        }
-        _ => return Expr::Error("Invalid argument for ~.".to_string()),
-    }
+    return waveform_binary_op(arguments, Waveform::DotProduct);
 }
 
 pub fn chord(arguments: Vec<Expr>) -> Expr {
@@ -174,18 +180,18 @@ pub fn chord(arguments: Vec<Expr>) -> Expr {
                 waveform: Box::new(Waveform::Const(0.0)),
             };
             for expr in exprs.iter().rev() {
-                match expr {
-                    Expr::Waveform(waveform) => {
-                        result = Waveform::Sum(
-                            Box::new(Waveform::Seq {
-                                duration: 0.0,
-                                waveform: Box::new(waveform.clone()),
-                            }),
-                            Box::new(result),
-                        );
-                    }
+                let waveform = match expr {
+                    Expr::Waveform(waveform) => Box::new(waveform.clone()),
+                    &Expr::Float(value) => Box::new(Waveform::Const(value)),
                     _ => return Expr::Error(format!("Invalid element in chord: {}", expr)),
-                }
+                };
+                result = Waveform::Sum(
+                    Box::new(Waveform::Seq {
+                        duration: 0.0,
+                        waveform,
+                    }),
+                    Box::new(result),
+                );
             }
             return Expr::Waveform(result);
         }
@@ -201,12 +207,12 @@ pub fn sequence(arguments: Vec<Expr>) -> Expr {
                 waveform: Box::new(Waveform::Const(0.0)),
             };
             for expr in exprs.iter().rev() {
-                match expr {
-                    Expr::Waveform(waveform) => {
-                        result = Waveform::Sum(Box::new(waveform.clone()), Box::new(result));
-                    }
+                let waveform = match expr {
+                    Expr::Waveform(waveform) => Box::new(waveform.clone()),
+                    &Expr::Float(value) => Box::new(Waveform::Const(value)),
                     _ => return Expr::Error(format!("Invalid element in sequence: {}", expr)),
-                }
+                };
+                result = Waveform::Sum(waveform, Box::new(result));
             }
             return Expr::Waveform(result);
         }
@@ -225,7 +231,6 @@ pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
         ("map", map),
         ("reduce", reduce),
         ("$", sine_waveform),
-        ("const", const_waveform),
         ("linear", linear_waveform),
         ("fin", fin),
         ("seq", seq),
