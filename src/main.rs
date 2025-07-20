@@ -3,38 +3,15 @@ use std::time::{Duration, Instant};
 extern crate sdl2;
 use sdl2::audio::AudioSpecDesired;
 use sdl2::event::Event;
-use sdl2::pixels::Color;
-use sdl2::render::{TextureCreator, TextureQuery};
-use sdl2::ttf::Font;
-use sdl2::video::WindowContext;
-
-use realfft::num_complex::ComplexFloat;
-use realfft::RealFftPlanner;
+use sdl2::ttf::Sdl2TtfContext;
 
 use clap::Parser as ClapParser;
 
 mod builtins;
 mod parser;
+mod renderer;
 mod tracker;
 use tracker::Command;
-
-fn make_texture<'a>(
-    font: &Font<'a, 'static>,
-    color: Color,
-    texture_creator: &'a TextureCreator<WindowContext>,
-    s: &str,
-) -> sdl2::render::Texture<'a> {
-    let surface = font
-        .render(s)
-        .blended(color)
-        .map_err(|e| e.to_string())
-        .unwrap();
-    let texture = texture_creator
-        .create_texture_from_surface(&surface)
-        .map_err(|e| e.to_string())
-        .unwrap();
-    return texture;
-}
 
 #[derive(ClapParser, Debug)]
 #[command(version, about, long_about = None)]
@@ -42,7 +19,7 @@ struct Args {
     #[arg(long = "tempo", default_value_t = 90)]
     beats_per_minute: i32,
     #[arg(long = "beats_per_measure", default_value_t = 4)]
-    beats_per_measure: i32,
+    beats_per_measure: u32,
     #[arg(long, default_value_t = 44100)]
     sample_frequency: i32,
     #[arg(short, long = "program", default_value = "", number_of_values = 1)]
@@ -122,7 +99,7 @@ pub fn main() {
     let device = audio_subsystem
         .open_playback(None, &desired_spec, |spec| {
             println!("Spec: {:?}", spec);
-            tracker::new_tracker(
+            tracker::Tracker::new(
                 args.sample_frequency,
                 args.beats_per_minute,
                 command_receiver,
@@ -132,48 +109,8 @@ pub fn main() {
         .unwrap();
     device.resume();
 
-    let video_subsystem = sdl_context.video().unwrap();
-    let display_mode = video_subsystem
-        .current_display_mode(0)
-        .map_err(|e| e.to_string())
-        .unwrap();
-    let width = 1500.min(display_mode.w) as u32;
-    let height = 1000.min(display_mode.h - 64 /* menu bar, etc. */) as u32;
-    let ttf_context = sdl2::ttf::init().map_err(|e| e.to_string()).unwrap();
-    let font_path = "/Library/Fonts/Arial Unicode.ttf";
-    let window = video_subsystem
-        .window("tuunel", width, height)
-        .position_centered()
-        .build()
-        .map_err(|e| e.to_string())
-        .unwrap();
-    let mut canvas = window
-        .into_canvas()
-        .build()
-        .map_err(|e| e.to_string())
-        .unwrap();
-    let texture_creator = canvas.texture_creator();
-    let font = ttf_context.load_font(font_path, 48).unwrap();
-    let mut bold_font = ttf_context.load_font(font_path, 48).unwrap();
-    bold_font.set_style(sdl2::ttf::FontStyle::BOLD);
-    const INACTIVE_COLOR: Color = Color::RGBA(0, 255, 255, 255);
-    const ACTIVE_COLOR: Color = Color::RGBA(0, 255, 0, 255);
-    const PENDING_COLOR: Color = Color::RGBA(255, 222, 33, 255);
-    const EDIT_COLOR: Color = Color::RGBA(255, 255, 255, 255);
-    const ERROR_COLOR: Color = Color::RGBA(255, 0, 0, 255);
-
-    let prompt_texture = make_texture(&font, INACTIVE_COLOR, &texture_creator, " ▸ ");
-    let TextureQuery {
-        width: prompt_width,
-        height: line_height,
-        ..
-    } = prompt_texture.query();
-    let number_texture = make_texture(&font, INACTIVE_COLOR, &texture_creator, "① ");
-    let TextureQuery {
-        width: number_width,
-        ..
-    } = number_texture.query();
-    let nav_width = prompt_width + number_width;
+    let ttf_context: Sdl2TtfContext = sdl2::ttf::init().unwrap();
+    let mut renderer = renderer::Renderer::new(&sdl_context, &ttf_context, args.beats_per_measure);
 
     let mut context = load_context(&args.context);
     let mut programs = args.programs.clone();
@@ -184,15 +121,14 @@ pub fn main() {
     let mut status = tracker::Status {
         active_waveforms: Vec::new(),
         pending_waveforms: Vec::new(),
-        buffer: None,
         current_beat: 0,
         next_beat_start: Instant::now()
             + Duration::from_secs_f32(1.0 / (args.beats_per_minute as f32 * 60.0)),
+        buffer: None,
     };
 
-    video_subsystem.text_input().start();
+    renderer.video_subsystem.text_input().start();
     let mut event_pump = sdl_context.event_pump().unwrap();
-    let mut buffer = Vec::new();
     const BUFFER_REFRESH_INTERVAL: Duration = Duration::from_millis(200);
     let mut next_buffer_refresh = Instant::now();
     command_sender.send(Command::SendCurrentBuffer).unwrap();
@@ -226,266 +162,14 @@ pub fn main() {
                 status.current_beat = tracker_status.current_beat;
                 status.next_beat_start = tracker_status.next_beat_start;
                 match tracker_status.buffer {
-                    Some(b) => buffer = b,
+                    Some(_) => status.buffer = tracker_status.buffer,
                     _ => (),
                 }
-
-                canvas.set_draw_color(Color::RGB(0, 0, 0));
-                canvas.clear();
-
-                let mut y = 10;
-                for (i, program) in programs.iter().enumerate() {
-                    let color = match (&mode, is_active(&status, i), is_pending(&status, i)) {
-                        (_, true, _) => ACTIVE_COLOR,
-                        (_, _, true) => PENDING_COLOR,
-                        (Mode::Edit { index, .. }, _, _) if i == *index => EDIT_COLOR,
-                        _ => INACTIVE_COLOR,
-                    };
-                    let number = char::from_u32(0x2460 + i as u32).unwrap().to_string();
-                    let number_texture = if is_active(&status, i) {
-                        make_texture(&bold_font, color, &texture_creator, &number)
-                    } else {
-                        make_texture(&font, color, &texture_creator, &number)
-                    };
-                    let TextureQuery {
-                        width: number_width,
-                        ..
-                    } = number_texture.query();
-                    match mode {
-                        Mode::Edit { index, ref errors } => {
-                            canvas
-                                .copy(
-                                    &number_texture,
-                                    None,
-                                    Some(sdl2::rect::Rect::new(
-                                        prompt_width as i32,
-                                        y,
-                                        number_width,
-                                        line_height,
-                                    )),
-                                )
-                                .unwrap();
-                            if i != index && !program.is_empty() {
-                                let text_texture =
-                                    make_texture(&font, INACTIVE_COLOR, &texture_creator, program);
-                                let TextureQuery {
-                                    width: text_width,
-                                    height: text_height,
-                                    ..
-                                } = text_texture.query();
-                                canvas
-                                    .copy(
-                                        &text_texture,
-                                        None,
-                                        Some(sdl2::rect::Rect::new(
-                                            nav_width as i32,
-                                            y,
-                                            text_width,
-                                            text_height,
-                                        )),
-                                    )
-                                    .unwrap();
-                            } else if i == index {
-                                // Loop over each character in program and check to see if it's in any of the error
-                                // ranges
-                                let mut x = nav_width as i32;
-                                for (j, c) in program.chars().enumerate() {
-                                    let color = if errors.iter().any(|e| match e.range() {
-                                        Some(range) if range.contains(&j) => true,
-                                        _ => false,
-                                    }) {
-                                        ERROR_COLOR
-                                    } else {
-                                        EDIT_COLOR
-                                    };
-                                    let char_texture = make_texture(
-                                        &font,
-                                        color,
-                                        &texture_creator,
-                                        &c.to_string(),
-                                    );
-                                    let TextureQuery {
-                                        width: char_width,
-                                        height: char_height,
-                                        ..
-                                    } = char_texture.query();
-                                    canvas
-                                        .copy(
-                                            &char_texture,
-                                            None,
-                                            Some(sdl2::rect::Rect::new(
-                                                x,
-                                                y,
-                                                char_width,
-                                                char_height,
-                                            )),
-                                        )
-                                        .unwrap();
-                                    x += char_width as i32;
-                                }
-                                let color = if !errors.is_empty() {
-                                    ERROR_COLOR
-                                } else {
-                                    EDIT_COLOR
-                                };
-                                let cursor_texture =
-                                    make_texture(&font, color, &texture_creator, "‸");
-                                let TextureQuery {
-                                    width: cursor_width,
-                                    height: cursor_height,
-                                    ..
-                                } = cursor_texture.query();
-                                canvas
-                                    .copy(
-                                        &cursor_texture,
-                                        None,
-                                        Some(sdl2::rect::Rect::new(
-                                            x,
-                                            y,
-                                            cursor_width,
-                                            cursor_height,
-                                        )),
-                                    )
-                                    .unwrap();
-                            }
-                        }
-                        Mode::Select { index } => {
-                            if index == i {
-                                canvas
-                                    .copy(
-                                        &prompt_texture,
-                                        None,
-                                        Some(sdl2::rect::Rect::new(
-                                            0,
-                                            y,
-                                            prompt_width,
-                                            line_height,
-                                        )),
-                                    )
-                                    .unwrap();
-                            }
-                            canvas
-                                .copy(
-                                    &number_texture,
-                                    None,
-                                    Some(sdl2::rect::Rect::new(
-                                        prompt_width as i32,
-                                        y,
-                                        number_width,
-                                        line_height,
-                                    )),
-                                )
-                                .unwrap();
-                            if !program.is_empty() {
-                                let text_texture =
-                                    make_texture(&font, INACTIVE_COLOR, &texture_creator, program);
-                                let TextureQuery {
-                                    width: text_width,
-                                    height: text_height,
-                                    ..
-                                } = text_texture.query();
-                                canvas
-                                    .copy(
-                                        &text_texture,
-                                        None,
-                                        Some(sdl2::rect::Rect::new(
-                                            nav_width as i32,
-                                            y,
-                                            text_width,
-                                            text_height,
-                                        )),
-                                    )
-                                    .unwrap();
-                            }
-                        }
-                        Mode::Exit => (),
-                    }
-                    y += line_height as i32;
-                }
-
-                // Draw the waveform
-                let x_scale = width as f32 / buffer.len() as f32;
-                let waveform_height = height * 3 / 5;
-                canvas.set_draw_color(Color::RGB(0, 255, 0));
-                for (i, f) in buffer.iter().enumerate() {
-                    let x = (i as f32 * x_scale) as i32;
-                    let y = (f * (waveform_height as f32 / 2.4) + (waveform_height as f32 / 2.0))
-                        as i32;
-                    canvas.draw_point((x, y)).unwrap();
-                }
-
-                // Draw the spectra
-                let mut planner = RealFftPlanner::<f32>::new();
-                let fft = planner.plan_fft_forward(buffer.len());
-                let mut input = fft.make_input_vec();
-                for (i, f) in buffer.iter().enumerate() {
-                    input[i] = *f;
-                }
-                let mut spectrum = fft.make_output_vec();
-                if let Err(e) = fft.process(&mut input, &mut spectrum) {
-                    println!("Error processing FFT: {}", e);
-                } else {
-                    let spectrum_height = height - waveform_height;
-                    let y_scale = -(buffer.len() as f32).sqrt();
-                    canvas.set_draw_color(Color::RGB(255, 0, 0));
-                    let mut last_y = (waveform_height + 300) as i32;
-                    for (i, f) in spectrum.iter().enumerate() {
-                        let x = ((i * 10) as f32 * x_scale) as i32;
-                        let y = (f.abs() / y_scale * (spectrum_height as f32 / 10.0)
-                            + (waveform_height + 300) as f32)
-                            as i32;
-                        canvas.draw_line((x, last_y), (x + 9, y)).unwrap();
-                        last_y = y;
-                    }
-                }
-
-                // Draw the current beat
-                let current_beat = if status.next_beat_start <= Instant::now() {
-                    status.current_beat + 1
-                } else {
-                    status.current_beat
-                } % args.beats_per_measure as u64
-                    + 1;
-                let beat_texture = make_texture(
-                    &font,
-                    ACTIVE_COLOR,
-                    &texture_creator,
-                    current_beat.to_string().as_str(),
-                );
-                let TextureQuery {
-                    width: beat_width,
-                    height: beat_height,
-                    ..
-                } = beat_texture.query();
-                canvas
-                    .copy(
-                        &beat_texture,
-                        None,
-                        Some(sdl2::rect::Rect::new(
-                            width as i32 - beat_width as i32 - 20,
-                            height as i32 - beat_height as i32 - 20,
-                            beat_width,
-                            beat_height,
-                        )),
-                    )
-                    .unwrap();
-
-                canvas.present();
+                renderer.render(&ttf_context, &programs, &status, &mode);
             }
             Err(_) => {}
         }
     }
-}
-
-fn is_pending(status: &tracker::Status, index: usize) -> bool {
-    status
-        .pending_waveforms
-        .iter()
-        .any(|w| w.id == index as u32)
-}
-
-fn is_active(status: &tracker::Status, index: usize) -> bool {
-    status.active_waveforms.iter().any(|w| w.id == index as u32)
 }
 
 fn edit_mode_from_program(index: usize, program: &str) -> Mode {
@@ -526,7 +210,11 @@ fn process_event(
                 (Mode::Select { index }, Some(sdl2::keyboard::Scancode::Return)) => {
                     // Check to see whether or not the current index is in the tracker's
                     // pending waveforms
-                    if is_pending(status, index) {
+                    if status
+                        .pending_waveforms
+                        .iter()
+                        .any(|w| w.id == index as u32)
+                    {
                         // If it is, we just stay in select mode
                         return (context, Mode::Select { index });
                     }

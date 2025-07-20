@@ -293,26 +293,27 @@ pub struct Tracker {
     send_current_buffer: bool,
 }
 
-pub fn new_tracker(
-    sample_frequency: i32,
-    beats_per_minute: i32,
-    command_receiver: Receiver<Command>,
-    status_sender: Sender<Status>,
-) -> Tracker {
-    return Tracker {
-        sample_frequency,
-        beats_per_minute,
-        command_receiver,
-        status_sender,
+impl Tracker {
+    pub fn new(
+        sample_frequency: i32,
+        beats_per_minute: i32,
+        command_receiver: Receiver<Command>,
+        status_sender: Sender<Status>,
+    ) -> Tracker {
+        return Tracker {
+            sample_frequency,
+            beats_per_minute,
+            command_receiver,
+            status_sender,
 
-        active_waveforms: Vec::new(),
-        pending_waveforms: Vec::new(),
-        current_beat: 1,
-        samples_to_next_beat: samples_per_beat(sample_frequency, beats_per_minute),
-        send_current_buffer: false,
-    };
+            active_waveforms: Vec::new(),
+            pending_waveforms: Vec::new(),
+            current_beat: 1,
+            samples_to_next_beat: samples_per_beat(sample_frequency, beats_per_minute),
+            send_current_buffer: false,
+        };
+    }
 }
-
 fn samples_per_beat(sample_frequency: i32, beats_per_minute: i32) -> usize {
     // (seconds/minute) * 60/(beats/min) * (samples/sec)
     let seconds_per_beat = 60.0 / beats_per_minute as f32;
