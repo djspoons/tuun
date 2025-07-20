@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "4.5.39", features = ["derive"] }
+mock_instant = "0.6.0"
 nom = "8.0"
 nom_locate = "5.0.0"
 realfft = "3.5.0"

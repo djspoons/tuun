@@ -8,6 +8,8 @@ use sdl2::ttf::Sdl2TtfContext;
 use clap::Parser as ClapParser;
 
 mod builtins;
+mod metric;
+use metric::Metric;
 mod parser;
 mod renderer;
 mod tracker;
@@ -17,7 +19,7 @@ use tracker::Command;
 #[command(version, about, long_about = None)]
 struct Args {
     #[arg(long = "tempo", default_value_t = 90)]
-    beats_per_minute: i32,
+    beats_per_minute: u32,
     #[arg(long = "beats_per_measure", default_value_t = 4)]
     beats_per_measure: u32,
     #[arg(long, default_value_t = 44100)]
@@ -110,7 +112,12 @@ pub fn main() {
     device.resume();
 
     let ttf_context: Sdl2TtfContext = sdl2::ttf::init().unwrap();
-    let mut renderer = renderer::Renderer::new(&sdl_context, &ttf_context, args.beats_per_measure);
+    let mut renderer = renderer::Renderer::new(
+        &sdl_context,
+        &ttf_context,
+        args.beats_per_minute,
+        args.beats_per_measure,
+    );
 
     let mut context = load_context(&args.context);
     let mut programs = args.programs.clone();
@@ -125,6 +132,10 @@ pub fn main() {
         next_beat_start: Instant::now()
             + Duration::from_secs_f32(1.0 / (args.beats_per_minute as f32 * 60.0)),
         buffer: None,
+        tracker_load: None,
+    };
+    let mut metrics = renderer::Metrics {
+        tracker_load: Metric::new(std::time::Duration::from_secs(10), 100),
     };
 
     renderer.video_subsystem.text_input().start();
@@ -161,11 +172,14 @@ pub fn main() {
                 status.pending_waveforms = tracker_status.pending_waveforms;
                 status.current_beat = tracker_status.current_beat;
                 status.next_beat_start = tracker_status.next_beat_start;
+                if let Some(ratio) = tracker_status.tracker_load {
+                    metrics.tracker_load.set(ratio);
+                }
                 match tracker_status.buffer {
                     Some(_) => status.buffer = tracker_status.buffer,
                     _ => (),
                 }
-                renderer.render(&ttf_context, &programs, &status, &mode);
+                renderer.render(&ttf_context, &programs, &status, &mode, &mut metrics);
             }
             Err(_) => {}
         }

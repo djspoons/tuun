@@ -80,8 +80,10 @@ pub enum Waveform {
  */
 struct Generator {
     sample_frequency: i32,
-    beats_per_minute: i32,
+    beats_per_minute: u32,
 }
+
+// TODO add metrics for waveform expr depth and total ops
 
 impl Generator {
     // Generate a vector of samples up to `desired` length. `position` indicates where
@@ -98,8 +100,8 @@ impl Generator {
                 }
                 return out;
             }
-            Waveform::Const(value) => {
-                return vec![*value; desired];
+            &Waveform::Const(value) => {
+                return vec![value; desired];
             }
             Waveform::Linear {
                 initial_value,
@@ -276,12 +278,13 @@ pub struct Status {
     pub pending_waveforms: Vec<PendingWaveform>,
     pub current_beat: u64,
     pub next_beat_start: Instant,
+    pub tracker_load: Option<f32>, // ratio of sample frequency to samples generated per second
     pub buffer: Option<Vec<f32>>,
 }
 
 pub struct Tracker {
     sample_frequency: i32,
-    beats_per_minute: i32,
+    beats_per_minute: u32,
     command_receiver: Receiver<Command>,
     status_sender: Sender<Status>,
 
@@ -296,7 +299,7 @@ pub struct Tracker {
 impl Tracker {
     pub fn new(
         sample_frequency: i32,
-        beats_per_minute: i32,
+        beats_per_minute: u32,
         command_receiver: Receiver<Command>,
         status_sender: Sender<Status>,
     ) -> Tracker {
@@ -314,13 +317,11 @@ impl Tracker {
         };
     }
 }
-fn samples_per_beat(sample_frequency: i32, beats_per_minute: i32) -> usize {
+fn samples_per_beat(sample_frequency: i32, beats_per_minute: u32) -> usize {
     // (seconds/minute) * 60/(beats/min) * (samples/sec)
     let seconds_per_beat = 60.0 / beats_per_minute as f32;
     (sample_frequency as f32 * seconds_per_beat) as usize
 }
-
-// TODO add metrics
 
 impl<'a> AudioCallback for Tracker {
     type Channel = f32;
@@ -368,10 +369,12 @@ impl<'a> AudioCallback for Tracker {
                     (self.samples_to_next_beat as f32 / self.sample_frequency as f32 * 1000.0)
                         as u64,
                 ),
+            tracker_load: None,
             buffer: None,
         };
 
         // Now generate!
+        let generate_start = Instant::now();
         let generator = Generator {
             sample_frequency: self.sample_frequency,
             beats_per_minute: self.beats_per_minute,
@@ -435,8 +438,8 @@ impl<'a> AudioCallback for Tracker {
                     (out[filled..filled + tmp.len()]).copy_from_slice(&tmp);
                 } else {
                     // If this is not the first waveform, then we need to add the samples to the out buffer
-                    for (j, x) in tmp.iter().enumerate() {
-                        out[filled + j] += *x;
+                    for (j, &x) in tmp.iter().enumerate() {
+                        out[filled + j] += x;
                     }
                 }
                 if tmp.len() < desired {
@@ -453,6 +456,11 @@ impl<'a> AudioCallback for Tracker {
             }
             filled += desired;
         }
+
+        status_to_send.tracker_load = Some(
+            self.sample_frequency as f32
+                / (out.len() as f32 / generate_start.elapsed().as_secs_f32()),
+        );
 
         if self.send_current_buffer {
             let mut copy: Vec<f32> = Vec::with_capacity(out.len());

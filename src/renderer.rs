@@ -9,6 +9,7 @@ use sdl2::Sdl;
 use realfft::num_complex::ComplexFloat;
 use realfft::RealFftPlanner;
 
+use crate::metric::Metric;
 use crate::tracker::Status;
 use crate::Mode;
 
@@ -40,6 +41,7 @@ pub struct Renderer {
     pub video_subsystem: sdl2::VideoSubsystem,
     canvas: sdl2::render::Canvas<sdl2::video::Window>,
 
+    beats_per_minute: u32,
     beats_per_measure: u32,
 
     width: u32,
@@ -49,12 +51,17 @@ pub struct Renderer {
     nav_width: u32,
 }
 
+pub struct Metrics {
+    pub tracker_load: Metric<f32>,
+}
+
 const FONT_PATH: &'static str = "/Library/Fonts/Arial Unicode.ttf";
 
 impl Renderer {
     pub fn new(
         sdl_context: &Sdl,
         ttf_context: &Sdl2TtfContext,
+        beats_per_minute: u32,
         beats_per_measure: u32,
     ) -> Renderer {
         let video_subsystem = sdl_context.video().unwrap();
@@ -95,6 +102,7 @@ impl Renderer {
         Renderer {
             video_subsystem,
             canvas,
+            beats_per_minute,
             beats_per_measure,
             width,
             height,
@@ -110,7 +118,9 @@ impl Renderer {
         programs: &[String],
         status: &Status,
         mode: &Mode,
+        metrics: &mut Metrics,
     ) {
+        // TODO so much clean-up
         let texture_creator = self.canvas.texture_creator();
         let font = ttf_context.load_font(FONT_PATH, 48).unwrap();
         let mut bold_font = ttf_context.load_font(FONT_PATH, 48).unwrap();
@@ -279,14 +289,23 @@ impl Renderer {
         match &status.buffer {
             Some(buffer) => {
                 // Draw the waveform
-                let x_scale = self.width as f32 / buffer.len() as f32;
+                let x_scale = self.width as f32 / (buffer.len() + 1) as f32;
                 let waveform_height = self.height * 3 / 5;
-                self.canvas.set_draw_color(Color::RGB(0, 255, 0));
-                for (i, f) in buffer.iter().enumerate() {
-                    let x = (i as f32 * x_scale) as i32;
-                    let y = (f * (waveform_height as f32 / 2.4) + (waveform_height as f32 / 2.0))
+                if buffer.len() > 0 {
+                    self.canvas.set_draw_color(Color::RGB(0, 255, 0));
+                    let mut last_y = (buffer[0] * (waveform_height as f32 / 2.4)
+                        + (waveform_height as f32 / 2.0))
                         as i32;
-                    self.canvas.draw_point((x, y)).unwrap();
+                    for (i, f) in buffer.iter().enumerate() {
+                        let x = (i as f32 * x_scale) as i32;
+                        let y = (f * (waveform_height as f32 / 2.4)
+                            + (waveform_height as f32 / 2.0))
+                            as i32;
+                        self.canvas
+                            .draw_line((x, last_y as i32), (x + x_scale as i32, y))
+                            .unwrap();
+                        last_y = y;
+                    }
                 }
 
                 // Draw the spectra
@@ -324,11 +343,16 @@ impl Renderer {
             status.current_beat
         } % self.beats_per_measure as u64
             + 1;
+        let beat_font = ttf_context.load_font(FONT_PATH, 64).unwrap();
         let beat_texture = make_texture(
-            &font,
+            &beat_font,
             ACTIVE_COLOR,
             &texture_creator,
-            current_beat.to_string().as_str(),
+            format!(
+                "{} / {} ({} bpm)",
+                current_beat, self.beats_per_measure, self.beats_per_minute
+            )
+            .as_str(),
         );
         let TextureQuery {
             width: beat_width,
@@ -347,6 +371,36 @@ impl Renderer {
                 )),
             )
             .unwrap();
+
+        // Draw some internal metrics
+        let metrics_height = self.height / 2 - beat_height as u32 - 40;
+        let metrics_width = 200;
+        let x = (self.width - metrics_width - 20) as i32;
+        let y = self.height as i32 / 2;
+        let points: Vec<f32> = metrics.tracker_load.iter().collect();
+        if points.len() > 0 {
+            let mut last_y = y + metrics_height as i32 - (points[0] * metrics_height as f32) as i32;
+            for (i, &load) in points.iter().enumerate() {
+                if i == points.len() - 1 && load == 0.0 {
+                    continue; // Skip the last point if it's zero
+                }
+                let value = y + metrics_height as i32 - (load * metrics_height as f32) as i32;
+                if load < 0.7 {
+                    self.canvas.set_draw_color(Color::RGB(0, 255, 0));
+                } else if load < 0.9 {
+                    self.canvas.set_draw_color(Color::RGB(255, 222, 33));
+                } else {
+                    self.canvas.set_draw_color(Color::RGB(255, 0, 0));
+                }
+                self.canvas
+                    .draw_line(
+                        (x + (200 / points.len() as i32) * i as i32, last_y),
+                        (x + (200 / points.len() as i32) * ((i + 1) as i32), value),
+                    )
+                    .unwrap();
+                last_y = value;
+            }
+        }
 
         self.canvas.present();
     }
