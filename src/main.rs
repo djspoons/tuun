@@ -251,58 +251,23 @@ fn process_event(
                     );
                 }
                 (Mode::Edit { index, .. }, Some(sdl2::keyboard::Scancode::Return)) => {
-                    let buffer = &programs[index];
-                    match parser::parse_program(buffer) {
-                        Ok(expr) => {
-                            println!("Parser returned: {:}", &expr);
-                            match parser::simplify(&context, expr) {
-                                Ok(expr) => {
-                                    println!("Simplify returned: {:}", &expr);
-                                    if let parser::Expr::Waveform(waveform) = expr {
-                                        command_sender
-                                            .send(Command::PlayOnce {
-                                                id: index as u32,
-                                                waveform,
-                                                at_beat: ((status.current_beat + 1)
-                                                    / args.beats_per_measure as u64
-                                                    + 1)
-                                                    * args.beats_per_measure as u64,
-                                            })
-                                            .unwrap();
-                                        return (context, Mode::Select { index });
-                                    } else {
-                                        println!(
-                                            "Expression is not a waveform, cannot play: {:#?}",
-                                            expr
-                                        );
-                                        return (
-                                            context,
-                                            Mode::Edit {
-                                                index,
-                                                errors: vec![parser::Error::new(
-                                                    "Expression is not a waveform".to_string(),
-                                                )],
-                                            },
-                                        );
-                                    }
-                                }
-                                Err(error) => {
-                                    // If there are errors, we stay in edit mode
-                                    println!("Errors while simplifying input: {:?}", error);
-                                    return (
-                                        context,
-                                        Mode::Edit {
-                                            index,
-                                            errors: vec![error],
-                                        },
-                                    );
-                                }
-                            }
+                    match play_waveform_helper(&context, index, &programs[index]) {
+                        WaveformOrMode::Waveform(waveform) => {
+                            command_sender
+                                .send(Command::PlayOnce {
+                                    id: index as u32,
+                                    waveform,
+                                    at_beat: Some(
+                                        ((status.current_beat + 1) / args.beats_per_measure as u64
+                                            + 1)
+                                            * args.beats_per_measure as u64,
+                                    ),
+                                })
+                                .unwrap();
+                            return (context, Mode::Select { index });
                         }
-                        Err(errors) => {
-                            // If there are errors, we stay in edit mode
-                            println!("Errors while parsing input: {:?}", errors);
-                            return (context, Mode::Edit { index, errors });
+                        WaveformOrMode::Mode(new_mode) => {
+                            return (context, new_mode);
                         }
                     }
                 }
@@ -337,7 +302,7 @@ fn process_event(
         }
         Event::TextInput { text, .. } => {
             match mode {
-                Mode::Select { .. } => {
+                Mode::Select { index } => {
                     // If the text is a number less than programs.len(), update the index
                     if let Ok(index) = text.parse::<usize>() {
                         if index <= programs.len() {
@@ -348,10 +313,39 @@ fn process_event(
                                 },
                             );
                         } else {
-                            println!("Invalid buffer index: {}", index);
+                            println!("Invalid program index: {}", index);
                         }
                     } else if text == "r" {
                         context = load_context(&args.context);
+                    } else if text == "w" {
+                        let (status_sender, _status_receiver) = std::sync::mpsc::channel();
+                        let (command_sender, command_receiver) = std::sync::mpsc::channel();
+                        let mut tmp = tracker::Tracker::new(
+                            args.sample_frequency,
+                            args.beats_per_minute,
+                            command_receiver,
+                            status_sender,
+                        );
+                        match play_waveform_helper(&context, index, &programs[index]) {
+                            WaveformOrMode::Waveform(waveform) => {
+                                command_sender
+                                    .send(Command::PlayOnce {
+                                        id: index as u32,
+                                        waveform,
+                                        at_beat: None,
+                                    })
+                                    .unwrap();
+                            }
+                            WaveformOrMode::Mode(new_mode) => {
+                                return (context, new_mode);
+                            }
+                        }
+                        let filename = format!("program_{}.wav", index);
+                        match tmp.write_to_file(&filename) {
+                            Ok(_) => println!("Wrote program {} to {}", index, filename),
+                            Err(e) => println!("Error writing program {}: {}", index, e),
+                        }
+                        return (context, mode);
                     } else {
                         println!("Invalid command in select mode: {}", text);
                     }
@@ -368,6 +362,52 @@ fn process_event(
         }
         _ => {
             return (context, mode);
+        }
+    }
+}
+
+enum WaveformOrMode {
+    Waveform(tracker::Waveform),
+    Mode(Mode),
+}
+
+fn play_waveform_helper(
+    context: &Vec<(String, parser::Expr)>,
+    index: usize,
+    program: &str,
+) -> WaveformOrMode {
+    match parser::parse_program(program) {
+        Ok(expr) => {
+            println!("Parser returned: {:}", &expr);
+            match parser::simplify(context, expr) {
+                Ok(expr) => {
+                    println!("Simplify returned: {:}", &expr);
+                    if let parser::Expr::Waveform(waveform) = expr {
+                        return WaveformOrMode::Waveform(waveform);
+                    } else {
+                        println!("Expression is not a waveform, cannot play: {:#?}", expr);
+                        return WaveformOrMode::Mode(Mode::Edit {
+                            index,
+                            errors: vec![parser::Error::new(
+                                "Expression is not a waveform".to_string(),
+                            )],
+                        });
+                    }
+                }
+                Err(error) => {
+                    // If there are errors, we stay in edit mode
+                    println!("Errors while simplifying input: {:?}", error);
+                    return WaveformOrMode::Mode(Mode::Edit {
+                        index,
+                        errors: vec![error],
+                    });
+                }
+            }
+        }
+        Err(errors) => {
+            // If there are errors, we stay in edit mode
+            println!("Errors while parsing input: {:?}", errors);
+            return WaveformOrMode::Mode(Mode::Edit { index, errors });
         }
     }
 }

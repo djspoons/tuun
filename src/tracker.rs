@@ -86,6 +86,13 @@ struct Generator {
 // TODO add metrics for waveform expr depth and total ops
 
 impl Generator {
+    fn new(sample_frequency: i32, beats_per_minute: u32) -> Self {
+        Generator {
+            sample_frequency,
+            beats_per_minute,
+        }
+    }
+
     // Generate a vector of samples up to `desired` length. `position` indicates where
     // the beginning of the result is relative to the start of the waveform. If fewer than
     // 'desired' samples are generated, that indicates that this waveform has finished (and
@@ -252,8 +259,9 @@ pub enum Command {
         // A unique id for this waveform
         id: u32,
         waveform: Waveform,
-        // When the waveform should start playing, in beats from the beginning of playback
-        at_beat: u64,
+        // When the waveform should start playing, in beats from the beginning of playback;
+        // if None, then play immediately.
+        at_beat: Option<u64>,
     },
     SendCurrentBuffer,
 }
@@ -269,7 +277,7 @@ pub struct ActiveWaveform {
 pub struct PendingWaveform {
     pub id: u32,
     pub waveform: Waveform,
-    pub beat: u64, // The beat at which this waveform should be played
+    pub beat: Option<u64>, // The beat at which this waveform should be played
 }
 
 #[derive(Debug, Clone)]
@@ -289,6 +297,7 @@ pub struct Tracker {
     status_sender: Sender<Status>,
 
     // Internal state
+    generator: Generator,
     active_waveforms: Vec<ActiveWaveform>,
     pending_waveforms: Vec<PendingWaveform>,
     current_beat: u64,
@@ -309,6 +318,8 @@ impl Tracker {
             command_receiver,
             status_sender,
 
+            generator: Generator::new(sample_frequency, beats_per_minute),
+
             active_waveforms: Vec::new(),
             pending_waveforms: Vec::new(),
             current_beat: 1,
@@ -328,38 +339,7 @@ impl<'a> AudioCallback for Tracker {
 
     fn callback(&mut self, out: &mut [f32]) {
         // Check to see if we have any new commands
-        match self.command_receiver.try_recv() {
-            Ok(Command::PlayOnce {
-                id,
-                waveform,
-                at_beat,
-            }) => {
-                println!(
-                    "Received command to play once at beat {} with waveform {}: {:?}",
-                    at_beat, id, waveform
-                );
-                if at_beat < self.current_beat {
-                    println!(
-                        "Ignoring command to play waveform {} at beat {} (current beat is {})",
-                        id, at_beat, self.current_beat
-                    );
-                } else {
-                    self.pending_waveforms.push(PendingWaveform {
-                        id,
-                        waveform,
-                        beat: at_beat,
-                    });
-                }
-            }
-            Ok(Command::SendCurrentBuffer) => {
-                self.send_current_buffer = true;
-            }
-            Err(TryRecvError::Empty) => {}
-            Err(e) => {
-                println!("Error receiving command: {:?}", e);
-            }
-        }
-
+        self.empty_command_queue();
         let mut status_to_send = Status {
             active_waveforms: self.active_waveforms.clone(),
             pending_waveforms: self.pending_waveforms.clone(),
@@ -375,14 +355,81 @@ impl<'a> AudioCallback for Tracker {
 
         // Now generate!
         let generate_start = Instant::now();
-        let generator = Generator {
-            sample_frequency: self.sample_frequency,
-            beats_per_minute: self.beats_per_minute,
-        };
+        let _ = self.generate(out);
+        status_to_send.tracker_load = Some(
+            self.sample_frequency as f32
+                / (out.len() as f32 / generate_start.elapsed().as_secs_f32()),
+        );
+
+        if self.send_current_buffer {
+            let mut copy: Vec<f32> = Vec::with_capacity(out.len());
+            out.clone_into(&mut copy);
+            status_to_send.buffer = Some(copy);
+            self.send_current_buffer = false;
+        }
+
+        self.status_sender.send(status_to_send).unwrap();
+    }
+}
+
+impl Tracker {
+    fn empty_command_queue(&mut self) {
+        loop {
+            match self.command_receiver.try_recv() {
+                Ok(Command::PlayOnce {
+                    id,
+                    waveform,
+                    at_beat,
+                }) => {
+                    println!(
+                        "Received command to play once at beat {:?} with waveform {}: {:?}",
+                        at_beat, id, waveform
+                    );
+                    match at_beat {
+                        Some(beat) if beat < self.current_beat => {
+                            println!(
+                                "Ignoring command to play waveform {} at beat {:?} (current beat is {})",
+                                id, at_beat, self.current_beat
+                           );
+                        }
+                        None => {
+                            // Play immediately
+                            self.active_waveforms.push(ActiveWaveform {
+                                id,
+                                waveform,
+                                position: 0,
+                            });
+                        }
+                        _ => {
+                            self.pending_waveforms.push(PendingWaveform {
+                                id,
+                                waveform,
+                                beat: at_beat,
+                            });
+                        }
+                    }
+                }
+                Ok(Command::SendCurrentBuffer) => {
+                    self.send_current_buffer = true;
+                }
+                Err(TryRecvError::Empty) => {
+                    break;
+                }
+                Err(e) => {
+                    println!("Error receiving command: {:?}", e);
+                }
+            }
+        }
+    }
+
+    // Generate from pending waveforms and active waveforms, filling the out buffer.
+    // Returns how many samples were generated, or None if the no samples were generated.
+    fn generate(&mut self, out: &mut [f32]) -> Option<usize> {
         for x in out.iter_mut() {
             *x = 0.0;
         }
         let mut filled = 0; // How much of the out buffer we've filled so far
+        let mut generated = 0; // How many samples we actually generated (vs filled w/ 0s)
         while filled < out.len() {
             let mut desired: usize = out.len() - filled;
             if self.samples_to_next_beat == 0 {
@@ -395,7 +442,7 @@ impl<'a> AudioCallback for Tracker {
                 let mut i = 0;
                 while i < self.pending_waveforms.len() {
                     let pending = &self.pending_waveforms[i];
-                    if pending.beat == self.current_beat {
+                    if pending.beat == Some(self.current_beat) {
                         // This waveform can become active
                         self.active_waveforms.push(ActiveWaveform {
                             id: pending.id,
@@ -427,7 +474,9 @@ impl<'a> AudioCallback for Tracker {
             let mut i = 0;
             while i < self.active_waveforms.len() {
                 let active = &mut self.active_waveforms[i];
-                let tmp = generator.generate(&active.waveform, active.position, desired);
+                let tmp = self
+                    .generator
+                    .generate(&active.waveform, active.position, desired);
                 if tmp.len() > desired {
                     panic!(
                         "Generated more samples than desired: {} > {} for waveform id {} at position {}: {:?}", 
@@ -455,21 +504,41 @@ impl<'a> AudioCallback for Tracker {
                 }
             }
             filled += desired;
+            generated += desired;
         }
-
-        status_to_send.tracker_load = Some(
-            self.sample_frequency as f32
-                / (out.len() as f32 / generate_start.elapsed().as_secs_f32()),
-        );
-
-        if self.send_current_buffer {
-            let mut copy: Vec<f32> = Vec::with_capacity(out.len());
-            out.clone_into(&mut copy);
-            status_to_send.buffer = Some(copy);
-            self.send_current_buffer = false;
+        if generated == 0 {
+            None
+        } else {
+            Some(generated)
         }
+    }
 
-        self.status_sender.send(status_to_send).unwrap();
+    pub fn write_to_file(&mut self, filename: &str) -> Result<(), Box<dyn std::error::Error>> {
+        use hound;
+
+        self.empty_command_queue();
+
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 44100,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+
+        let mut writer = hound::WavWriter::create(filename, spec)?;
+        loop {
+            let mut out = vec![0.0; 1024];
+            let generated = self.generate(&mut out);
+            match generated {
+                None => break, // No more samples to generate
+                Some(n) => {
+                    for x in out[..n].iter() {
+                        writer.write_sample(*x)?;
+                    }
+                }
+            }
+        }
+        return writer.finalize().map_err(|e| e.into());
     }
 }
 
@@ -489,10 +558,7 @@ mod tests {
     }
 
     fn run_tests(waveform: &Waveform, desired: Vec<f32>) {
-        let generator = Generator {
-            sample_frequency: 1,
-            beats_per_minute: 60,
-        };
+        let generator = Generator::new(1, 60);
         for size in [1, 2, 4, 8] {
             let mut out = vec![0.0; 8];
             for n in 0..out.len() / size {
@@ -535,10 +601,7 @@ mod tests {
 
     #[test]
     fn test_sum() {
-        let generator = Generator {
-            sample_frequency: 1,
-            beats_per_minute: 60,
-        };
+        let generator = Generator::new(1, 60);
         let w1 = Sum(
             Box::new(finite_const_gen(1.0, 5.0, 2.0)),
             Box::new(finite_const_gen(1.0, 5.0, 2.0)),
@@ -594,10 +657,7 @@ mod tests {
 
     #[test]
     fn test_dot_product() {
-        let generator = Generator {
-            sample_frequency: 1,
-            beats_per_minute: 60,
-        };
+        let generator = Generator::new(1, 60);
         let w1 = DotProduct(
             Box::new(finite_const_gen(3.0, 8.0, 2.0)),
             Box::new(finite_const_gen(2.0, 5.0, 2.0)),
