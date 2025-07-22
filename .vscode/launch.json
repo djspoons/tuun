@@ -7,34 +7,34 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug executable 'tuunel'",
+            "name": "Debug executable 'tuun'",
             "cargo": {
                 "args": [
                     "build",
-                    "--bin=tuunel",
-                    "--package=tuunel"
+                    "--bin=tuun",
+                    "--package=tuun"
                 ],
                 "filter": {
-                    "name": "tuunel",
+                    "name": "tuun",
                     "kind": "bin"
                 }
             },
-            "args": ["--context_file", "${workspaceFolder}/context.tun"],
+            "args": ["--context_file", "${workspaceFolder}/context.tuun"],
             "cwd": "${workspaceFolder}"
         },
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug unit tests in executable 'tuunel'",
+            "name": "Debug unit tests in executable 'tuun'",
             "cargo": {
                 "args": [
                     "test",
                     "--no-run",
-                    "--bin=tuunel",
-                    "--package=tuunel"
+                    "--bin=tuun",
+                    "--package=tuun"
                 ],
                 "filter": {
-                    "name": "tuunel",
+                    "name": "tuun",
                     "kind": "bin"
                 }
             },
