@@ -57,6 +57,10 @@ pub enum Waveform {
     },
     Const(f32),
     /*
+     * Time generates a signal based on the current time from the start of this waveform.
+     */
+    Time,
+    /*
      * Linear generates a sequence of values along a line with the given slope.
      */
     Linear {
@@ -68,12 +72,18 @@ pub enum Waveform {
      */
     Dial(Dial),
     /*
-     * Fin generates a finite waveform that lasts for the given duration in beats.
+     * Fin generates a finite waveform that lasts for the given duration in beats, truncating
+     * the underlying waveform.
      */
     Fin {
         duration: f32, // duration in beats
         waveform: Box<Waveform>,
     },
+    /*
+     * Rep generates a repeating waveform that loops the given waveform indefinitely.
+     */
+    // TODO maybe -- technically? -- this should use offset? sort of like reduce(~+, 0, list(waveform))?
+    Rep(Box<Waveform>),
     /*
      * Seq sets the offset to the given value (ignoring offset of the underlying waveform).
      */
@@ -123,6 +133,13 @@ impl Generator {
             &Waveform::Const(value) => {
                 return vec![value; desired];
             }
+            &Waveform::Time => {
+                let mut out = vec![0.0; desired];
+                for (i, x) in out.iter_mut().enumerate() {
+                    *x = (i + position) as f32 / self.sample_frequency as f32;
+                }
+                return out;
+            }
             Waveform::Dial(dial) => {
                 let value = self.dial_values.get(dial).cloned().unwrap_or(0.0);
                 return vec![value; desired];
@@ -151,6 +168,24 @@ impl Generator {
                 }
                 return self.generate(inner_waveform, position, desired.min(length - position));
             }
+            Waveform::Rep(inner_waveform) => {
+                let mut out = Vec::new();
+                let inner_length = self.length(inner_waveform);
+                let mut position = match inner_length {
+                    Length::Finite(length) => position % length,
+                    Length::Infinite => position, // Sort of strange...
+                };
+                while out.len() < desired {
+                    let tmp = self.generate(inner_waveform, position, desired - out.len());
+                    if tmp.is_empty() {
+                        position = 0;
+                        continue;
+                    }
+                    position += tmp.len();
+                    out.extend(tmp);
+                }
+                return out;
+            }
             Waveform::Seq { waveform, .. } => {
                 return self.generate(waveform, position, desired);
             }
@@ -177,12 +212,14 @@ impl Generator {
         match waveform {
             Waveform::SineWave { .. } => Length::Infinite,
             Waveform::Const { .. } => Length::Infinite,
+            Waveform::Time => Length::Infinite,
             Waveform::Dial { .. } => Length::Infinite,
             Waveform::Linear { .. } => Length::Infinite,
             Waveform::Fin { duration, .. } => ((duration
                 * samples_per_beat(self.sample_frequency, self.beats_per_minute) as f32)
                 as usize)
                 .into(),
+            Waveform::Rep(_) => Length::Infinite,
             Waveform::Seq { waveform, .. } => self.length(waveform),
             Waveform::Sum(a, b) => {
                 let length = Length::Finite(self.offset(a)) + self.length(b);
@@ -199,9 +236,11 @@ impl Generator {
         match waveform {
             Waveform::SineWave { .. } => 0,
             Waveform::Const { .. } => 0,
+            Waveform::Time => 0,
             Waveform::Dial { .. } => 0,
             Waveform::Linear { .. } => 0,
             Waveform::Fin { waveform, .. } => self.offset(waveform),
+            Waveform::Rep(_) => 0, // TODO reconsider offset for Rep
             Waveform::Seq { duration, .. } => {
                 (duration * samples_per_beat(self.sample_frequency, self.beats_per_minute) as f32)
                     as usize
@@ -603,6 +642,25 @@ mod tests {
             }
             assert_eq!(out, desired);
         }
+    }
+
+    #[test]
+    fn test_time() {
+        let w1 = Waveform::Time;
+        run_tests(&w1, vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+
+        let generator = Generator::new(1, 90);
+        let result = generator.generate(&w1, 0, 8);
+        assert_eq!(result, vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+    }
+
+    #[test]
+    fn test_rep() {
+        let w1 = Waveform::Rep(Box::new(Waveform::Fin {
+            duration: 3.0,
+            waveform: Box::new(Waveform::Time),
+        }));
+        run_tests(&w1, vec![0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 0.0, 1.0]);
     }
 
     #[test]

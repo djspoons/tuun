@@ -47,11 +47,15 @@ enum Mode {
     Exit,
 }
 
-fn load_context(file: &String) -> Vec<(String, parser::Expr)> {
+fn load_context(args: &Args) -> Vec<(String, parser::Expr)> {
     let mut context: Vec<(String, parser::Expr)> = Vec::new();
+    context.push((
+        "tempo".to_string(),
+        parser::Expr::Float(args.beats_per_minute as f32),
+    ));
     builtins::add_prelude(&mut context);
-    if file != "" {
-        let raw_context = std::fs::read_to_string(file).unwrap();
+    if args.context != "" {
+        let raw_context = std::fs::read_to_string(&args.context).unwrap();
         // Strip out comments (that is any after // on a line)
         let raw_context: String = raw_context
             .lines()
@@ -124,7 +128,7 @@ pub fn main() {
         args.beats_per_measure,
     );
 
-    let mut context = load_context(&args.context);
+    let mut context = load_context(&args);
     let mut programs = args.programs.clone();
     while programs.len() < NUM_PROGRAMS {
         programs.push(String::new());
@@ -406,7 +410,7 @@ fn process_event(
                             println!("Invalid program index: {}", index);
                         }
                     } else if text == "r" {
-                        context = load_context(&args.context);
+                        context = load_context(&args);
                     } else if text == "w" {
                         let (status_sender, _status_receiver) = std::sync::mpsc::channel();
                         let (command_sender, command_receiver) = std::sync::mpsc::channel();

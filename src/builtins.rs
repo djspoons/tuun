@@ -134,6 +134,16 @@ pub fn fin(arguments: Vec<Expr>) -> Expr {
     }
 }
 
+pub fn rep(arguments: Vec<Expr>) -> Expr {
+    match arguments[..] {
+        [] => BuiltIn {
+            name: "rep()".to_string(),
+            function: filter(move |waveform: Box<Waveform>| Waveform::Rep(waveform)),
+        },
+        _ => Expr::Error("Invalid arguments for rep".to_string()),
+    }
+}
+
 pub fn seq(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
         [Float(duration)] => BuiltIn {
@@ -221,21 +231,11 @@ pub fn sequence(arguments: Vec<Expr>) -> Expr {
     }
 }
 
-pub fn dial_x_waveform(arguments: Vec<Expr>) -> Expr {
-    match arguments[..] {
-        [] => Expr::Waveform(Waveform::Dial(Dial::X)),
-        _ => Expr::Error("Invalid argument for X".to_string()),
-    }
-}
-
-pub fn dial_y_waveform(arguments: Vec<Expr>) -> Expr {
-    match arguments[..] {
-        [] => Expr::Waveform(Waveform::Dial(Dial::Y)),
-        _ => Expr::Error("Invalid argument for Y".to_string()),
-    }
-}
-
 pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
+    context.push(("time".to_string(), Expr::Waveform(Waveform::Time)));
+    context.push(("X".to_string(), Expr::Waveform(Waveform::Dial(Dial::X))));
+    context.push(("Y".to_string(), Expr::Waveform(Waveform::Dial(Dial::Y))));
+
     let builtins: Vec<(&str, fn(Vec<Expr>) -> Expr)> = vec![
         ("+", plus),
         ("-", minus),
@@ -247,15 +247,19 @@ pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
         ("$", sine_waveform),
         ("linear", linear_waveform),
         ("fin", fin),
+        ("rep", rep),
+        ("seq", seq),
+        ("fin", fin),
+        ("+", waveform_sum),
+        (".", waveform_dot_product),
+        ("chord", chord),
+        ("sequence", sequence),
         ("seq", seq),
         ("~+", waveform_sum),
         ("~.", waveform_dot_product),
         ("_chord", chord),
         ("_sequence", sequence),
-        ("X", dial_x_waveform),
-        ("Y", dial_y_waveform),
     ];
-
     for (name, function) in builtins {
         context.push((
             name.to_string(),
