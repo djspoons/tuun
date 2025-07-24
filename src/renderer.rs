@@ -228,22 +228,27 @@ impl Renderer {
                         }
                     }
                 }
-                Mode::Select { index } => {
+                Mode::Select { index } | Mode::TurnDials { index } => {
                     if index == i {
-                        let prompt_texture =
-                            make_texture(&font, INACTIVE_COLOR, &texture_creator, " ▸ ");
-                        self.canvas
-                            .copy(
-                                &prompt_texture,
-                                None,
-                                Some(sdl2::rect::Rect::new(
-                                    0,
-                                    y,
-                                    self.prompt_width,
-                                    self.line_height,
-                                )),
-                            )
-                            .unwrap();
+                        match mode {
+                            Mode::Select { .. } => {
+                                let prompt_texture =
+                                    make_texture(&font, INACTIVE_COLOR, &texture_creator, " ▸ ");
+                                self.canvas
+                                    .copy(
+                                        &prompt_texture,
+                                        None,
+                                        Some(sdl2::rect::Rect::new(
+                                            0,
+                                            y,
+                                            self.prompt_width,
+                                            self.line_height,
+                                        )),
+                                    )
+                                    .unwrap();
+                            }
+                            _ => (),
+                        }
                     }
                     self.canvas
                         .copy(

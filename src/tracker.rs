@@ -41,6 +41,12 @@ impl From<usize> for Length {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Dial {
+    X,
+    Y,
+}
+
 #[derive(Debug, Clone)]
 pub enum Waveform {
     /*
@@ -57,6 +63,10 @@ pub enum Waveform {
         initial_value: f32,
         slope: f32, // slope in value per beat
     },
+    /*
+     * Dial generates a continuous control signal from a "dial" input.
+     */
+    Dial(Dial),
     /*
      * Fin generates a finite waveform that lasts for the given duration in beats.
      */
@@ -81,6 +91,8 @@ pub enum Waveform {
 struct Generator {
     sample_frequency: i32,
     beats_per_minute: u32,
+
+    dial_values: std::collections::HashMap<Dial, f32>,
 }
 
 // TODO add metrics for waveform expr depth and total ops
@@ -90,6 +102,7 @@ impl Generator {
         Generator {
             sample_frequency,
             beats_per_minute,
+            dial_values: std::collections::HashMap::new(),
         }
     }
 
@@ -108,6 +121,10 @@ impl Generator {
                 return out;
             }
             &Waveform::Const(value) => {
+                return vec![value; desired];
+            }
+            Waveform::Dial(dial) => {
+                let value = self.dial_values.get(dial).cloned().unwrap_or(0.0);
                 return vec![value; desired];
             }
             Waveform::Linear {
@@ -160,6 +177,7 @@ impl Generator {
         match waveform {
             Waveform::SineWave { .. } => Length::Infinite,
             Waveform::Const { .. } => Length::Infinite,
+            Waveform::Dial { .. } => Length::Infinite,
             Waveform::Linear { .. } => Length::Infinite,
             Waveform::Fin { duration, .. } => ((duration
                 * samples_per_beat(self.sample_frequency, self.beats_per_minute) as f32)
@@ -181,6 +199,7 @@ impl Generator {
         match waveform {
             Waveform::SineWave { .. } => 0,
             Waveform::Const { .. } => 0,
+            Waveform::Dial { .. } => 0,
             Waveform::Linear { .. } => 0,
             Waveform::Fin { waveform, .. } => self.offset(waveform),
             Waveform::Seq { duration, .. } => {
@@ -264,6 +283,12 @@ pub enum Command {
         at_beat: Option<u64>,
     },
     SendCurrentBuffer,
+    TurnDial {
+        // The dial to set
+        dial: Dial,
+        // The amount to change it by
+        delta: f32,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -374,6 +399,8 @@ impl<'a> AudioCallback for Tracker {
 
 impl Tracker {
     fn empty_command_queue(&mut self) {
+        //println!("Dial state before processing commands: {:?}", self.generator.dial_values);
+        //let mut turn_dial_count = 0;
         loop {
             match self.command_receiver.try_recv() {
                 Ok(Command::PlayOnce {
@@ -412,6 +439,14 @@ impl Tracker {
                 Ok(Command::SendCurrentBuffer) => {
                     self.send_current_buffer = true;
                 }
+                Ok(Command::TurnDial { dial, delta }) => {
+                    //turn_dial_count += 1;
+                    self.generator
+                        .dial_values
+                        .entry(dial)
+                        .and_modify(|v| *v += delta)
+                        .or_insert(delta);
+                }
                 Err(TryRecvError::Empty) => {
                     break;
                 }
@@ -420,6 +455,7 @@ impl Tracker {
                 }
             }
         }
+        //println!("Dial state after processing commands: {:?} ({} turns)", self.generator.dial_values, turn_dial_count);
     }
 
     // Generate from pending waveforms and active waveforms, filling the out buffer.

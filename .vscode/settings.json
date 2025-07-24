@@ -11,7 +11,9 @@
         "realfft",
         "rfind",
         "scancode",
-        "Tuun"
+        "Tuun",
+        "xrel",
+        "yrel"
     ],
     "rust-analyzer.runnables.extraEnv": {
         "LIBRARY_PATH": "/opt/homebrew/lib",

@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use crate::parser::{simplify, BuiltInFn, Expr};
-use crate::tracker::Waveform;
+use crate::tracker::{Dial, Waveform};
 use Expr::{Application, BuiltIn, Error, Float, List, Tuple};
 
 pub fn plus(arguments: Vec<Expr>) -> Expr {
@@ -221,6 +221,20 @@ pub fn sequence(arguments: Vec<Expr>) -> Expr {
     }
 }
 
+pub fn dial_x_waveform(arguments: Vec<Expr>) -> Expr {
+    match arguments[..] {
+        [] => Expr::Waveform(Waveform::Dial(Dial::X)),
+        _ => Expr::Error("Invalid argument for X".to_string()),
+    }
+}
+
+pub fn dial_y_waveform(arguments: Vec<Expr>) -> Expr {
+    match arguments[..] {
+        [] => Expr::Waveform(Waveform::Dial(Dial::Y)),
+        _ => Expr::Error("Invalid argument for Y".to_string()),
+    }
+}
+
 pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
     let builtins: Vec<(&str, fn(Vec<Expr>) -> Expr)> = vec![
         ("+", plus),
@@ -238,6 +252,8 @@ pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
         ("~.", waveform_dot_product),
         ("_chord", chord),
         ("_sequence", sequence),
+        ("X", dial_x_waveform),
+        ("Y", dial_y_waveform),
     ];
 
     for (name, function) in builtins {

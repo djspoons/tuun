@@ -41,6 +41,9 @@ enum Mode {
         cursor_position: usize, // Cursor is located before the character this position
         errors: Vec<parser::Error>,
     },
+    TurnDials {
+        index: usize, // Don't forget this
+    },
     Exit,
 }
 
@@ -256,6 +259,9 @@ fn process_event(
                         },
                     );
                 }
+                (Mode::Select { index }, Some(sdl2::keyboard::Scancode::LGui)) => {
+                    return (context, Mode::TurnDials { index });
+                }
                 (
                     Mode::Edit {
                         index,
@@ -369,6 +375,21 @@ fn process_event(
                 (mode, _) => return (context, mode),
             }
         }
+        Event::KeyUp {
+            scancode: Some(sdl2::keyboard::Scancode::LGui),
+            ..
+        } => {
+            // Exit turn dials mode when the left alt key is released
+            match mode {
+                Mode::TurnDials { index } => {
+                    // If we were in turn dials mode, return to select mode
+                    return (context, Mode::Select { index });
+                }
+                _ => {
+                    return (context, mode);
+                }
+            }
+        }
         Event::TextInput { text, .. } => {
             match mode {
                 Mode::Select { index } => {
@@ -443,7 +464,35 @@ fn process_event(
                         ),
                     );
                 }
-                Mode::Exit => {
+                Mode::TurnDials { .. } | Mode::Exit => {
+                    return (context, mode);
+                }
+            }
+        }
+        Event::MouseMotion { xrel, yrel, .. } => {
+            use tracker::Dial;
+            match mode {
+                Mode::TurnDials { .. } => {
+                    //println!("Mouse motion: xrel: {}, yrel: {}", xrel, yrel);
+                    if xrel != 0 {
+                        command_sender
+                            .send(Command::TurnDial {
+                                dial: Dial::X,
+                                delta: xrel as f32 / 100.0,
+                            })
+                            .unwrap();
+                    }
+                    if yrel != 0 {
+                        command_sender
+                            .send(Command::TurnDial {
+                                dial: Dial::Y,
+                                delta: yrel as f32 / 100.0,
+                            })
+                            .unwrap();
+                    }
+                    return (context, mode);
+                }
+                _ => {
                     return (context, mode);
                 }
             }
