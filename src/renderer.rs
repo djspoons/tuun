@@ -148,7 +148,11 @@ impl Renderer {
                 ..
             } = number_texture.query();
             match *mode {
-                Mode::Edit { index, ref errors } => {
+                Mode::Edit {
+                    index,
+                    cursor_position,
+                    ref errors,
+                } => {
                     self.canvas
                         .copy(
                             &number_texture,
@@ -194,6 +198,9 @@ impl Renderer {
                             } else {
                                 EDIT_COLOR
                             };
+                            if cursor_position == j {
+                                self.draw_cursor(ttf_context, color, x, y, &texture_creator);
+                            }
                             let char_texture =
                                 make_texture(&font, color, &texture_creator, &c.to_string());
                             let TextureQuery {
@@ -210,24 +217,15 @@ impl Renderer {
                                 .unwrap();
                             x += char_width as i32;
                         }
-                        let color = if !errors.is_empty() {
-                            ERROR_COLOR
-                        } else {
-                            EDIT_COLOR
-                        };
-                        let cursor_texture = make_texture(&font, color, &texture_creator, "‸");
-                        let TextureQuery {
-                            width: cursor_width,
-                            height: cursor_height,
-                            ..
-                        } = cursor_texture.query();
-                        self.canvas
-                            .copy(
-                                &cursor_texture,
-                                None,
-                                Some(sdl2::rect::Rect::new(x, y, cursor_width, cursor_height)),
-                            )
-                            .unwrap();
+                        if cursor_position == program.len() {
+                            // Draw the cursor at the end of the line
+                            let color = if !errors.is_empty() {
+                                ERROR_COLOR
+                            } else {
+                                EDIT_COLOR
+                            };
+                            self.draw_cursor(ttf_context, color, x, y, &texture_creator);
+                        }
                     }
                 }
                 Mode::Select { index } => {
@@ -403,6 +401,35 @@ impl Renderer {
         }
 
         self.canvas.present();
+    }
+
+    fn draw_cursor(
+        self: &mut Renderer,
+        ttf_context: &Sdl2TtfContext,
+        color: Color,
+        x: i32,
+        y: i32,
+        texture_creator: &TextureCreator<WindowContext>,
+    ) {
+        let font = ttf_context.load_font(FONT_PATH, 48).unwrap();
+        let cursor_texture = make_texture(&font, color, &texture_creator, "‸");
+        let TextureQuery {
+            width: cursor_width,
+            height: cursor_height,
+            ..
+        } = cursor_texture.query();
+        self.canvas
+            .copy(
+                &cursor_texture,
+                None,
+                Some(sdl2::rect::Rect::new(
+                    x - 7,
+                    y + 5,
+                    cursor_width,
+                    cursor_height,
+                )),
+            )
+            .unwrap();
     }
 }
 

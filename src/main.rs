@@ -37,6 +37,8 @@ enum Mode {
     },
     Edit {
         index: usize,
+        // TODO unicode!!
+        cursor_position: usize, // Cursor is located before the character this position
         errors: Vec<parser::Error>,
     },
     Exit,
@@ -186,13 +188,14 @@ pub fn main() {
     }
 }
 
-fn edit_mode_from_program(index: usize, program: &str) -> Mode {
-    match parser::parse_program(program) {
-        Ok(_) => Mode::Edit {
-            index,
-            errors: Vec::new(),
+fn edit_mode_from_program(index: usize, cursor_position: usize, program: &str) -> Mode {
+    Mode::Edit {
+        index,
+        cursor_position,
+        errors: match parser::parse_program(program) {
+            Ok(_) => Vec::new(),
+            Err(errors) => errors,
         },
-        Err(errors) => Mode::Edit { index, errors },
     }
 }
 
@@ -232,7 +235,10 @@ fn process_event(
                         // If it is, we just stay in select mode
                         return (context, Mode::Select { index });
                     }
-                    return (context, edit_mode_from_program(index, &programs[index]));
+                    return (
+                        context,
+                        edit_mode_from_program(index, programs[index].len(), &programs[index]),
+                    );
                 }
                 (Mode::Select { index }, Some(sdl2::keyboard::Scancode::Up)) => {
                     return (
@@ -250,8 +256,15 @@ fn process_event(
                         },
                     );
                 }
-                (Mode::Edit { index, .. }, Some(sdl2::keyboard::Scancode::Return)) => {
-                    match play_waveform_helper(&context, index, &programs[index]) {
+                (
+                    Mode::Edit {
+                        index,
+                        cursor_position,
+                        ..
+                    },
+                    Some(sdl2::keyboard::Scancode::Return),
+                ) => {
+                    match play_waveform_helper(&context, index, cursor_position, &programs[index]) {
                         WaveformOrMode::Waveform(waveform) => {
                             command_sender
                                 .send(Command::PlayOnce {
@@ -271,32 +284,88 @@ fn process_event(
                         }
                     }
                 }
-                (Mode::Edit { index, .. }, Some(sdl2::keyboard::Scancode::Backspace)) => {
+                (
+                    Mode::Edit {
+                        index,
+                        cursor_position,
+                        ..
+                    },
+                    Some(sdl2::keyboard::Scancode::Backspace),
+                ) => {
                     // If the option key is down, clear the last word
-                    let mut buffer = programs[index].clone();
+                    let mut new_cursor_position = cursor_position;
+                    let mut program = programs[index].clone();
                     if keymod.contains(sdl2::keyboard::Mod::LALTMOD) {
-                        if let Some(char_index) = buffer.rfind(|e| !char::is_whitespace(e)) {
+                        if let Some(char_index) =
+                            program[..cursor_position].rfind(|e: char| !e.is_whitespace())
+                        {
                             if let Some(space_index) =
-                                buffer[..char_index].rfind(char::is_whitespace)
+                                program[..char_index].rfind(char::is_whitespace)
                             {
-                                // Remove everything after that whitespace
-                                buffer.truncate(space_index);
+                                // Remove everything between that whitespace and the cursor
+                                let mut new_program = program[..=space_index].to_string();
+                                new_program.push_str(&program[cursor_position..]);
+                                program = new_program;
+                                new_cursor_position = space_index + 1;
                             } else {
-                                buffer.clear();
+                                program = program[cursor_position..].to_string();
+                                new_cursor_position = 0;
                             }
                         } else {
-                            // No non-whitespace characters, so clear the whole string
-                            buffer.clear();
+                            // No non-whitespace characters, so clear everything before the cursor
+                            program = program[cursor_position..].to_string();
+                            new_cursor_position = 0;
                         }
                     } else {
-                        buffer.pop();
+                        if !program.is_empty() && cursor_position > 0 {
+                            program.remove(cursor_position - 1);
+                            new_cursor_position = cursor_position - 1;
+                        }
                     }
-                    programs[index] = buffer;
-                    return (context, edit_mode_from_program(index, &programs[index]));
+                    programs[index] = program;
+                    return (
+                        context,
+                        edit_mode_from_program(index, new_cursor_position, &programs[index]),
+                    );
                 }
                 (Mode::Edit { index, .. }, Some(sdl2::keyboard::Scancode::Escape)) => {
                     return (context, Mode::Select { index: index });
                 }
+                (
+                    Mode::Edit {
+                        index,
+                        cursor_position,
+                        errors,
+                    },
+                    Some(sdl2::keyboard::Scancode::Left),
+                ) => {
+                    return (
+                        context,
+                        Mode::Edit {
+                            index,
+                            cursor_position: cursor_position.saturating_sub(1),
+                            errors,
+                        },
+                    );
+                }
+                (
+                    Mode::Edit {
+                        index,
+                        cursor_position,
+                        errors,
+                    },
+                    Some(sdl2::keyboard::Scancode::Right),
+                ) => {
+                    return (
+                        context,
+                        Mode::Edit {
+                            index,
+                            cursor_position: programs[index].len().min(cursor_position + 1),
+                            errors,
+                        },
+                    );
+                }
+
                 (mode, _) => return (context, mode),
             }
         }
@@ -326,7 +395,12 @@ fn process_event(
                             command_receiver,
                             status_sender,
                         );
-                        match play_waveform_helper(&context, index, &programs[index]) {
+                        match play_waveform_helper(
+                            &context,
+                            index,
+                            programs[index].len(),
+                            &programs[index],
+                        ) {
                             WaveformOrMode::Waveform(waveform) => {
                                 command_sender
                                     .send(Command::PlayOnce {
@@ -351,9 +425,23 @@ fn process_event(
                     }
                     return (context, mode);
                 }
-                Mode::Edit { index, .. } => {
-                    programs[index].push_str(&text);
-                    return (context, edit_mode_from_program(index, &programs[index]));
+                Mode::Edit {
+                    index,
+                    cursor_position,
+                    ..
+                } => {
+                    let mut new_program = programs[index][..cursor_position].to_string();
+                    new_program.push_str(&text);
+                    new_program.push_str(&programs[index][cursor_position..]);
+                    programs[index] = new_program;
+                    return (
+                        context,
+                        edit_mode_from_program(
+                            index,
+                            cursor_position + text.len(),
+                            &programs[index],
+                        ),
+                    );
                 }
                 Mode::Exit => {
                     return (context, mode);
@@ -374,6 +462,7 @@ enum WaveformOrMode {
 fn play_waveform_helper(
     context: &Vec<(String, parser::Expr)>,
     index: usize,
+    cursor_position: usize,
     program: &str,
 ) -> WaveformOrMode {
     match parser::parse_program(program) {
@@ -388,6 +477,7 @@ fn play_waveform_helper(
                         println!("Expression is not a waveform, cannot play: {:#?}", expr);
                         return WaveformOrMode::Mode(Mode::Edit {
                             index,
+                            cursor_position,
                             errors: vec![parser::Error::new(
                                 "Expression is not a waveform".to_string(),
                             )],
@@ -399,6 +489,7 @@ fn play_waveform_helper(
                     println!("Errors while simplifying input: {:?}", error);
                     return WaveformOrMode::Mode(Mode::Edit {
                         index,
+                        cursor_position,
                         errors: vec![error],
                     });
                 }
@@ -407,7 +498,11 @@ fn play_waveform_helper(
         Err(errors) => {
             // If there are errors, we stay in edit mode
             println!("Errors while parsing input: {:?}", errors);
-            return WaveformOrMode::Mode(Mode::Edit { index, errors });
+            return WaveformOrMode::Mode(Mode::Edit {
+                index,
+                cursor_position,
+                errors,
+            });
         }
     }
 }
