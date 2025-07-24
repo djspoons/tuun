@@ -377,6 +377,30 @@ impl Renderer {
         let y = self.height as i32 / 2;
         let points: Vec<f32> = metrics.tracker_load.iter().collect();
         if points.len() > 0 {
+            let last_value_texture = make_texture(
+                &font,
+                Color::RGB(0, 255, 0),
+                &texture_creator,
+                format!("{:.2}", points.last().unwrap()).as_str(),
+            );
+            let TextureQuery {
+                width: last_value_width,
+                height: last_value_height,
+                ..
+            } = last_value_texture.query();
+            self.canvas
+                .copy(
+                    &last_value_texture,
+                    None,
+                    Some(sdl2::rect::Rect::new(
+                        x,
+                        y,
+                        last_value_width,
+                        last_value_height,
+                    )),
+                )
+                .unwrap();
+
             let mut last_y = y + metrics_height as i32 - (points[0] * metrics_height as f32) as i32;
             for (i, &load) in points.iter().enumerate() {
                 if i == points.len() - 1 && load == 0.0 {
