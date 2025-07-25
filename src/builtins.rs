@@ -15,7 +15,7 @@ pub fn minus(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
         [Float(a)] => Expr::Float(-a),
         [Float(a), Float(b)] => Expr::Float(a - b),
-        _ => Expr::Error("Invalid arguments for -".to_string()),
+        _ => Expr::Error(format!("Invalid arguments for -: {:?}", arguments)),
     }
 }
 
@@ -245,12 +245,6 @@ pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
         ("$", sine_waveform),
         ("fin", fin),
         ("rep", rep),
-        ("seq", seq),
-        ("fin", fin),
-        ("+", waveform_sum),
-        (".", waveform_dot_product),
-        ("chord", chord),
-        ("sequence", sequence),
         ("seq", seq),
         ("~+", waveform_sum),
         ("~.", waveform_dot_product),
