@@ -100,16 +100,6 @@ pub fn sine_waveform(arguments: Vec<Expr>) -> Expr {
     }
 }
 
-pub fn linear_waveform(arguments: Vec<Expr>) -> Expr {
-    match arguments[..] {
-        [Float(initial_value), Float(slope)] => Expr::Waveform(Waveform::Linear {
-            initial_value,
-            slope,
-        }),
-        _ => Expr::Error("Invalid argument for linear_waveform".to_string()),
-    }
-}
-
 fn filter(f: impl Fn(Box<Waveform>) -> Waveform + 'static) -> BuiltInFn {
     BuiltInFn(Rc::new(move |mut arguments: Vec<Expr>| -> Expr {
         if arguments.len() != 1 {
@@ -245,7 +235,6 @@ pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
         ("map", map),
         ("reduce", reduce),
         ("$", sine_waveform),
-        ("linear", linear_waveform),
         ("fin", fin),
         ("rep", rep),
         ("seq", seq),
