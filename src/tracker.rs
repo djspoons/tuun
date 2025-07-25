@@ -75,8 +75,10 @@ pub enum Waveform {
     /*
      * Rep generates a repeating waveform that loops the given waveform indefinitely.
      */
-    // TODO maybe -- technically? -- this should use offset? sort of like reduce(~+, 0, list(waveform))?
-    Rep(Box<Waveform>),
+    Rep {
+        trigger: Box<Waveform>, // Will cause the waveform to restart when it generates a zero
+        waveform: Box<Waveform>, // The waveform to repeat
+    },
     /*
      * Seq sets the offset to the given value (ignoring offset of the underlying waveform).
      */
@@ -149,21 +151,38 @@ impl Generator {
                 }
                 return self.generate(inner_waveform, position, desired.min(length - position));
             }
-            Waveform::Rep(inner_waveform) => {
+            Waveform::Rep { trigger, waveform } => {
+                let mut position = position;
+                let mut inner_position = position;
                 let mut out = Vec::new();
-                let inner_length = self.length(inner_waveform);
-                let mut position = match inner_length {
-                    Length::Finite(length) => position % length,
-                    Length::Infinite => position, // Sort of strange...
-                };
-                while out.len() < desired {
-                    let tmp = self.generate(inner_waveform, position, desired - out.len());
-                    if tmp.is_empty() {
-                        position = 0;
-                        continue;
+                let mut trigger_tmp = self.generate(trigger, position, desired);
+                let mut inner_desired = trigger_tmp.len();
+                for (i, &x) in trigger_tmp.iter().enumerate() {
+                    if x == 0.0 {
+                        if i == 0 {
+                            inner_position = 0;
+                        } else {
+                            inner_desired = i;
+                            break;
+                        }
                     }
-                    position += tmp.len();
+                }
+                while out.len() < desired {
+                    let tmp = self.generate(waveform, inner_position, inner_desired);
                     out.extend(tmp);
+                    position += inner_desired;
+                    trigger_tmp = self.generate(trigger, position, desired - out.len());
+                    inner_desired = trigger_tmp.len();
+                    for (i, &x) in trigger_tmp.iter().enumerate() {
+                        if x == 0.0 {
+                            if i == 0 {
+                                inner_position = 0;
+                            } else {
+                                inner_desired = i;
+                                break;
+                            }
+                        }
+                    }
                 }
                 return out;
             }
@@ -199,7 +218,7 @@ impl Generator {
                 * samples_per_beat(self.sample_frequency, self.beats_per_minute) as f32)
                 as usize)
                 .into(),
-            Waveform::Rep(_) => Length::Infinite,
+            Waveform::Rep { .. } => Length::Infinite,
             Waveform::Seq { waveform, .. } => self.length(waveform),
             Waveform::Sum(a, b) => {
                 let length = Length::Finite(self.offset(a)) + self.length(b);
@@ -219,7 +238,7 @@ impl Generator {
             Waveform::Time => 0,
             Waveform::Dial { .. } => 0,
             Waveform::Fin { waveform, .. } => self.offset(waveform),
-            Waveform::Rep(_) => 0, // TODO reconsider offset for Rep
+            Waveform::Rep { .. } => 0, // TODO reconsider offset for Rep
             Waveform::Seq { duration, .. } => {
                 (duration * samples_per_beat(self.sample_frequency, self.beats_per_minute) as f32)
                     as usize
@@ -635,14 +654,13 @@ mod tests {
 
     #[test]
     fn test_rep() {
-        let w1 = Waveform::Rep(Box::new(Waveform::Fin {
-            duration: 3.0,
+        let w1 = Waveform::Rep {
+            trigger: Box::new(Waveform::SineWave {
+                frequency: Box::new(Waveform::Const(1.0)),
+            }),
             waveform: Box::new(Waveform::Time),
-        }));
-        run_tests(&w1, vec![0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 0.0, 1.0]);
-    }
-
         };
+        run_tests(&w1, vec![0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 0.0, 1.0]);
     }
 
     #[test]

@@ -124,14 +124,22 @@ pub fn fin(arguments: Vec<Expr>) -> Expr {
     }
 }
 
-pub fn rep(arguments: Vec<Expr>) -> Expr {
-    match arguments[..] {
-        [] => BuiltIn {
-            name: "rep()".to_string(),
-            function: filter(move |waveform: Box<Waveform>| Waveform::Rep(waveform)),
-        },
-        _ => Expr::Error("Invalid arguments for rep".to_string()),
+pub fn rep(mut arguments: Vec<Expr>) -> Expr {
+    if arguments.len() != 2 {
+        return Expr::Error("Expected a waveform".to_string());
     }
+    let trigger = match arguments.remove(0) {
+        Expr::Waveform(a) => a,
+        _ => return Expr::Error("First argument must be a waveform".to_string()),
+    };
+    let waveform = match arguments.remove(0) {
+        Expr::Waveform(a) => a,
+        _ => return Expr::Error("Second argument must be a waveform".to_string()),
+    };
+    Expr::Waveform(Waveform::Rep {
+        trigger: Box::new(trigger),
+        waveform: Box::new(waveform),
+    })
 }
 
 pub fn seq(arguments: Vec<Expr>) -> Expr {
