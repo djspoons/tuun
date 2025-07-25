@@ -4,6 +4,9 @@ amp = fn(level) => fn(w) => w ~. level,
 
 sawtooth = fn(freq) => ((time ~. freq | fin(tempo/60 * 1/freq) | rep()) ~+ -0.5) ~. 2,
 
+// slope is in terms of level-change per beat
+linear = fn(initial, slope) => (time ~. (tempo/60 * slope)) ~+ initial,
+
 // Create waveforms for the four parts of the envelope.
 Aw = fn(dur) => linear(0.0, 1.0 / dur) | fin(dur) | seq(dur),
 Dw = fn(dur, level) => linear(1.0, (level - 1.0) / dur) | fin(dur) | seq(dur),

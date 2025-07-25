@@ -15,7 +15,7 @@ pub fn minus(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
         [Float(a)] => Expr::Float(-a),
         [Float(a), Float(b)] => Expr::Float(a - b),
-        _ => Expr::Error("Invalid arguments for -".to_string()),
+        _ => Expr::Error(format!("Invalid arguments for -: {:?}", arguments)),
     }
 }
 
@@ -97,16 +97,6 @@ pub fn sine_waveform(arguments: Vec<Expr>) -> Expr {
             frequency: Box::new(Waveform::Const(*value)),
         }),
         _ => Expr::Error("Invalid argument for $".to_string()),
-    }
-}
-
-pub fn linear_waveform(arguments: Vec<Expr>) -> Expr {
-    match arguments[..] {
-        [Float(initial_value), Float(slope)] => Expr::Waveform(Waveform::Linear {
-            initial_value,
-            slope,
-        }),
-        _ => Expr::Error("Invalid argument for linear_waveform".to_string()),
     }
 }
 
@@ -245,7 +235,6 @@ pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
         ("map", map),
         ("reduce", reduce),
         ("$", sine_waveform),
-        ("linear", linear_waveform),
         ("fin", fin),
         ("rep", rep),
         ("seq", seq),

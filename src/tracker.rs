@@ -61,13 +61,6 @@ pub enum Waveform {
      */
     Time,
     /*
-     * Linear generates a sequence of values along a line with the given slope.
-     */
-    Linear {
-        initial_value: f32,
-        slope: f32, // slope in value per beat
-    },
-    /*
      * Dial generates a continuous control signal from a "dial" input.
      */
     Dial(Dial),
@@ -144,18 +137,6 @@ impl Generator {
                 let value = self.dial_values.get(dial).cloned().unwrap_or(0.0);
                 return vec![value; desired];
             }
-            Waveform::Linear {
-                initial_value,
-                slope,
-            } => {
-                let mut out = vec![0.0; desired];
-                let samples_per_beat =
-                    self.sample_frequency as f32 * 60.0 / (self.beats_per_minute as f32);
-                for (i, x) in out.iter_mut().enumerate() {
-                    *x = initial_value + slope * ((i + position) as f32 / samples_per_beat);
-                }
-                return out;
-            }
             Waveform::Fin {
                 waveform: inner_waveform,
                 ..
@@ -214,7 +195,6 @@ impl Generator {
             Waveform::Const { .. } => Length::Infinite,
             Waveform::Time => Length::Infinite,
             Waveform::Dial { .. } => Length::Infinite,
-            Waveform::Linear { .. } => Length::Infinite,
             Waveform::Fin { duration, .. } => ((duration
                 * samples_per_beat(self.sample_frequency, self.beats_per_minute) as f32)
                 as usize)
@@ -238,7 +218,6 @@ impl Generator {
             Waveform::Const { .. } => 0,
             Waveform::Time => 0,
             Waveform::Dial { .. } => 0,
-            Waveform::Linear { .. } => 0,
             Waveform::Fin { waveform, .. } => self.offset(waveform),
             Waveform::Rep(_) => 0, // TODO reconsider offset for Rep
             Waveform::Seq { duration, .. } => {
@@ -620,7 +599,7 @@ impl Tracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use Waveform::{Const, DotProduct, Fin, Linear, Seq, Sum};
+    use Waveform::{Const, DotProduct, Fin, Seq, Sum};
 
     fn finite_const_gen(value: f32, fin_duration: f32, seq_duration: f32) -> Waveform {
         return Seq {
@@ -661,36 +640,6 @@ mod tests {
             waveform: Box::new(Waveform::Time),
         }));
         run_tests(&w1, vec![0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 0.0, 1.0]);
-    }
-
-    #[test]
-    fn test_linear() {
-        let w1 = Linear {
-            initial_value: 10.0,
-            slope: -1.0,
-        };
-        run_tests(&w1, vec![10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0]);
-
-        let w2 = Fin {
-            duration: 4.0,
-            waveform: Box::new(DotProduct(
-                Box::new(Const(3.0)),
-                Box::new(Sum(
-                    Box::new(Seq {
-                        duration: 4.0,
-                        waveform: Box::new(Fin {
-                            duration: 4.0,
-                            waveform: Box::new(Linear {
-                                initial_value: 0.0,
-                                slope: 0.5,
-                            }),
-                        }),
-                    }),
-                    Box::new(Const(1.0)),
-                )),
-            )),
-        };
-        run_tests(&w2, vec![0.0, 1.5, 3.0, 4.5, 0.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]
