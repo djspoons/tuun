@@ -100,7 +100,7 @@ pub fn sine_waveform(arguments: Vec<Expr>) -> Expr {
     }
 }
 
-fn filter(f: impl Fn(Box<Waveform>) -> Waveform + 'static) -> BuiltInFn {
+fn filter(f: impl Fn(Box<Waveform<()>>) -> Waveform<()> + 'static) -> BuiltInFn {
     BuiltInFn(Rc::new(move |mut arguments: Vec<Expr>| -> Expr {
         if arguments.len() != 1 {
             return Expr::Error("Expected waveform".to_string());
@@ -118,13 +118,17 @@ pub fn fin(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
         [Float(duration)] => BuiltIn {
             name: format!("fin({})", duration),
-            function: filter(move |waveform: Box<Waveform>| Waveform::Fin { duration, waveform }),
+            function: filter(move |waveform: Box<Waveform<()>>| Waveform::Fin {
+                duration,
+                waveform,
+            }),
         },
         _ => Expr::Error("Invalid arguments for fin".to_string()),
     }
 }
 
 pub fn rep(mut arguments: Vec<Expr>) -> Expr {
+    // TODO make it work in curried form
     if arguments.len() != 2 {
         return Expr::Error("Expected a waveform".to_string());
     }
@@ -139,6 +143,7 @@ pub fn rep(mut arguments: Vec<Expr>) -> Expr {
     Expr::Waveform(Waveform::Rep {
         trigger: Box::new(trigger),
         waveform: Box::new(waveform),
+        state: (),
     })
 }
 
@@ -146,7 +151,10 @@ pub fn seq(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
         [Float(duration)] => BuiltIn {
             name: format!("seq({})", duration),
-            function: filter(move |waveform: Box<Waveform>| Waveform::Seq { duration, waveform }),
+            function: filter(move |waveform: Box<Waveform<()>>| Waveform::Seq {
+                duration,
+                waveform,
+            }),
         },
         _ => Expr::Error("Invalid arguments for seq".to_string()),
     }
@@ -154,7 +162,7 @@ pub fn seq(arguments: Vec<Expr>) -> Expr {
 
 fn waveform_binary_op(
     mut arguments: Vec<Expr>,
-    op: fn(Box<Waveform>, Box<Waveform>) -> Waveform,
+    op: fn(Box<Waveform<()>>, Box<Waveform<()>>) -> Waveform<()>,
 ) -> Expr {
     if arguments.len() != 2 {
         return Expr::Error("Expected two waveforms".to_string());

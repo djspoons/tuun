@@ -11,6 +11,7 @@
         "realfft",
         "rfind",
         "scancode",
+        "signum",
         "Tuun",
         "xrel",
         "yrel"

@@ -2,7 +2,7 @@ fs = fn(dur) => fn(w) => w | fin(dur) | seq(dur),
 
 amp = fn(level) => fn(w) => w ~. level,
 
-sawtooth = fn(freq) => ((time ~. freq | fin(tempo/60 * 1/freq) | rep()) ~+ -0.5) ~. 2,
+sawtooth = fn(freq) => (rep($freq, time ~. freq) ~+ -0.5) ~. 2,
 
 // slope is in terms of level-change per beat
 linear = fn(initial, slope) => (time ~. (tempo/60 * slope)) ~+ initial,
