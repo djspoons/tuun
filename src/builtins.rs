@@ -40,6 +40,20 @@ pub fn power(arguments: Vec<Expr>) -> Expr {
     }
 }
 
+pub fn sqrt(arguments: Vec<Expr>) -> Expr {
+    match arguments[..] {
+        [Float(value)] if value >= 0.0 => Expr::Float(value.sqrt()),
+        _ => Expr::Error("Invalid argument for sqrt".to_string()),
+    }
+}
+
+pub fn exp(arguments: Vec<Expr>) -> Expr {
+    match arguments[..] {
+        [Float(value)] => Expr::Float(value.exp()),
+        _ => Expr::Error("Invalid argument for exp".to_string()),
+    }
+}
+
 pub fn map(arguments: Vec<Expr>) -> Expr {
     match &arguments[..] {
         [function, List(exprs)] => {
@@ -97,6 +111,22 @@ pub fn sine_waveform(arguments: Vec<Expr>) -> Expr {
             frequency: Box::new(Waveform::Const(*value)),
         }),
         _ => Expr::Error("Invalid argument for $".to_string()),
+    }
+}
+
+pub fn fixed_waveform(arguments: Vec<Expr>) -> Expr {
+    match &arguments[..] {
+        [List(samples)] => {
+            let mut fixed_samples = Vec::new();
+            for sample in samples {
+                match sample {
+                    Float(value) => fixed_samples.push(*value),
+                    _ => return Expr::Error("Invalid sample in fixed waveform".to_string()),
+                }
+            }
+            Expr::Waveform(Waveform::Fixed(fixed_samples))
+        }
+        _ => Expr::Error("Invalid argument for fixed waveform".to_string()),
     }
 }
 
@@ -248,9 +278,12 @@ pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
         ("*", times),
         ("/", divide),
         ("pow", power),
+        ("sqrt", sqrt),
+        ("exp", exp),
         ("map", map),
         ("reduce", reduce),
         ("$", sine_waveform),
+        ("fixed", fixed_waveform),
         ("fin", fin),
         ("rep", rep),
         ("seq", seq),

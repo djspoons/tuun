@@ -74,6 +74,10 @@ pub enum Waveform {
     /*
      * Dial generates a continuous control signal from a "dial" input.
      */
+    /*
+     * Always generates the same, finite, sequence of samples.
+     */
+    Fixed(Vec<f32>),
     Dial(Dial),
     /*
      * Fin generates a finite waveform that lasts for the given duration in beats, truncating
@@ -152,6 +156,9 @@ impl Generator {
                     *x = (i + position) as f32 / self.sample_frequency as f32;
                 }
                 return out;
+            }
+            Waveform::Fixed(samples) => {
+                return samples.clone();
             }
             Waveform::Dial(dial) => {
                 let value = self.dial_values.get(&dial).cloned().unwrap_or(0.0);
@@ -296,6 +303,7 @@ impl Generator {
         match waveform {
             Waveform::Const { .. } => Length::Infinite,
             Waveform::Time => Length::Infinite,
+            Waveform::Fixed(samples) => Length::Finite(samples.len()),
             Waveform::Dial { .. } => Length::Infinite,
             Waveform::Fin { duration, .. } => ((duration
                 * samples_per_beat(self.sample_frequency, self.beats_per_minute) as f32)
@@ -322,6 +330,7 @@ impl Generator {
         match waveform {
             Waveform::Const { .. } => 0,
             Waveform::Time => 0,
+            Waveform::Fixed(_) => 0,
             Waveform::Dial { .. } => 0,
             Waveform::Fin { waveform, .. } => self.offset(waveform),
             Waveform::Rep { trigger, .. } => self.offset(trigger),
