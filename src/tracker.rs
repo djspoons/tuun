@@ -59,12 +59,12 @@ pub enum Dial {
 }
 
 #[derive(Debug, Clone)]
-pub enum Waveform<S = ()> {
+pub enum Waveform {
     /*
      * SineWave is a sinusoidal wave generator with the given frequency.
      */
     SineWave {
-        frequency: Box<Waveform<S>>,
+        frequency: Box<Waveform>,
     },
     Const(f32),
     /*
@@ -81,31 +81,30 @@ pub enum Waveform<S = ()> {
      */
     Fin {
         duration: f32, // duration in beats
-        waveform: Box<Waveform<S>>,
+        waveform: Box<Waveform>,
     },
     /*
      * Seq sets the offset to the given value (ignoring offset of the underlying waveform).
      */
     Seq {
         duration: f32, // duration in beats
-        waveform: Box<Waveform<S>>,
+        waveform: Box<Waveform>,
     },
     /*
      * Rep generates a repeating waveform that loops the given waveform whenever the trigger waveform flips from negative values to positive values. Its length and offset are determined by the trigger waveform.
      */
     Rep {
-        trigger: Box<Waveform<S>>,
-        waveform: Box<Waveform<S>>,
-        state: S,
+        trigger: Box<Waveform>,
+        waveform: Box<Waveform>,
     },
-    Sum(Box<Waveform<S>>, Box<Waveform<S>>),
-    DotProduct(Box<Waveform<S>>, Box<Waveform<S>>),
+    Sum(Box<Waveform>, Box<Waveform>),
+    DotProduct(Box<Waveform>, Box<Waveform>),
     /*
      * Convolution computes a new sample for each sample in the waveform by computing the sum of the products of that sample and the kernel.
      */
     Convolution {
-        waveform: Box<Waveform<S>>,
-        kernel: Box<Waveform<S>>,
+        waveform: Box<Waveform>,
+        kernel: Box<Waveform>,
     },
 }
 
@@ -134,39 +133,29 @@ impl Generator {
     // the beginning of the result is relative to the start of the waveform. If fewer than
     // 'desired' samples are generated, that indicates that this waveform has finished (and
     // generate won't be called on it again).
-    fn generate(
-        &self,
-        waveform: Waveform<(f32, usize)>,
-        position: usize,
-        desired: usize,
-    ) -> (Waveform<(f32, usize)>, Vec<f32>) {
+    fn generate(&self, waveform: &Waveform, position: usize, desired: usize) -> Vec<f32> {
         match waveform {
             Waveform::SineWave { frequency } => {
-                let (frequency, mut out) = self.generate(*frequency, position, desired);
+                let mut out = self.generate(frequency, position, desired);
                 for (i, f) in out.iter_mut().enumerate() {
                     let t_secs = (i + position) as f32 / self.sample_frequency as f32;
                     *f = (2.0 * PI * *f * t_secs).sin();
                 }
-                return (
-                    Waveform::SineWave {
-                        frequency: Box::new(frequency),
-                    },
-                    out,
-                );
+                return out;
             }
-            Waveform::Const(value) => {
-                return (waveform, vec![value; desired]);
+            &Waveform::Const(value) => {
+                return vec![value; desired];
             }
             Waveform::Time => {
                 let mut out = vec![0.0; desired];
                 for (i, x) in out.iter_mut().enumerate() {
                     *x = (i + position) as f32 / self.sample_frequency as f32;
                 }
-                return (waveform, out);
+                return out;
             }
             Waveform::Dial(dial) => {
                 let value = self.dial_values.get(&dial).cloned().unwrap_or(0.0);
-                return (waveform, vec![value; desired]);
+                return vec![value; desired];
             }
             Waveform::Fin {
                 duration,
@@ -177,41 +166,22 @@ impl Generator {
                     * samples_per_beat(self.sample_frequency, self.beats_per_minute) as f32)
                     as usize;
                 if position >= length {
-                    return (
-                        Waveform::Fin {
-                            duration,
-                            waveform: inner_waveform,
-                        },
-                        Vec::new(),
-                    ); // No samples to generate
+                    return Vec::new(); // No samples to generate
                 }
-                let (inner_waveform, out) =
-                    self.generate(*inner_waveform, position, desired.min(length - position));
-                return (
-                    Waveform::Fin {
-                        duration,
-                        waveform: Box::new(inner_waveform),
-                    },
-                    out,
-                );
+                return self.generate(inner_waveform, position, desired.min(length - position));
             }
-            Waveform::Rep {
-                mut trigger,
-                mut waveform,
-                state: (mut _last_signum, mut _inner_position),
-            } => {
+            Waveform::Rep { trigger, waveform } => {
                 // TODO think about all of these unwrap_ors
                 // TODO generate the trigger in blocks?
-                // TODO cache the last trigger position and signum and use it if position doesn't change
+                // Maybe cache the last trigger position and signum and use it if position doesn't change?
+
                 // First go back and find the most recent trigger before position.
                 let mut last_trigger_position = position;
-                let (tmp_trigger, out) = self.generate(*trigger, position, 1);
-                trigger = Box::new(tmp_trigger);
-                let mut last_signum = out.get(0).unwrap_or(&0.0).signum();
+                let trigger_out = self.generate(trigger, position, 1);
+                let mut last_signum = trigger_out.get(0).unwrap_or(&0.0).signum();
                 while last_trigger_position > 0 {
-                    let (tmp_trigger, out) = self.generate(*trigger, last_trigger_position - 1, 1);
-                    trigger = Box::new(tmp_trigger);
-                    let new_signum = out.get(0).unwrap_or(&0.0).signum();
+                    let trigger_out = self.generate(trigger, last_trigger_position - 1, 1);
+                    let new_signum = trigger_out.get(0).unwrap_or(&0.0).signum();
                     if last_signum >= 0.0 && new_signum < 0.0 {
                         break;
                     }
@@ -222,7 +192,7 @@ impl Generator {
                 let mut generated = 0;
                 let mut out = Vec::new();
 
-                let (trigger, trigger_out) = self.generate(*trigger, position, desired);
+                let trigger_out = self.generate(trigger, position, desired);
 
                 while generated < trigger_out.len() {
                     // Set to true if there a restart will be triggered before desired
@@ -240,9 +210,7 @@ impl Generator {
                         }
                     }
 
-                    let (inner_waveform, mut tmp) =
-                        self.generate(*waveform, inner_position, inner_desired);
-                    waveform = Box::new(inner_waveform);
+                    let mut tmp = self.generate(waveform, inner_position, inner_desired);
                     if tmp.len() < inner_desired {
                         tmp.resize(inner_desired, 0.0);
                     }
@@ -254,30 +222,13 @@ impl Generator {
                         inner_position += inner_desired;
                     }
                 }
-                return (
-                    Waveform::Rep {
-                        trigger: Box::new(trigger),
-                        waveform,
-                        state: (last_signum, inner_position),
-                    },
-                    out,
-                );
+                return out;
             }
-            Waveform::Seq {
-                duration, waveform, ..
-            } => {
-                let (waveform, out) = self.generate(*waveform, position, desired);
-                return (
-                    Waveform::Seq {
-                        duration,
-                        waveform: Box::new(waveform),
-                    },
-                    out,
-                );
+            Waveform::Seq { waveform, .. } => {
+                return self.generate(waveform, position, desired);
             }
             Waveform::Sum(a, b) => {
-                let (a, b, out) = self.generate_binary_op(|x, y| x + y, *a, *b, position, desired);
-                return (Waveform::Sum(Box::new(a), Box::new(b)), out);
+                return self.generate_binary_op(|x, y| x + y, a, b, position, desired);
             }
             Waveform::DotProduct(a, b) => {
                 // Like sum, but we need to make sure we generate a length based on
@@ -288,21 +239,19 @@ impl Generator {
                         if length > position {
                             desired.min(length - position)
                         } else {
-                            return (Waveform::DotProduct(a, b), Vec::new()); // No samples to generate
+                            return Vec::new(); // No samples to generate
                         }
                     }
                     Length::Infinite => desired,
                 };
-                let (a, b, out) =
-                    self.generate_binary_op(|x, y| x * y, *a, *b, position, new_desired);
-                return (Waveform::DotProduct(Box::new(a), Box::new(b)), out);
+                return self.generate_binary_op(|x, y| x * y, a, b, position, new_desired);
             }
             Waveform::Convolution { waveform, kernel } => {
                 let kernel_length = match self.length(&kernel) {
                     Length::Finite(length) => length,
                     Length::Infinite => {
                         println!("Infinite kernel length, skipping generation");
-                        return (Waveform::Convolution { waveform, kernel }, Vec::new());
+                        return Vec::new();
                     }
                 };
                 let desired = match self.length(&waveform) {
@@ -310,7 +259,7 @@ impl Generator {
                         if length + kernel_length / 2 > position {
                             desired.min(length + kernel_length / 2 - position)
                         } else {
-                            return (Waveform::Convolution { waveform, kernel }, Vec::new());
+                            return Vec::new();
                         }
                     }
                     Length::Infinite => desired,
@@ -324,9 +273,9 @@ impl Generator {
                     let position_diff = position.min(kernel_length / 2 - position);
                     (position_diff, desired + position_diff + kernel_length / 2)
                 };
-                let (waveform, waveform_out) =
-                    self.generate(*waveform, position - position_diff, waveform_desired);
-                let (kernel, kernel_out) = self.generate(*kernel, 0, kernel_length);
+                let waveform_out =
+                    self.generate(waveform, position - position_diff, waveform_desired);
+                let kernel_out = self.generate(kernel, 0, kernel_length);
                 let mut out = vec![0.0; desired];
                 for (i, x) in out.iter_mut().enumerate() {
                     for (j, &k) in kernel_out.iter().enumerate() {
@@ -338,18 +287,12 @@ impl Generator {
                         }
                     }
                 }
-                return (
-                    Waveform::Convolution {
-                        waveform: Box::new(waveform),
-                        kernel: Box::new(kernel),
-                    },
-                    out,
-                );
+                return out;
             }
         }
     }
 
-    fn length<S>(&self, waveform: &Waveform<S>) -> Length {
+    fn length(&self, waveform: &Waveform) -> Length {
         match waveform {
             Waveform::Const { .. } => Length::Infinite,
             Waveform::Time => Length::Infinite,
@@ -375,7 +318,7 @@ impl Generator {
         }
     }
 
-    fn offset<S>(&self, waveform: &Waveform<S>) -> usize {
+    fn offset(&self, waveform: &Waveform) -> usize {
         match waveform {
             Waveform::Const { .. } => 0,
             Waveform::Time => 0,
@@ -398,13 +341,13 @@ impl Generator {
     fn generate_binary_op(
         &self,
         op: fn(f32, f32) -> f32,
-        a: Waveform<(f32, usize)>,
-        mut b: Waveform<(f32, usize)>,
+        a: &Waveform,
+        b: &Waveform,
         position: usize,
         desired: usize,
-    ) -> (Waveform<(f32, usize)>, Waveform<(f32, usize)>, Vec<f32>) {
+    ) -> Vec<f32> {
         let offset = self.offset(&a);
-        let (a, mut left) = self.generate(a, position, desired);
+        let mut left = self.generate(a, position, desired);
 
         if offset >= position + desired {
             // Make sure the left side is long enough so that we get another chance to
@@ -423,8 +366,7 @@ impl Generator {
 
             if position < offset {
                 // ... and the right waveform starts after position
-                let (tmp_b, right) = self.generate(b, 0, desired - (offset - position));
-                b = tmp_b;
+                let right = self.generate(b, 0, desired - (offset - position));
                 // Merge the overlapping portion
                 for (i, x) in left[offset - position..].iter_mut().enumerate() {
                     if i >= right.len() {
@@ -438,8 +380,7 @@ impl Generator {
                 }
             } else {
                 // ... and the right waveform starts before  position
-                let (tmp_b, right) = self.generate(b, position - offset, desired);
-                b = tmp_b;
+                let right = self.generate(b, position - offset, desired);
                 // Merge the overlapping portion
                 for (i, x) in left.iter_mut().enumerate() {
                     if i >= right.len() {
@@ -453,7 +394,7 @@ impl Generator {
                 }
             }
         }
-        return (a, b, left);
+        return left;
     }
 }
 
@@ -478,7 +419,7 @@ pub enum Command {
 #[derive(Debug, Clone)]
 pub struct ActiveWaveform {
     pub id: u32,
-    pub waveform: Waveform<(f32, usize)>,
+    pub waveform: Waveform,
     pub position: usize,
 }
 
@@ -581,44 +522,6 @@ impl<'a> AudioCallback for Tracker {
     }
 }
 
-fn make_active_waveform(a: Waveform) -> Waveform<(f32, usize)> {
-    match a {
-        Waveform::SineWave { frequency } => Waveform::SineWave {
-            frequency: Box::new(make_active_waveform(*frequency)),
-        },
-        Waveform::Const(value) => Waveform::Const(value),
-        Waveform::Time => Waveform::Time,
-        Waveform::Dial(dial) => Waveform::Dial(dial),
-        Waveform::Fin { duration, waveform } => Waveform::Fin {
-            duration,
-            waveform: Box::new(make_active_waveform(*waveform)),
-        },
-        Waveform::Seq { duration, waveform } => Waveform::Seq {
-            duration,
-            waveform: Box::new(make_active_waveform(*waveform)),
-        },
-        Waveform::Rep {
-            trigger, waveform, ..
-        } => Waveform::Rep {
-            trigger: Box::new(make_active_waveform(*trigger)),
-            waveform: Box::new(make_active_waveform(*waveform)),
-            state: ((-1.0f32).signum(), 0),
-        },
-        Waveform::Sum(a, b) => Waveform::Sum(
-            Box::new(make_active_waveform(*a)),
-            Box::new(make_active_waveform(*b)),
-        ),
-        Waveform::DotProduct(a, b) => Waveform::DotProduct(
-            Box::new(make_active_waveform(*a)),
-            Box::new(make_active_waveform(*b)),
-        ),
-        Waveform::Convolution { waveform, kernel } => Waveform::Convolution {
-            waveform: Box::new(make_active_waveform(*waveform)),
-            kernel: Box::new(make_active_waveform(*kernel)),
-        },
-    }
-}
-
 impl Tracker {
     fn empty_command_queue(&mut self) {
         //println!("Dial state before processing commands: {:?}", self.generator.dial_values);
@@ -645,7 +548,7 @@ impl Tracker {
                             // Play immediately
                             self.active_waveforms.push(ActiveWaveform {
                                 id,
-                                waveform: make_active_waveform(waveform),
+                                waveform,
                                 position: 0,
                             });
                         }
@@ -704,7 +607,7 @@ impl Tracker {
                         // This waveform can become active
                         self.active_waveforms.push(ActiveWaveform {
                             id: pending.id,
-                            waveform: make_active_waveform(pending.waveform.clone()),
+                            waveform: pending.waveform.clone(),
                             position: 0,
                         });
                         println!(
@@ -732,10 +635,9 @@ impl Tracker {
             let mut i = 0;
             while i < self.active_waveforms.len() {
                 let active = &mut self.active_waveforms[i];
-                let (waveform, tmp) =
-                    self.generator
-                        .generate(active.waveform.clone(), active.position, desired);
-                active.waveform = waveform;
+                let tmp = self
+                    .generator
+                    .generate(&active.waveform, active.position, desired);
                 if tmp.len() > desired {
                     panic!(
                         "Generated more samples than desired: {} > {} for waveform id {} at position {}: {:?}", 
@@ -807,7 +709,7 @@ mod tests {
     use super::*;
     use Waveform::{Const, Convolution, DotProduct, Fin, Rep, Seq, SineWave, Sum, Time};
 
-    fn finite_const_gen<S>(value: f32, fin_duration: f32, seq_duration: f32) -> Waveform<S> {
+    fn finite_const_gen(value: f32, fin_duration: f32, seq_duration: f32) -> Waveform {
         return Seq {
             duration: seq_duration,
             waveform: Box::new(Fin {
@@ -817,44 +719,40 @@ mod tests {
         };
     }
 
-    fn run_tests(waveform: Waveform<(f32, usize)>, desired: Vec<f32>) -> Waveform<(f32, usize)> {
+    fn run_tests(waveform: &Waveform, desired: Vec<f32>) {
         let generator = Generator::new(1, 60);
         for size in [1, 2, 4, 8] {
             //println!("Running tests for waveform {:?} with size {}", waveform, size);
-            let mut waveform = waveform.clone();
             let mut out = vec![0.0; desired.len()];
             for n in 0..out.len() / size {
-                let (w, tmp) = generator.generate(waveform, n * size, size);
+                let tmp = generator.generate(waveform, n * size, size);
                 (&mut out[n * size..(n * size + tmp.len())]).copy_from_slice(&tmp);
-                waveform = w;
             }
             assert_eq!(out, desired);
         }
-        waveform
     }
 
     #[test]
     fn test_time() {
-        let mut w1 = Waveform::Time;
-        w1 = run_tests(w1, vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+        let w1 = Waveform::Time;
+        run_tests(&w1, vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
 
         let generator = Generator::new(1, 90);
-        let (_, result) = generator.generate(w1, 0, 8);
+        let result = generator.generate(&w1, 0, 8);
         assert_eq!(result, vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
     }
 
     #[test]
     fn test_rep() {
-        let w1 = make_active_waveform(Rep {
+        let w1 = Rep {
             trigger: Box::new(SineWave {
                 frequency: Box::new(Const(0.25)),
             }),
             waveform: Box::new(Time),
-            state: (),
-        });
-        run_tests(w1, vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0, 3.0]);
+        };
+        run_tests(&w1, vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0, 3.0]);
 
-        let w2 = make_active_waveform(Rep {
+        let w2 = Rep {
             trigger: Box::new(Fin {
                 duration: 6.0,
                 waveform: Box::new(SineWave {
@@ -862,13 +760,12 @@ mod tests {
                 }),
             }),
             waveform: Box::new(Time),
-            state: (),
-        });
+        };
         let generator = Generator::new(1, 60);
         assert_eq!(generator.length(&w2), Length::Finite(6));
-        run_tests(w2, vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 0.0, 0.0]);
+        run_tests(&w2, vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 0.0, 0.0]);
 
-        let w3 = make_active_waveform(Rep {
+        let w3 = Rep {
             trigger: Box::new(Waveform::SineWave {
                 frequency: Box::new(Waveform::Const(0.25)),
             }),
@@ -876,9 +773,8 @@ mod tests {
                 duration: 3.0,
                 waveform: Box::new(Waveform::Time),
             }),
-            state: (),
-        });
-        run_tests(w3, vec![0.0, 1.0, 2.0, 0.0, 0.0, 1.0, 2.0, 0.0]);
+        };
+        run_tests(&w3, vec![0.0, 1.0, 2.0, 0.0, 0.0, 1.0, 2.0, 0.0]);
     }
 
     #[test]
@@ -890,7 +786,7 @@ mod tests {
         );
         assert_eq!(generator.offset(&w1), 4);
         assert_eq!(generator.length(&w1), Length::Finite(7));
-        run_tests(w1, vec![1.0, 1.0, 2.0, 2.0, 2.0, 1.0, 1.0, 0.0]);
+        run_tests(&w1, vec![1.0, 1.0, 2.0, 2.0, 2.0, 1.0, 1.0, 0.0]);
 
         let w2 = Fin {
             duration: 8.0,
@@ -911,19 +807,19 @@ mod tests {
                 )),
             )),
         };
-        run_tests(w2, vec![3.0; 8]);
+        run_tests(&w2, vec![3.0; 8]);
 
-        let mut w5 = Sum(
+        let w5 = Sum(
             Box::new(finite_const_gen(3.0, 1.0, 3.0)),
             Box::new(finite_const_gen(2.0, 2.0, 2.0)),
         );
-        w5 = run_tests(w5, vec![3.0, 0.0, 0.0, 2.0, 2.0, 0.0, 0.0, 0.0]);
+        run_tests(&w5, vec![3.0, 0.0, 0.0, 2.0, 2.0, 0.0, 0.0, 0.0]);
 
         // Test a case to make sure that the sum generates enough samples, even when
         // the left-hand side is shorter and the right hasn't started yet.
-        let (w5, result) = generator.generate(w5, 0, 2);
+        let result = generator.generate(&w5, 0, 2);
         assert_eq!(result, vec![3.0, 0.0]);
-        let (_, result) = generator.generate(w5, 1, 2);
+        let result = generator.generate(&w5, 1, 2);
         assert_eq!(result, vec![0.0, 0.0]);
 
         // This one is a little strange: the right-hand side doesn't generate any
@@ -933,7 +829,7 @@ mod tests {
             Box::new(finite_const_gen(3.0, 1.0, 3.0)),
             Box::new(finite_const_gen(2.0, 0.0, 0.0)),
         );
-        let (_, result) = generator.generate(w6, 0, 2);
+        let result = generator.generate(&w6, 0, 2);
         assert_eq!(result, vec![3.0, 0.0]);
     }
 
@@ -946,19 +842,19 @@ mod tests {
         );
         assert_eq!(generator.offset(&w1), 4);
         assert_eq!(generator.length(&w1), Length::Finite(7));
-        run_tests(w1, vec![3.0, 3.0, 6.0, 6.0, 6.0, 6.0, 6.0, 0.0]);
+        run_tests(&w1, vec![3.0, 3.0, 6.0, 6.0, 6.0, 6.0, 6.0, 0.0]);
 
         let w2 = DotProduct(
             Box::new(finite_const_gen(3.0, 5.0, 2.0)),
             Box::new(finite_const_gen(2.0, 5.0, 2.0)),
         );
-        run_tests(w2, vec![3.0, 3.0, 6.0, 6.0, 6.0, 0.0, 0.0, 0.0]);
+        run_tests(&w2, vec![3.0, 3.0, 6.0, 6.0, 6.0, 0.0, 0.0, 0.0]);
 
         let w3 = Fin {
             duration: 8.0,
             waveform: Box::new(DotProduct(Box::new(Const(3.0)), Box::new(Const(2.0)))),
         };
-        run_tests(w3, vec![6.0; 8]);
+        run_tests(&w3, vec![6.0; 8]);
 
         let w4 = DotProduct(
             Box::new(Seq {
@@ -967,7 +863,7 @@ mod tests {
             }),
             Box::new(finite_const_gen(2.0, 5.0, 5.0)),
         );
-        run_tests(w4, vec![3.0, 6.0, 6.0, 6.0, 6.0, 6.0, 0.0, 0.0]);
+        run_tests(&w4, vec![3.0, 6.0, 6.0, 6.0, 6.0, 6.0, 0.0, 0.0]);
     }
 
     #[test]
@@ -976,7 +872,7 @@ mod tests {
             waveform: Box::new(Time),
             kernel: Box::new(finite_const_gen(2.0, 3.0, 3.0)),
         };
-        run_tests(w1, vec![2.0, 6.0, 12.0, 18.0, 24.0, 30.0, 36.0, 42.0]);
+        run_tests(&w1, vec![2.0, 6.0, 12.0, 18.0, 24.0, 30.0, 36.0, 42.0]);
 
         let w2 = Convolution {
             waveform: Box::new(Fin {
@@ -987,7 +883,7 @@ mod tests {
         };
         let generator = Generator::new(1, 60);
         assert_eq!(generator.length(&w2), Length::Finite(6));
-        run_tests(w2, vec![2.0, 6.0, 12.0, 18.0, 14.0, 8.0, 0.0, 0.0]);
+        run_tests(&w2, vec![2.0, 6.0, 12.0, 18.0, 14.0, 8.0, 0.0, 0.0]);
 
         let w3 = Convolution {
             waveform: Box::new(Fin {
@@ -998,18 +894,17 @@ mod tests {
         };
         let generator = Generator::new(1, 60);
         assert_eq!(generator.length(&w3), Length::Finite(5));
-        run_tests(w3, vec![6.0, 6.0, 6.0, 6.0, 4.0, 0.0, 0.0, 0.0]);
+        run_tests(&w3, vec![6.0, 6.0, 6.0, 6.0, 4.0, 0.0, 0.0, 0.0]);
 
         let w4 = Convolution {
-            waveform: Box::new(make_active_waveform(Rep {
+            waveform: Box::new(Rep {
                 trigger: Box::new(SineWave {
                     frequency: Box::new(Const(1.0 / 3.0)),
                 }),
                 waveform: Box::new(Time),
-                state: (),
-            })),
+            }),
             kernel: Box::new(finite_const_gen(2.0, 5.0, 5.0)),
         };
-        run_tests(w4, vec![6.0, 6.0, 8.0, 12.0, 10.0, 8.0, 12.0, 10.0]);
+        run_tests(&w4, vec![6.0, 6.0, 8.0, 12.0, 10.0, 8.0, 12.0, 10.0]);
     }
 }

@@ -140,7 +140,6 @@ pub fn rep(mut arguments: Vec<Expr>) -> Expr {
     Expr::Waveform(Waveform::Rep {
         trigger: Box::new(trigger),
         waveform: Box::new(waveform),
-        state: (),
     })
 }
 
