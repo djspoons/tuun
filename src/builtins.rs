@@ -188,6 +188,13 @@ pub fn waveform_dot_product(arguments: Vec<Expr>) -> Expr {
     return waveform_binary_op(arguments, Waveform::DotProduct);
 }
 
+pub fn waveform_convolution(arguments: Vec<Expr>) -> Expr {
+    return waveform_binary_op(arguments, |waveform, kernel| Waveform::Convolution {
+        waveform,
+        kernel,
+    });
+}
+
 pub fn chord(arguments: Vec<Expr>) -> Expr {
     match &arguments[..] {
         [List(exprs)] => {
@@ -256,6 +263,7 @@ pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
         ("seq", seq),
         ("~+", waveform_sum),
         ("~.", waveform_dot_product),
+        ("~*", waveform_convolution),
         ("_chord", chord),
         ("_sequence", sequence),
     ];

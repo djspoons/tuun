@@ -118,10 +118,11 @@ These two combinators that change how a waveform behaves in time in relation to 
  * `Fin(duration)` - stops generating samples after the given duration
  * `Seq(duration)` - marks the offset at which subsequent waveforms should take effect
 
-And finally there are two arithmetic combinators that combine the samples themselves.
+And finally there are the arithmetic combinators that combine the samples themselves.
 
  * `a ~+ b` - adds sample points together
  * `a ~. b` - multiplies sample points together
+ * `a ~* b` - convolves the points of a with b
 
 And for comparison, here are the lengths and offsets of each waveform:
 
@@ -130,12 +131,14 @@ And for comparison, here are the lengths and offsets of each waveform:
 | `Const(_)`         | ∞                                  | 0                   |
 | `Time`             | ∞                                  | 0                   |
 | `Dial(_)`          | ∞                                  | 0                   |
-| `Sin(a)`           | a.length                           | a.duration          |
-| `Rep(trigger, a)`  | trigger.length                     | trigger.duration    |
+| `Sin(a)`           | a.length                           | a.offset            |
+| `Rep(trigger, a)`  | trigger.length                     | trigger.offset    |
+<!-- | `Alt(trigger, a, b)`  | trigger.length                     | trigger.offset    | -->
 | `Fin(duration, a)` | duration                           | a.offset            |
 | `Seq(duration, a)` | a.length                           | duration            |
 | `a ~+ b`           | max(a.length, a.offset + b.length) | a.offset + b.offset | 
 | `a ~. b`           | min(a.length, a.offset + b.length) | a.offset + b.offset |
+| `a ~* b`           | a.length + (b.length / 2)          | a.offset            |
 
 This might seem like a small set of combinators, but it's enough to create synthesizers, filters, and even musical compositions with the help of the Tuun specification language.
 

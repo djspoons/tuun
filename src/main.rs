@@ -101,7 +101,7 @@ pub fn main() {
     let desired_spec = AudioSpecDesired {
         freq: Some(args.sample_frequency),
         channels: Some(1), // mono
-        samples: None,     // default sample size
+        samples: None,     // default buffer size
     };
 
     let (status_sender, status_receiver) = std::sync::mpsc::channel();

@@ -319,7 +319,7 @@ fn parse_multiplicative(input: LocatedSpan) -> IResult<Expr> {
         (
             parse_application,
             many0((
-                delimited(multispace0, alt((tag("*"), tag("/"), tag("~."))), multispace0),
+                delimited(multispace0, alt((tag("*"), tag("/"), tag("~."), tag("~*"))), multispace0),
                 expect(parse_application, "expected expression after operator"),
             )),
         ),
