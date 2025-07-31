@@ -59,7 +59,7 @@ pub enum Dial {
 }
 
 #[derive(Debug, Clone)]
-pub enum Waveform<S> {
+pub enum Waveform<S = ()> {
     /*
      * SineWave is a sinusoidal wave generator with the given frequency.
      */
@@ -461,7 +461,7 @@ pub enum Command {
     PlayOnce {
         // A unique id for this waveform
         id: u32,
-        waveform: Waveform<()>,
+        waveform: Waveform,
         // When the waveform should start playing, in beats from the beginning of playback;
         // if None, then play immediately.
         at_beat: Option<u64>,
@@ -485,7 +485,7 @@ pub struct ActiveWaveform {
 #[derive(Debug, Clone)]
 pub struct PendingWaveform {
     pub id: u32,
-    pub waveform: Waveform<()>,
+    pub waveform: Waveform,
     pub beat: Option<u64>, // The beat at which this waveform should be played
 }
 
@@ -581,7 +581,7 @@ impl<'a> AudioCallback for Tracker {
     }
 }
 
-fn make_active_waveform(a: Waveform<()>) -> Waveform<(f32, usize)> {
+fn make_active_waveform(a: Waveform) -> Waveform<(f32, usize)> {
     match a {
         Waveform::SineWave { frequency } => Waveform::SineWave {
             frequency: Box::new(make_active_waveform(*frequency)),

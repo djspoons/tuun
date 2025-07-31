@@ -508,7 +508,7 @@ fn process_event(
 }
 
 enum WaveformOrMode {
-    Waveform(tracker::Waveform<()>),
+    Waveform(tracker::Waveform),
     Mode(Mode),
 }
 

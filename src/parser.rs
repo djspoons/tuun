@@ -134,7 +134,7 @@ impl std::fmt::Debug for BuiltInFn {
 pub enum Expr {
     // Values
     Float(f32),
-    Waveform(tracker::Waveform<()>),
+    Waveform(tracker::Waveform),
     Function {
         arguments: Vec<String>,
         body: Box<Expr>,
