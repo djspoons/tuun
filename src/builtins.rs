@@ -102,15 +102,7 @@ pub fn reduce(arguments: Vec<Expr>) -> Expr {
     }
 }
 
-pub fn sin_waveform(arguments: Vec<Expr>) -> Expr {
-    match &arguments[..] {
-        [Expr::Waveform(a)] => Expr::Waveform(Waveform::Sin(Box::new(a.clone()))),
-        [Float(value)] => Expr::Waveform(Waveform::Sin(Box::new(Waveform::Const(*value)))),
-        _ => Expr::Error("Invalid argument for $".to_string()),
-    }
-}
-
-pub fn fixed_waveform(arguments: Vec<Expr>) -> Expr {
+pub fn fixed(arguments: Vec<Expr>) -> Expr {
     match &arguments[..] {
         [List(samples)] => {
             let mut fixed_samples = Vec::new();
@@ -150,25 +142,6 @@ pub fn fin(arguments: Vec<Expr>) -> Expr {
     }
 }
 
-pub fn rep(mut arguments: Vec<Expr>) -> Expr {
-    // TODO make it work in curried form
-    if arguments.len() != 2 {
-        return Expr::Error("Expected a waveform".to_string());
-    }
-    let trigger = match arguments.remove(0) {
-        Expr::Waveform(a) => a,
-        _ => return Expr::Error("First argument must be a waveform".to_string()),
-    };
-    let waveform = match arguments.remove(0) {
-        Expr::Waveform(a) => a,
-        _ => return Expr::Error("Second argument must be a waveform".to_string()),
-    };
-    Expr::Waveform(Waveform::Rep {
-        trigger: Box::new(trigger),
-        waveform: Box::new(waveform),
-    })
-}
-
 pub fn seq(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
         [Float(duration)] => BuiltIn {
@@ -176,6 +149,14 @@ pub fn seq(arguments: Vec<Expr>) -> Expr {
             function: filter(move |waveform: Box<Waveform>| Waveform::Seq { duration, waveform }),
         },
         _ => Expr::Error("Invalid arguments for seq".to_string()),
+    }
+}
+
+pub fn waveform_sin(arguments: Vec<Expr>) -> Expr {
+    match &arguments[..] {
+        [Expr::Waveform(a)] => Expr::Waveform(Waveform::Sin(Box::new(a.clone()))),
+        [Float(value)] => Expr::Waveform(Waveform::Sin(Box::new(Waveform::Const(*value)))),
+        _ => Expr::Error("Invalid argument for $".to_string()),
     }
 }
 
@@ -199,6 +180,13 @@ fn waveform_binary_op(
     return Expr::Waveform(op(a, b));
 }
 
+pub fn waveform_convolution(arguments: Vec<Expr>) -> Expr {
+    return waveform_binary_op(arguments, |waveform, kernel| Waveform::Convolution {
+        waveform,
+        kernel,
+    });
+}
+
 pub fn waveform_sum(arguments: Vec<Expr>) -> Expr {
     return waveform_binary_op(arguments, Waveform::Sum);
 }
@@ -207,11 +195,50 @@ pub fn waveform_dot_product(arguments: Vec<Expr>) -> Expr {
     return waveform_binary_op(arguments, Waveform::DotProduct);
 }
 
-pub fn waveform_convolution(arguments: Vec<Expr>) -> Expr {
-    return waveform_binary_op(arguments, |waveform, kernel| Waveform::Convolution {
-        waveform,
-        kernel,
-    });
+pub fn res(mut arguments: Vec<Expr>) -> Expr {
+    // TODO make it work in curried form
+    if arguments.len() != 2 {
+        return Expr::Error("Expected two waveforms".to_string());
+    }
+    let trigger = match arguments.remove(0) {
+        Expr::Waveform(a) => a,
+        _ => return Expr::Error("First argument must be a waveform".to_string()),
+    };
+    let waveform = match arguments.remove(0) {
+        Expr::Waveform(a) => a,
+        Float(value) => Waveform::Const(value),
+        _ => return Expr::Error("Second argument must be a waveform or a float".to_string()),
+    };
+    Expr::Waveform(Waveform::Res {
+        trigger: Box::new(trigger),
+        waveform: Box::new(waveform),
+    })
+}
+
+pub fn alt(mut arguments: Vec<Expr>) -> Expr {
+    // TODO make it work in curried form
+    if arguments.len() != 3 {
+        return Expr::Error("Expected three waveforms".to_string());
+    }
+    let trigger = match arguments.remove(0) {
+        Expr::Waveform(a) => a,
+        _ => return Expr::Error("First argument must be a waveform".to_string()),
+    };
+    let positive_waveform = match arguments.remove(0) {
+        Expr::Waveform(a) => a,
+        Float(value) => Waveform::Const(value),
+        _ => return Expr::Error("Second argument must be a waveform or a float".to_string()),
+    };
+    let negative_waveform = match arguments.remove(0) {
+        Expr::Waveform(a) => a,
+        Float(value) => Waveform::Const(value),
+        _ => return Expr::Error("Third argument must be a waveform or a float".to_string()),
+    };
+    Expr::Waveform(Waveform::Alt {
+        trigger: Box::new(trigger),
+        positive_waveform: Box::new(positive_waveform),
+        negative_waveform: Box::new(negative_waveform),
+    })
 }
 
 pub fn chord(arguments: Vec<Expr>) -> Expr {
@@ -279,14 +306,15 @@ pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
         ("exp", exp),
         ("map", map),
         ("reduce", reduce),
-        ("fixed", fixed_waveform),
+        ("fixed", fixed),
         ("fin", fin),
         ("seq", seq),
-        ("sin", sin_waveform),
+        ("sin", waveform_sin),
         ("~*", waveform_convolution),
         ("~+", waveform_sum),
         ("~.", waveform_dot_product),
-        ("rep", rep),
+        ("res", res),
+        ("alt", alt),
         ("_chord", chord),
         ("_sequence", sequence),
     ];

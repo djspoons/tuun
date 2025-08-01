@@ -111,11 +111,22 @@ pub enum Waveform {
     Sum(Box<Waveform>, Box<Waveform>),
     DotProduct(Box<Waveform>, Box<Waveform>),
     /*
-     * Rep generates a repeating waveform that loops the given waveform whenever the trigger waveform flips from negative values to positive values. Its length and offset are determined by the trigger waveform.
+     * Res generates a repeating waveform that restarts the given waveform whenever the trigger
+     * waveform flips from negative values to positive values. Its length and offset are determined
+     * by the trigger waveform.
      */
-    Rep {
+    Res {
         trigger: Box<Waveform>,
         waveform: Box<Waveform>,
+    },
+    /*
+     * Alt generates a waveform by alternating between two waveforms based on the sign of
+     * the trigger waveform.
+     */
+    Alt {
+        trigger: Box<Waveform>,
+        positive_waveform: Box<Waveform>,
+        negative_waveform: Box<Waveform>,
     },
 }
 
@@ -255,7 +266,7 @@ impl Generator {
                 };
                 return self.generate_binary_op(|x, y| x * y, a, b, position, new_desired);
             }
-            Waveform::Rep { trigger, waveform } => {
+            Waveform::Res { trigger, waveform } => {
                 // TODO think about all of these unwrap_ors
                 // TODO generate the trigger in blocks?
                 // Maybe cache the last trigger position and signum and use it if position doesn't change?
@@ -309,6 +320,25 @@ impl Generator {
                 }
                 return out;
             }
+            Waveform::Alt {
+                trigger,
+                positive_waveform,
+                negative_waveform,
+            } => {
+                let mut out = self.generate(trigger, position, desired);
+                let mut positive_out = self.generate(positive_waveform, position, desired);
+                positive_out.resize(out.len(), 0.0);
+                let mut negative_out = self.generate(negative_waveform, position, desired);
+                negative_out.resize(out.len(), 0.0);
+                for (i, x) in out.iter_mut().enumerate() {
+                    if x.signum() >= 0.0 {
+                        *x = positive_out[i];
+                    } else {
+                        *x = negative_out[i];
+                    }
+                }
+                return out;
+            }
         }
     }
 
@@ -336,7 +366,7 @@ impl Generator {
                 let length = Length::Finite(self.offset(a)) + self.length(b);
                 self.length(a).min(length)
             }
-            Waveform::Rep { trigger, .. } => self.length(trigger),
+            Waveform::Res { trigger, .. } | Waveform::Alt { trigger, .. } => self.length(trigger),
         }
     }
 
@@ -355,7 +385,7 @@ impl Generator {
             Waveform::Sin(waveform) => self.offset(waveform),
             Waveform::Convolution { waveform, .. } => self.offset(waveform),
             Waveform::Sum(a, b) | Waveform::DotProduct(a, b) => self.offset(a) + self.offset(b),
-            Waveform::Rep { trigger, .. } => self.offset(trigger),
+            Waveform::Res { trigger, .. } | Waveform::Alt { trigger, .. } => self.offset(trigger),
         }
     }
 
@@ -731,7 +761,7 @@ impl Tracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use Waveform::{Const, Convolution, DotProduct, Fin, Rep, Seq, Sin, Sum, Time};
+    use Waveform::{Const, Convolution, DotProduct, Fin, Res, Seq, Sin, Sum, Time};
 
     fn finite_const_gen(value: f32, fin_duration: f32, seq_duration: f32) -> Waveform {
         return Seq {
@@ -767,8 +797,8 @@ mod tests {
     }
 
     #[test]
-    fn test_rep() {
-        let w1 = Rep {
+    fn test_res() {
+        let w1 = Res {
             trigger: Box::new(Sin(Box::new(DotProduct(
                 Box::new(Const(0.25)),
                 Box::new(Time),
@@ -777,7 +807,7 @@ mod tests {
         };
         run_tests(&w1, vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0, 3.0]);
 
-        let w2 = Rep {
+        let w2 = Res {
             trigger: Box::new(Fin {
                 duration: 6.0,
                 waveform: Box::new(Sin(Box::new(DotProduct(
@@ -791,7 +821,7 @@ mod tests {
         assert_eq!(generator.length(&w2), Length::Finite(6));
         run_tests(&w2, vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 0.0, 0.0]);
 
-        let w3 = Rep {
+        let w3 = Res {
             trigger: Box::new(Sin(Box::new(DotProduct(
                 Box::new(Const(0.25)),
                 Box::new(Time),
@@ -924,7 +954,7 @@ mod tests {
         run_tests(&w3, vec![6.0, 6.0, 6.0, 6.0, 4.0, 0.0, 0.0, 0.0]);
 
         let w4 = Convolution {
-            waveform: Box::new(Rep {
+            waveform: Box::new(Res {
                 trigger: Box::new(Sin(Box::new(DotProduct(
                     Box::new(Const(1.0 / 3.0)),
                     Box::new(Time),
@@ -934,5 +964,11 @@ mod tests {
             kernel: Box::new(finite_const_gen(2.0, 5.0, 5.0)),
         };
         run_tests(&w4, vec![6.0, 6.0, 8.0, 12.0, 10.0, 8.0, 12.0, 10.0]);
+
+        let w5 = Convolution {
+            waveform: Box::new(Const(1.0)),
+            kernel: Box::new(finite_const_gen(0.2, 5.0, 5.0)),
+        };
+        run_tests(&w5, vec![0.6, 0.8, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
     }
 }
