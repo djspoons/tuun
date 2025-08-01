@@ -2,6 +2,8 @@ use std::f32::consts::PI;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::Instant;
 
+use fastrand;
+
 extern crate sdl2;
 use sdl2::audio::AudioCallback;
 
@@ -72,12 +74,16 @@ pub enum Waveform {
      */
     Time,
     /*
-     * Dial generates a continuous control signal from a "dial" input.
+     * Noise generates random samples.
      */
+    Noise,
     /*
-     * Always generates the same, finite, sequence of samples.
+     * Fixed always generates the same, finite, sequence of samples.
      */
     Fixed(Vec<f32>),
+    /*
+     * Dial generates a continuous control signal from a "dial" input.
+     */
     Dial(Dial),
     /*
      * Fin generates a finite waveform that lasts for the given duration in beats, truncating
@@ -154,6 +160,13 @@ impl Generator {
                 let mut out = vec![0.0; desired];
                 for (i, x) in out.iter_mut().enumerate() {
                     *x = (i + position) as f32 / self.sample_frequency as f32;
+                }
+                return out;
+            }
+            Waveform::Noise => {
+                let mut out = vec![0.0; desired];
+                for x in out.iter_mut() {
+                    *x = fastrand::f32() * 2.0 - 1.0;
                 }
                 return out;
             }
@@ -303,6 +316,7 @@ impl Generator {
         match waveform {
             Waveform::Const { .. } => Length::Infinite,
             Waveform::Time => Length::Infinite,
+            Waveform::Noise => Length::Infinite,
             Waveform::Fixed(samples) => Length::Finite(samples.len()),
             Waveform::Dial { .. } => Length::Infinite,
             Waveform::Fin { duration, .. } => ((duration
@@ -330,6 +344,7 @@ impl Generator {
         match waveform {
             Waveform::Const { .. } => 0,
             Waveform::Time => 0,
+            Waveform::Noise => 0,
             Waveform::Fixed(_) => 0,
             Waveform::Dial { .. } => 0,
             Waveform::Fin { waveform, .. } => self.offset(waveform),

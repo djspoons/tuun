@@ -269,6 +269,7 @@ pub fn sequence(arguments: Vec<Expr>) -> Expr {
 
 pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
     context.push(("time".to_string(), Expr::Waveform(Waveform::Time)));
+    context.push(("noise".to_string(), Expr::Waveform(Waveform::Noise)));
     context.push(("X".to_string(), Expr::Waveform(Waveform::Dial(Dial::X))));
     context.push(("Y".to_string(), Expr::Waveform(Waveform::Dial(Dial::Y))));
 
