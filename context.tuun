@@ -1,3 +1,4 @@
+$ = fn(freq) => sin(freq ~. time),
 fs = fn(dur) => fn(w) => w | fin(dur) | seq(dur),
 
 amp = fn(level) => fn(w) => w ~. level,

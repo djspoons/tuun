@@ -102,14 +102,10 @@ pub fn reduce(arguments: Vec<Expr>) -> Expr {
     }
 }
 
-pub fn sine_waveform(arguments: Vec<Expr>) -> Expr {
+pub fn sin_waveform(arguments: Vec<Expr>) -> Expr {
     match &arguments[..] {
-        [Expr::Waveform(a)] => Expr::Waveform(Waveform::SineWave {
-            frequency: Box::new(a.clone()),
-        }),
-        [Float(value)] => Expr::Waveform(Waveform::SineWave {
-            frequency: Box::new(Waveform::Const(*value)),
-        }),
+        [Expr::Waveform(a)] => Expr::Waveform(Waveform::Sin(Box::new(a.clone()))),
+        [Float(value)] => Expr::Waveform(Waveform::Sin(Box::new(Waveform::Const(*value)))),
         _ => Expr::Error("Invalid argument for $".to_string()),
     }
 }
@@ -283,14 +279,14 @@ pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
         ("exp", exp),
         ("map", map),
         ("reduce", reduce),
-        ("$", sine_waveform),
         ("fixed", fixed_waveform),
         ("fin", fin),
-        ("rep", rep),
         ("seq", seq),
+        ("sin", sin_waveform),
+        ("~*", waveform_convolution),
         ("~+", waveform_sum),
         ("~.", waveform_dot_product),
-        ("~*", waveform_convolution),
+        ("rep", rep),
         ("_chord", chord),
         ("_sequence", sequence),
     ];
