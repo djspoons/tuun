@@ -33,7 +33,7 @@ Tuun has several primitive waveforms and waveform combinators. The first two, `C
 ```
 Sin(Const(440) ~. Time)
 ```
-`Const` and `Time` both infinite waveforms. Since it's often useful to have waveforms that *don't* go forever, the `Fin` combinator modifies a waveform to be finite. For example, the following will generate a tone at 440Hz for 1 beat.
+`Const` and `Time` are both infinite waveforms, and so the expression above will generate a tone that goes on forever. However, since it's often useful to have waveforms that *don't* go forever, the `Fin` combinator modifies a waveform to be finite. For example, the following will generate a tone at 440Hz for 1 beat.
 
 ```
 Fin(1, Sin(Const(440) ~. Time))
@@ -47,7 +47,7 @@ We used the `~.` combinator above to combine the inputs to `Sin`, and we can als
 Fin(1, Sin(Const(440) ~. Time) ~. Const(0.5))
 ```
 
-As you might expect, and analogous to `~.`, the `~+` combinator adds each pair of corresponding samples.
+As you might expect, and analogous to `~.`, the `~+` combinator _adds_ each pair of corresponding samples.
 
 > The length of a waveform `a ~+ b` is the _maximum_ of the length of `a` and the length of `b` (since the sum can continue generating samples as long as one of the components is), and the length of a waveform `a ~. b` is the _minimum_ of the length of `a` and the length of `b` (since once the length of one waveform has been exceeded, it's as if it will generate only zeros forever).
 
