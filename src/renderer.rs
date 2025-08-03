@@ -33,7 +33,6 @@ fn make_texture<'a>(
 
 const INACTIVE_COLOR: Color = Color::RGBA(0, 255, 255, 255);
 const ACTIVE_COLOR: Color = Color::RGBA(0, 255, 0, 255);
-const PENDING_COLOR: Color = Color::RGBA(255, 222, 33, 255);
 const EDIT_COLOR: Color = Color::RGBA(255, 255, 255, 255);
 const ERROR_COLOR: Color = Color::RGBA(255, 0, 0, 255);
 
@@ -123,48 +122,67 @@ impl Renderer {
         // TODO so much clean-up
         let texture_creator = self.canvas.texture_creator();
         let font = ttf_context.load_font(FONT_PATH, 48).unwrap();
-        let mut bold_font = ttf_context.load_font(FONT_PATH, 48).unwrap();
-        bold_font.set_style(sdl2::ttf::FontStyle::BOLD);
+        let circle_font = ttf_context.load_font(FONT_PATH, 108).unwrap();
 
         self.canvas.set_draw_color(Color::RGB(0, 0, 0));
         self.canvas.clear();
 
         let mut y = 10;
         for (i, program) in programs.iter().enumerate() {
-            let color = match (&mode, is_active(&status, i), is_pending(&status, i)) {
-                (_, true, _) => ACTIVE_COLOR,
-                (_, _, true) => PENDING_COLOR,
-                (Mode::Edit { index, .. }, _, _) if i == *index => EDIT_COLOR,
+            let color = match (&mode, is_pending(&status, i)) {
+                (_, true) => ACTIVE_COLOR,
+                (Mode::Edit { index, .. }, _) if i == *index => EDIT_COLOR,
                 _ => INACTIVE_COLOR,
             };
-            let number = char::from_u32(0x2460 + i as u32).unwrap().to_string();
-            let number_texture = if is_active(&status, i) {
-                make_texture(&bold_font, color, &texture_creator, &number)
-            } else {
-                make_texture(&font, color, &texture_creator, &number)
-            };
+            if !is_pending(status, i) || status.current_beat % 2 == 1 {
+                let number = char::from_u32(0x31 + i as u32).unwrap().to_string();
+                let number_texture = make_texture(&font, color, &texture_creator, &number);
+                let TextureQuery {
+                    width: number_width,
+                    ..
+                } = number_texture.query();
+                self.canvas
+                    .copy(
+                        &number_texture,
+                        None,
+                        Some(sdl2::rect::Rect::new(
+                            self.prompt_width as i32,
+                            y,
+                            number_width,
+                            self.line_height,
+                        )),
+                    )
+                    .unwrap();
+            }
+            let circle = char::from_u32(0x25EF).unwrap().to_string();
+            let circle_texture =
+                make_texture(&circle_font, ACTIVE_COLOR, &texture_creator, &circle);
             let TextureQuery {
-                width: number_width,
+                width: circle_width,
+                height: circle_height,
                 ..
-            } = number_texture.query();
+            } = circle_texture.query();
+            if is_active(status, i) {
+                self.canvas
+                    .copy(
+                        &circle_texture,
+                        None,
+                        Some(sdl2::rect::Rect::new(
+                            self.prompt_width as i32 - 20,
+                            y - 38,
+                            circle_width,
+                            circle_height,
+                        )),
+                    )
+                    .unwrap();
+            }
+
             match *mode {
                 Mode::Edit {
                     index,
                     cursor_position,
                     ref errors,
                 } => {
-                    self.canvas
-                        .copy(
-                            &number_texture,
-                            None,
-                            Some(sdl2::rect::Rect::new(
-                                self.prompt_width as i32,
-                                y,
-                                number_width,
-                                self.line_height,
-                            )),
-                        )
-                        .unwrap();
                     if i != index && !program.is_empty() {
                         let text_texture =
                             make_texture(&font, INACTIVE_COLOR, &texture_creator, program);
@@ -250,18 +268,6 @@ impl Renderer {
                             _ => (),
                         }
                     }
-                    self.canvas
-                        .copy(
-                            &number_texture,
-                            None,
-                            Some(sdl2::rect::Rect::new(
-                                self.prompt_width as i32,
-                                y,
-                                number_width,
-                                self.line_height,
-                            )),
-                        )
-                        .unwrap();
                     if !program.is_empty() {
                         let text_texture =
                             make_texture(&font, INACTIVE_COLOR, &texture_creator, program);

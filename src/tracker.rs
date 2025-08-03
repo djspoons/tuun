@@ -461,6 +461,19 @@ pub enum Command {
         // if None, then play immediately.
         at_beat: Option<u64>,
     },
+    PlayInLoop {
+        // A unique id for this waveform
+        id: u32,
+        waveform: Waveform,
+        // When the waveform should start playing, in beats from the beginning of playback
+        at_beat: u64,
+        // How often to repeat this waveform, in beats
+        repeat_after_beats: u64,
+    },
+    RemovePending {
+        // The id of the waveform to remove
+        id: u32,
+    },
     SendCurrentBuffer,
     TurnDial {
         // The dial to set
@@ -481,7 +494,8 @@ pub struct ActiveWaveform {
 pub struct PendingWaveform {
     pub id: u32,
     pub waveform: Waveform,
-    pub beat: Option<u64>, // The beat at which this waveform should be played
+    pub first_beat: Option<u64>, // The beat at which this waveform should be played
+    pub repeat_after_beats: Option<u64>, // If Some, then repeat this waveform every N beats after the first_beat
 }
 
 #[derive(Debug, Clone)]
@@ -577,61 +591,82 @@ impl<'a> AudioCallback for Tracker {
 }
 
 impl Tracker {
+    fn process_command(&mut self, command: Command) {
+        match command {
+            Command::PlayOnce {
+                id,
+                waveform,
+                at_beat,
+            } => {
+                println!(
+                    "Received command to play once at beat {:?} with waveform {}: {:?}",
+                    at_beat, id, waveform
+                );
+                match at_beat {
+                    Some(beat) if beat < self.current_beat => {
+                        println!("Ignoring command to play waveform {} at beat {:?} (current beat is {})", id, at_beat, self.current_beat);
+                    }
+                    None => {
+                        // Play immediately
+                        self.active_waveforms.push(ActiveWaveform {
+                            id,
+                            waveform,
+                            position: 0,
+                        });
+                    }
+                    _ => {
+                        self.pending_waveforms.push(PendingWaveform {
+                            id,
+                            waveform,
+                            first_beat: at_beat,
+                            repeat_after_beats: None,
+                        });
+                    }
+                }
+            }
+            Command::PlayInLoop {
+                id,
+                waveform,
+                mut at_beat,
+                repeat_after_beats,
+            } => {
+                println!("Received command to play in loop at beat {:?} every {:?} beats with waveform {}: {:?}", at_beat, repeat_after_beats, id, waveform);
+                while at_beat < self.current_beat {
+                    at_beat += repeat_after_beats;
+                }
+                self.pending_waveforms.push(PendingWaveform {
+                    id,
+                    waveform,
+                    first_beat: Some(at_beat),
+                    repeat_after_beats: Some(repeat_after_beats),
+                });
+            }
+            Command::RemovePending { id } => {
+                println!("Received command to remove pending waveform {}", id);
+                self.pending_waveforms.retain(|w| w.id != id);
+            }
+            Command::SendCurrentBuffer => {
+                self.send_current_buffer = true;
+            }
+            Command::TurnDial { dial, delta } => {
+                //turn_dial_count += 1;
+                self.generator
+                    .dial_values
+                    .entry(dial)
+                    .and_modify(|v| *v += delta)
+                    .or_insert(delta);
+            }
+        }
+    }
+
     fn empty_command_queue(&mut self) {
         //println!("Dial state before processing commands: {:?}", self.generator.dial_values);
         //let mut turn_dial_count = 0;
         loop {
             match self.command_receiver.try_recv() {
-                Ok(Command::PlayOnce {
-                    id,
-                    waveform,
-                    at_beat,
-                }) => {
-                    println!(
-                        "Received command to play once at beat {:?} with waveform {}: {:?}",
-                        at_beat, id, waveform
-                    );
-                    match at_beat {
-                        Some(beat) if beat < self.current_beat => {
-                            println!(
-                                "Ignoring command to play waveform {} at beat {:?} (current beat is {})",
-                                id, at_beat, self.current_beat
-                           );
-                        }
-                        None => {
-                            // Play immediately
-                            self.active_waveforms.push(ActiveWaveform {
-                                id,
-                                waveform,
-                                position: 0,
-                            });
-                        }
-                        _ => {
-                            self.pending_waveforms.push(PendingWaveform {
-                                id,
-                                waveform,
-                                beat: at_beat,
-                            });
-                        }
-                    }
-                }
-                Ok(Command::SendCurrentBuffer) => {
-                    self.send_current_buffer = true;
-                }
-                Ok(Command::TurnDial { dial, delta }) => {
-                    //turn_dial_count += 1;
-                    self.generator
-                        .dial_values
-                        .entry(dial)
-                        .and_modify(|v| *v += delta)
-                        .or_insert(delta);
-                }
-                Err(TryRecvError::Empty) => {
-                    break;
-                }
-                Err(e) => {
-                    println!("Error receiving command: {:?}", e);
-                }
+                Ok(command) => self.process_command(command),
+                Err(TryRecvError::Empty) => break,
+                Err(e) => println!("Error receiving command: {:?}", e),
             }
         }
         //println!("Dial state after processing commands: {:?} ({} turns)", self.generator.dial_values, turn_dial_count);
@@ -656,8 +691,8 @@ impl Tracker {
                 // that can become active waveforms.
                 let mut i = 0;
                 while i < self.pending_waveforms.len() {
-                    let pending = &self.pending_waveforms[i];
-                    if pending.beat == Some(self.current_beat) {
+                    let pending = &mut self.pending_waveforms[i];
+                    if pending.first_beat == Some(self.current_beat) {
                         // This waveform can become active
                         self.active_waveforms.push(ActiveWaveform {
                             id: pending.id,
@@ -668,9 +703,22 @@ impl Tracker {
                             "Activating waveform {} at beat {}",
                             pending.id, self.current_beat
                         );
-                        self.pending_waveforms.remove(i);
+                        match pending.repeat_after_beats {
+                            Some(beats) => {
+                                println!(
+                                    "Scheduling waveform {} to repeat in {} beats",
+                                    pending.id, beats
+                                );
+                                pending.first_beat = Some(self.current_beat + beats);
+                                i += 1;
+                            }
+                            None => {
+                                // Otherwise, remove it from the pending list
+                                self.pending_waveforms.remove(i);
+                            }
+                        }
                     } else {
-                        i += 1; // Only remove if we activated it
+                        i += 1;
                     }
                 }
             }

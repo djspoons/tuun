@@ -215,6 +215,8 @@ fn process_event(
     programs: &mut Vec<String>,
     command_sender: &std::sync::mpsc::Sender<Command>,
 ) -> (Vec<(String, parser::Expr)>, Mode) {
+    use sdl2::keyboard::Mod;
+    use sdl2::keyboard::Scancode;
     match event {
         Event::Quit { .. } => return (context, Mode::Exit),
         Event::KeyDown {
@@ -222,16 +224,26 @@ fn process_event(
         } => {
             match (mode, scancode) {
                 // Exit on control-C
-                (mode, Some(sdl2::keyboard::Scancode::C)) => {
-                    if keymod.contains(sdl2::keyboard::Mod::LCTRLMOD)
-                        || keymod.contains(sdl2::keyboard::Mod::RCTRLMOD)
-                    {
+                (mode, Some(Scancode::C)) => {
+                    if keymod.contains(Mod::LCTRLMOD) || keymod.contains(Mod::RCTRLMOD) {
                         return (context, Mode::Exit);
                     } else {
                         return (context, mode);
                     }
                 }
-                (Mode::Select { index }, Some(sdl2::keyboard::Scancode::Return)) => {
+                (Mode::Select { index }, Some(Scancode::Return)) => {
+                    if keymod.contains(Mod::LGUIMOD) || keymod.contains(Mod::RGUIMOD) {
+                        return play_waveform(
+                            context,
+                            status,
+                            args,
+                            index,
+                            programs[index].len(),
+                            &programs[index],
+                            command_sender,
+                            keymod,
+                        );
+                    }
                     // Check to see whether or not the current index is in the tracker's
                     // pending waveforms
                     if status
@@ -239,32 +251,29 @@ fn process_event(
                         .iter()
                         .any(|w| w.id == index as u32)
                     {
-                        // If it is, we just stay in select mode
-                        return (context, Mode::Select { index });
+                        // If it is, send a command to remove it.
+                        command_sender
+                            .send(Command::RemovePending { id: index as u32 })
+                            .unwrap();
                     }
-                    return (
-                        context,
-                        edit_mode_from_program(index, programs[index].len(), &programs[index]),
-                    );
+                    let mode =
+                        edit_mode_from_program(index, programs[index].len(), &programs[index]);
+                    (context, mode)
                 }
-                (Mode::Select { index }, Some(sdl2::keyboard::Scancode::Up)) => {
-                    return (
-                        context,
-                        Mode::Select {
-                            index: (index + programs.len() - 1) % programs.len(),
-                        },
-                    );
-                }
-                (Mode::Select { index }, Some(sdl2::keyboard::Scancode::Down)) => {
-                    return (
-                        context,
-                        Mode::Select {
-                            index: (index + 1) % programs.len(),
-                        },
-                    );
-                }
-                (Mode::Select { index }, Some(sdl2::keyboard::Scancode::LGui)) => {
-                    return (context, Mode::TurnDials { index });
+                (Mode::Select { index }, Some(Scancode::Up)) => (
+                    context,
+                    Mode::Select {
+                        index: (index + programs.len() - 1) % programs.len(),
+                    },
+                ),
+                (Mode::Select { index }, Some(Scancode::Down)) => (
+                    context,
+                    Mode::Select {
+                        index: (index + 1) % programs.len(),
+                    },
+                ),
+                (Mode::Select { index }, Some(Scancode::LAlt) | Some(Scancode::RAlt)) => {
+                    (context, Mode::TurnDials { index })
                 }
                 (
                     Mode::Edit {
@@ -272,40 +281,29 @@ fn process_event(
                         cursor_position,
                         ..
                     },
-                    Some(sdl2::keyboard::Scancode::Return),
-                ) => {
-                    match play_waveform_helper(&context, index, cursor_position, &programs[index]) {
-                        WaveformOrMode::Waveform(waveform) => {
-                            command_sender
-                                .send(Command::PlayOnce {
-                                    id: index as u32,
-                                    waveform,
-                                    at_beat: Some(
-                                        ((status.current_beat + 1) / args.beats_per_measure as u64
-                                            + 1)
-                                            * args.beats_per_measure as u64,
-                                    ),
-                                })
-                                .unwrap();
-                            return (context, Mode::Select { index });
-                        }
-                        WaveformOrMode::Mode(new_mode) => {
-                            return (context, new_mode);
-                        }
-                    }
-                }
+                    Some(Scancode::Return),
+                ) => play_waveform(
+                    context,
+                    status,
+                    args,
+                    index,
+                    cursor_position,
+                    &programs[index],
+                    command_sender,
+                    keymod,
+                ),
                 (
                     Mode::Edit {
                         index,
                         cursor_position,
                         ..
                     },
-                    Some(sdl2::keyboard::Scancode::Backspace),
+                    Some(Scancode::Backspace),
                 ) => {
                     // If the option key is down, clear the last word
                     let mut new_cursor_position = cursor_position;
                     let mut program = programs[index].clone();
-                    if keymod.contains(sdl2::keyboard::Mod::LALTMOD) {
+                    if keymod.contains(Mod::LALTMOD) {
                         if let Some(char_index) =
                             program[..cursor_position].rfind(|e: char| !e.is_whitespace())
                         {
@@ -333,13 +331,11 @@ fn process_event(
                         }
                     }
                     programs[index] = program;
-                    return (
-                        context,
-                        edit_mode_from_program(index, new_cursor_position, &programs[index]),
-                    );
+                    let mode = edit_mode_from_program(index, new_cursor_position, &programs[index]);
+                    (context, mode)
                 }
-                (Mode::Edit { index, .. }, Some(sdl2::keyboard::Scancode::Escape)) => {
-                    return (context, Mode::Select { index: index });
+                (Mode::Edit { index, .. }, Some(Scancode::Escape)) => {
+                    (context, Mode::Select { index: index })
                 }
                 (
                     Mode::Edit {
@@ -347,16 +343,17 @@ fn process_event(
                         cursor_position,
                         errors,
                     },
-                    Some(sdl2::keyboard::Scancode::Left),
+                    Some(Scancode::Left),
                 ) => {
-                    return (
+                    let cursor_position = cursor_position.saturating_sub(1);
+                    (
                         context,
                         Mode::Edit {
                             index,
-                            cursor_position: cursor_position.saturating_sub(1),
+                            cursor_position,
                             errors,
                         },
-                    );
+                    )
                 }
                 (
                     Mode::Edit {
@@ -364,34 +361,33 @@ fn process_event(
                         cursor_position,
                         errors,
                     },
-                    Some(sdl2::keyboard::Scancode::Right),
+                    Some(Scancode::Right),
                 ) => {
-                    return (
+                    let cursor_position = programs[index].len().min(cursor_position + 1);
+                    (
                         context,
                         Mode::Edit {
                             index,
-                            cursor_position: programs[index].len().min(cursor_position + 1),
+                            cursor_position,
                             errors,
                         },
-                    );
+                    )
                 }
 
                 (mode, _) => return (context, mode),
             }
         }
         Event::KeyUp {
-            scancode: Some(sdl2::keyboard::Scancode::LGui),
+            scancode: Some(Scancode::LAlt) | Some(Scancode::RAlt),
             ..
         } => {
             // Exit turn dials mode when the left alt key is released
             match mode {
                 Mode::TurnDials { index } => {
                     // If we were in turn dials mode, return to select mode
-                    return (context, Mode::Select { index });
+                    (context, Mode::Select { index })
                 }
-                _ => {
-                    return (context, mode);
-                }
+                _ => (context, mode),
             }
         }
         Event::TextInput { text, .. } => {
@@ -507,11 +503,63 @@ fn process_event(
     }
 }
 
+// Returns the first beat of the next measure
+fn next_measure_beat(args: &Args, status: &tracker::Status) -> u64 {
+    return ((status.current_beat + 1) / args.beats_per_measure as u64 + 1)
+        * args.beats_per_measure as u64;
+}
+
 enum WaveformOrMode {
     Waveform(tracker::Waveform),
     Mode(Mode),
 }
 
+fn play_waveform(
+    context: Vec<(String, parser::Expr)>,
+    status: &tracker::Status,
+    args: &Args,
+    index: usize,
+    cursor_position: usize,
+    program: &str,
+    command_sender: &std::sync::mpsc::Sender<Command>,
+    keymod: sdl2::keyboard::Mod,
+) -> (Vec<(String, parser::Expr)>, Mode) {
+    use sdl2::keyboard::Mod;
+    match play_waveform_helper(&context, index, cursor_position, program) {
+        WaveformOrMode::Waveform(waveform) => {
+            if keymod.contains(Mod::LGUIMOD) || keymod.contains(Mod::RGUIMOD) {
+                // If the alt key is down, play the waveform in a loop
+                let repeat_after_beats =
+                    if keymod.contains(Mod::LSHIFTMOD) || keymod.contains(Mod::RSHIFTMOD) {
+                        args.beats_per_measure as u64 * 2
+                    } else {
+                        args.beats_per_measure as u64
+                    };
+                command_sender
+                    .send(Command::PlayInLoop {
+                        id: index as u32,
+                        waveform,
+                        at_beat: next_measure_beat(&args, &status),
+                        repeat_after_beats,
+                    })
+                    .unwrap();
+            } else {
+                // Otherwise, play it once
+                command_sender
+                    .send(Command::PlayOnce {
+                        id: index as u32,
+                        waveform,
+                        at_beat: Some(next_measure_beat(&args, &status)),
+                    })
+                    .unwrap();
+            }
+            return (context, Mode::Select { index });
+        }
+        WaveformOrMode::Mode(new_mode) => {
+            return (context, new_mode);
+        }
+    }
+}
 fn play_waveform_helper(
     context: &Vec<(String, parser::Expr)>,
     index: usize,
