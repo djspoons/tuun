@@ -34,26 +34,31 @@ struct Args {
 enum Mode {
     Select {
         index: usize,
+        message: String,
     },
     Edit {
         index: usize,
         // TODO unicode!!
         cursor_position: usize, // Cursor is located before the character this position
         errors: Vec<parser::Error>,
+        message: String,
     },
     TurnDials {
         index: usize, // Don't forget this
+        message: String,
     },
     Exit,
 }
 
-fn load_context(args: &Args) -> Vec<(String, parser::Expr)> {
+fn load_context(index: usize, args: &Args) -> (Vec<(String, parser::Expr)>, Mode) {
     let mut context: Vec<(String, parser::Expr)> = Vec::new();
     context.push((
         "tempo".to_string(),
         parser::Expr::Float(args.beats_per_minute as f32),
     ));
     builtins::add_prelude(&mut context);
+    let mut bindings = 0;
+    let mut errors = Vec::new();
     if args.context != "" {
         let raw_context = std::fs::read_to_string(&args.context).unwrap();
         // Strip out comments (that is any after // on a line)
@@ -76,20 +81,35 @@ fn load_context(args: &Args) -> Vec<(String, parser::Expr)> {
                         Ok(expr) => {
                             println!("   {}", &name);
                             context.push((name.trim().to_string(), expr));
+                            bindings += 1;
                         }
-                        Err(error) => println!(
-                            "Error simplifying context expression for {}: {:?}",
-                            name, error
-                        ),
+                        Err(error) => {
+                            println!(
+                                "Error simplifying context expression for {}: {:?}",
+                                name, error
+                            );
+                            errors.push(error);
+                        }
                     }
                 }
             }
-            Err(errors) => {
-                println!("Errors parsing context: {:?}", errors);
+            Err(es) => {
+                println!("Errors parsing context: {:?}", es);
+                errors.extend_from_slice(&es);
             }
         }
     }
-    return context;
+    return (
+        context,
+        Mode::Select {
+            index,
+            message: if errors.len() == 0 {
+                format!("Loaded {} bindings from context", bindings)
+            } else {
+                format!("Error loading context: {}", errors[0].to_string())
+            },
+        },
+    );
 }
 
 const NUM_PROGRAMS: usize = 8;
@@ -128,12 +148,11 @@ pub fn main() {
         args.beats_per_measure,
     );
 
-    let mut context = load_context(&args);
+    let (mut context, mut mode) = load_context(0, &args);
     let mut programs = args.programs.clone();
     while programs.len() < NUM_PROGRAMS {
         programs.push(String::new());
     }
-    let mut mode = Mode::Select { index: 0 };
     let mut status = tracker::Status {
         active_waveforms: Vec::new(),
         pending_waveforms: Vec::new(),
@@ -203,12 +222,13 @@ fn edit_mode_from_program(index: usize, cursor_position: usize, program: &str) -
             Ok(_) => Vec::new(),
             Err(errors) => errors,
         },
+        message: String::new(),
     }
 }
 
 fn process_event(
     args: &Args,
-    mut context: Vec<(String, parser::Expr)>,
+    context: Vec<(String, parser::Expr)>,
     event: Event,
     mode: Mode,
     status: &tracker::Status,
@@ -231,7 +251,7 @@ fn process_event(
                         return (context, mode);
                     }
                 }
-                (Mode::Select { index }, Some(Scancode::Return)) => {
+                (Mode::Select { index, .. }, Some(Scancode::Return)) => {
                     if keymod.contains(Mod::LGUIMOD) || keymod.contains(Mod::RGUIMOD) {
                         return play_waveform(
                             context,
@@ -256,25 +276,61 @@ fn process_event(
                             .send(Command::RemovePending { id: index as u32 })
                             .unwrap();
                     }
-                    let mode =
+                    let mut mode =
                         edit_mode_from_program(index, programs[index].len(), &programs[index]);
+                    mode = match mode {
+                        Mode::Edit {
+                            index,
+                            cursor_position,
+                            errors,
+                            ..
+                        } if !errors.is_empty() => Mode::Edit {
+                            index,
+                            cursor_position,
+                            message: format!("Error: {}", errors[0].to_string()),
+                            errors,
+                        },
+                        _ => mode,
+                    };
                     (context, mode)
                 }
-                (Mode::Select { index }, Some(Scancode::Up)) => (
+                (Mode::Select { index, .. }, Some(Scancode::Escape)) => {
+                    let mut message = String::new();
+                    // Remove the current waveform from the pending waveforms
+                    if status
+                        .pending_waveforms
+                        .iter()
+                        .any(|w| w.id == index as u32)
+                    {
+                        // If it is, send a command to remove it.
+                        command_sender
+                            .send(Command::RemovePending { id: index as u32 })
+                            .unwrap();
+                        message = format!("Removed pending waveform for program {}", index);
+                    }
+                    (context, Mode::Select { index, message })
+                }
+                (Mode::Select { index, .. }, Some(Scancode::Up)) => (
                     context,
                     Mode::Select {
                         index: (index + programs.len() - 1) % programs.len(),
+                        message: String::new(),
                     },
                 ),
-                (Mode::Select { index }, Some(Scancode::Down)) => (
+                (Mode::Select { index, .. }, Some(Scancode::Down)) => (
                     context,
                     Mode::Select {
                         index: (index + 1) % programs.len(),
+                        message: String::new(),
                     },
                 ),
-                (Mode::Select { index }, Some(Scancode::LAlt) | Some(Scancode::RAlt)) => {
-                    (context, Mode::TurnDials { index })
-                }
+                (Mode::Select { index, .. }, Some(Scancode::LAlt) | Some(Scancode::RAlt)) => (
+                    context,
+                    Mode::TurnDials {
+                        index,
+                        message: String::new(),
+                    },
+                ),
                 (
                     Mode::Edit {
                         index,
@@ -334,14 +390,19 @@ fn process_event(
                     let mode = edit_mode_from_program(index, new_cursor_position, &programs[index]);
                     (context, mode)
                 }
-                (Mode::Edit { index, .. }, Some(Scancode::Escape)) => {
-                    (context, Mode::Select { index: index })
-                }
+                (Mode::Edit { index, .. }, Some(Scancode::Escape)) => (
+                    context,
+                    Mode::Select {
+                        index: index,
+                        message: String::new(),
+                    },
+                ),
                 (
                     Mode::Edit {
                         index,
                         cursor_position,
                         errors,
+                        message,
                     },
                     Some(Scancode::Left),
                 ) => {
@@ -352,6 +413,7 @@ fn process_event(
                             index,
                             cursor_position,
                             errors,
+                            message,
                         },
                     )
                 }
@@ -360,6 +422,7 @@ fn process_event(
                         index,
                         cursor_position,
                         errors,
+                        message,
                     },
                     Some(Scancode::Right),
                 ) => {
@@ -370,6 +433,7 @@ fn process_event(
                             index,
                             cursor_position,
                             errors,
+                            message,
                         },
                     )
                 }
@@ -383,31 +447,46 @@ fn process_event(
         } => {
             // Exit turn dials mode when the left alt key is released
             match mode {
-                Mode::TurnDials { index } => {
+                Mode::TurnDials { index, .. } => {
                     // If we were in turn dials mode, return to select mode
-                    (context, Mode::Select { index })
+                    (
+                        context,
+                        Mode::Select {
+                            index,
+                            message: String::new(),
+                        },
+                    )
                 }
                 _ => (context, mode),
             }
         }
         Event::TextInput { text, .. } => {
             match mode {
-                Mode::Select { index } => {
+                Mode::Select { index, .. } => {
                     // If the text is a number less than programs.len(), update the index
                     if let Ok(index) = text.parse::<usize>() {
-                        if index <= programs.len() {
+                        if index > 0 && index <= programs.len() {
                             return (
                                 context,
                                 Mode::Select {
                                     index: (index + programs.len() - 1) % programs.len(),
+                                    message: String::new(),
                                 },
                             );
                         } else {
-                            println!("Invalid program index: {}", index);
+                            return (
+                                context,
+                                Mode::Select {
+                                    index,
+                                    message: format!("Invalid program index: {}", index),
+                                },
+                            );
                         }
                     } else if text == "r" {
-                        context = load_context(&args);
+                        // Reload context
+                        return load_context(index, &args);
                     } else if text == "w" {
+                        // Write waveform
                         let (status_sender, _status_receiver) = std::sync::mpsc::channel();
                         let (command_sender, command_receiver) = std::sync::mpsc::channel();
                         let mut tmp = tracker::Tracker::new(
@@ -435,16 +514,48 @@ fn process_event(
                                 return (context, new_mode);
                             }
                         }
-                        let filename = format!("program_{}.wav", index);
+                        let filename = format!("program_{}.wav", index + 1);
                         match tmp.write_to_file(&filename) {
-                            Ok(_) => println!("Wrote program {} to {}", index, filename),
-                            Err(e) => println!("Error writing program {}: {}", index, e),
+                            Ok(_) => (
+                                context,
+                                Mode::Select {
+                                    index,
+                                    message: format!(
+                                        "Waveform {} written to file {}",
+                                        index + 1,
+                                        filename
+                                    ),
+                                },
+                            ),
+                            Err(e) => (
+                                context,
+                                Mode::Select {
+                                    index,
+                                    message: format!("Error writing waveform {}: {}", index, e),
+                                },
+                            ),
                         }
-                        return (context, mode);
+                    } else if text == "p" {
+                        // Print programs
+                        for program in programs.iter() {
+                            println!(" -p {} \\", program);
+                        }
+                        return (
+                            context,
+                            Mode::Select {
+                                index,
+                                message: "Printed programs to console".to_string(),
+                            },
+                        );
                     } else {
-                        println!("Invalid command in select mode: {}", text);
+                        return (
+                            context,
+                            Mode::Select {
+                                index,
+                                message: format!("Invalid command: {}", text),
+                            },
+                        );
                     }
-                    return (context, mode);
                 }
                 Mode::Edit {
                     index,
@@ -472,7 +583,7 @@ fn process_event(
         Event::MouseMotion { xrel, yrel, .. } => {
             use tracker::Dial;
             match mode {
-                Mode::TurnDials { .. } => {
+                Mode::TurnDials { index, .. } => {
                     //println!("Mouse motion: xrel: {}, yrel: {}", xrel, yrel);
                     if xrel != 0 {
                         command_sender
@@ -490,7 +601,13 @@ fn process_event(
                             })
                             .unwrap();
                     }
-                    return (context, mode);
+                    return (
+                        context,
+                        Mode::TurnDials {
+                            index,
+                            message: format!("Turned dials by xrel: {}, yrel: {}", xrel, yrel),
+                        },
+                    );
                 }
                 _ => {
                     return (context, mode);
@@ -527,6 +644,7 @@ fn play_waveform(
     use sdl2::keyboard::Mod;
     match play_waveform_helper(&context, index, cursor_position, program) {
         WaveformOrMode::Waveform(waveform) => {
+            let message: String;
             if keymod.contains(Mod::LGUIMOD) || keymod.contains(Mod::RGUIMOD) {
                 // If the alt key is down, play the waveform in a loop
                 let repeat_after_beats =
@@ -543,6 +661,11 @@ fn play_waveform(
                         repeat_after_beats,
                     })
                     .unwrap();
+                message = format!(
+                    "Looping waveform {} every {} beats",
+                    index + 1,
+                    repeat_after_beats
+                );
             } else {
                 // Otherwise, play it once
                 command_sender
@@ -552,8 +675,9 @@ fn play_waveform(
                         at_beat: Some(next_measure_beat(&args, &status)),
                     })
                     .unwrap();
+                message = format!("Playing waveform {}", index + 1);
             }
-            return (context, Mode::Select { index });
+            return (context, Mode::Select { index, message });
         }
         WaveformOrMode::Mode(new_mode) => {
             return (context, new_mode);
@@ -582,16 +706,19 @@ fn play_waveform_helper(
                             errors: vec![parser::Error::new(
                                 "Expression is not a waveform".to_string(),
                             )],
+                            message: format!("Not a waveform: {}", expr.to_string()),
                         });
                     }
                 }
                 Err(error) => {
                     // If there are errors, we stay in edit mode
                     println!("Errors while simplifying input: {:?}", error);
+                    let message = format!("Error: {}", error.to_string());
                     return WaveformOrMode::Mode(Mode::Edit {
                         index,
                         cursor_position,
                         errors: vec![error],
+                        message: message,
                     });
                 }
             }
@@ -599,10 +726,12 @@ fn play_waveform_helper(
         Err(errors) => {
             // If there are errors, we stay in edit mode
             println!("Errors while parsing input: {:?}", errors);
+            let message = format!("Error: {}", errors[0].to_string());
             return WaveformOrMode::Mode(Mode::Edit {
                 index,
                 cursor_position,
                 errors,
+                message,
             });
         }
     }

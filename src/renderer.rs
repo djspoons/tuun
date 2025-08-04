@@ -48,6 +48,8 @@ pub struct Renderer {
     prompt_width: u32,
     line_height: u32,
     nav_width: u32,
+
+    last_message: String,
 }
 
 pub struct Metrics {
@@ -108,6 +110,7 @@ impl Renderer {
             prompt_width,
             line_height,
             nav_width,
+            last_message: String::new(),
         }
     }
 
@@ -182,6 +185,7 @@ impl Renderer {
                     index,
                     cursor_position,
                     ref errors,
+                    ..
                 } => {
                     if i != index && !program.is_empty() {
                         let text_texture =
@@ -246,7 +250,7 @@ impl Renderer {
                         }
                     }
                 }
-                Mode::Select { index } | Mode::TurnDials { index } => {
+                Mode::Select { index, .. } | Mode::TurnDials { index, .. } => {
                     if index == i {
                         match mode {
                             Mode::Select { .. } => {
@@ -343,6 +347,42 @@ impl Renderer {
                 }
             }
             None => (),
+        }
+
+        // Draw the message
+        let mut message = match mode {
+            Mode::Edit { message, .. } => message,
+            Mode::Select { message, .. } => message,
+            Mode::TurnDials { message, .. } => message,
+            Mode::Exit => "",
+        };
+
+        if !message.is_empty() && message != self.last_message {
+            println!("{}", message);
+        }
+        self.last_message = message.to_string();
+        if !message.is_empty() {
+            if message.len() > 45 {
+                message = &message[..45];
+            }
+            let message_texture = make_texture(&font, INACTIVE_COLOR, &texture_creator, message);
+            let TextureQuery {
+                width: message_width,
+                height: message_height,
+                ..
+            } = message_texture.query();
+            self.canvas
+                .copy(
+                    &message_texture,
+                    None,
+                    Some(sdl2::rect::Rect::new(
+                        20,
+                        self.height as i32 - message_height as i32 - 20,
+                        message_width,
+                        message_height,
+                    )),
+                )
+                .unwrap();
         }
 
         // Draw the current beat

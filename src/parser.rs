@@ -367,7 +367,7 @@ fn parse_chord(input: LocatedSpan) -> IResult<Expr> {
     let (rest, expr) = delimited(
         (char('{'), multispace0),
         parse_expr,
-        (multispace0, expect(char('}'), "expected '}'")),
+        (multispace0, expect(char('}'), "expected '}' at end of chord")),
     ).parse(input)?;
     return Ok((
         rest,
@@ -383,7 +383,7 @@ fn parse_sequence(input: LocatedSpan) -> IResult<Expr> {
     let (rest, expr) = delimited(
         (char('<'), multispace0),
         parse_expr,
-        (multispace0, expect(char('>'), "expected ']'")),
+        (multispace0, expect(char('>'), "expected '>' at end of sequence")),
     ).parse(input)?;
     return Ok((
         rest,
@@ -418,7 +418,7 @@ fn parse_list(input: LocatedSpan) -> IResult<Expr> {
             (multispace0, char(','), multispace0),
             parse_expr,
         ),
-        (multispace0, expect(char(']'), "expected ')' at end of list")),
+        (multispace0, expect(char(']'), "expected ']' at end of list")),
     ).parse(input)?;
     return Ok((rest, Expr::List(exprs)));
 }
