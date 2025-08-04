@@ -7,10 +7,10 @@ use nom::{
     branch::alt,
     bytes::complete::tag,
     character::complete::{alpha1, char, multispace0, multispace1},
-    combinator::{all_consuming, map, not, peek, recognize, verify},
+    combinator::{all_consuming, map, not, opt, peek, recognize, verify},
     multi::{many0, separated_list0},
     number::complete::float,
-    sequence::{delimited, preceded},
+    sequence::{delimited, preceded, terminated},
     Parser,
 };
 
@@ -121,6 +121,16 @@ where
     }
 }
 
+// https://github.com/Geal/nom/blob/main/doc/nom_recipes.md#wrapper-combinators-that-eat-whitespace-before-and-after-a-parser
+fn ws<'a, F, T, E: nom::error::ParseError<LocatedSpan<'a>>>(
+    inner: F,
+) -> impl Parser<LocatedSpan<'a>, Output = T, Error = E>
+where
+    F: Parser<LocatedSpan<'a>, Output = T, Error = E>,
+{
+    delimited(multispace0, inner, multispace0)
+}
+
 #[derive(Clone)]
 pub struct BuiltInFn(pub Rc<dyn Fn(Vec<Expr>) -> Expr>);
 
@@ -205,10 +215,10 @@ fn parse_function(input: LocatedSpan) -> IResult<Expr> {
         ((delimited(
             (tag("fn"), multispace0, char('('), multispace0),
             separated_list0(
-                (multispace0, char(','), multispace0),
+                ws(char(',')),
                 parse_identifier),
             (multispace0, char(')'))),
-            (multispace0, expect(tag("=>"), "expected '=>'"), multispace0),
+            ws(expect(tag("=>"), "expected '=>'")),
             parse_expr,
         )).map(|(arguments, _, body)| {
             let arguments = arguments.into_iter().map(|s| s.to_string()).collect();
@@ -220,17 +230,17 @@ fn parse_function(input: LocatedSpan) -> IResult<Expr> {
 fn parse_bindings(input: LocatedSpan) -> IResult<Vec<(String, Expr)>> {
     #[rustfmt::skip]
     let (rest, bindings) =
-        separated_list0(
-        (multispace0, char(','), multispace0),
-          (delimited( // TODO maybe some extra whitespace here?
-                multispace0,
-               parse_identifier,
-                (multispace0, char('='), multispace0)),
-            delimited(
-                multispace0,
-                parse_expr,
-                multispace0),
-            )
+        // TODO maybe don't allow [,]?
+        terminated(
+            separated_list0(
+            ws(char(',')),
+              (delimited( // TODO maybe some extra whitespace here?
+                    multispace0,
+                   parse_identifier,
+                    ws(char('='))),
+                ws(parse_expr),
+            )),
+            opt(ws(char(','))),
         ).parse(input)?;
     return Ok((rest, bindings));
 }
@@ -319,7 +329,7 @@ fn parse_multiplicative(input: LocatedSpan) -> IResult<Expr> {
         (
             parse_application,
             many0((
-                delimited(multispace0, alt((tag("*"), tag("/"), tag("~."), tag("~*"))), multispace0),
+                ws(alt((tag("*"), tag("/"), tag("~."), tag("~*")))),
                 expect(parse_application, "expected expression after operator"),
             )),
         ),
@@ -344,7 +354,7 @@ fn parse_additive(input: LocatedSpan) -> IResult<Expr> {
         (
             parse_multiplicative,
             many0((
-                delimited(multispace0, alt((tag("+"), tag("-"), tag("~+"))), multispace0),
+                ws(alt((tag("+"), tag("-"), tag("~+")))),
                 expect(parse_multiplicative, "expected expression after operator"),
             )),
         ),
@@ -429,7 +439,7 @@ fn parse_expr(input: LocatedSpan) -> IResult<Expr> {
         (
             parse_additive,
             many0(preceded(
-                    delimited(multispace0, char('|'), multispace0),
+                    ws(char('|')),
                     expect(parse_additive, "expected expression after | operator"),
                 )),
         ),
@@ -484,10 +494,7 @@ pub fn parse_program(input: &str) -> Result<Expr, Vec<Error>> {
     let span = LocatedSpan::new_extra(input, ParseState(&errors));
     #[rustfmt::skip]
     let result = all_consuming(
-        delimited(
-            multispace0,
-            parse_expr,
-            multispace0),
+        ws(parse_expr),
     ).parse(span);
     if errors.borrow().len() > 0 {
         println!(

@@ -26,8 +26,8 @@ struct Args {
     sample_frequency: i32,
     #[arg(short, long = "program", default_value = "", number_of_values = 1)]
     programs: Vec<String>,
-    #[arg(short = 'C', long = "context_file")]
-    context: String,
+    #[arg(short = 'C', long = "context_file", number_of_values = 1)]
+    context: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -59,8 +59,8 @@ fn load_context(index: usize, args: &Args) -> (Vec<(String, parser::Expr)>, Mode
     builtins::add_prelude(&mut context);
     let mut bindings = 0;
     let mut errors = Vec::new();
-    if args.context != "" {
-        let raw_context = std::fs::read_to_string(&args.context).unwrap();
+    for file in args.context.iter() {
+        let raw_context = std::fs::read_to_string(file).unwrap();
         // Strip out comments (that is any after // on a line)
         let raw_context: String = raw_context
             .lines()
