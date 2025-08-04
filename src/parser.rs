@@ -143,6 +143,7 @@ impl std::fmt::Debug for BuiltInFn {
 #[derive(Clone, Debug)]
 pub enum Expr {
     // Values
+    Bool(bool),
     Float(f32),
     Waveform(tracker::Waveform),
     Function {
@@ -153,6 +154,12 @@ pub enum Expr {
         name: String,
         // Pure functions from a vector of values to a value
         function: BuiltInFn,
+    },
+    // If-Then-Else expression
+    IfThenElse {
+        condition: Box<Expr>,
+        then: Box<Expr>,
+        else_: Box<Expr>,
     },
     // Function application
     Variable(String),
@@ -165,6 +172,13 @@ pub enum Expr {
     List(Vec<Expr>),
     // Errors
     Error(String),
+}
+
+// TODO use this in 'expect'?
+impl Default for Expr {
+    fn default() -> Self {
+        Expr::Error("_".to_string())
+    }
 }
 
 fn parse_literal(input: LocatedSpan) -> IResult<Expr> {
@@ -187,7 +201,9 @@ fn parse_identifier(input: LocatedSpan) -> IResult<String> {
                     many0(alt((alpha1, tag("_"), tag("#")))),
                 )),
                 |s: &LocatedSpan| *s.fragment() != "fn" &&
-                    *s.fragment() != "let" && *s.fragment() != "in",
+                    *s.fragment() != "let" && *s.fragment() != "in" &&
+                    *s.fragment() != "if" && *s.fragment() != "then" &&
+                    *s.fragment() != "else",
             ),
             parse_unary_operator,
         )).parse(input)?;
@@ -255,7 +271,7 @@ fn parse_let(input: LocatedSpan) -> IResult<Expr> {
         ),
         expect(parse_expr, "expected expression after 'in'")
         ).map(|(bindings, expr)| {
-            let mut expr = expr.unwrap_or(Expr::Error("_".to_string()));
+            let mut expr = expr.unwrap_or_default();
             for (name, binding) in bindings.into_iter().rev() {
                 expr = Expr::Application {
                     function: Box::new(Expr::Function {
@@ -270,12 +286,34 @@ fn parse_let(input: LocatedSpan) -> IResult<Expr> {
     return Ok((rest, expr));
 }
 
+fn parse_if_then_else(input: LocatedSpan) -> IResult<Expr> {
+    #[rustfmt::skip]
+    let (rest, expr) =
+        (delimited(
+            (tag("if"), multispace1),
+            parse_expr,
+            delimited(multispace1, tag("then"), multispace1),
+        ),
+        parse_expr,
+        delimited(multispace1, tag("else"), multispace1),
+        parse_expr,
+        ).map(|(condition, then, _, else_)| {
+            Expr::IfThenElse {
+                condition: Box::new(condition),
+                then: Box::new(then),
+                else_: Box::new(else_),
+            }
+        }).parse(input)?;
+    return Ok((rest, expr));
+}
+
 fn parse_primitive(input: LocatedSpan) -> IResult<Expr> {
     #[rustfmt::skip]
     let (rest, value) = alt((
         parse_literal,
         parse_function,
         parse_let,
+        parse_if_then_else,
         // Should come before identifiers, since operators also match the identifier rule
         (parse_unary_operator, parse_primitive).map(
             |(op, expr)| Expr::Application {
@@ -338,8 +376,7 @@ fn parse_multiplicative(input: LocatedSpan) -> IResult<Expr> {
             for (op, factor) in op_factors {
                 expr = Expr::Application {
                     function: Box::new(Expr::Variable(op.fragment().to_string())),
-                    arguments: Box::new(Expr::Tuple(vec![
-                        expr, factor.unwrap_or(Expr::Error("_".to_string()))])),
+                    arguments: Box::new(Expr::Tuple(vec![expr, factor.unwrap_or_default()])),
                 };
             }
             return expr;
@@ -363,7 +400,30 @@ fn parse_additive(input: LocatedSpan) -> IResult<Expr> {
             for (op, term) in op_terms {
                 expr = Expr::Application {
                     function: Box::new(Expr::Variable(op.fragment().to_string())),
-                    arguments: Box::new(Expr::Tuple(vec![expr, term.unwrap_or(Expr::Error("_".to_string()))])),
+                    arguments: Box::new(Expr::Tuple(vec![expr, term.unwrap_or_default()])),
+                };
+            }
+            return expr;
+        },
+    ).parse(input)?;
+    return Ok((rest, value));
+}
+
+fn parse_relational(input: LocatedSpan) -> IResult<Expr> {
+    #[rustfmt::skip]
+    let (rest, value) = map(
+        (
+            parse_additive,
+            many0((
+                ws(alt((tag("=="), tag("!="), tag(">"), tag("<"), tag("<="), tag(">"), tag(">=")))),
+                expect(parse_additive, "expected expression after operator"),
+            )),
+        ),
+        |(mut expr, op_exprs)| {
+            for (op, term) in op_exprs {
+                expr = Expr::Application {
+                    function: Box::new(Expr::Variable(op.fragment().to_string())),
+                    arguments: Box::new(Expr::Tuple(vec![expr, term.unwrap_or_default()])),
                 };
             }
             return expr;
@@ -437,10 +497,10 @@ fn parse_expr(input: LocatedSpan) -> IResult<Expr> {
     #[rustfmt::skip]
     let (rest, expr) = map(
         (
-            parse_additive,
+            parse_relational,
             many0(preceded(
                     ws(char('|')),
-                    expect(parse_additive, "expected expression after | operator"),
+                    expect(parse_relational, "expected expression after | operator"),
                 )),
         ),
         |(argument, fn_exprs)| {
@@ -521,8 +581,9 @@ pub fn parse_context(input: &str) -> Result<Vec<(String, Expr)>, Vec<Error>> {
 }
 
 fn substitute(context: &Vec<(String, Expr)>, expr: Expr) -> Expr {
-    use Expr::{Application, BuiltIn, Float, Function, List, Tuple, Variable};
+    use Expr::{Application, Bool, BuiltIn, Float, Function, IfThenElse, List, Tuple, Variable};
     match expr {
+        Bool(_) => expr,
         Float(_) => expr,
         Expr::Waveform(waveform) => Expr::Waveform(waveform),
         Function { arguments, body } => {
@@ -544,6 +605,20 @@ fn substitute(context: &Vec<(String, Expr)>, expr: Expr) -> Expr {
                 }
             }
             Expr::Error(format!("Variable '{}' not found in context", name))
+        }
+        IfThenElse {
+            condition,
+            then,
+            else_,
+        } => {
+            let condition = Box::new(substitute(context, *condition));
+            let then = Box::new(substitute(context, *then));
+            let else_ = Box::new(substitute(context, *else_));
+            IfThenElse {
+                condition,
+                then,
+                else_,
+            }
         }
         Application {
             function,
@@ -579,6 +654,7 @@ fn fmt_with_parens(expr: &Expr, f: &mut fmt::Formatter) -> fmt::Result {
 impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
+            Expr::Bool(value) => write!(f, "{}", value),
             Expr::Float(value) => write!(f, "{}", value),
             Expr::Waveform(waveform) => {
                 write!(f, "{:?}", waveform)
@@ -595,6 +671,13 @@ impl fmt::Display for Expr {
             }
             Expr::BuiltIn { name, .. } => write!(f, "{}", name),
             Expr::Variable(name) => write!(f, "{}", name),
+            Expr::IfThenElse {
+                condition,
+                then,
+                else_,
+            } => {
+                write!(f, "if {} then {} else {}", condition, then, else_)
+            }
             Expr::Application {
                 function,
                 arguments,
@@ -632,8 +715,11 @@ impl fmt::Display for Expr {
 }
 
 fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
-    use Expr::{Application, BuiltIn, Float, Function, List, Tuple, Variable, Waveform};
+    use Expr::{
+        Application, Bool, BuiltIn, Float, Function, IfThenElse, List, Tuple, Variable, Waveform,
+    };
     match expr {
+        Bool(_) => Ok(expr),
         Float(_) => Ok(expr),
         Waveform(_) => Ok(expr),
         Function { .. } => Ok(expr),
@@ -642,6 +728,15 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
             name
         ))),
         BuiltIn { .. } => Ok(expr),
+        IfThenElse {
+            condition,
+            then,
+            else_,
+        } => match simplify_closed(*condition)? {
+            Bool(true) => return simplify_closed(*then),
+            Bool(false) => return simplify_closed(*else_),
+            _ => return Err(Error::new("Expected boolean condition".to_string())),
+        },
         Application {
             function,
             arguments,

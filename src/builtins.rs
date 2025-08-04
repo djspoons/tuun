@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use crate::parser::{simplify, BuiltInFn, Expr};
 use crate::tracker::{Dial, Waveform};
-use Expr::{Application, BuiltIn, Error, Float, List, Tuple};
+use Expr::{Application, Bool, BuiltIn, Error, Float, List, Tuple};
 
 pub fn plus(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
@@ -54,6 +54,14 @@ pub fn exp(arguments: Vec<Expr>) -> Expr {
     }
 }
 
+pub fn equals(arguments: Vec<Expr>) -> Expr {
+    match arguments[..] {
+        [Bool(a), Bool(b)] => Expr::Bool(a == b),
+        [Float(a), Float(b)] => Expr::Bool(a == b),
+        _ => Expr::Error("Invalid arguments for ==".to_string()),
+    }
+}
+
 pub fn map(arguments: Vec<Expr>) -> Expr {
     match &arguments[..] {
         [function, List(exprs)] => {
@@ -99,6 +107,17 @@ pub fn reduce(arguments: Vec<Expr>) -> Expr {
             acc
         }
         _ => Expr::Error("Invalid arguments for reduce".to_string()),
+    }
+}
+
+pub fn append(arguments: Vec<Expr>) -> Expr {
+    match &arguments[..] {
+        [List(a), List(b)] => {
+            let mut result = a.clone();
+            result.extend(b.clone());
+            Expr::List(result)
+        }
+        _ => Expr::Error("Invalid arguments for append".to_string()),
     }
 }
 
@@ -291,6 +310,8 @@ pub fn sequence(arguments: Vec<Expr>) -> Expr {
 }
 
 pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
+    context.push(("true".to_string(), Expr::Bool(true)));
+    context.push(("false".to_string(), Expr::Bool(false)));
     context.push(("time".to_string(), Expr::Waveform(Waveform::Time)));
     context.push(("noise".to_string(), Expr::Waveform(Waveform::Noise)));
     context.push(("X".to_string(), Expr::Waveform(Waveform::Dial(Dial::X))));
@@ -301,11 +322,13 @@ pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
         ("-", minus),
         ("*", times),
         ("/", divide),
+        ("==", equals),
         ("pow", power),
         ("sqrt", sqrt),
         ("exp", exp),
         ("map", map),
         ("reduce", reduce),
+        ("append", append),
         ("fixed", fixed),
         ("fin", fin),
         ("seq", seq),
