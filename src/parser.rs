@@ -141,13 +141,19 @@ impl std::fmt::Debug for BuiltInFn {
 }
 
 #[derive(Clone, Debug)]
+pub enum Pattern {
+    Identifier(String),
+    Tuple(Vec<Pattern>),
+}
+
+#[derive(Clone, Debug)]
 pub enum Expr {
     // Values
     Bool(bool),
     Float(f32),
     Waveform(tracker::Waveform),
     Function {
-        arguments: Vec<String>,
+        arguments: Pattern,
         body: Box<Expr>,
     },
     BuiltIn {
@@ -165,7 +171,7 @@ pub enum Expr {
     Variable(String),
     Application {
         function: Box<Expr>,
-        arguments: Box<Expr>, // TODO singular? or Vec<Expr>?
+        arguments: Box<Expr>,
     },
     // Compound expressions
     Tuple(Vec<Expr>),
@@ -225,38 +231,54 @@ fn parse_unary_operator(input: LocatedSpan) -> IResult<LocatedSpan> {
     return Ok((rest, value));
 }
 
+fn parse_pattern(input: LocatedSpan) -> IResult<Pattern> {
+    #[rustfmt::skip]
+    let (rest, pattern) =
+        alt((
+            parse_identifier.map(Pattern::Identifier),
+            delimited(
+                (char('('), multispace0),
+                separated_list0(
+                    ws(char(',')),
+                    parse_pattern),
+                (multispace0, expect(char(')'), "expected ')' at end of tuple pattern")),
+            ).map(Pattern::Tuple),
+        )).parse(input)?;
+    return Ok((rest, pattern));
+}
+
 fn parse_function(input: LocatedSpan) -> IResult<Expr> {
     #[rustfmt::skip]
     let (rest, expr) =
         ((delimited(
-            (tag("fn"), multispace0, char('('), multispace0),
-            separated_list0(
-                ws(char(',')),
-                parse_identifier),
-            (multispace0, char(')'))),
-            ws(expect(tag("=>"), "expected '=>'")),
+            (tag("fn"), multispace0),
+            alt((
+                delimited((char('('), multispace0),
+                        parse_identifier.map(Pattern::Identifier),
+                        (multispace0, char(')'))),
+                parse_pattern,
+            )),
+            ws(expect(tag("=>"), "expected '=>'"))),
             parse_expr,
-        )).map(|(arguments, _, body)| {
-            let arguments = arguments.into_iter().map(|s| s.to_string()).collect();
+        )).map(|(arguments, body)| {
             Expr::Function { arguments, body: Box::new(body) }
         }).parse(input)?;
     return Ok((rest, expr));
 }
 
-fn parse_bindings(input: LocatedSpan) -> IResult<Vec<(String, Expr)>> {
+fn parse_bindings(input: LocatedSpan) -> IResult<Vec<(Pattern, Expr)>> {
     #[rustfmt::skip]
     let (rest, bindings) =
-        // TODO maybe don't allow [,]?
+        // TODO maybe don't allow just a comma?
         terminated(
             separated_list0(
-            ws(char(',')),
-              (delimited( // TODO maybe some extra whitespace here?
-                    multispace0,
-                   parse_identifier,
-                    ws(char('='))),
-                ws(parse_expr),
-            )),
-            opt(ws(char(','))),
+                ws(char(',')),
+                (parse_pattern,
+                   ws(char('=')),
+                   parse_expr,
+                ).map(|(pattern, _, expr)| (pattern, expr))
+            ),
+            opt((multispace0, char(','))),
         ).parse(input)?;
     return Ok((rest, bindings));
 }
@@ -265,17 +287,17 @@ fn parse_let(input: LocatedSpan) -> IResult<Expr> {
     #[rustfmt::skip]
     let (rest, expr) =
         (delimited(
-            tag("let"),
+            (tag("let"), multispace1),
             parse_bindings,
-            (expect(tag("in"), "expected 'in'"), multispace1),
+            (multispace1, expect(tag("in"), "expected 'in'"), multispace1),
         ),
         expect(parse_expr, "expected expression after 'in'")
         ).map(|(bindings, expr)| {
             let mut expr = expr.unwrap_or_default();
-            for (name, binding) in bindings.into_iter().rev() {
+            for (pattern, binding) in bindings.into_iter().rev() {
                 expr = Expr::Application {
                     function: Box::new(Expr::Function {
-                        arguments: vec![name],
+                        arguments: pattern,
                         body: Box::new(expr),
                     }),
                     arguments: Box::new(binding),
@@ -415,7 +437,7 @@ fn parse_relational(input: LocatedSpan) -> IResult<Expr> {
         (
             parse_additive,
             many0((
-                ws(alt((tag("=="), tag("!="), tag(">"), tag("<"), tag("<="), tag(">"), tag(">=")))),
+                ws(alt((tag("=="), tag("!=")))),
                 expect(parse_additive, "expected expression after operator"),
             )),
         ),
@@ -514,7 +536,7 @@ fn parse_expr(input: LocatedSpan) -> IResult<Expr> {
                         }
                     }
                     None => {
-                        expr = Expr::Error("_".to_string());
+                        expr = Expr::default();
                     }
                 }
             }
@@ -561,7 +583,7 @@ pub fn parse_program(input: &str) -> Result<Expr, Vec<Error>> {
             "Got result {:} and errors {:?}",
             match result {
                 Ok((_, node)) => node,
-                _ => Expr::Error("_".to_string()),
+                _ => Expr::default(),
             },
             errors.borrow()
         );
@@ -570,14 +592,27 @@ pub fn parse_program(input: &str) -> Result<Expr, Vec<Error>> {
     translate_parse_result(result)
 }
 
-pub fn parse_context(input: &str) -> Result<Vec<(String, Expr)>, Vec<Error>> {
+pub fn parse_context(input: &str) -> Result<Vec<(Pattern, Expr)>, Vec<Error>> {
     let errors = RefCell::new(Vec::new());
     let span = LocatedSpan::new_extra(input, ParseState(&errors));
-    let result = all_consuming(parse_bindings).parse(span);
+    let result = all_consuming(ws(parse_bindings)).parse(span);
     if errors.borrow().len() > 0 {
         return Err(errors.into_inner());
     }
     translate_parse_result(result)
+}
+
+fn extend_with_trivial_context(context: &mut Vec<(String, Expr)>, pattern: &Pattern) {
+    match pattern {
+        Pattern::Identifier(name) => {
+            context.push((name.clone(), Expr::Variable(name.clone())));
+        }
+        Pattern::Tuple(patterns) => {
+            for pattern in patterns {
+                extend_with_trivial_context(context, pattern);
+            }
+        }
+    }
 }
 
 fn substitute(context: &Vec<(String, Expr)>, expr: Expr) -> Expr {
@@ -588,9 +623,7 @@ fn substitute(context: &Vec<(String, Expr)>, expr: Expr) -> Expr {
         Expr::Waveform(waveform) => Expr::Waveform(waveform),
         Function { arguments, body } => {
             let mut context = context.clone();
-            for arg in &arguments {
-                context.push((arg.clone(), Expr::Variable(arg.clone())));
-            }
+            extend_with_trivial_context(&mut context, &arguments);
             let body = substitute(&context, *body);
             Expr::Function {
                 arguments,
@@ -651,6 +684,24 @@ fn fmt_with_parens(expr: &Expr, f: &mut fmt::Formatter) -> fmt::Result {
     }
 }
 
+impl fmt::Display for Pattern {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Pattern::Identifier(name) => write!(f, "{}", name),
+            Pattern::Tuple(patterns) => {
+                write!(f, "(")?;
+                for (i, pattern) in patterns.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", pattern)?;
+                }
+                write!(f, ")")
+            }
+        }
+    }
+}
+
 impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
@@ -660,14 +711,12 @@ impl fmt::Display for Expr {
                 write!(f, "{:?}", waveform)
             }
             Expr::Function { arguments, body } => {
-                write!(f, "fn (")?;
-                for (i, arg) in arguments.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", arg)?;
+                write!(f, "fn ")?;
+                match arguments {
+                    Pattern::Identifier(name) => write!(f, "({})", name)?,
+                    Pattern::Tuple(_) => write!(f, "{}", arguments)?,
                 }
-                write!(f, ") => {}", body)
+                write!(f, " => {}", body)
             }
             Expr::BuiltIn { name, .. } => write!(f, "{}", name),
             Expr::Variable(name) => write!(f, "{}", name),
@@ -714,6 +763,29 @@ impl fmt::Display for Expr {
     }
 }
 
+pub fn extend_context(
+    context: &mut Vec<(String, Expr)>,
+    pattern: &Pattern,
+    actual: &Expr,
+) -> Result<(), Error> {
+    match (pattern, actual) {
+        (Pattern::Identifier(name), actual) => {
+            context.push((name.clone(), actual.clone()));
+            Ok(())
+        }
+        (Pattern::Tuple(patterns), Expr::Tuple(actuals)) => {
+            for (pattern, actual) in patterns.iter().zip(actuals) {
+                extend_context(context, pattern, actual)?;
+            }
+            Ok(())
+        }
+        _ => Err(Error::new(format!(
+            "Pattern {:?} does not match actual expression {:?}",
+            pattern, actual
+        ))),
+    }
+}
+
 fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
     use Expr::{
         Application, Bool, BuiltIn, Float, Function, IfThenElse, List, Tuple, Variable, Waveform,
@@ -750,23 +822,12 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
                         body,
                     },
                     actuals,
-                ) => match (formals, actuals) {
-                    (formals, Expr::Tuple(actual_arguments))
-                        if formals.len() == actual_arguments.len() =>
-                    {
-                        let context = formals
-                            .into_iter()
-                            .zip(actual_arguments)
-                            .map(|(formal, actual)| (formal, actual))
-                            .collect();
-                        return simplify(&context, *body);
-                    }
-                    (formals, expr) if formals.len() == 1 => {
-                        let context = vec![(formals[0].clone(), expr)];
-                        return simplify(&context, *body);
-                    }
-                    _ => return Err(Error::new("Mismatched number of arguments".to_string())),
-                },
+                ) => {
+                    let mut context = Vec::new();
+                    extend_context(&mut context, &formals, &actuals)?;
+                    let body = substitute(&context, *body);
+                    simplify_closed(body)
+                }
                 (BuiltIn { function, .. }, Tuple(actuals)) => {
                     let result = function.0(actuals);
                     return match result {
@@ -860,11 +921,27 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_sequence() {
+        let input = "<[$x, $y, $z]>";
+        let result = parse_program(input);
+        assert!(result.is_ok());
+        assert_eq!(
+            format!("{}", result.unwrap()),
+            "_sequence([$(x), $(y), $(z)])"
+        );
+    }
+
+    #[test]
     fn test_parse_function() {
         let input = "fn (x) => x";
         let result = parse_program(input);
         assert!(result.is_ok());
         assert_eq!(format!("{}", result.unwrap()), "fn (x) => x");
+
+        let input = "fn(x, (y, z)) => x";
+        let result = parse_program(input);
+        assert!(result.is_ok());
+        assert_eq!(format!("{}", result.unwrap()), "fn (x, (y, z)) => x");
     }
 
     #[test]
@@ -875,6 +952,14 @@ mod tests {
         assert_eq!(
             format!("{}", result.unwrap()),
             "(fn (x) => (fn (y) => *(2, y))(+(x, 1)))(1)"
+        );
+
+        let input = "let (x, y) = (1, 2) in x * y";
+        let result = parse_program(input);
+        assert!(result.is_ok());
+        assert_eq!(
+            format!("{}", result.unwrap()),
+            "(fn (x, y) => *(x, y))(1, 2)"
         );
     }
 
@@ -922,6 +1007,13 @@ mod tests {
         assert_eq!(format!("{}", simplified), "5");
 
         let input = "(fn (x) => fn (y, z) => (x, y, z))(3)(4, 5)";
+        let result = parse_program(input);
+        assert!(result.is_ok());
+        let expr = result.unwrap();
+        let simplified = simplify(&context, expr).unwrap();
+        assert_eq!(format!("{}", simplified), "(3, 4, 5)");
+
+        let input = "(fn (x, (y, z)) => (x, y, z))(3, (4, 5))";
         let result = parse_program(input);
         assert!(result.is_ok());
         let expr = result.unwrap();

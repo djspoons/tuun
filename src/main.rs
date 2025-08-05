@@ -75,18 +75,21 @@ fn load_context(index: usize, args: &Args) -> (Vec<(String, parser::Expr)>, Mode
             .join("\n");
         match parser::parse_context(&raw_context) {
             Ok(parsed_exprs) => {
-                println!("Parsed context:");
-                for (name, parsed_expr) in parsed_exprs {
+                println!("Parsed context from {}:", file);
+                for (pattern, parsed_expr) in parsed_exprs {
                     match parser::simplify(&context, parsed_expr) {
                         Ok(expr) => {
-                            println!("   {}", &name);
-                            context.push((name.trim().to_string(), expr));
+                            match parser::extend_context(&mut context, &pattern, &expr) {
+                                Ok(_) => println!("   {}", &pattern),
+                                Err(error) => errors.push(error),
+                            }
+                            // Not exactly one binding... :shrug:
                             bindings += 1;
                         }
                         Err(error) => {
                             println!(
                                 "Error simplifying context expression for {}: {:?}",
-                                name, error
+                                pattern, error
                             );
                             errors.push(error);
                         }
