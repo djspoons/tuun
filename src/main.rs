@@ -1,4 +1,7 @@
+use std::fs;
 use std::time::{Duration, Instant};
+
+use chrono;
 
 extern crate sdl2;
 use sdl2::audio::AudioSpecDesired;
@@ -24,10 +27,13 @@ struct Args {
     beats_per_measure: u32,
     #[arg(long, default_value_t = 44100)]
     sample_frequency: i32,
+    #[arg(short = 'P', long = "programs_file", default_value = "programs.tnp")]
+    programs_file: String,
+    // Additional programs to load
     #[arg(short, long = "program", default_value = "", number_of_values = 1)]
     programs: Vec<String>,
     #[arg(short = 'C', long = "context_file", number_of_values = 1)]
-    context: Vec<String>,
+    context_files: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -59,7 +65,7 @@ fn load_context(index: usize, args: &Args) -> (Vec<(String, parser::Expr)>, Mode
     builtins::add_prelude(&mut context);
     let mut bindings = 0;
     let mut errors = Vec::new();
-    for file in args.context.iter() {
+    for file in args.context_files.iter() {
         let raw_context = std::fs::read_to_string(file).unwrap();
         // Strip out comments (that is any after // on a line)
         let raw_context: String = raw_context
@@ -117,6 +123,35 @@ fn load_context(index: usize, args: &Args) -> (Vec<(String, parser::Expr)>, Mode
 
 const NUM_PROGRAMS: usize = 8;
 
+fn load_programs(args: &Args, programs: &mut Vec<String>) {
+    *programs = Vec::new();
+    let mut count = 0;
+    let contents = fs::read_to_string(&args.programs_file).unwrap_or_default();
+    for line in contents.lines() {
+        let line = if let Some(comment_index) = line.find("//") {
+            &line[..comment_index]
+        } else {
+            line
+        }
+        .trim();
+        if !line.is_empty() {
+            programs.push(line.to_string());
+            count += 1;
+        }
+    }
+    println!("Loaded {} programs from {}", count, args.programs_file);
+    // Add in any additional programs specified on the command line
+    for program in &args.programs {
+        if !program.is_empty() {
+            programs.push(program.to_string());
+        }
+    }
+    // Fill up to NUM_PROGRAMS with empty strings if necessary
+    while programs.len() < NUM_PROGRAMS {
+        programs.push(String::new());
+    }
+}
+
 pub fn main() {
     let args = Args::parse();
     let sdl_context = sdl2::init().unwrap();
@@ -152,10 +187,8 @@ pub fn main() {
     );
 
     let (mut context, mut mode) = load_context(0, &args);
-    let mut programs = args.programs.clone();
-    while programs.len() < NUM_PROGRAMS {
-        programs.push(String::new());
-    }
+    let mut programs = Vec::new();
+    load_programs(&args, &mut programs);
     let mut status = tracker::Status {
         active_waveforms: Vec::new(),
         pending_waveforms: Vec::new(),
@@ -309,7 +342,7 @@ fn process_event(
                         command_sender
                             .send(Command::RemovePending { id: index as u32 })
                             .unwrap();
-                        message = format!("Removed pending waveform for program {}", index);
+                        message = format!("Removed pending waveform for program {}", index + 1);
                     }
                     (context, Mode::Select { index, message })
                 }
@@ -485,10 +518,38 @@ fn process_event(
                                 },
                             );
                         }
-                    } else if text == "r" {
+                    } else if text == "R" {
                         // Reload context
                         return load_context(index, &args);
-                    } else if text == "w" {
+                    } else if text == "L" {
+                        // Load programs
+                        load_programs(&args, programs);
+                        return (
+                            context,
+                            Mode::Select {
+                                index,
+                                message: format!("Loaded programs"),
+                            },
+                        );
+                    } else if text == "S" {
+                        // Save programs
+                        use std::io::Write;
+                        let datetime = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
+                        let filename = format!("programs_{}.tuunp", datetime);
+                        let mut file = fs::File::create(&filename).unwrap();
+                        for program in programs.iter() {
+                            if !program.is_empty() {
+                                writeln!(file, "{}", program).unwrap();
+                            }
+                        }
+                        return (
+                            context,
+                            Mode::Select {
+                                index,
+                                message: format!("Saved to {}", &filename),
+                            },
+                        );
+                    } else if text == "W" {
                         // Write waveform
                         let (status_sender, _status_receiver) = std::sync::mpsc::channel();
                         let (command_sender, command_receiver) = std::sync::mpsc::channel();
@@ -517,17 +578,14 @@ fn process_event(
                                 return (context, new_mode);
                             }
                         }
-                        let filename = format!("program_{}.wav", index + 1);
+                        let datetime = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
+                        let filename = format!("waveform_{}_{}.wav", index + 1, datetime);
                         match tmp.write_to_file(&filename) {
                             Ok(_) => (
                                 context,
                                 Mode::Select {
                                     index,
-                                    message: format!(
-                                        "Waveform {} written to file {}",
-                                        index + 1,
-                                        filename
-                                    ),
+                                    message: format!("Wrote to {}", filename),
                                 },
                             ),
                             Err(e) => (
@@ -538,18 +596,6 @@ fn process_event(
                                 },
                             ),
                         }
-                    } else if text == "p" {
-                        // Print programs
-                        for program in programs.iter() {
-                            println!(" -p {} \\", program);
-                        }
-                        return (
-                            context,
-                            Mode::Select {
-                                index,
-                                message: "Printed programs to console".to_string(),
-                            },
-                        );
                     } else {
                         return (
                             context,
