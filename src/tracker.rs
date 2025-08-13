@@ -1,6 +1,7 @@
 use std::f32::consts::PI;
+use std::fmt::Debug;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use fastrand;
 
@@ -79,22 +80,18 @@ pub enum Waveform {
      */
     Fixed(Vec<f32>),
     /*
-     * Dial generates samples from an interactive "dial" input.
-     */
-    Dial(Dial),
-    /*
-     * Fin generates a finite waveform that lasts for the given duration in beats, truncating
+     * Fin generates a finite waveform that lasts for the given duration, truncating
      * the underlying waveform.
      */
     Fin {
-        duration: f32, // duration in beats
+        duration: Duration,
         waveform: Box<Waveform>,
     },
     /*
      * Seq sets the offset to the given value (ignoring offset of the underlying waveform).
      */
     Seq {
-        duration: f32, // duration in beats
+        duration: Duration,
         waveform: Box<Waveform>,
     },
     /*
@@ -128,6 +125,19 @@ pub enum Waveform {
         positive_waveform: Box<Waveform>,
         negative_waveform: Box<Waveform>,
     },
+    /*
+     * Dial generates samples from an interactive "dial" input.
+     */
+    Dial(Dial),
+    /*
+     * Marked waveforms don't generate any samples, but are used to signal that a certain event will
+     * occur or has occurred. Each status update will include a list of marked waveforms, along with
+     * their start times and durations.
+     */
+    Marked {
+        id: u32,
+        waveform: Box<Waveform>,
+    },
 }
 
 /*
@@ -135,7 +145,6 @@ pub enum Waveform {
  */
 struct Generator {
     sample_frequency: i32,
-    beats_per_minute: u32,
 
     dial_values: std::collections::HashMap<Dial, f32>,
 }
@@ -143,10 +152,9 @@ struct Generator {
 // TODO add metrics for waveform expr depth and total ops
 
 impl Generator {
-    fn new(sample_frequency: i32, beats_per_minute: u32) -> Self {
+    fn new(sample_frequency: i32) -> Self {
         Generator {
             sample_frequency,
-            beats_per_minute,
             dial_values: std::collections::HashMap::new(),
         }
     }
@@ -177,18 +185,14 @@ impl Generator {
             Waveform::Fixed(samples) => {
                 return samples.clone();
             }
-            Waveform::Dial(dial) => {
-                let value = self.dial_values.get(&dial).cloned().unwrap_or(0.0);
-                return vec![value; desired];
-            }
             Waveform::Fin {
-                duration,
                 waveform: inner_waveform,
+                ..
             } => {
-                // TODO if generate took &Waveform then we could call length()
-                let length = (duration
-                    * samples_per_beat(self.sample_frequency, self.beats_per_minute) as f32)
-                    as usize;
+                let length = match self.length(waveform) {
+                    Length::Finite(length) => length,
+                    Length::Infinite => panic!("Finite waveform expected, got infinite"),
+                };
                 if position >= length {
                     return Vec::new(); // No samples to generate
                 }
@@ -253,8 +257,7 @@ impl Generator {
             Waveform::DotProduct(a, b) => {
                 // Like sum, but we need to make sure we generate a length based on
                 // the shorter waveform.
-                // TODO if generate took &Waveform then we wouldn't need to reconstruct here
-                let new_desired = match self.length(&Waveform::DotProduct(a.clone(), b.clone())) {
+                let new_desired = match self.length(waveform) {
                     Length::Finite(length) => {
                         if length > position {
                             desired.min(length - position)
@@ -339,20 +342,26 @@ impl Generator {
                 }
                 return out;
             }
+            Waveform::Dial(dial) => {
+                let value = self.dial_values.get(&dial).cloned().unwrap_or(0.0);
+                return vec![value; desired];
+            }
+            Waveform::Marked { waveform, .. } => {
+                return self.generate(waveform, position, desired);
+            }
         }
     }
 
+    // Returns the length of the waveform in samples.
     fn length(&self, waveform: &Waveform) -> Length {
         match waveform {
             Waveform::Const { .. } => Length::Infinite,
             Waveform::Time => Length::Infinite,
             Waveform::Noise => Length::Infinite,
             Waveform::Fixed(samples) => Length::Finite(samples.len()),
-            Waveform::Dial { .. } => Length::Infinite,
-            Waveform::Fin { duration, .. } => ((duration
-                * samples_per_beat(self.sample_frequency, self.beats_per_minute) as f32)
-                as usize)
-                .into(),
+            Waveform::Fin { duration, .. } => {
+                ((duration.as_secs_f32() * self.sample_frequency as f32) as usize).into()
+            }
             Waveform::Seq { waveform, .. } => self.length(waveform),
             Waveform::Sin(waveform) => self.length(waveform),
             Waveform::Convolution { waveform, kernel } => {
@@ -367,6 +376,8 @@ impl Generator {
                 self.length(a).min(length)
             }
             Waveform::Res { trigger, .. } | Waveform::Alt { trigger, .. } => self.length(trigger),
+            Waveform::Dial { .. } => Length::Infinite,
+            Waveform::Marked { waveform, .. } => self.length(waveform),
         }
     }
 
@@ -376,16 +387,16 @@ impl Generator {
             Waveform::Time => 0,
             Waveform::Noise => 0,
             Waveform::Fixed(_) => 0,
-            Waveform::Dial { .. } => 0,
             Waveform::Fin { waveform, .. } => self.offset(waveform),
             Waveform::Seq { duration, .. } => {
-                (duration * samples_per_beat(self.sample_frequency, self.beats_per_minute) as f32)
-                    as usize
+                (duration.as_secs_f32() * self.sample_frequency as f32) as usize
             }
             Waveform::Sin(waveform) => self.offset(waveform),
             Waveform::Convolution { waveform, .. } => self.offset(waveform),
             Waveform::Sum(a, b) | Waveform::DotProduct(a, b) => self.offset(a) + self.offset(b),
             Waveform::Res { trigger, .. } | Waveform::Alt { trigger, .. } => self.offset(trigger),
+            Waveform::Dial { .. } => 0,
+            Waveform::Marked { waveform, .. } => self.offset(waveform),
         }
     }
 
@@ -452,27 +463,23 @@ impl Generator {
     }
 }
 
-pub enum Command {
-    PlayOnce {
+pub enum Command<I> {
+    Play {
         // A unique id for this waveform
-        id: u32,
+        id: I,
         waveform: Waveform,
-        // When the waveform should start playing, in beats from the beginning of playback;
-        // if None, then play immediately.
-        at_beat: Option<u64>,
+        // When the waveform should start playing; if in the past, then play immediately
+        start: Instant,
+        // If set, play this waveform in a loop
+        repeat_every: Option<Duration>,
     },
-    PlayInLoop {
-        // A unique id for this waveform
-        id: u32,
-        waveform: Waveform,
-        // When the waveform should start playing, in beats from the beginning of playback
-        at_beat: u64,
-        // How often to repeat this waveform, in beats
-        repeat_after_beats: u64,
+    Stop {
+        // The id of the waveform to stop
+        id: I,
     },
     RemovePending {
         // The id of the waveform to remove
-        id: u32,
+        id: I,
     },
     SendCurrentBuffer,
     TurnDial {
@@ -484,100 +491,177 @@ pub enum Command {
 }
 
 #[derive(Debug, Clone)]
-pub struct ActiveWaveform {
-    pub id: u32,
+pub struct Mark<I> {
+    pub waveform_id: I,
+    pub mark_id: u32,
+    pub start: Instant,
+    pub duration: Duration,
+}
+
+#[derive(Debug, Clone)]
+pub struct Status<I>
+where
+    I: Clone + Send,
+{
+    pub buffer_start: Instant,
+    // Marks for each active waveform as well as any pending waveforms
+    pub marks: Vec<Mark<I>>,
+    // Some status updates will include the current buffer
+    pub buffer: Option<Vec<f32>>,
+    // The current tracker load, the ratio of sample frequency to samples generated per second
+    pub tracker_load: Option<f32>,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveWaveform<I>
+where
+    I: Clone,
+{
+    pub id: I,
     pub waveform: Waveform,
+    pub marks: Vec<Mark<I>>,
     pub position: usize,
 }
 
 #[derive(Debug, Clone)]
-pub struct PendingWaveform {
-    pub id: u32,
+struct PendingWaveform<I> {
+    pub id: I,
     pub waveform: Waveform,
-    pub first_beat: Option<u64>, // The beat at which this waveform should be played
-    pub repeat_after_beats: Option<u64>, // If Some, then repeat this waveform every N beats after the first_beat
+    pub start: Instant,
+    pub repeat_every: Option<Duration>,
+    pub marks: Vec<Mark<I>>,
 }
 
-#[derive(Debug, Clone)]
-pub struct Status {
-    pub active_waveforms: Vec<ActiveWaveform>,
-    pub pending_waveforms: Vec<PendingWaveform>,
-    pub current_beat: u64,
-    pub next_beat_start: Instant,
-    pub tracker_load: Option<f32>, // ratio of sample frequency to samples generated per second
-    pub buffer: Option<Vec<f32>>,
-}
-
-pub struct Tracker {
+pub struct Tracker<I>
+where
+    I: Clone + Send,
+{
     sample_frequency: i32,
-    beats_per_minute: u32,
-    command_receiver: Receiver<Command>,
-    status_sender: Sender<Status>,
+    command_receiver: Receiver<Command<I>>,
+    status_sender: Sender<Status<I>>,
 
     // Internal state
     generator: Generator,
-    active_waveforms: Vec<ActiveWaveform>,
-    pending_waveforms: Vec<PendingWaveform>,
-    current_beat: u64,
-    samples_to_next_beat: usize,
+    active_waveforms: Vec<ActiveWaveform<I>>,
+    pending_waveforms: Vec<PendingWaveform<I>>, // sorted by start time
     send_current_buffer: bool,
 }
 
-impl Tracker {
+impl<I> Tracker<I>
+where
+    I: Clone + Send,
+{
     pub fn new(
         sample_frequency: i32,
-        beats_per_minute: u32,
-        command_receiver: Receiver<Command>,
-        status_sender: Sender<Status>,
-    ) -> Tracker {
+        command_receiver: Receiver<Command<I>>,
+        status_sender: Sender<Status<I>>,
+    ) -> Tracker<I> {
         return Tracker {
             sample_frequency,
-            beats_per_minute,
             command_receiver,
             status_sender,
 
-            generator: Generator::new(sample_frequency, beats_per_minute),
+            generator: Generator::new(sample_frequency),
 
             active_waveforms: Vec::new(),
             pending_waveforms: Vec::new(),
-            current_beat: 1,
-            samples_to_next_beat: samples_per_beat(sample_frequency, beats_per_minute),
             send_current_buffer: false,
         };
     }
-}
-fn samples_per_beat(sample_frequency: i32, beats_per_minute: u32) -> usize {
-    // (seconds/minute) * 60/(beats/min) * (samples/sec)
-    let seconds_per_beat = 60.0 / beats_per_minute as f32;
-    (sample_frequency as f32 * seconds_per_beat) as usize
+
+    fn process_marked(
+        &self,
+        waveform_id: &I,
+        start: Instant,
+        waveform: &Waveform,
+        out: &mut Vec<Mark<I>>,
+    ) {
+        use Waveform::{
+            Alt, Const, Convolution, Dial, DotProduct, Fin, Fixed, Marked, Noise, Res, Seq, Sin,
+            Sum, Time,
+        };
+        match waveform {
+            Const(_) | Time | Noise | Fixed(_) | Dial { .. } => {
+                return;
+            }
+            Fin { waveform, .. }
+            | Seq { waveform, .. }
+            | Sin(waveform)
+            | Convolution { waveform, .. }
+            | Res {
+                trigger: waveform, ..
+            }
+            | Alt {
+                trigger: waveform, ..
+            } => {
+                self.process_marked(waveform_id, start, &*waveform, out);
+            }
+            Sum(a, b) | DotProduct(a, b) => {
+                self.process_marked(waveform_id, start, &*a, out);
+                let offset = self.generator.offset(&*a);
+                let start =
+                    start + Duration::from_secs_f32(offset as f32 / self.sample_frequency as f32);
+                self.process_marked(waveform_id, start, &*b, out);
+            }
+            Marked { waveform, id } => {
+                let length = match self.generator.length(waveform) {
+                    Length::Finite(length) => length,
+                    Length::Infinite => usize::MAX, // Ehh, should we change the type of marks?
+                };
+                out.push(Mark {
+                    waveform_id: waveform_id.clone(),
+                    mark_id: *id,
+                    start,
+                    duration: Duration::from_secs_f32(length as f32 / self.sample_frequency as f32),
+                });
+                self.process_marked(waveform_id, start, &*waveform, out);
+            }
+        }
+    }
 }
 
-impl<'a> AudioCallback for Tracker {
+impl<'a, I> AudioCallback for Tracker<I>
+where
+    I: Clone + PartialEq + Send + Debug,
+{
     type Channel = f32;
 
     fn callback(&mut self, out: &mut [f32]) {
         // Check to see if we have any new commands
         self.empty_command_queue();
+
+        // Assume that the callback is called with far enough in advance of when the samples are
+        // needed that we can use time equal to the length of the buffer. If that's true, then
+        // the moment corresponding to the start of the buffer is the current time plus the length
+        // of the buffer.
+        let buffer_start = Instant::now()
+            + Duration::from_secs_f32(out.len() as f32 / self.sample_frequency as f32);
         let mut status_to_send = Status {
-            active_waveforms: self.active_waveforms.clone(),
-            pending_waveforms: self.pending_waveforms.clone(),
-            current_beat: self.current_beat,
-            next_beat_start: Instant::now()
-                + std::time::Duration::from_millis(
-                    (self.samples_to_next_beat as f32 / self.sample_frequency as f32 * 1000.0)
-                        as u64,
-                ),
+            buffer_start,
+            marks: Vec::new(),
             tracker_load: None,
             buffer: None,
         };
 
         // Now generate!
         let generate_start = Instant::now();
-        let _ = self.generate(out);
+        let (_, finished) = self.generate(buffer_start, out);
         status_to_send.tracker_load = Some(
             self.sample_frequency as f32
                 / (out.len() as f32 / generate_start.elapsed().as_secs_f32()),
         );
+
+        // Copy the marks from finished waveforms into the status
+        for active in finished {
+            status_to_send.marks.extend_from_slice(&active.marks);
+        }
+        // Copy the marks from active and pending waveforms into the status
+        for active in &self.active_waveforms {
+            status_to_send.marks.extend_from_slice(&active.marks);
+        }
+        for pending in &self.pending_waveforms {
+            status_to_send.marks.extend_from_slice(&pending.marks);
+        }
 
         if self.send_current_buffer {
             let mut copy: Vec<f32> = Vec::with_capacity(out.len());
@@ -590,59 +674,47 @@ impl<'a> AudioCallback for Tracker {
     }
 }
 
-impl Tracker {
-    fn process_command(&mut self, command: Command) {
+impl<I> Tracker<I>
+where
+    I: Clone + PartialEq + Debug + Send,
+{
+    // buffer_start is the time corresponding to the beginning of the current buffer
+    fn process_command(&mut self, command: Command<I>) {
         match command {
-            Command::PlayOnce {
+            Command::Play {
                 id,
                 waveform,
-                at_beat,
+                start,
+                repeat_every,
             } => {
-                println!(
-                    "Received command to play once at beat {:?} with waveform {}: {:?}",
-                    at_beat, id, waveform
-                );
-                match at_beat {
-                    Some(beat) if beat < self.current_beat => {
-                        println!("Ignoring command to play waveform {} at beat {:?} (current beat is {})", id, at_beat, self.current_beat);
-                    }
-                    None => {
-                        // Play immediately
-                        self.active_waveforms.push(ActiveWaveform {
-                            id,
-                            waveform,
-                            position: 0,
-                        });
-                    }
-                    _ => {
-                        self.pending_waveforms.push(PendingWaveform {
-                            id,
-                            waveform,
-                            first_beat: at_beat,
-                            repeat_after_beats: None,
-                        });
-                    }
+                if let Some(duration) = repeat_every {
+                    println!(
+                        "Received command to play waveform {:?} at {:?} and every {:?}: {:?}",
+                        id, start, duration, waveform
+                    );
+                } else {
+                    println!(
+                        "Received command to play waveform {:?} at {:?}: {:?}",
+                        id, start, waveform
+                    );
                 }
-            }
-            Command::PlayInLoop {
-                id,
-                waveform,
-                mut at_beat,
-                repeat_after_beats,
-            } => {
-                println!("Received command to play in loop at beat {:?} every {:?} beats with waveform {}: {:?}", at_beat, repeat_after_beats, id, waveform);
-                while at_beat < self.current_beat {
-                    at_beat += repeat_after_beats;
-                }
+                let mut marks = Vec::new();
+                self.process_marked(&id, start, &waveform, &mut marks);
                 self.pending_waveforms.push(PendingWaveform {
                     id,
                     waveform,
-                    first_beat: Some(at_beat),
-                    repeat_after_beats: Some(repeat_after_beats),
+                    start,
+                    repeat_every,
+                    marks,
                 });
+                self.pending_waveforms.sort_by_key(|w| w.start);
+            }
+            Command::Stop { id } => {
+                println!("Received command to stop waveform {:?}", id);
+                self.active_waveforms.retain(|w| w.id != id);
             }
             Command::RemovePending { id } => {
-                println!("Received command to remove pending waveform {}", id);
+                println!("Received command to remove pending waveform {:?}", id);
                 self.pending_waveforms.retain(|w| w.id != id);
             }
             Command::SendCurrentBuffer => {
@@ -650,6 +722,7 @@ impl Tracker {
             }
             Command::TurnDial { dial, delta } => {
                 //turn_dial_count += 1;
+                // TODO accumulate the changes and apply them over the duration of the buffer
                 self.generator
                     .dial_values
                     .entry(dial)
@@ -673,77 +746,98 @@ impl Tracker {
     }
 
     // Generate from pending waveforms and active waveforms, filling the out buffer.
-    // Returns how many samples were generated, or None if the no samples were generated.
-    fn generate(&mut self, out: &mut [f32]) -> Option<usize> {
+    // Returns how many samples were generated, or None if the no samples were generated
+    // along with the set of active waveforms that finished generating
+    fn generate(
+        &mut self,
+        buffer_start: Instant,
+        out: &mut [f32],
+    ) -> (Option<usize>, Vec<ActiveWaveform<I>>) {
+        // We'll generate in segments based on the set of active waveforms at a given time.
+        let mut segment_start = buffer_start;
+        let mut segment_length = out.len();
+        let mut finished = Vec::new();
+
         for x in out.iter_mut() {
             *x = 0.0;
         }
         let mut filled = 0; // How much of the out buffer we've filled so far
-        let mut generated = 0; // How many samples we actually generated (vs filled w/ 0s)
+        let mut high_water_mark = 0; // How much that's filled by a waveform (not padded)
         while filled < out.len() {
-            let mut desired: usize = out.len() - filled;
-            if self.samples_to_next_beat == 0 {
-                self.samples_to_next_beat =
-                    samples_per_beat(self.sample_frequency, self.beats_per_minute);
-                self.current_beat += 1;
-
-                // If we are at the start of a beat, check to see if there any any pending waveforms
-                // that can become active waveforms.
-                let mut i = 0;
-                while i < self.pending_waveforms.len() {
-                    let pending = &mut self.pending_waveforms[i];
-                    if pending.first_beat == Some(self.current_beat) {
-                        // This waveform can become active
-                        self.active_waveforms.push(ActiveWaveform {
-                            id: pending.id,
-                            waveform: pending.waveform.clone(),
-                            position: 0,
-                        });
-                        println!(
-                            "Activating waveform {} at beat {}",
-                            pending.id, self.current_beat
-                        );
-                        match pending.repeat_after_beats {
-                            Some(beats) => {
-                                println!(
-                                    "Scheduling waveform {} to repeat in {} beats",
-                                    pending.id, beats
-                                );
-                                pending.first_beat = Some(self.current_beat + beats);
-                                i += 1;
-                            }
-                            None => {
-                                // Otherwise, remove it from the pending list
-                                self.pending_waveforms.remove(i);
-                            }
+            // Check to see if any pending waveform starts at or before segment_start. If so, promote
+            // them active waveforms.
+            while !self.pending_waveforms.is_empty() {
+                if self.pending_waveforms[0].start <= segment_start {
+                    let mut pending = self.pending_waveforms.remove(0);
+                    println!(
+                        "Activating waveform {:?} at time {:?}",
+                        pending.id, segment_start
+                    );
+                    let mut marks = pending.marks;
+                    if pending.start < segment_start {
+                        // If the pending waveform starts before the segment start, then we need to
+                        // adjust the marks to account for the segment start.
+                        for mark in &mut marks {
+                            mark.start += segment_start - pending.start;
                         }
-                    } else {
-                        i += 1;
                     }
+                    self.active_waveforms.push(ActiveWaveform {
+                        id: pending.id.clone(),
+                        waveform: pending.waveform.clone(),
+                        marks,
+                        position: 0,
+                    });
+                    // Check to see if this waveform should repeat
+                    if let Some(duration) = pending.repeat_every {
+                        println!(
+                            "Scheduling waveform {:?} to repeat after {:?}",
+                            pending.id, duration
+                        );
+                        pending.start = segment_start + duration;
+                        pending.marks = Vec::new();
+                        self.process_marked(
+                            &pending.id,
+                            pending.start,
+                            &pending.waveform,
+                            &mut pending.marks,
+                        );
+                        self.pending_waveforms.push(pending);
+                        self.pending_waveforms.sort_by_key(|w| w.start);
+                    }
+                } else {
+                    // Set the length of the current segment to the start of the next pending waveform
+                    // We take the ceiling here to make sure that we don't create a segment that is shorter
+                    // than the duration of a single sample.
+                    segment_length = segment_length.min(
+                        ((self.pending_waveforms[0].start - segment_start).as_secs_f32()
+                            * self.sample_frequency as f32)
+                            .ceil() as usize,
+                    );
+                    break;
                 }
             }
 
-            // Only generate samples up to the next beat
-            desired = desired.min(self.samples_to_next_beat);
-            self.samples_to_next_beat -= desired;
-
-            // Finally, walk through the waveforms and generate samples up to the next beat. If there
+            // Finally, walk through the waveforms and generate samples up to the next start. If there
             // are no active waveforms, then just updated filled and continue.
             if self.active_waveforms.len() == 0 {
-                filled += desired;
+                filled += segment_length;
+                segment_start +=
+                    Duration::from_secs_f32(segment_length as f32 / self.sample_frequency as f32);
+                segment_length = out.len() - filled;
+                // Don't change high_water_mark
                 continue;
             }
 
             let mut i = 0;
             while i < self.active_waveforms.len() {
                 let active = &mut self.active_waveforms[i];
-                let tmp = self
-                    .generator
-                    .generate(&active.waveform, active.position, desired);
-                if tmp.len() > desired {
+                let tmp =
+                    self.generator
+                        .generate(&active.waveform, active.position, segment_length);
+                if tmp.len() > segment_length {
                     panic!(
-                        "Generated more samples than desired: {} > {} for waveform id {} at position {}: {:?}", 
-                        tmp.len(), desired, active.id, active.position, active.waveform);
+                        "Generated more samples than desired: {} > {} for waveform id {:?} at position {}: {:?}", 
+                        tmp.len(), segment_length, active.id, active.position, active.waveform);
                 }
                 if i == 0 {
                     // If this is the first, just overwrite the out buffer
@@ -754,25 +848,30 @@ impl Tracker {
                         out[filled + j] += x;
                     }
                 }
-                if tmp.len() < desired {
+                if tmp.len() < segment_length {
                     // If we didn't generate enough samples, then remove this waveform from the active list
                     println!(
-                        "Removing waveform {} at position {}",
+                        "Removing waveform {:?} at position {}",
                         active.id, active.position
                     );
-                    self.active_waveforms.remove(i);
+                    let active = self.active_waveforms.remove(i);
+                    finished.push(active);
                 } else {
-                    active.position += desired;
+                    active.position += segment_length;
                     i += 1;
                 }
             }
-            filled += desired;
-            generated += desired;
+            filled += segment_length;
+            segment_start +=
+                Duration::from_secs_f32(segment_length as f32 / self.sample_frequency as f32);
+            segment_length = out.len() - filled;
+            // Only set high_water_mark if there was at least one active waveform
+            high_water_mark = filled;
         }
-        if generated == 0 {
-            None
+        if high_water_mark == 0 {
+            (None, finished)
         } else {
-            Some(generated)
+            (Some(high_water_mark), finished)
         }
     }
 
@@ -791,11 +890,11 @@ impl Tracker {
         let mut writer = hound::WavWriter::create(filename, spec)?;
         loop {
             let mut out = vec![0.0; 1024];
-            let generated = self.generate(&mut out);
+            let generated = self.generate(Instant::now(), &mut out);
             // TODO double check to see if some padding is happening here
             match generated {
-                None => break, // No more samples to generate
-                Some(n) => {
+                (None, _) => break, // No more samples to generate
+                (Some(n), _) => {
                     for x in out[..n].iter() {
                         writer.write_sample(*x)?;
                     }
@@ -811,18 +910,18 @@ mod tests {
     use super::*;
     use Waveform::{Const, Convolution, DotProduct, Fin, Res, Seq, Sin, Sum, Time};
 
-    fn finite_const_gen(value: f32, fin_duration: f32, seq_duration: f32) -> Waveform {
+    fn finite_const_gen(value: f32, fin_duration: u64, seq_duration: u64) -> Waveform {
         return Seq {
-            duration: seq_duration,
+            duration: Duration::from_secs(seq_duration),
             waveform: Box::new(Fin {
-                duration: fin_duration,
+                duration: Duration::from_secs(fin_duration),
                 waveform: Box::new(Const(value)),
             }),
         };
     }
 
     fn run_tests(waveform: &Waveform, desired: Vec<f32>) {
-        let generator = Generator::new(1, 60);
+        let generator = Generator::new(1);
         for size in [1, 2, 4, 8] {
             //println!("Running tests for waveform {:?} with size {}", waveform, size);
             let mut out = vec![0.0; desired.len()];
@@ -839,7 +938,7 @@ mod tests {
         let w1 = Waveform::Time;
         run_tests(&w1, vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
 
-        let generator = Generator::new(1, 90);
+        let generator = Generator::new(1);
         let result = generator.generate(&w1, 0, 8);
         assert_eq!(result, vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
     }
@@ -857,7 +956,7 @@ mod tests {
 
         let w2 = Res {
             trigger: Box::new(Fin {
-                duration: 6.0,
+                duration: Duration::from_secs(6),
                 waveform: Box::new(Sin(Box::new(DotProduct(
                     Box::new(Const(0.25)),
                     Box::new(Time),
@@ -865,7 +964,7 @@ mod tests {
             }),
             waveform: Box::new(Time),
         };
-        let generator = Generator::new(1, 60);
+        let generator = Generator::new(1);
         assert_eq!(generator.length(&w2), Length::Finite(6));
         run_tests(&w2, vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 0.0, 0.0]);
 
@@ -875,7 +974,7 @@ mod tests {
                 Box::new(Time),
             )))),
             waveform: Box::new(Waveform::Fin {
-                duration: 3.0,
+                duration: Duration::from_secs(3),
                 waveform: Box::new(Waveform::Time),
             }),
         };
@@ -884,29 +983,29 @@ mod tests {
 
     #[test]
     fn test_sum() {
-        let generator = Generator::new(1, 60);
+        let generator = Generator::new(1);
         let w1 = Sum(
-            Box::new(finite_const_gen(1.0, 5.0, 2.0)),
-            Box::new(finite_const_gen(1.0, 5.0, 2.0)),
+            Box::new(finite_const_gen(1.0, 5, 2)),
+            Box::new(finite_const_gen(1.0, 5, 2)),
         );
         assert_eq!(generator.offset(&w1), 4);
         assert_eq!(generator.length(&w1), Length::Finite(7));
         run_tests(&w1, vec![1.0, 1.0, 2.0, 2.0, 2.0, 1.0, 1.0, 0.0]);
 
         let w2 = Fin {
-            duration: 8.0,
+            duration: Duration::from_secs(8),
             waveform: Box::new(Sum(
                 Box::new(Seq {
-                    duration: 0.0,
+                    duration: Duration::from_secs(0),
                     waveform: Box::new(Const(1.0)),
                 }),
                 Box::new(Sum(
                     Box::new(Seq {
-                        duration: 0.0,
+                        duration: Duration::from_secs(0),
                         waveform: Box::new(Const(2.0)),
                     }),
                     Box::new(Fin {
-                        duration: 0.0,
+                        duration: Duration::from_secs(0),
                         waveform: Box::new(Const(0.0)),
                     }),
                 )),
@@ -915,8 +1014,8 @@ mod tests {
         run_tests(&w2, vec![3.0; 8]);
 
         let w5 = Sum(
-            Box::new(finite_const_gen(3.0, 1.0, 3.0)),
-            Box::new(finite_const_gen(2.0, 2.0, 2.0)),
+            Box::new(finite_const_gen(3.0, 1, 3)),
+            Box::new(finite_const_gen(2.0, 2, 2)),
         );
         run_tests(&w5, vec![3.0, 0.0, 0.0, 2.0, 2.0, 0.0, 0.0, 0.0]);
 
@@ -931,8 +1030,8 @@ mod tests {
         // samples but we still want length(a ~+ b) to be
         //   max(length(a), offset(a) + length(b)).
         let w6 = Sum(
-            Box::new(finite_const_gen(3.0, 1.0, 3.0)),
-            Box::new(finite_const_gen(2.0, 0.0, 0.0)),
+            Box::new(finite_const_gen(3.0, 1, 3)),
+            Box::new(finite_const_gen(2.0, 0, 0)),
         );
         let result = generator.generate(&w6, 0, 2);
         assert_eq!(result, vec![3.0, 0.0]);
@@ -940,33 +1039,33 @@ mod tests {
 
     #[test]
     fn test_dot_product() {
-        let generator = Generator::new(1, 60);
+        let generator = Generator::new(1);
         let w1 = DotProduct(
-            Box::new(finite_const_gen(3.0, 8.0, 2.0)),
-            Box::new(finite_const_gen(2.0, 5.0, 2.0)),
+            Box::new(finite_const_gen(3.0, 8, 2)),
+            Box::new(finite_const_gen(2.0, 5, 2)),
         );
         assert_eq!(generator.offset(&w1), 4);
         assert_eq!(generator.length(&w1), Length::Finite(7));
         run_tests(&w1, vec![3.0, 3.0, 6.0, 6.0, 6.0, 6.0, 6.0, 0.0]);
 
         let w2 = DotProduct(
-            Box::new(finite_const_gen(3.0, 5.0, 2.0)),
-            Box::new(finite_const_gen(2.0, 5.0, 2.0)),
+            Box::new(finite_const_gen(3.0, 5, 2)),
+            Box::new(finite_const_gen(2.0, 5, 2)),
         );
         run_tests(&w2, vec![3.0, 3.0, 6.0, 6.0, 6.0, 0.0, 0.0, 0.0]);
 
         let w3 = Fin {
-            duration: 8.0,
+            duration: Duration::from_secs(8),
             waveform: Box::new(DotProduct(Box::new(Const(3.0)), Box::new(Const(2.0)))),
         };
         run_tests(&w3, vec![6.0; 8]);
 
         let w4 = DotProduct(
             Box::new(Seq {
-                duration: 1.0,
+                duration: Duration::from_secs(1),
                 waveform: Box::new(Const(3.0)),
             }),
-            Box::new(finite_const_gen(2.0, 5.0, 5.0)),
+            Box::new(finite_const_gen(2.0, 5, 5)),
         );
         run_tests(&w4, vec![3.0, 6.0, 6.0, 6.0, 6.0, 6.0, 0.0, 0.0]);
     }
@@ -975,29 +1074,29 @@ mod tests {
     fn test_convolution() {
         let w1 = Convolution {
             waveform: Box::new(Time),
-            kernel: Box::new(finite_const_gen(2.0, 3.0, 3.0)),
+            kernel: Box::new(finite_const_gen(2.0, 3, 3)),
         };
         run_tests(&w1, vec![2.0, 6.0, 12.0, 18.0, 24.0, 30.0, 36.0, 42.0]);
 
         let w2 = Convolution {
             waveform: Box::new(Fin {
-                duration: 5.0,
+                duration: Duration::from_secs(5),
                 waveform: Box::new(Time),
             }),
-            kernel: Box::new(finite_const_gen(2.0, 3.0, 3.0)),
+            kernel: Box::new(finite_const_gen(2.0, 3, 3)),
         };
-        let generator = Generator::new(1, 60);
+        let generator = Generator::new(1);
         assert_eq!(generator.length(&w2), Length::Finite(6));
         run_tests(&w2, vec![2.0, 6.0, 12.0, 18.0, 14.0, 8.0, 0.0, 0.0]);
 
         let w3 = Convolution {
             waveform: Box::new(Fin {
-                duration: 3.0,
+                duration: Duration::from_secs(3),
                 waveform: Box::new(Time),
             }),
-            kernel: Box::new(finite_const_gen(2.0, 5.0, 5.0)),
+            kernel: Box::new(finite_const_gen(2.0, 5, 5)),
         };
-        let generator = Generator::new(1, 60);
+        let generator = Generator::new(1);
         assert_eq!(generator.length(&w3), Length::Finite(5));
         run_tests(&w3, vec![6.0, 6.0, 6.0, 6.0, 4.0, 0.0, 0.0, 0.0]);
 
@@ -1009,13 +1108,13 @@ mod tests {
                 )))),
                 waveform: Box::new(Time),
             }),
-            kernel: Box::new(finite_const_gen(2.0, 5.0, 5.0)),
+            kernel: Box::new(finite_const_gen(2.0, 5, 5)),
         };
         run_tests(&w4, vec![6.0, 6.0, 8.0, 12.0, 10.0, 8.0, 12.0, 10.0]);
 
         let w5 = Convolution {
             waveform: Box::new(Const(1.0)),
-            kernel: Box::new(finite_const_gen(0.2, 5.0, 5.0)),
+            kernel: Box::new(finite_const_gen(0.2, 5, 5)),
         };
         run_tests(&w5, vec![0.6, 0.8, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
     }

@@ -6,12 +6,12 @@ use sdl2::ttf::{Font, Sdl2TtfContext};
 use sdl2::video::WindowContext;
 use sdl2::Sdl;
 
-use realfft::num_complex::ComplexFloat;
+use realfft::num_complex::{Complex, ComplexFloat};
 use realfft::RealFftPlanner;
 
 use crate::metric::Metric;
 use crate::tracker::Status;
-use crate::Mode;
+use crate::{is_active, is_pending, Mode, WaveformId};
 
 fn make_texture<'a>(
     font: &Font<'a, 'static>,
@@ -50,6 +50,8 @@ pub struct Renderer {
     nav_width: u32,
 
     last_message: String,
+    samples: Vec<f32>,
+    spectrum: Vec<Complex<f32>>,
 }
 
 pub struct Metrics {
@@ -111,6 +113,8 @@ impl Renderer {
             line_height,
             nav_width,
             last_message: String::new(),
+            samples: Vec::new(),
+            spectrum: Vec::new(),
         }
     }
 
@@ -118,11 +122,29 @@ impl Renderer {
         &mut self,
         ttf_context: &Sdl2TtfContext,
         programs: &[String],
-        status: &Status,
+        status: &Status<WaveformId>,
         mode: &Mode,
         metrics: &mut Metrics,
     ) {
         // TODO so much clean-up
+        let now = Instant::now();
+        let mut current_beat = 0;
+        for mark in status.marks.iter() {
+            if mark.waveform_id == WaveformId::Beats {
+                // XXX sometimes this doesn't match anything?
+                if mark.start <= status.buffer_start
+                    && mark.start + mark.duration > status.buffer_start
+                {
+                    current_beat = mark.mark_id;
+                }
+            }
+        }
+        if current_beat == 0 {
+            println!(
+                "No current beat found in marks at time {:?}: {:?}",
+                status.buffer_start, status.marks
+            );
+        }
         let texture_creator = self.canvas.texture_creator();
         let font = ttf_context.load_font(FONT_PATH, 48).unwrap();
         let circle_font = ttf_context.load_font(FONT_PATH, 108).unwrap();
@@ -132,12 +154,19 @@ impl Renderer {
 
         let mut y = 10;
         for (i, program) in programs.iter().enumerate() {
-            let color = match (&mode, is_pending(&status, i)) {
+            let program_index = i + 1;
+            let color = match (&mode, is_pending(&status, now, program_index)) {
                 (_, true) => ACTIVE_COLOR,
-                (Mode::Edit { index, .. }, _) if i == *index => EDIT_COLOR,
+                (
+                    Mode::Edit {
+                        program_index: edit_program_index,
+                        ..
+                    },
+                    _,
+                ) if program_index == *edit_program_index => EDIT_COLOR,
                 _ => INACTIVE_COLOR,
             };
-            if !is_pending(status, i) || status.current_beat % 2 == 1 {
+            if !is_pending(&status, now, program_index) || current_beat % 2 == 1 {
                 let number = char::from_u32(0x31 + i as u32).unwrap().to_string();
                 let number_texture = make_texture(&font, color, &texture_creator, &number);
                 let TextureQuery {
@@ -165,7 +194,7 @@ impl Renderer {
                 height: circle_height,
                 ..
             } = circle_texture.query();
-            if is_active(status, i) {
+            if is_active(status, now, program_index) {
                 self.canvas
                     .copy(
                         &circle_texture,
@@ -182,12 +211,12 @@ impl Renderer {
 
             match *mode {
                 Mode::Edit {
-                    index,
+                    program_index: edit_program_index,
                     cursor_position,
                     ref errors,
                     ..
                 } => {
-                    if i != index && !program.is_empty() {
+                    if edit_program_index != program_index && !program.is_empty() {
                         let text_texture =
                             make_texture(&font, INACTIVE_COLOR, &texture_creator, program);
                         let TextureQuery {
@@ -207,7 +236,7 @@ impl Renderer {
                                 )),
                             )
                             .unwrap();
-                    } else if i == index {
+                    } else if edit_program_index == program_index {
                         // Loop over each character in program and check to see if it's in any of the error
                         // ranges
                         let mut x = self.nav_width as i32;
@@ -250,8 +279,15 @@ impl Renderer {
                         }
                     }
                 }
-                Mode::Select { index, .. } | Mode::TurnDials { index, .. } => {
-                    if index == i {
+                Mode::Select {
+                    program_index: mode_program_index,
+                    ..
+                }
+                | Mode::TurnDials {
+                    program_index: mode_program_index,
+                    ..
+                } => {
+                    if mode_program_index == program_index {
                         match mode {
                             Mode::Select { .. } => {
                                 let prompt_texture =
@@ -299,54 +335,54 @@ impl Renderer {
             y += self.line_height as i32;
         }
 
-        match &status.buffer {
-            Some(buffer) => {
-                // Draw the waveform
-                let x_scale = self.width as f32 / (buffer.len() + 1) as f32;
-                let waveform_height = self.height * 3 / 5;
-                if buffer.len() > 0 {
-                    self.canvas.set_draw_color(Color::RGB(0, 255, 0));
-                    let mut last_y = (buffer[0] * (waveform_height as f32 / 2.4)
-                        + (waveform_height as f32 / 2.0))
+        // Save the new buffer if present
+        if let Some(buffer) = &status.buffer {
+            self.samples = buffer.clone();
+            let mut planner = RealFftPlanner::<f32>::new();
+            let fft = planner.plan_fft_forward(self.samples.len());
+            let mut input = fft.make_input_vec();
+            for (i, f) in self.samples.iter().enumerate() {
+                input[i] = *f;
+            }
+            self.spectrum = fft.make_output_vec();
+            if let Err(e) = fft.process(&mut input, &mut self.spectrum) {
+                println!("Error processing FFT: {}", e);
+            }
+        }
+        // Draw the most recent sample buffer
+        if !self.samples.is_empty() {
+            // Draw the waveform
+            let x_scale = self.width as f32 / (self.samples.len() + 1) as f32;
+            let waveform_height = self.height * 3 / 5;
+            if self.samples.len() > 0 {
+                self.canvas.set_draw_color(Color::RGB(0, 255, 0));
+                let mut last_y = (self.samples[0] * (waveform_height as f32 / 2.4)
+                    + (waveform_height as f32 / 2.0)) as i32;
+                for (i, f) in self.samples.iter().enumerate() {
+                    let x = (i as f32 * x_scale) as i32;
+                    let y = (f * (waveform_height as f32 / 2.4) + (waveform_height as f32 / 2.0))
                         as i32;
-                    for (i, f) in buffer.iter().enumerate() {
-                        let x = (i as f32 * x_scale) as i32;
-                        let y = (f * (waveform_height as f32 / 2.4)
-                            + (waveform_height as f32 / 2.0))
-                            as i32;
-                        self.canvas
-                            .draw_line((x, last_y as i32), (x + x_scale as i32, y))
-                            .unwrap();
-                        last_y = y;
-                    }
-                }
-
-                // Draw the spectra
-                let mut planner = RealFftPlanner::<f32>::new();
-                let fft = planner.plan_fft_forward(buffer.len());
-                let mut input = fft.make_input_vec();
-                for (i, f) in buffer.iter().enumerate() {
-                    input[i] = *f;
-                }
-                let mut spectrum = fft.make_output_vec();
-                if let Err(e) = fft.process(&mut input, &mut spectrum) {
-                    println!("Error processing FFT: {}", e);
-                } else {
-                    let spectrum_height = self.height - waveform_height;
-                    let y_scale = -(buffer.len() as f32).sqrt();
-                    self.canvas.set_draw_color(Color::RGB(255, 0, 0));
-                    let mut last_y = (waveform_height + 300) as i32;
-                    for (i, f) in spectrum.iter().enumerate() {
-                        let x = ((i * 10) as f32 * x_scale) as i32;
-                        let y = (f.abs() / y_scale * (spectrum_height as f32 / 10.0)
-                            + (waveform_height + 300) as f32)
-                            as i32;
-                        self.canvas.draw_line((x, last_y), (x + 9, y)).unwrap();
-                        last_y = y;
-                    }
+                    self.canvas
+                        .draw_line((x, last_y as i32), (x + x_scale as i32, y))
+                        .unwrap();
+                    last_y = y;
                 }
             }
-            None => (),
+
+            // Draw the spectrum
+            if !self.spectrum.is_empty() {
+                let spectrum_height = self.height - waveform_height;
+                let y_scale = -(self.samples.len() as f32).sqrt();
+                self.canvas.set_draw_color(Color::RGB(255, 0, 0));
+                let mut last_y = (waveform_height + 300) as i32;
+                for (i, f) in self.spectrum.iter().enumerate() {
+                    let x = ((i * 10) as f32 * x_scale) as i32;
+                    let y = (f.abs() / y_scale * (spectrum_height as f32 / 10.0)
+                        + (waveform_height + 300) as f32) as i32;
+                    self.canvas.draw_line((x, last_y), (x + 9, y)).unwrap();
+                    last_y = y;
+                }
+            }
         }
 
         // Draw the message
@@ -386,12 +422,6 @@ impl Renderer {
         }
 
         // Draw the current beat
-        let current_beat = if status.next_beat_start <= Instant::now() {
-            status.current_beat + 1
-        } else {
-            status.current_beat
-        } % self.beats_per_measure as u64
-            + 1;
         let beat_font = ttf_context.load_font(FONT_PATH, 64).unwrap();
         let beat_texture = make_texture(
             &beat_font,
@@ -506,15 +536,4 @@ impl Renderer {
             )
             .unwrap();
     }
-}
-
-fn is_pending(status: &Status, index: usize) -> bool {
-    status
-        .pending_waveforms
-        .iter()
-        .any(|w| w.id == index as u32)
-}
-
-fn is_active(status: &Status, index: usize) -> bool {
-    status.active_waveforms.iter().any(|w| w.id == index as u32)
 }

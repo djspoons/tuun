@@ -1,4 +1,5 @@
 use std::rc::Rc;
+use std::time::Duration;
 
 use crate::parser::{simplify, BuiltInFn, Expr};
 use crate::tracker::{Dial, Waveform};
@@ -155,7 +156,10 @@ pub fn fin(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
         [Float(duration)] => BuiltIn {
             name: format!("fin({})", duration),
-            function: filter(move |waveform: Box<Waveform>| Waveform::Fin { duration, waveform }),
+            function: filter(move |waveform: Box<Waveform>| Waveform::Fin {
+                duration: Duration::from_secs_f32(duration),
+                waveform,
+            }),
         },
         _ => Expr::Error("Invalid arguments for fin".to_string()),
     }
@@ -165,7 +169,10 @@ pub fn seq(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
         [Float(duration)] => BuiltIn {
             name: format!("seq({})", duration),
-            function: filter(move |waveform: Box<Waveform>| Waveform::Seq { duration, waveform }),
+            function: filter(move |waveform: Box<Waveform>| Waveform::Seq {
+                duration: Duration::from_secs_f32(duration),
+                waveform,
+            }),
         },
         _ => Expr::Error("Invalid arguments for seq".to_string()),
     }
@@ -260,11 +267,24 @@ pub fn alt(mut arguments: Vec<Expr>) -> Expr {
     })
 }
 
+fn mark(arguments: Vec<Expr>) -> Expr {
+    match &arguments[..] {
+        [Float(id)] if *id >= 1.0 => {
+            let id = id.round() as u32;
+            BuiltIn {
+                name: format!("mark({})", id),
+                function: filter(move |waveform: Box<Waveform>| Waveform::Marked { id, waveform }),
+            }
+        }
+        _ => Expr::Error("Invalid argument for mark".to_string()),
+    }
+}
+
 pub fn chord(arguments: Vec<Expr>) -> Expr {
     match &arguments[..] {
         [List(exprs)] => {
             let mut result = Waveform::Fin {
-                duration: 0.0,
+                duration: Duration::ZERO,
                 waveform: Box::new(Waveform::Const(0.0)),
             };
             for expr in exprs.iter().rev() {
@@ -275,7 +295,7 @@ pub fn chord(arguments: Vec<Expr>) -> Expr {
                 };
                 result = Waveform::Sum(
                     Box::new(Waveform::Seq {
-                        duration: 0.0,
+                        duration: Duration::ZERO,
                         waveform,
                     }),
                     Box::new(result),
@@ -291,7 +311,7 @@ pub fn sequence(arguments: Vec<Expr>) -> Expr {
     match &arguments[..] {
         [List(exprs)] => {
             let mut result = Waveform::Fin {
-                duration: 0.0,
+                duration: Duration::ZERO,
                 waveform: Box::new(Waveform::Const(0.0)),
             };
             for expr in exprs.iter().rev() {
@@ -338,6 +358,7 @@ pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
         ("~.", waveform_dot_product),
         ("res", res),
         ("alt", alt),
+        ("mark", mark),
         ("_chord", chord),
         ("_sequence", sequence),
     ];

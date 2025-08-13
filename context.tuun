@@ -1,8 +1,6 @@
+
+// WAVES
 $ = fn(freq) => sin(freq ~. time),
-fs = fn(dur) => fn(w) => w | fin(dur) | seq(dur),
-
-amp = fn(level) => fn(w) => w ~. level,
-
 sawtooth = fn(freq) => (res($freq, time ~. freq) ~+ -0.5) ~. 2,
 square = fn(freq) => alt($freq, -1, 1),
 triangle = fn(freq) => let
@@ -12,9 +10,12 @@ triangle = fn(freq) => let
     b = time ~. -slope ~+ 3
   in alt(t, res(t, a), res(t, b)),
 
-// slope is in terms of level-change per beat
-linear = fn(initial, slope) => initial ~+ (time ~. (tempo/60 * slope)),
+// HELPERS
+amp = fn(level) => fn(w) => w ~. level,
+// slope is in terms of level-change per second
+linear = fn(initial, slope) => initial ~+ (time ~. slope),
 
+// ENVELOPES
 // Create waveforms for the four parts of the envelope.
 Aw = fn(dur) => linear(0.0, 1.0 / dur) | fin(dur) | seq(dur),
 Dw = fn(dur, level) => linear(1.0, (level - 1.0) / dur) | fin(dur) | seq(dur),
@@ -34,9 +35,8 @@ D = fn(dur, level) => fn(w) => w ~. (Dw(dur, level) ~+ 1),
 S = fn(dur, level) => fn(w) => w ~. (Sw(dur, level) ~+ 1),
 R = fn(dur, level) => fn(w) => w ~. Rw(dur, level),
 
-over = fn(x, freq) => $(freq*x) ~. (1/x),
-hrm = fn(freq) => {map(fn(x) => over(x, freq), [1, 3, 5, 7, 9, 11])},
-mar = fn(freq) => {[$freq, over(2.76, freq), over(5.40, freq), over(8.93, freq)]},
+over = fn(freq) => fn (x) => $(freq*x) ~. (1/x),
+hrm = fn(freq) => {map(over(freq), [1, 3, 5, 7, 9, 11])},
 
 step = fn(freq,n) => freq * pow(2, n/12),
 just_third = fn(freq) => {[hrm(freq), hrm(freq * 5/4)]},
@@ -45,23 +45,41 @@ equal_third = fn(freq) => {[hrm(freq), hrm(step(freq, 4))]},
 // Instruments
 harmonica = fn(dur, freq) =>
   let a = 0.13,
-      d = .33,
-      r = .33,
+      d = 0.33,
+      r = 0.33,
       s = dur - (a + d + r) in
-  hrm(freq) | ADSR(a, d, .5, s, r) | seq(dur),
+  hrm(freq) | ADSR(a, d, 0.5, s, r) | seq(dur),
 
 // Convert from MIDI note numbers to frequency
 @ = fn(m) => pow(2, (m - 69) / 12) * 440,
 
-beats_per_measure = 4, // beats
-Q = beats_per_measure / 4,
-H = beats_per_measure / 2,
-W = beats_per_measure,
+duration_from_beats = fn(beats) => beats * (60 / tempo),
 
+// 4-4 time! (Move to 4-4 file...)
+beats_per_measure = 4,
+// Note lengths in seconds
+W = duration_from_beats(beats_per_measure),
+H = W / 2,
+Q = W / 4,
+E = W / 8,
+
+// Notes as waveforms: use with ~.
+Ww = 1 | fin(W) | seq(W),
+Hw = 1 | fin(H) | seq(H),
+Qw = 1 | fin(Q) | seq(Q),
+Ew = 1 | fin(E) | seq(E),
+
+// Rests as waveforms: use with <> or ~+
+Wrw = 0 | fin(0) | seq(W),
+Hrw = 0 | fin(0) | seq(H),
+Qrw = 0 | fin(0) | seq(Q),
+Erw = 0 | fin(0) | seq(E),
+
+
+// These take the root as a MIDI note number
 major_triad = fn(root) => fn(fw) => [fw(@root), fw(@(root + 4)), fw(@(root + 7))],
 // major_triad = fn(root, dur, inst) => [inst(dur, @root), inst(dur, @(root + 4)), inst(dur, @(root + 7))],
 minor_triad = fn(root) => fn(fw) => [fw(@root), fw(@(root + 3)), fw(@(root + 7))],
-
 // These get a little distorted... may need to scale a bit
 I = fn(key) => fn(inst) => fn(dur) => {major_triad(key)(fn(freq) => inst(dur, freq))} | seq(dur),
 // I = fn(key) => fn(inst) => fn(dur) => {major_triad(key, dur, inst)} | seq(dur),
@@ -82,7 +100,17 @@ III = III(harmonica),
 i = i(harmonica),
 
 // Just notes on harmonica
-Hh = fn(freq) => harmonica(H, freq) | seq(H)
+Hh = fn(freq) => harmonica(H, freq) | seq(H),
 
 // <[I H, III H, i H]>
 // <[Hh(@67), Hh(@69)]>
+
+// Plays the given waveform w on the beats in bs, starting at 1. For example:
+// play_on_beats(bass, [1, 2, 3, 4])
+play_on_beats = fn(w, bs) => let
+  f = fn((offset, prev, ws), play_at_beat) =>
+      if offset == play_at_beat
+      then (play_at_beat, w, append(ws, [prev | seq(0)]))
+      else (play_at_beat, w, append(ws, [prev | seq(duration_from_beats(play_at_beat - offset))])),
+  (offset, prev, ws) = reduce(f, (1, 0 | fin(0), []), bs),
+  in <append(ws, [prev])>,
