@@ -127,8 +127,8 @@ There are three combinators for describing periodic waveforms:
 
 And finally, there are these two waveforms that provide ways of dynamically interacting with waveforms through a user interface.
 
- * `Dial(_)` - generates values dynamically based on user input
- * `Marked(a)` - generates the values of `a` and also provides updates as to when `a` starts and stops
+ * `Slider(_)` - generates samples dynamically based on user input
+ * `Marked(a)` - generates the samples of `a` and also provides updates as to when `a` starts and stops
 
 
 For comparison, here are the lengths and offsets of each waveform:
@@ -138,7 +138,7 @@ For comparison, here are the lengths and offsets of each waveform:
 | `Const(_)`           | ∞                                  | 0                   |
 | `Time`               | ∞                                  | 0                   |
 | `Noise`              | ∞                                  | 0                   |
-| `Dial(_)`            | ∞                                  | 0                   |
+| `Slider(_)`          | ∞                                  | 0                   |
 | `Fixed(v)`           | length of v                        | 0                   |
 | `Fin(duration, a)`   | duration                           | a.offset            |
 | `Seq(duration, a)`   | a.length                           | duration            |

@@ -2,7 +2,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use crate::parser::{simplify, BuiltInFn, Expr};
-use crate::tracker::{Dial, Waveform};
+use crate::tracker::{Slider, Waveform};
 use Expr::{Application, Bool, BuiltIn, Error, Float, List, Tuple};
 
 pub fn plus(arguments: Vec<Expr>) -> Expr {
@@ -334,8 +334,8 @@ pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
     context.push(("false".to_string(), Expr::Bool(false)));
     context.push(("time".to_string(), Expr::Waveform(Waveform::Time)));
     context.push(("noise".to_string(), Expr::Waveform(Waveform::Noise)));
-    context.push(("X".to_string(), Expr::Waveform(Waveform::Dial(Dial::X))));
-    context.push(("Y".to_string(), Expr::Waveform(Waveform::Dial(Dial::Y))));
+    context.push(("X".to_string(), Expr::Waveform(Waveform::Slider(Slider::X))));
+    context.push(("Y".to_string(), Expr::Waveform(Waveform::Slider(Slider::Y))));
 
     let builtins: Vec<(&str, fn(Vec<Expr>) -> Expr)> = vec![
         ("+", plus),

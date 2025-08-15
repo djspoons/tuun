@@ -10,7 +10,7 @@ use realfft::num_complex::{Complex, ComplexFloat};
 use realfft::RealFftPlanner;
 
 use crate::metric::Metric;
-use crate::tracker::Status;
+use crate::tracker::{Slider, Status};
 use crate::{is_active, is_pending, Mode, WaveformId};
 
 fn make_texture<'a>(
@@ -43,8 +43,8 @@ pub struct Renderer {
     beats_per_minute: u32,
     beats_per_measure: u32,
 
-    width: u32,
-    height: u32,
+    pub width: u32,
+    pub height: u32,
     prompt_width: u32,
     line_height: u32,
     nav_width: u32,
@@ -283,7 +283,7 @@ impl Renderer {
                     program_index: mode_program_index,
                     ..
                 }
-                | Mode::TurnDials {
+                | Mode::MoveSliders {
                     program_index: mode_program_index,
                     ..
                 } => {
@@ -334,6 +334,36 @@ impl Renderer {
             }
             y += self.line_height as i32;
         }
+
+        // Draw the sliders
+        self.canvas
+            .set_draw_color(if let Mode::MoveSliders { .. } = mode {
+                ACTIVE_COLOR
+            } else {
+                INACTIVE_COLOR
+            });
+        self.canvas
+            .fill_rect(sdl2::rect::Rect::new(
+                (self.width / 2) as i32
+                    + (self.width as f32 * *status.slider_values.get(&Slider::X).unwrap_or(&0.0)
+                        / 2.0) as i32
+                    - 3,
+                0,
+                6,
+                16,
+            ))
+            .unwrap();
+        self.canvas
+            .fill_rect(sdl2::rect::Rect::new(
+                0,
+                (self.height / 2) as i32
+                    - (self.height as f32 * *status.slider_values.get(&Slider::Y).unwrap_or(&0.0)
+                        / 2.0) as i32
+                    - 3,
+                16,
+                6,
+            ))
+            .unwrap();
 
         // Save the new buffer if present
         if let Some(buffer) = &status.buffer {
@@ -389,7 +419,7 @@ impl Renderer {
         let mut message = match mode {
             Mode::Edit { message, .. } => message,
             Mode::Select { message, .. } => message,
-            Mode::TurnDials { message, .. } => message,
+            Mode::MoveSliders { message, .. } => message,
             Mode::Exit => "",
         };
 

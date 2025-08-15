@@ -16,6 +16,7 @@ mod metric;
 use metric::Metric;
 mod parser;
 mod renderer;
+use renderer::Renderer;
 mod tracker;
 use tracker::Command;
 
@@ -74,7 +75,7 @@ enum Mode {
         errors: Vec<parser::Error>,
         message: String,
     },
-    TurnDials {
+    MoveSliders {
         program_index: usize, // Don't forget this
         message: String,
     },
@@ -225,7 +226,7 @@ pub fn main() {
     device.resume();
 
     let ttf_context: Sdl2TtfContext = sdl2::ttf::init().unwrap();
-    let mut renderer = renderer::Renderer::new(
+    let mut renderer = Renderer::new(
         &sdl_context,
         &ttf_context,
         args.beats_per_minute,
@@ -238,6 +239,7 @@ pub fn main() {
     let mut status = tracker::Status {
         buffer_start: Instant::now(),
         marks: Vec::new(),
+        slider_values: std::collections::HashMap::new(),
         buffer: None,
         tracker_load: None,
     };
@@ -264,6 +266,7 @@ pub fn main() {
             (context, mode) = process_event::<WaveformId>(
                 &args,
                 context,
+                &renderer,
                 event,
                 mode,
                 &status,
@@ -283,7 +286,6 @@ pub fn main() {
         // TODO need to empty this receiver and skip to last status
         match status_receiver.recv_timeout(Duration::from_millis(10)) {
             Ok(tracker_status) => {
-                //println!("Got marks: {:?}", tracker_status.marks);
                 if let Some(ratio) = tracker_status.tracker_load {
                     metrics.tracker_load.set(ratio);
                 }
@@ -314,6 +316,7 @@ fn edit_mode_from_program(program_index: usize, cursor_position: usize, program:
 fn process_event<I>(
     args: &Args,
     context: Vec<(String, parser::Expr)>,
+    renderer: &Renderer,
     event: Event,
     mode: Mode,
     status: &tracker::Status<WaveformId>,
@@ -434,7 +437,7 @@ fn process_event<I>(
                     Some(Scancode::LAlt) | Some(Scancode::RAlt),
                 ) => (
                     context,
-                    Mode::TurnDials {
+                    Mode::MoveSliders {
                         program_index,
                         message: String::new(),
                     },
@@ -558,10 +561,10 @@ fn process_event<I>(
             scancode: Some(Scancode::LAlt) | Some(Scancode::RAlt),
             ..
         } => {
-            // Exit turn dials mode when the left alt key is released
+            // Exit move sliders mode when the left alt key is released
             match mode {
-                Mode::TurnDials { program_index, .. } => {
-                    // If we were in turn dials mode, return to select mode
+                Mode::MoveSliders { program_index, .. } => {
+                    // If we were in move sliders mode, return to select mode
                     (
                         context,
                         Mode::Select {
@@ -708,37 +711,36 @@ fn process_event<I>(
                         ),
                     );
                 }
-                Mode::TurnDials { .. } | Mode::Exit => {
+                Mode::MoveSliders { .. } | Mode::Exit => {
                     return (context, mode);
                 }
             }
         }
         Event::MouseMotion { xrel, yrel, .. } => {
-            use tracker::Dial;
+            use tracker::Slider;
             match mode {
-                Mode::TurnDials { program_index, .. } => {
-                    //println!("Mouse motion: xrel: {}, yrel: {}", xrel, yrel);
+                Mode::MoveSliders { program_index, .. } => {
                     if xrel != 0 {
                         command_sender
-                            .send(Command::TurnDial {
-                                dial: Dial::X,
-                                delta: xrel as f32 / 100.0,
+                            .send(Command::MoveSlider {
+                                slider: Slider::X,
+                                delta: xrel as f32 / (renderer.width as f32 / 2.0),
                             })
                             .unwrap();
                     }
                     if yrel != 0 {
                         command_sender
-                            .send(Command::TurnDial {
-                                dial: Dial::Y,
-                                delta: yrel as f32 / 100.0,
+                            .send(Command::MoveSlider {
+                                slider: Slider::Y,
+                                delta: -yrel as f32 / (renderer.height as f32 / 2.0),
                             })
                             .unwrap();
                     }
                     return (
                         context,
-                        Mode::TurnDials {
+                        Mode::MoveSliders {
                             program_index,
-                            message: format!("Turned dials by xrel: {}, yrel: {}", xrel, yrel),
+                            message: String::new(),
                         },
                     );
                 }

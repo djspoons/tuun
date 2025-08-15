@@ -55,8 +55,9 @@ impl From<usize> for Length {
     }
 }
 
+// TODO move this out of the tracker?
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Dial {
+pub enum Slider {
     X,
     Y,
 }
@@ -126,9 +127,9 @@ pub enum Waveform {
         negative_waveform: Box<Waveform>,
     },
     /*
-     * Dial generates samples from an interactive "dial" input.
+     * Slider generates samples from an interactive "slider" input.
      */
-    Dial(Dial),
+    Slider(Slider),
     /*
      * Marked waveforms don't generate any samples, but are used to signal that a certain event will
      * occur or has occurred. Each status update will include a list of marked waveforms, along with
@@ -146,7 +147,16 @@ pub enum Waveform {
 struct Generator {
     sample_frequency: i32,
 
-    dial_values: std::collections::HashMap<Dial, f32>,
+    // The following are used to implement the slider waveforms. Other waveforms should not depend
+    // on this state.
+    // The final values of sliders at the end of the last generate call
+    last_slider_values: std::collections::HashMap<Slider, f32>,
+    // Any changes to the sliders since the last generate call
+    slider_changes: std::collections::HashMap<Slider, f32>,
+    // The length of the current buffer being generated
+    buffer_length: usize,
+    // The position in the buffer where the next sample will be written
+    buffer_position: usize,
 }
 
 // TODO add metrics for waveform expr depth and total ops
@@ -155,7 +165,10 @@ impl Generator {
     fn new(sample_frequency: i32) -> Self {
         Generator {
             sample_frequency,
-            dial_values: std::collections::HashMap::new(),
+            last_slider_values: std::collections::HashMap::new(),
+            slider_changes: std::collections::HashMap::new(),
+            buffer_length: 0,
+            buffer_position: 0,
         }
     }
 
@@ -342,9 +355,22 @@ impl Generator {
                 }
                 return out;
             }
-            Waveform::Dial(dial) => {
-                let value = self.dial_values.get(&dial).cloned().unwrap_or(0.0);
-                return vec![value; desired];
+            Waveform::Slider(slider) => {
+                let last_value = self.last_slider_values.get(&slider).cloned().unwrap_or(0.0);
+                let change = self.slider_changes.get(&slider).cloned().unwrap_or(0.0);
+                // Use a linear interpolation between the last value and the change. This is almost right, but if
+                // a slider waveform is used in a binary op, then buffer_position + position might not be large
+                // enough.
+                let mut out = vec![0.0; desired];
+                for (i, x) in out.iter_mut().enumerate() {
+                    *x = last_value
+                        + change
+                            * ((self.buffer_position as f32 / self.buffer_length as f32)
+                                + i as f32 / desired as f32)
+                                .min(1.0)
+                                .max(-1.0);
+                }
+                return out;
             }
             Waveform::Marked { waveform, .. } => {
                 return self.generate(waveform, position, desired);
@@ -376,7 +402,7 @@ impl Generator {
                 self.length(a).min(length)
             }
             Waveform::Res { trigger, .. } | Waveform::Alt { trigger, .. } => self.length(trigger),
-            Waveform::Dial { .. } => Length::Infinite,
+            Waveform::Slider { .. } => Length::Infinite,
             Waveform::Marked { waveform, .. } => self.length(waveform),
         }
     }
@@ -395,7 +421,7 @@ impl Generator {
             Waveform::Convolution { waveform, .. } => self.offset(waveform),
             Waveform::Sum(a, b) | Waveform::DotProduct(a, b) => self.offset(a) + self.offset(b),
             Waveform::Res { trigger, .. } | Waveform::Alt { trigger, .. } => self.offset(trigger),
-            Waveform::Dial { .. } => 0,
+            Waveform::Slider { .. } => 0,
             Waveform::Marked { waveform, .. } => self.offset(waveform),
         }
     }
@@ -482,9 +508,9 @@ pub enum Command<I> {
         id: I,
     },
     SendCurrentBuffer,
-    TurnDial {
-        // The dial to set
-        dial: Dial,
+    MoveSlider {
+        // The slider to set
+        slider: Slider,
         // The amount to change it by
         delta: f32,
     },
@@ -506,6 +532,8 @@ where
     pub buffer_start: Instant,
     // Marks for each active waveform as well as any pending waveforms
     pub marks: Vec<Mark<I>>,
+    // The current values of the sliders (as of buffer_start)
+    pub slider_values: std::collections::HashMap<Slider, f32>,
     // Some status updates will include the current buffer
     pub buffer: Option<Vec<f32>>,
     // The current tracker load, the ratio of sample frequency to samples generated per second
@@ -577,11 +605,11 @@ where
         out: &mut Vec<Mark<I>>,
     ) {
         use Waveform::{
-            Alt, Const, Convolution, Dial, DotProduct, Fin, Fixed, Marked, Noise, Res, Seq, Sin,
+            Alt, Const, Convolution, DotProduct, Fin, Fixed, Marked, Noise, Res, Seq, Sin, Slider,
             Sum, Time,
         };
         match waveform {
-            Const(_) | Time | Noise | Fixed(_) | Dial { .. } => {
+            Const(_) | Time | Noise | Fixed(_) | Slider { .. } => {
                 return;
             }
             Fin { waveform, .. }
@@ -639,17 +667,32 @@ where
         let mut status_to_send = Status {
             buffer_start,
             marks: Vec::new(),
+            slider_values: self.generator.last_slider_values.clone(),
             tracker_load: None,
             buffer: None,
         };
 
         // Now generate!
+        self.generator.buffer_length = out.len();
         let generate_start = Instant::now();
         let (_, finished) = self.generate(buffer_start, out);
         status_to_send.tracker_load = Some(
             self.sample_frequency as f32
                 / (out.len() as f32 / generate_start.elapsed().as_secs_f32()),
         );
+
+        // Update the slider values based on the changes
+        for (slider, change) in self.generator.slider_changes.iter() {
+            let last_value = self
+                .generator
+                .last_slider_values
+                .remove(slider)
+                .unwrap_or(0.0);
+            self.generator
+                .last_slider_values
+                .insert(slider.clone(), (last_value + change).min(1.0).max(-1.0));
+        }
+        self.generator.slider_changes.clear();
 
         // Copy the marks from finished waveforms into the status
         for active in finished {
@@ -720,12 +763,10 @@ where
             Command::SendCurrentBuffer => {
                 self.send_current_buffer = true;
             }
-            Command::TurnDial { dial, delta } => {
-                //turn_dial_count += 1;
-                // TODO accumulate the changes and apply them over the duration of the buffer
+            Command::MoveSlider { slider, delta } => {
                 self.generator
-                    .dial_values
-                    .entry(dial)
+                    .slider_changes
+                    .entry(slider)
                     .and_modify(|v| *v += delta)
                     .or_insert(delta);
             }
@@ -733,8 +774,6 @@ where
     }
 
     fn empty_command_queue(&mut self) {
-        //println!("Dial state before processing commands: {:?}", self.generator.dial_values);
-        //let mut turn_dial_count = 0;
         loop {
             match self.command_receiver.try_recv() {
                 Ok(command) => self.process_command(command),
@@ -742,7 +781,6 @@ where
                 Err(e) => println!("Error receiving command: {:?}", e),
             }
         }
-        //println!("Dial state after processing commands: {:?} ({} turns)", self.generator.dial_values, turn_dial_count);
     }
 
     // Generate from pending waveforms and active waveforms, filling the out buffer.
@@ -753,15 +791,18 @@ where
         buffer_start: Instant,
         out: &mut [f32],
     ) -> (Option<usize>, Vec<ActiveWaveform<I>>) {
-        // We'll generate in segments based on the set of active waveforms at a given time.
+        // We'll generate in segments based on the set of active waveforms at a given time
         let mut segment_start = buffer_start;
         let mut segment_length = out.len();
+
+        // Keep track of any active waveforms that finish generating
         let mut finished = Vec::new();
 
         for x in out.iter_mut() {
             *x = 0.0;
         }
         let mut filled = 0; // How much of the out buffer we've filled so far
+        self.generator.buffer_position = filled;
         let mut high_water_mark = 0; // How much that's filled by a waveform (not padded)
         while filled < out.len() {
             // Check to see if any pending waveform starts at or before segment_start. If so, promote
@@ -821,6 +862,7 @@ where
             // are no active waveforms, then just updated filled and continue.
             if self.active_waveforms.len() == 0 {
                 filled += segment_length;
+                self.generator.buffer_position = filled;
                 segment_start +=
                     Duration::from_secs_f32(segment_length as f32 / self.sample_frequency as f32);
                 segment_length = out.len() - filled;
@@ -862,6 +904,7 @@ where
                 }
             }
             filled += segment_length;
+            self.generator.buffer_position = filled;
             segment_start +=
                 Duration::from_secs_f32(segment_length as f32 / self.sample_frequency as f32);
             segment_length = out.len() - filled;
@@ -1118,4 +1161,6 @@ mod tests {
         };
         run_tests(&w5, vec![0.6, 0.8, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
     }
+
+    // TODO test for forgetting to sort pending waveforms
 }
