@@ -5,7 +5,7 @@ use std::{cell::RefCell, rc::Rc};
 
 use nom::{
     branch::alt,
-    bytes::complete::tag,
+    bytes::complete::{tag, take_while},
     character::complete::{alpha1, char, multispace0, multispace1},
     combinator::{all_consuming, map, not, opt, peek, recognize, verify},
     multi::{many0, separated_list0},
@@ -151,6 +151,7 @@ pub enum Expr {
     // Values
     Bool(bool),
     Float(f32),
+    String(String),
     Waveform(tracker::Waveform),
     Function {
         arguments: Pattern,
@@ -187,15 +188,28 @@ impl Default for Expr {
     }
 }
 
+fn parse_string(input: LocatedSpan) -> IResult<Expr> {
+    #[rustfmt::skip]
+    let (rest, value) = delimited(
+        char('"'),
+        // TODO implement escaping
+        take_while(|c: char| c != '"'),
+        char('"'),
+    ).parse(input)?;
+    return Ok((rest, Expr::String(value.fragment().to_string())));
+}
+
 fn parse_literal(input: LocatedSpan) -> IResult<Expr> {
     #[rustfmt::skip]
-    let (rest, value) =
+    let (rest, value) = alt((
         // Handle parsing negative floats ourselves
         preceded(
             not(peek(char('-'))),
             float,
-        ).parse(input)?;
-    return Ok((rest, Expr::Float(value)));
+        ).map(Expr::Float),
+        parse_string,
+    )).parse(input)?;
+    return Ok((rest, value));
 }
 
 fn parse_identifier(input: LocatedSpan) -> IResult<String> {
@@ -616,10 +630,11 @@ fn extend_with_trivial_context(context: &mut Vec<(String, Expr)>, pattern: &Patt
 }
 
 fn substitute(context: &Vec<(String, Expr)>, expr: Expr) -> Expr {
-    use Expr::{Application, Bool, BuiltIn, Float, Function, IfThenElse, List, Tuple, Variable};
+    use Expr::{
+        Application, Bool, BuiltIn, Float, Function, IfThenElse, List, String, Tuple, Variable,
+    };
     match expr {
-        Bool(_) => expr,
-        Float(_) => expr,
+        Bool(_) | Float(_) | String(_) => expr,
         Expr::Waveform(waveform) => Expr::Waveform(waveform),
         Function { arguments, body } => {
             let mut context = context.clone();
@@ -707,6 +722,7 @@ impl fmt::Display for Expr {
         match self {
             Expr::Bool(value) => write!(f, "{}", value),
             Expr::Float(value) => write!(f, "{}", value),
+            Expr::String(value) => write!(f, "{}", value),
             Expr::Waveform(waveform) => {
                 write!(f, "{:?}", waveform)
             }
@@ -788,13 +804,11 @@ pub fn extend_context(
 
 fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
     use Expr::{
-        Application, Bool, BuiltIn, Float, Function, IfThenElse, List, Tuple, Variable, Waveform,
+        Application, Bool, BuiltIn, Float, Function, IfThenElse, List, String, Tuple, Variable,
+        Waveform,
     };
     match expr {
-        Bool(_) => Ok(expr),
-        Float(_) => Ok(expr),
-        Waveform(_) => Ok(expr),
-        Function { .. } => Ok(expr),
+        Bool(_) | Float(_) | String(_) | Waveform(_) | Function { .. } => Ok(expr),
         Variable(name) => Err(Error::new(format!(
             "Variable '{}' not found in context",
             name

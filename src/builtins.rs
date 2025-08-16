@@ -280,6 +280,23 @@ fn mark(arguments: Vec<Expr>) -> Expr {
     }
 }
 
+fn capture(mut arguments: Vec<Expr>) -> Expr {
+    if arguments.len() != 1 {
+        return Expr::Error("Expected one argument for capture".to_string());
+    }
+    let file_stem = match arguments.remove(0) {
+        Expr::String(file_stem) => file_stem,
+        _ => return Expr::Error("Expected a string argument to capture".to_string()),
+    };
+    BuiltIn {
+        name: format!("capture({})", file_stem),
+        function: filter(move |waveform: Box<Waveform>| Waveform::Captured {
+            file_stem: file_stem.clone(),
+            waveform,
+        }),
+    }
+}
+
 pub fn chord(arguments: Vec<Expr>) -> Expr {
     match &arguments[..] {
         [List(exprs)] => {
@@ -359,6 +376,7 @@ pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
         ("res", res),
         ("alt", alt),
         ("mark", mark),
+        ("capture", capture),
         ("_chord", chord),
         ("_sequence", sequence),
     ];
