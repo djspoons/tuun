@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::fmt::Debug;
+use std::io::BufWriter;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
@@ -139,6 +141,11 @@ pub enum Waveform {
         id: u32,
         waveform: Box<Waveform>,
     },
+
+    Captured {
+        file_stem: String,
+        waveform: Box<Waveform>,
+    },
 }
 
 /*
@@ -150,9 +157,9 @@ struct Generator {
     // The following are used to implement the slider waveforms. Other waveforms should not depend
     // on this state.
     // The final values of sliders at the end of the last generate call
-    last_slider_values: std::collections::HashMap<Slider, f32>,
+    last_slider_values: HashMap<Slider, f32>,
     // Any changes to the sliders since the last generate call
-    slider_changes: std::collections::HashMap<Slider, f32>,
+    slider_changes: HashMap<Slider, f32>,
     // The length of the current buffer being generated
     buffer_length: usize,
     // The position in the buffer where the next sample will be written
@@ -165,8 +172,8 @@ impl Generator {
     fn new(sample_frequency: i32) -> Self {
         Generator {
             sample_frequency,
-            last_slider_values: std::collections::HashMap::new(),
-            slider_changes: std::collections::HashMap::new(),
+            last_slider_values: HashMap::new(),
+            slider_changes: HashMap::new(),
             buffer_length: 0,
             buffer_position: 0,
         }
@@ -370,10 +377,23 @@ impl Generator {
                                 .min(1.0)
                                 .max(-1.0);
                 }
+                /*
+                println!(
+                    "Slider {:?} average value: {}",
+                    slider,
+                    (out[0] + out[out.len() - 1]) / 2.0
+                );
+                println!("Slider {:?} values: {:?}", slider, out);
+                */
                 return out;
             }
             Waveform::Marked { waveform, .. } => {
                 return self.generate(waveform, position, desired);
+            }
+            Waveform::Captured { waveform, .. } => {
+                let out = self.generate(waveform, position, desired);
+                //self.write_captured_samples(file_stem, &out);
+                return out;
             }
         }
     }
@@ -403,7 +423,9 @@ impl Generator {
             }
             Waveform::Res { trigger, .. } | Waveform::Alt { trigger, .. } => self.length(trigger),
             Waveform::Slider { .. } => Length::Infinite,
-            Waveform::Marked { waveform, .. } => self.length(waveform),
+            Waveform::Marked { waveform, .. } | Waveform::Captured { waveform, .. } => {
+                self.length(waveform)
+            }
         }
     }
 
@@ -422,7 +444,9 @@ impl Generator {
             Waveform::Sum(a, b) | Waveform::DotProduct(a, b) => self.offset(a) + self.offset(b),
             Waveform::Res { trigger, .. } | Waveform::Alt { trigger, .. } => self.offset(trigger),
             Waveform::Slider { .. } => 0,
-            Waveform::Marked { waveform, .. } => self.offset(waveform),
+            Waveform::Marked { waveform, .. } | Waveform::Captured { waveform, .. } => {
+                self.offset(waveform)
+            }
         }
     }
 
@@ -533,31 +557,32 @@ where
     // Marks for each active waveform as well as any pending waveforms
     pub marks: Vec<Mark<I>>,
     // The current values of the sliders (as of buffer_start)
-    pub slider_values: std::collections::HashMap<Slider, f32>,
+    pub slider_values: HashMap<Slider, f32>,
     // Some status updates will include the current buffer
     pub buffer: Option<Vec<f32>>,
     // The current tracker load, the ratio of sample frequency to samples generated per second
     pub tracker_load: Option<f32>,
 }
 
-#[derive(Debug, Clone)]
 struct ActiveWaveform<I>
 where
     I: Clone,
 {
-    pub id: I,
-    pub waveform: Waveform,
-    pub marks: Vec<Mark<I>>,
-    pub position: usize,
+    id: I,
+    waveform: Waveform,
+    marks: Vec<Mark<I>>,
+    position: usize,
+    // Open files used by Captured waveforms
+    open_files: HashMap<String, hound::WavWriter<BufWriter<std::fs::File>>>,
 }
 
 #[derive(Debug, Clone)]
 struct PendingWaveform<I> {
-    pub id: I,
-    pub waveform: Waveform,
-    pub start: Instant,
-    pub repeat_every: Option<Duration>,
-    pub marks: Vec<Mark<I>>,
+    id: I,
+    waveform: Waveform,
+    start: Instant,
+    repeat_every: Option<Duration>,
+    marks: Vec<Mark<I>>,
 }
 
 pub struct Tracker<I>
@@ -605,8 +630,8 @@ where
         out: &mut Vec<Mark<I>>,
     ) {
         use Waveform::{
-            Alt, Const, Convolution, DotProduct, Fin, Fixed, Marked, Noise, Res, Seq, Sin, Slider,
-            Sum, Time,
+            Alt, Captured, Const, Convolution, DotProduct, Fin, Fixed, Marked, Noise, Res, Seq,
+            Sin, Slider, Sum, Time,
         };
         match waveform {
             Const(_) | Time | Noise | Fixed(_) | Slider { .. } => {
@@ -621,7 +646,8 @@ where
             }
             | Alt {
                 trigger: waveform, ..
-            } => {
+            }
+            | Captured { waveform, .. } => {
                 self.process_marked(waveform_id, start, &*waveform, out);
             }
             Sum(a, b) | DotProduct(a, b) => {
@@ -643,6 +669,67 @@ where
                     duration: Duration::from_secs_f32(length as f32 / self.sample_frequency as f32),
                 });
                 self.process_marked(waveform_id, start, &*waveform, out);
+            }
+        }
+    }
+
+    fn process_captured(
+        &self,
+        waveform_id: &I,
+        waveform: &Waveform,
+        out: &mut HashMap<String, hound::WavWriter<BufWriter<std::fs::File>>>,
+    ) {
+        use Waveform::{
+            Alt, Captured, Const, Convolution, DotProduct, Fin, Fixed, Marked, Noise, Res, Seq,
+            Sin, Slider, Sum, Time,
+        };
+        match waveform {
+            Const(_) | Time | Noise | Fixed(_) | Slider { .. } => {
+                return;
+            }
+            Fin { waveform, .. }
+            | Seq { waveform, .. }
+            | Sin(waveform)
+            | Convolution { waveform, .. }
+            | Res {
+                trigger: waveform, ..
+            }
+            | Alt {
+                trigger: waveform, ..
+            }
+            | Marked { waveform, .. } => {
+                self.process_captured(waveform_id, &*waveform, out);
+            }
+            Sum(a, b) | DotProduct(a, b) => {
+                self.process_captured(waveform_id, &*a, out);
+                self.process_captured(waveform_id, &*b, out);
+            }
+            Captured {
+                file_stem,
+                waveform,
+            } => {
+                use hound::{SampleFormat, WavSpec, WavWriter};
+                self.process_captured(waveform_id, &*waveform, out);
+                // If we haven't already opened a file for this waveform, then open it now.
+                if out.contains_key(file_stem) {
+                    panic!(
+                        "Captured waveform called with duplicate file stem: {}",
+                        file_stem
+                    );
+                }
+                let datetime = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
+                let file_name = format!("{}_{}.wav", &file_stem, &datetime);
+                let path = std::path::Path::new(&file_name);
+                let file = std::fs::File::create(path).expect("Failed to create file");
+                let spec = WavSpec {
+                    channels: 1,
+                    sample_rate: self.sample_frequency as u32,
+                    bits_per_sample: 32,
+                    sample_format: SampleFormat::Float,
+                };
+                let writer = WavWriter::new(BufWriter::new(file), spec)
+                    .expect("Failed to create WAV writer");
+                out.insert(file_stem.clone(), writer);
             }
         }
     }
@@ -822,11 +909,14 @@ where
                             mark.start += segment_start - pending.start;
                         }
                     }
+                    let mut open_files = HashMap::new();
+                    self.process_captured(&pending.id, &pending.waveform, &mut open_files);
                     self.active_waveforms.push(ActiveWaveform {
                         id: pending.id.clone(),
                         waveform: pending.waveform.clone(),
                         marks,
                         position: 0,
+                        open_files,
                     });
                     // Check to see if this waveform should repeat
                     if let Some(duration) = pending.repeat_every {
@@ -918,7 +1008,7 @@ where
         }
     }
 
-    pub fn write_to_file(&mut self, filename: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn write_to_file(&mut self, file_name: &str) -> Result<(), Box<dyn std::error::Error>> {
         use hound;
 
         self.empty_command_queue();
@@ -930,7 +1020,7 @@ where
             sample_format: hound::SampleFormat::Float,
         };
 
-        let mut writer = hound::WavWriter::create(filename, spec)?;
+        let mut writer = hound::WavWriter::create(file_name, spec)?;
         loop {
             let mut out = vec![0.0; 1024];
             let generated = self.generate(Instant::now(), &mut out);
