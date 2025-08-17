@@ -1,6 +1,7 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::f32::consts::PI;
 use std::fmt::Debug;
+use std::hash::Hash;
 use std::io::BufWriter;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
@@ -133,49 +134,52 @@ pub enum Waveform {
      */
     Slider(Slider),
     /*
-     * Marked waveforms don't generate any samples, but are used to signal that a certain event will
-     * occur or has occurred. Each status update will include a list of marked waveforms, along with
+     * Marked waveforms generate the same samples as the inner waveform and are used to signal that a certain
+     * event will occur or has occurred. Each status update will include a list of marked waveforms, along with
      * their start times and durations.
      */
     Marked {
         id: u32,
         waveform: Box<Waveform>,
     },
-
+    /* Captured waveforms generate the same samples as the inner waveform and also write them to a file
+     * beginning with the given file stem.
+     */
     Captured {
         file_stem: String,
         waveform: Box<Waveform>,
     },
 }
 
-/*
- * Generator converts waveforms into sequences of samples.
- */
-struct Generator {
-    sample_frequency: i32,
-
-    // The following are used to implement the slider waveforms. Other waveforms should not depend
-    // on this state.
+struct SliderState {
     // The final values of sliders at the end of the last generate call
-    last_slider_values: HashMap<Slider, f32>,
+    last_values: HashMap<Slider, f32>,
     // Any changes to the sliders since the last generate call
-    slider_changes: HashMap<Slider, f32>,
+    changes: HashMap<Slider, f32>,
     // The length of the current buffer being generated
     buffer_length: usize,
     // The position in the buffer where the next sample will be written
     buffer_position: usize,
 }
 
+/*
+ * Generator converts waveforms into sequences of samples.
+ */
+struct Generator<'a> {
+    sample_frequency: i32,
+    slider_state: Option<&'a SliderState>,
+    capture_state:
+        Option<RefCell<&'a mut HashMap<String, hound::WavWriter<BufWriter<std::fs::File>>>>>,
+}
+
 // TODO add metrics for waveform expr depth and total ops
 
-impl Generator {
+impl<'a> Generator<'a> {
     fn new(sample_frequency: i32) -> Self {
         Generator {
             sample_frequency,
-            last_slider_values: HashMap::new(),
-            slider_changes: HashMap::new(),
-            buffer_length: 0,
-            buffer_position: 0,
+            slider_state: None,
+            capture_state: None,
         }
     }
 
@@ -224,7 +228,7 @@ impl Generator {
             Waveform::Sin(waveform) => {
                 let mut out = self.generate(waveform, position, desired);
                 for f in out.iter_mut() {
-                    *f = (2.0 * PI * *f).sin();
+                    *f = (*f).sin();
                 }
                 return out;
             }
@@ -363,8 +367,17 @@ impl Generator {
                 return out;
             }
             Waveform::Slider(slider) => {
-                let last_value = self.last_slider_values.get(&slider).cloned().unwrap_or(0.0);
-                let change = self.slider_changes.get(&slider).cloned().unwrap_or(0.0);
+                if self.slider_state.is_none() {
+                    println!("Warning: Slider waveform used, but no slider state set");
+                    return vec![0.0; desired];
+                }
+                let slider_state = self.slider_state.unwrap();
+                let last_value = slider_state
+                    .last_values
+                    .get(&slider)
+                    .cloned()
+                    .unwrap_or(0.0);
+                let change = slider_state.changes.get(&slider).cloned().unwrap_or(0.0);
                 // Use a linear interpolation between the last value and the change. This is almost right, but if
                 // a slider waveform is used in a binary op, then buffer_position + position might not be large
                 // enough.
@@ -372,7 +385,8 @@ impl Generator {
                 for (i, x) in out.iter_mut().enumerate() {
                     *x = last_value
                         + change
-                            * ((self.buffer_position as f32 / self.buffer_length as f32)
+                            * ((slider_state.buffer_position as f32
+                                / slider_state.buffer_length as f32)
                                 + i as f32 / desired as f32)
                                 .min(1.0)
                                 .max(-1.0);
@@ -390,62 +404,34 @@ impl Generator {
             Waveform::Marked { waveform, .. } => {
                 return self.generate(waveform, position, desired);
             }
-            Waveform::Captured { waveform, .. } => {
+            Waveform::Captured {
+                file_stem,
+                waveform,
+            } => {
+                if self.capture_state.is_none() {
+                    println!("Warning: captured waveform used without capture_state");
+                    return vec![0.0; desired];
+                }
                 let out = self.generate(waveform, position, desired);
-                //self.write_captured_samples(file_stem, &out);
+                match self
+                    .capture_state
+                    .as_ref()
+                    .unwrap()
+                    .borrow_mut()
+                    .get_mut(file_stem)
+                {
+                    Some(writer) => {
+                        for x in out.iter() {
+                            if let Err(e) = writer.write_sample(*x) {
+                                eprintln!("Error writing sample for {}: {}", file_stem, e);
+                            }
+                        }
+                    }
+                    None => {
+                        panic!("No open file for captured waveform {}", file_stem);
+                    }
+                }
                 return out;
-            }
-        }
-    }
-
-    // Returns the length of the waveform in samples.
-    fn length(&self, waveform: &Waveform) -> Length {
-        match waveform {
-            Waveform::Const { .. } => Length::Infinite,
-            Waveform::Time => Length::Infinite,
-            Waveform::Noise => Length::Infinite,
-            Waveform::Fixed(samples) => Length::Finite(samples.len()),
-            Waveform::Fin { duration, .. } => {
-                ((duration.as_secs_f32() * self.sample_frequency as f32) as usize).into()
-            }
-            Waveform::Seq { waveform, .. } => self.length(waveform),
-            Waveform::Sin(waveform) => self.length(waveform),
-            Waveform::Convolution { waveform, kernel } => {
-                self.length(waveform) + self.length(kernel) / 2.into()
-            }
-            Waveform::Sum(a, b) => {
-                let length = Length::Finite(self.offset(a)) + self.length(b);
-                self.length(a).max(length)
-            }
-            Waveform::DotProduct(a, b) => {
-                let length = Length::Finite(self.offset(a)) + self.length(b);
-                self.length(a).min(length)
-            }
-            Waveform::Res { trigger, .. } | Waveform::Alt { trigger, .. } => self.length(trigger),
-            Waveform::Slider { .. } => Length::Infinite,
-            Waveform::Marked { waveform, .. } | Waveform::Captured { waveform, .. } => {
-                self.length(waveform)
-            }
-        }
-    }
-
-    fn offset(&self, waveform: &Waveform) -> usize {
-        match waveform {
-            Waveform::Const { .. } => 0,
-            Waveform::Time => 0,
-            Waveform::Noise => 0,
-            Waveform::Fixed(_) => 0,
-            Waveform::Fin { waveform, .. } => self.offset(waveform),
-            Waveform::Seq { duration, .. } => {
-                (duration.as_secs_f32() * self.sample_frequency as f32) as usize
-            }
-            Waveform::Sin(waveform) => self.offset(waveform),
-            Waveform::Convolution { waveform, .. } => self.offset(waveform),
-            Waveform::Sum(a, b) | Waveform::DotProduct(a, b) => self.offset(a) + self.offset(b),
-            Waveform::Res { trigger, .. } | Waveform::Alt { trigger, .. } => self.offset(trigger),
-            Waveform::Slider { .. } => 0,
-            Waveform::Marked { waveform, .. } | Waveform::Captured { waveform, .. } => {
-                self.offset(waveform)
             }
         }
     }
@@ -511,6 +497,58 @@ impl Generator {
         }
         return left;
     }
+
+    // Returns the length of the waveform in samples.
+    fn length(&self, waveform: &Waveform) -> Length {
+        match waveform {
+            Waveform::Const { .. } => Length::Infinite,
+            Waveform::Time => Length::Infinite,
+            Waveform::Noise => Length::Infinite,
+            Waveform::Fixed(samples) => Length::Finite(samples.len()),
+            Waveform::Fin { duration, .. } => {
+                ((duration.as_secs_f32() * self.sample_frequency as f32) as usize).into()
+            }
+            Waveform::Seq { waveform, .. } => self.length(waveform),
+            Waveform::Sin(waveform) => self.length(waveform),
+            Waveform::Convolution { waveform, kernel } => {
+                self.length(waveform) + self.length(kernel) / 2.into()
+            }
+            Waveform::Sum(a, b) => {
+                let length = Length::Finite(self.offset(a)) + self.length(b);
+                self.length(a).max(length)
+            }
+            Waveform::DotProduct(a, b) => {
+                let length = Length::Finite(self.offset(a)) + self.length(b);
+                self.length(a).min(length)
+            }
+            Waveform::Res { trigger, .. } | Waveform::Alt { trigger, .. } => self.length(trigger),
+            Waveform::Slider { .. } => Length::Infinite,
+            Waveform::Marked { waveform, .. } | Waveform::Captured { waveform, .. } => {
+                self.length(waveform)
+            }
+        }
+    }
+
+    fn offset(&self, waveform: &Waveform) -> usize {
+        match waveform {
+            Waveform::Const { .. } => 0,
+            Waveform::Time => 0,
+            Waveform::Noise => 0,
+            Waveform::Fixed(_) => 0,
+            Waveform::Fin { waveform, .. } => self.offset(waveform),
+            Waveform::Seq { duration, .. } => {
+                (duration.as_secs_f32() * self.sample_frequency as f32) as usize
+            }
+            Waveform::Sin(waveform) => self.offset(waveform),
+            Waveform::Convolution { waveform, .. } => self.offset(waveform),
+            Waveform::Sum(a, b) | Waveform::DotProduct(a, b) => self.offset(a) + self.offset(b),
+            Waveform::Res { trigger, .. } | Waveform::Alt { trigger, .. } => self.offset(trigger),
+            Waveform::Slider { .. } => 0,
+            Waveform::Marked { waveform, .. } | Waveform::Captured { waveform, .. } => {
+                self.offset(waveform)
+            }
+        }
+    }
 }
 
 pub enum Command<I> {
@@ -554,7 +592,8 @@ where
     I: Clone + Send,
 {
     pub buffer_start: Instant,
-    // Marks for each active waveform as well as any pending waveforms
+    // Marks for each active waveform as well as any pending waveforms; a mark may appear more
+    // than once if a given waveform is both active and pending
     pub marks: Vec<Mark<I>>,
     // The current values of the sliders (as of buffer_start)
     pub slider_values: HashMap<Slider, f32>,
@@ -573,7 +612,7 @@ where
     marks: Vec<Mark<I>>,
     position: usize,
     // Open files used by Captured waveforms
-    open_files: HashMap<String, hound::WavWriter<BufWriter<std::fs::File>>>,
+    capture_state: HashMap<String, hound::WavWriter<BufWriter<std::fs::File>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -593,11 +632,12 @@ where
     command_receiver: Receiver<Command<I>>,
     status_sender: Sender<Status<I>>,
 
-    // Internal state
-    generator: Generator,
+    // Persistent generation state
     active_waveforms: Vec<ActiveWaveform<I>>,
     pending_waveforms: Vec<PendingWaveform<I>>, // sorted by start time
+    // Command state
     send_current_buffer: bool,
+    slider_state: SliderState,
 }
 
 impl<I> Tracker<I>
@@ -614,11 +654,16 @@ where
             command_receiver,
             status_sender,
 
-            generator: Generator::new(sample_frequency),
-
             active_waveforms: Vec::new(),
             pending_waveforms: Vec::new(),
+
             send_current_buffer: false,
+            slider_state: SliderState {
+                last_values: HashMap::new(),
+                changes: HashMap::new(),
+                buffer_length: 0,
+                buffer_position: 0,
+            },
         };
     }
 
@@ -652,13 +697,13 @@ where
             }
             Sum(a, b) | DotProduct(a, b) => {
                 self.process_marked(waveform_id, start, &*a, out);
-                let offset = self.generator.offset(&*a);
+                let offset = Generator::new(self.sample_frequency).offset(&*a);
                 let start =
                     start + Duration::from_secs_f32(offset as f32 / self.sample_frequency as f32);
                 self.process_marked(waveform_id, start, &*b, out);
             }
             Marked { waveform, id } => {
-                let length = match self.generator.length(waveform) {
+                let length = match Generator::new(self.sample_frequency).length(waveform) {
                     Length::Finite(length) => length,
                     Length::Infinite => usize::MAX, // Ehh, should we change the type of marks?
                 };
@@ -675,7 +720,6 @@ where
 
     fn process_captured(
         &self,
-        waveform_id: &I,
         waveform: &Waveform,
         out: &mut HashMap<String, hound::WavWriter<BufWriter<std::fs::File>>>,
     ) {
@@ -698,18 +742,18 @@ where
                 trigger: waveform, ..
             }
             | Marked { waveform, .. } => {
-                self.process_captured(waveform_id, &*waveform, out);
+                self.process_captured(&*waveform, out);
             }
             Sum(a, b) | DotProduct(a, b) => {
-                self.process_captured(waveform_id, &*a, out);
-                self.process_captured(waveform_id, &*b, out);
+                self.process_captured(&*a, out);
+                self.process_captured(&*b, out);
             }
             Captured {
                 file_stem,
                 waveform,
             } => {
                 use hound::{SampleFormat, WavSpec, WavWriter};
-                self.process_captured(waveform_id, &*waveform, out);
+                self.process_captured(&*waveform, out);
                 // If we haven't already opened a file for this waveform, then open it now.
                 if out.contains_key(file_stem) {
                     panic!(
@@ -754,13 +798,12 @@ where
         let mut status_to_send = Status {
             buffer_start,
             marks: Vec::new(),
-            slider_values: self.generator.last_slider_values.clone(),
+            slider_values: self.slider_state.last_values.clone(),
             tracker_load: None,
             buffer: None,
         };
 
         // Now generate!
-        self.generator.buffer_length = out.len();
         let generate_start = Instant::now();
         let (_, finished) = self.generate(buffer_start, out);
         status_to_send.tracker_load = Some(
@@ -769,17 +812,13 @@ where
         );
 
         // Update the slider values based on the changes
-        for (slider, change) in self.generator.slider_changes.iter() {
-            let last_value = self
-                .generator
-                .last_slider_values
-                .remove(slider)
-                .unwrap_or(0.0);
-            self.generator
-                .last_slider_values
+        for (slider, change) in self.slider_state.changes.iter() {
+            let last_value = self.slider_state.last_values.remove(slider).unwrap_or(0.0);
+            self.slider_state
+                .last_values
                 .insert(slider.clone(), (last_value + change).min(1.0).max(-1.0));
         }
-        self.generator.slider_changes.clear();
+        self.slider_state.changes.clear();
 
         // Copy the marks from finished waveforms into the status
         for active in finished {
@@ -851,8 +890,8 @@ where
                 self.send_current_buffer = true;
             }
             Command::MoveSlider { slider, delta } => {
-                self.generator
-                    .slider_changes
+                self.slider_state
+                    .changes
                     .entry(slider)
                     .and_modify(|v| *v += delta)
                     .or_insert(delta);
@@ -889,7 +928,6 @@ where
             *x = 0.0;
         }
         let mut filled = 0; // How much of the out buffer we've filled so far
-        self.generator.buffer_position = filled;
         let mut high_water_mark = 0; // How much that's filled by a waveform (not padded)
         while filled < out.len() {
             // Check to see if any pending waveform starts at or before segment_start. If so, promote
@@ -909,14 +947,14 @@ where
                             mark.start += segment_start - pending.start;
                         }
                     }
-                    let mut open_files = HashMap::new();
-                    self.process_captured(&pending.id, &pending.waveform, &mut open_files);
+                    let mut capture_state = HashMap::new();
+                    self.process_captured(&pending.waveform, &mut capture_state);
                     self.active_waveforms.push(ActiveWaveform {
                         id: pending.id.clone(),
                         waveform: pending.waveform.clone(),
                         marks,
                         position: 0,
-                        open_files,
+                        capture_state,
                     });
                     // Check to see if this waveform should repeat
                     if let Some(duration) = pending.repeat_every {
@@ -952,7 +990,6 @@ where
             // are no active waveforms, then just updated filled and continue.
             if self.active_waveforms.len() == 0 {
                 filled += segment_length;
-                self.generator.buffer_position = filled;
                 segment_start +=
                     Duration::from_secs_f32(segment_length as f32 / self.sample_frequency as f32);
                 segment_length = out.len() - filled;
@@ -963,13 +1000,19 @@ where
             let mut i = 0;
             while i < self.active_waveforms.len() {
                 let active = &mut self.active_waveforms[i];
-                let tmp =
-                    self.generator
-                        .generate(&active.waveform, active.position, segment_length);
+                let tmp: Vec<f32>;
+                {
+                    let mut generator = Generator::new(self.sample_frequency);
+                    generator.slider_state = Some(&self.slider_state);
+                    let capture_state = RefCell::new(&mut active.capture_state);
+                    generator.capture_state = Some(capture_state);
+                    tmp = generator.generate(&active.waveform, active.position, segment_length);
+                }
                 if tmp.len() > segment_length {
                     panic!(
                         "Generated more samples than desired: {} > {} for waveform id {:?} at position {}: {:?}", 
-                        tmp.len(), segment_length, active.id, active.position, active.waveform);
+                        tmp.len(), segment_length, active.id, active.position, active.waveform
+                    );
                 }
                 if i == 0 {
                     // If this is the first, just overwrite the out buffer
@@ -994,7 +1037,6 @@ where
                 }
             }
             filled += segment_length;
-            self.generator.buffer_position = filled;
             segment_start +=
                 Duration::from_secs_f32(segment_length as f32 / self.sample_frequency as f32);
             segment_length = out.len() - filled;
@@ -1043,7 +1085,11 @@ mod tests {
     use super::*;
     use Waveform::{Const, Convolution, DotProduct, Fin, Res, Seq, Sin, Sum, Time};
 
-    fn finite_const_gen(value: f32, fin_duration: u64, seq_duration: u64) -> Waveform {
+    fn new_test_generator<'a>(sample_frequency: i32) -> Generator<'a> {
+        Generator::new(sample_frequency)
+    }
+
+    fn finite_const_waveform(value: f32, fin_duration: u64, seq_duration: u64) -> Waveform {
         return Seq {
             duration: Duration::from_secs(seq_duration),
             waveform: Box::new(Fin {
@@ -1054,8 +1100,8 @@ mod tests {
     }
 
     fn run_tests(waveform: &Waveform, desired: Vec<f32>) {
-        let generator = Generator::new(1);
         for size in [1, 2, 4, 8] {
+            let generator = new_test_generator(1);
             //println!("Running tests for waveform {:?} with size {}", waveform, size);
             let mut out = vec![0.0; desired.len()];
             for n in 0..out.len() / size {
@@ -1071,18 +1117,25 @@ mod tests {
         let w1 = Waveform::Time;
         run_tests(&w1, vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
 
-        let generator = Generator::new(1);
+        let generator = new_test_generator(1);
         let result = generator.generate(&w1, 0, 8);
         assert_eq!(result, vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+    }
+
+    fn sin_waveform(frequency: f32) -> Box<Waveform> {
+        return Box::new(Sin(Box::new(DotProduct(
+            Box::new(Const(2.0)),
+            Box::new(DotProduct(
+                Box::new(Const(std::f32::consts::PI)),
+                Box::new(DotProduct(Box::new(Const(frequency)), Box::new(Time))),
+            )),
+        ))));
     }
 
     #[test]
     fn test_res() {
         let w1 = Res {
-            trigger: Box::new(Sin(Box::new(DotProduct(
-                Box::new(Const(0.25)),
-                Box::new(Time),
-            )))),
+            trigger: sin_waveform(0.25),
             waveform: Box::new(Time),
         };
         run_tests(&w1, vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0, 3.0]);
@@ -1090,22 +1143,16 @@ mod tests {
         let w2 = Res {
             trigger: Box::new(Fin {
                 duration: Duration::from_secs(6),
-                waveform: Box::new(Sin(Box::new(DotProduct(
-                    Box::new(Const(0.25)),
-                    Box::new(Time),
-                )))),
+                waveform: sin_waveform(0.25),
             }),
             waveform: Box::new(Time),
         };
-        let generator = Generator::new(1);
+        let generator = new_test_generator(1);
         assert_eq!(generator.length(&w2), Length::Finite(6));
         run_tests(&w2, vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 0.0, 0.0]);
 
         let w3 = Res {
-            trigger: Box::new(Sin(Box::new(DotProduct(
-                Box::new(Const(0.25)),
-                Box::new(Time),
-            )))),
+            trigger: sin_waveform(0.25),
             waveform: Box::new(Waveform::Fin {
                 duration: Duration::from_secs(3),
                 waveform: Box::new(Waveform::Time),
@@ -1116,10 +1163,10 @@ mod tests {
 
     #[test]
     fn test_sum() {
-        let generator = Generator::new(1);
+        let generator = new_test_generator(1);
         let w1 = Sum(
-            Box::new(finite_const_gen(1.0, 5, 2)),
-            Box::new(finite_const_gen(1.0, 5, 2)),
+            Box::new(finite_const_waveform(1.0, 5, 2)),
+            Box::new(finite_const_waveform(1.0, 5, 2)),
         );
         assert_eq!(generator.offset(&w1), 4);
         assert_eq!(generator.length(&w1), Length::Finite(7));
@@ -1147,8 +1194,8 @@ mod tests {
         run_tests(&w2, vec![3.0; 8]);
 
         let w5 = Sum(
-            Box::new(finite_const_gen(3.0, 1, 3)),
-            Box::new(finite_const_gen(2.0, 2, 2)),
+            Box::new(finite_const_waveform(3.0, 1, 3)),
+            Box::new(finite_const_waveform(2.0, 2, 2)),
         );
         run_tests(&w5, vec![3.0, 0.0, 0.0, 2.0, 2.0, 0.0, 0.0, 0.0]);
 
@@ -1163,8 +1210,8 @@ mod tests {
         // samples but we still want length(a ~+ b) to be
         //   max(length(a), offset(a) + length(b)).
         let w6 = Sum(
-            Box::new(finite_const_gen(3.0, 1, 3)),
-            Box::new(finite_const_gen(2.0, 0, 0)),
+            Box::new(finite_const_waveform(3.0, 1, 3)),
+            Box::new(finite_const_waveform(2.0, 0, 0)),
         );
         let result = generator.generate(&w6, 0, 2);
         assert_eq!(result, vec![3.0, 0.0]);
@@ -1172,18 +1219,18 @@ mod tests {
 
     #[test]
     fn test_dot_product() {
-        let generator = Generator::new(1);
+        let generator = new_test_generator(1);
         let w1 = DotProduct(
-            Box::new(finite_const_gen(3.0, 8, 2)),
-            Box::new(finite_const_gen(2.0, 5, 2)),
+            Box::new(finite_const_waveform(3.0, 8, 2)),
+            Box::new(finite_const_waveform(2.0, 5, 2)),
         );
         assert_eq!(generator.offset(&w1), 4);
         assert_eq!(generator.length(&w1), Length::Finite(7));
         run_tests(&w1, vec![3.0, 3.0, 6.0, 6.0, 6.0, 6.0, 6.0, 0.0]);
 
         let w2 = DotProduct(
-            Box::new(finite_const_gen(3.0, 5, 2)),
-            Box::new(finite_const_gen(2.0, 5, 2)),
+            Box::new(finite_const_waveform(3.0, 5, 2)),
+            Box::new(finite_const_waveform(2.0, 5, 2)),
         );
         run_tests(&w2, vec![3.0, 3.0, 6.0, 6.0, 6.0, 0.0, 0.0, 0.0]);
 
@@ -1198,7 +1245,7 @@ mod tests {
                 duration: Duration::from_secs(1),
                 waveform: Box::new(Const(3.0)),
             }),
-            Box::new(finite_const_gen(2.0, 5, 5)),
+            Box::new(finite_const_waveform(2.0, 5, 5)),
         );
         run_tests(&w4, vec![3.0, 6.0, 6.0, 6.0, 6.0, 6.0, 0.0, 0.0]);
     }
@@ -1207,7 +1254,7 @@ mod tests {
     fn test_convolution() {
         let w1 = Convolution {
             waveform: Box::new(Time),
-            kernel: Box::new(finite_const_gen(2.0, 3, 3)),
+            kernel: Box::new(finite_const_waveform(2.0, 3, 3)),
         };
         run_tests(&w1, vec![2.0, 6.0, 12.0, 18.0, 24.0, 30.0, 36.0, 42.0]);
 
@@ -1216,9 +1263,10 @@ mod tests {
                 duration: Duration::from_secs(5),
                 waveform: Box::new(Time),
             }),
-            kernel: Box::new(finite_const_gen(2.0, 3, 3)),
+            kernel: Box::new(finite_const_waveform(2.0, 3, 3)),
         };
-        let generator = Generator::new(1);
+
+        let generator = new_test_generator(1);
         assert_eq!(generator.length(&w2), Length::Finite(6));
         run_tests(&w2, vec![2.0, 6.0, 12.0, 18.0, 14.0, 8.0, 0.0, 0.0]);
 
@@ -1227,27 +1275,24 @@ mod tests {
                 duration: Duration::from_secs(3),
                 waveform: Box::new(Time),
             }),
-            kernel: Box::new(finite_const_gen(2.0, 5, 5)),
+            kernel: Box::new(finite_const_waveform(2.0, 5, 5)),
         };
-        let generator = Generator::new(1);
+        let generator = new_test_generator(1);
         assert_eq!(generator.length(&w3), Length::Finite(5));
         run_tests(&w3, vec![6.0, 6.0, 6.0, 6.0, 4.0, 0.0, 0.0, 0.0]);
 
         let w4 = Convolution {
             waveform: Box::new(Res {
-                trigger: Box::new(Sin(Box::new(DotProduct(
-                    Box::new(Const(1.0 / 3.0)),
-                    Box::new(Time),
-                )))),
+                trigger: sin_waveform(1.0 / 3.0),
                 waveform: Box::new(Time),
             }),
-            kernel: Box::new(finite_const_gen(2.0, 5, 5)),
+            kernel: Box::new(finite_const_waveform(2.0, 5, 5)),
         };
         run_tests(&w4, vec![6.0, 6.0, 8.0, 12.0, 10.0, 8.0, 12.0, 10.0]);
 
         let w5 = Convolution {
             waveform: Box::new(Const(1.0)),
-            kernel: Box::new(finite_const_gen(0.2, 5, 5)),
+            kernel: Box::new(finite_const_waveform(0.2, 5, 5)),
         };
         run_tests(&w5, vec![0.6, 0.8, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
     }

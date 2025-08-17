@@ -182,7 +182,7 @@ pub fn waveform_sin(arguments: Vec<Expr>) -> Expr {
     match &arguments[..] {
         [Expr::Waveform(a)] => Expr::Waveform(Waveform::Sin(Box::new(a.clone()))),
         [Float(value)] => Expr::Waveform(Waveform::Sin(Box::new(Waveform::Const(*value)))),
-        _ => Expr::Error("Invalid argument for $".to_string()),
+        _ => Expr::Error("Invalid argument for sin".to_string()),
     }
 }
 

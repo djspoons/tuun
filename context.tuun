@@ -1,6 +1,7 @@
 
 // WAVES
-$ = fn(freq) => sin(freq ~. time),
+pi = 3.14159265,
+$ = fn(freq) => sin(2 ~. pi ~. freq ~. time),
 sawtooth = fn(freq) => (res($freq, time ~. freq) ~+ -0.5) ~. 2,
 square = fn(freq) => alt($freq, -1, 1),
 triangle = fn(freq) => let
