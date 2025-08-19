@@ -393,8 +393,10 @@ impl<'a> Generator<'a> {
                 }
                 /*
                 println!(
-                    "Slider {:?} average value: {}",
+                    "Slider {:?}, last_value: {}, change: {}, average value: {}",
                     slider,
+                    last_value,
+                    change,
                     (out[0] + out[out.len() - 1]) / 2.0
                 );
                 println!("Slider {:?} values: {:?}", slider, out);
@@ -805,7 +807,7 @@ where
 
         // Now generate!
         let generate_start = Instant::now();
-        let (_, finished) = self.generate(buffer_start, out);
+        let finished = self.generate(buffer_start, out);
         status_to_send.tracker_load = Some(
             self.sample_frequency as f32
                 / (out.len() as f32 / generate_start.elapsed().as_secs_f32()),
@@ -912,14 +914,11 @@ where
     // Generate from pending waveforms and active waveforms, filling the out buffer.
     // Returns how many samples were generated, or None if the no samples were generated
     // along with the set of active waveforms that finished generating
-    fn generate(
-        &mut self,
-        buffer_start: Instant,
-        out: &mut [f32],
-    ) -> (Option<usize>, Vec<ActiveWaveform<I>>) {
+    fn generate(&mut self, buffer_start: Instant, out: &mut [f32]) -> Vec<ActiveWaveform<I>> {
         // We'll generate in segments based on the set of active waveforms at a given time
         let mut segment_start = buffer_start;
         let mut segment_length = out.len();
+        self.slider_state.buffer_length = out.len();
 
         // Keep track of any active waveforms that finish generating
         let mut finished = Vec::new();
@@ -928,7 +927,6 @@ where
             *x = 0.0;
         }
         let mut filled = 0; // How much of the out buffer we've filled so far
-        let mut high_water_mark = 0; // How much that's filled by a waveform (not padded)
         while filled < out.len() {
             // Check to see if any pending waveform starts at or before segment_start. If so, promote
             // them active waveforms.
@@ -1003,6 +1001,7 @@ where
                 let tmp: Vec<f32>;
                 {
                     let mut generator = Generator::new(self.sample_frequency);
+                    self.slider_state.buffer_position = filled;
                     generator.slider_state = Some(&self.slider_state);
                     let capture_state = RefCell::new(&mut active.capture_state);
                     generator.capture_state = Some(capture_state);
@@ -1040,43 +1039,8 @@ where
             segment_start +=
                 Duration::from_secs_f32(segment_length as f32 / self.sample_frequency as f32);
             segment_length = out.len() - filled;
-            // Only set high_water_mark if there was at least one active waveform
-            high_water_mark = filled;
         }
-        if high_water_mark == 0 {
-            (None, finished)
-        } else {
-            (Some(high_water_mark), finished)
-        }
-    }
-
-    pub fn write_to_file(&mut self, file_name: &str) -> Result<(), Box<dyn std::error::Error>> {
-        use hound;
-
-        self.empty_command_queue();
-
-        let spec = hound::WavSpec {
-            channels: 1,
-            sample_rate: 44100,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        };
-
-        let mut writer = hound::WavWriter::create(file_name, spec)?;
-        loop {
-            let mut out = vec![0.0; 1024];
-            let generated = self.generate(Instant::now(), &mut out);
-            // TODO double check to see if some padding is happening here
-            match generated {
-                (None, _) => break, // No more samples to generate
-                (Some(n), _) => {
-                    for x in out[..n].iter() {
-                        writer.write_sample(*x)?;
-                    }
-                }
-            }
-        }
-        return writer.finalize().map_err(|e| e.into());
+        return finished;
     }
 }
 

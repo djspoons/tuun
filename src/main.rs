@@ -632,56 +632,6 @@ fn process_event<I>(
                                 message: format!("Saved to {}", &filename),
                             },
                         );
-                    } else if text == "W" {
-                        // Write waveform
-                        let (status_sender, _status_receiver) = std::sync::mpsc::channel();
-                        let (command_sender, command_receiver) = std::sync::mpsc::channel();
-                        let mut tmp = tracker::Tracker::new(
-                            args.sample_frequency,
-                            command_receiver,
-                            status_sender,
-                        );
-                        match play_waveform_helper(
-                            &context,
-                            program_index,
-                            programs[program_index - 1].len(),
-                            &programs[program_index - 1],
-                        ) {
-                            WaveformOrMode::Waveform(waveform) => {
-                                command_sender
-                                    .send(Command::Play {
-                                        id: WaveformId::Program(program_index),
-                                        waveform,
-                                        start: Instant::now(),
-                                        repeat_every: None,
-                                    })
-                                    .unwrap();
-                            }
-                            WaveformOrMode::Mode(new_mode) => {
-                                return (context, new_mode);
-                            }
-                        }
-                        let datetime = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
-                        let filename = format!("waveform_{}_{}.wav", program_index, datetime);
-                        match tmp.write_to_file(&filename) {
-                            Ok(_) => (
-                                context,
-                                Mode::Select {
-                                    program_index,
-                                    message: format!("Wrote to {}", filename),
-                                },
-                            ),
-                            Err(e) => (
-                                context,
-                                Mode::Select {
-                                    program_index,
-                                    message: format!(
-                                        "Error writing waveform {}: {}",
-                                        program_index, e
-                                    ),
-                                },
-                            ),
-                        }
                     } else {
                         return (
                             context,
