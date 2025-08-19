@@ -1,8 +1,8 @@
 
 // WAVES
 pi = 3.14159265,
-$ = fn(freq) => sin(2 ~. pi ~. freq ~. time),
-sawtooth = fn(freq) => (res($freq, time ~. freq) ~+ -0.5) ~. 2,
+$ = fn(freq) => sin((2 * pi) ~. freq ~. time),
+sawtooth = fn(freq) => (res($freq, freq ~. time) ~+ -0.5) ~. 2,
 square = fn(freq) => alt($freq, -1, 1),
 triangle = fn(freq) => let
     t = $freq,
@@ -107,8 +107,8 @@ Hh = fn(freq) => harmonica(H, freq) | seq(H),
 // <[Hh(@67), Hh(@69)]>
 
 // Plays the given waveform w on the beats in bs, starting at 1. For example:
-// play_on_beats(bass, [1, 2, 3, 4])
-play_on_beats = fn(w, bs) => let
+// on_beats(bass, [1, 2, 3, 4])
+on_beats = fn(w, bs) => let
   f = fn((offset, prev, ws), play_at_beat) =>
       if offset == play_at_beat
       then (play_at_beat, w, append(ws, [prev | seq(0)]))

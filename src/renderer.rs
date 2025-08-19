@@ -1,3 +1,4 @@
+use std::time::Duration;
 use std::time::Instant;
 
 use sdl2::pixels::Color;
@@ -11,7 +12,7 @@ use realfft::RealFftPlanner;
 
 use crate::metric::Metric;
 use crate::tracker::{Slider, Status};
-use crate::{is_active, is_pending, Mode, WaveformId};
+use crate::{is_active_program, is_pending_program, Mode, WaveformId};
 
 fn make_texture<'a>(
     font: &Font<'a, 'static>,
@@ -31,10 +32,10 @@ fn make_texture<'a>(
     return texture;
 }
 
-const INACTIVE_COLOR: Color = Color::RGBA(0, 255, 255, 255);
-const ACTIVE_COLOR: Color = Color::RGBA(0, 255, 0, 255);
-const EDIT_COLOR: Color = Color::RGBA(255, 255, 255, 255);
-const ERROR_COLOR: Color = Color::RGBA(255, 0, 0, 255);
+const INACTIVE_COLOR: Color = Color::RGB(0x00, 0xFF, 0xFF);
+const ACTIVE_COLOR: Color = Color::RGB(0x00, 0xFF, 0x00);
+const EDIT_COLOR: Color = Color::RGB(0xFF, 0xFF, 0xFF);
+const ERROR_COLOR: Color = Color::RGB(0xFF, 0x00, 0x00);
 
 pub struct Renderer {
     pub video_subsystem: sdl2::VideoSubsystem,
@@ -149,13 +150,13 @@ impl Renderer {
         let font = ttf_context.load_font(FONT_PATH, 48).unwrap();
         let circle_font = ttf_context.load_font(FONT_PATH, 108).unwrap();
 
-        self.canvas.set_draw_color(Color::RGB(0, 0, 0));
+        self.canvas.set_draw_color(Color::RGB(0x00, 0x00, 0x00));
         self.canvas.clear();
 
         let mut y = 10;
         for (i, program) in programs.iter().enumerate() {
             let program_index = i + 1;
-            let color = match (&mode, is_pending(&status, now, program_index)) {
+            let color = match (&mode, is_pending_program(&status, now, program_index)) {
                 (_, true) => ACTIVE_COLOR,
                 (
                     Mode::Edit {
@@ -166,7 +167,7 @@ impl Renderer {
                 ) if program_index == *edit_program_index => EDIT_COLOR,
                 _ => INACTIVE_COLOR,
             };
-            if !is_pending(&status, now, program_index) || current_beat % 2 == 1 {
+            if !is_pending_program(&status, now, program_index) || current_beat % 2 == 1 {
                 let number = char::from_u32(0x31 + i as u32).unwrap().to_string();
                 let number_texture = make_texture(&font, color, &texture_creator, &number);
                 let TextureQuery {
@@ -194,7 +195,7 @@ impl Renderer {
                 height: circle_height,
                 ..
             } = circle_texture.query();
-            if is_active(status, now, program_index) {
+            if is_active_program(status, now, program_index) {
                 self.canvas
                     .copy(
                         &circle_texture,
@@ -385,7 +386,7 @@ impl Renderer {
             let x_scale = self.width as f32 / (self.samples.len() + 1) as f32;
             let waveform_height = self.height * 3 / 5;
             if self.samples.len() > 0 {
-                self.canvas.set_draw_color(Color::RGB(0, 255, 0));
+                self.canvas.set_draw_color(Color::RGB(0x00, 0xFF, 0x00));
                 let mut last_y = (self.samples[0] * (waveform_height as f32 / 2.4)
                     + (waveform_height as f32 / 2.0)) as i32;
                 for (i, f) in self.samples.iter().enumerate() {
@@ -403,7 +404,7 @@ impl Renderer {
             if !self.spectrum.is_empty() {
                 let spectrum_height = self.height - waveform_height;
                 let y_scale = -(self.samples.len() as f32).sqrt();
-                self.canvas.set_draw_color(Color::RGB(255, 0, 0));
+                self.canvas.set_draw_color(Color::RGB(0xFF, 0x00, 0x00));
                 let mut last_y = (waveform_height + 300) as i32;
                 for (i, f) in self.spectrum.iter().enumerate() {
                     let x = ((i * 10) as f32 * x_scale) as i32;
@@ -413,6 +414,57 @@ impl Renderer {
                     last_y = y;
                 }
             }
+        }
+
+        // Draw the marks
+        let mark_colors = vec![
+            Color::RGB(0xE1, 0x77, 0xF9),
+            Color::RGB(0xAD, 0xD8, 0xFF),
+            Color::RGB(0xAC, 0xD8, 0xAA),
+            Color::RGB(0xFF, 0xAD, 0xC3),
+            Color::RGB(0xFF, 0xDC, 0x85),
+        ];
+        let mark_row_height = self.height as f32 / 4.0 / mark_colors.len() as f32;
+        let mark_y_padding = 6.0;
+        let mut marks_start = Instant::now();
+        let mut marks_duration = Duration::from_secs(0);
+        for mark in status.marks.iter() {
+            if mark.waveform_id == WaveformId::Beats && mark.mark_id == 0 {
+                marks_start = marks_start.min(mark.start);
+                marks_duration = 2 * mark.duration;
+            }
+        }
+        for mark in status.marks.iter() {
+            if mark.waveform_id == WaveformId::Beats || mark.mark_id < 1 {
+                continue; // Skip beats and top-level marks
+            }
+            if mark.start < now && mark.start + mark.duration >= now {
+                self.canvas
+                    .set_draw_color(mark_colors[(mark.mark_id - 1) as usize % mark_colors.len()]);
+            } else {
+                let mut color = mark_colors[(mark.mark_id - 1) as usize % mark_colors.len()];
+                color.r = color.r / 2;
+                color.g = color.g / 2;
+                color.b = color.b / 2;
+                self.canvas.set_draw_color(color);
+            }
+            let x = (mark.start - marks_start).as_secs_f32() / marks_duration.as_secs_f32()
+                * self.width as f32
+                / 2.0
+                + self.width as f32 / 4.0;
+            let y = (mark.mark_id - 1) as f32 * mark_row_height + 2.0 * self.height as f32 / 3.0;
+            let width = mark.duration.as_secs_f32() / marks_duration.as_secs_f32()
+                * self.width as f32
+                / 2.0;
+            let height = mark_row_height - mark_y_padding;
+            self.canvas
+                .fill_rect(sdl2::rect::Rect::new(
+                    x as i32,
+                    y as i32,
+                    width as u32,
+                    height as u32,
+                ))
+                .unwrap();
         }
 
         // Draw the message
@@ -490,7 +542,7 @@ impl Renderer {
         if points.len() > 0 {
             let last_value_texture = make_texture(
                 &font,
-                Color::RGB(0, 255, 0),
+                Color::RGB(0x00, 0xFF, 0x00),
                 &texture_creator,
                 format!("{:.2}", points.last().unwrap()).as_str(),
             );
@@ -519,11 +571,11 @@ impl Renderer {
                 }
                 let value = y + metrics_height as i32 - (load * metrics_height as f32) as i32;
                 if load < 0.7 {
-                    self.canvas.set_draw_color(Color::RGB(0, 255, 0));
+                    self.canvas.set_draw_color(Color::RGB(0x00, 0xFF, 0x00));
                 } else if load < 0.9 {
-                    self.canvas.set_draw_color(Color::RGB(255, 222, 33));
+                    self.canvas.set_draw_color(Color::RGB(0xFF, 0xDE, 0x21));
                 } else {
-                    self.canvas.set_draw_color(Color::RGB(255, 0, 0));
+                    self.canvas.set_draw_color(Color::RGB(0xFF, 0x00, 0x00));
                 }
                 self.canvas
                     .draw_line(

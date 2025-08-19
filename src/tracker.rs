@@ -957,8 +957,8 @@ where
                     // Check to see if this waveform should repeat
                     if let Some(duration) = pending.repeat_every {
                         println!(
-                            "Scheduling waveform {:?} to repeat after {:?}",
-                            pending.id, duration
+                            "Scheduling waveform {:?} to repeat after {:?} (at {:?})",
+                            pending.id, duration, segment_start + duration
                         );
                         pending.start = segment_start + duration;
                         pending.marks = Vec::new();
@@ -1025,8 +1025,8 @@ where
                 if tmp.len() < segment_length {
                     // If we didn't generate enough samples, then remove this waveform from the active list
                     println!(
-                        "Removing waveform {:?} at position {}",
-                        active.id, active.position
+                        "Removing waveform {:?} at position {} and time {:?}",
+                        active.id, active.position, segment_start + Duration::from_secs_f32(tmp.len() as f32 / self.sample_frequency as f32)
                     );
                     let active = self.active_waveforms.remove(i);
                     finished.push(active);

@@ -46,7 +46,7 @@ pub enum WaveformId {
     Program(usize), // Program index starts at 1
 }
 
-pub fn is_pending(
+pub fn is_pending_program(
     status: &tracker::Status<WaveformId>,
     now: Instant,
     program_index: usize,
@@ -56,7 +56,11 @@ pub fn is_pending(
     })
 }
 
-pub fn is_active(status: &tracker::Status<WaveformId>, now: Instant, program_index: usize) -> bool {
+pub fn is_active_program(
+    status: &tracker::Status<WaveformId>,
+    now: Instant,
+    program_index: usize,
+) -> bool {
     status.marks.iter().any(|w| {
         w.waveform_id == WaveformId::Program(program_index) && w.mark_id == 0 && w.start <= now
     })
@@ -194,7 +198,10 @@ fn beats_waveform(args: &Args) -> tracker::Waveform {
         }));
     }
     match sequence(vec![parser::Expr::List(ws)]) {
-        parser::Expr::Waveform(waveform) => waveform,
+        parser::Expr::Waveform(waveform) => tracker::Waveform::Marked {
+            id: 0,
+            waveform: Box::new(waveform),
+        },
         parser::Expr::Error(e) => panic!("Error creating beats waveform: {}", e),
         _ => panic!("Error creating beats waveform"),
     }
@@ -355,7 +362,7 @@ fn process_event<I>(
                     }
                     // Check to see whether or not the current index is in the tracker's
                     // pending waveforms
-                    if is_pending(&status, Instant::now(), program_index) {
+                    if is_pending_program(&status, Instant::now(), program_index) {
                         // If it is, send a command to remove it.
                         command_sender
                             .send(Command::RemovePending {
@@ -389,7 +396,7 @@ fn process_event<I>(
 
                     if keymod.contains(Mod::LGUIMOD)
                         || keymod.contains(Mod::RGUIMOD)
-                            && is_active(&status, Instant::now(), program_index)
+                            && is_active_program(&status, Instant::now(), program_index)
                     {
                         // If the program is active, stop it
                         command_sender
@@ -400,7 +407,7 @@ fn process_event<I>(
                         message = format!("Stopped program {}", program_index);
                     } else if !keymod.contains(Mod::LGUIMOD)
                         && !keymod.contains(Mod::RGUIMOD)
-                        && is_pending(&status, Instant::now(), program_index)
+                        && is_pending_program(&status, Instant::now(), program_index)
                     {
                         // If it is, send a command to remove it.
                         command_sender
@@ -738,46 +745,37 @@ fn play_waveform(
     use sdl2::keyboard::Mod;
     match play_waveform_helper(&context, program_index, cursor_position, program) {
         WaveformOrMode::Waveform(waveform) => {
-            let message: String;
+            let message;
+            let repeat_every;
             if keymod.contains(Mod::LGUIMOD) || keymod.contains(Mod::RGUIMOD) {
                 // If the alt key is down, play the waveform in a loop
-                let repeat_every_beats = args.beats_per_measure as u64
-                    * if keymod.contains(Mod::LSHIFTMOD) || keymod.contains(Mod::RSHIFTMOD) {
-                        2
-                    } else {
-                        1
-                    };
-                command_sender
-                    .send(Command::Play {
-                        // TODO maybe extend the mark to the full measure?
-                        id: WaveformId::Program(program_index),
-                        waveform: tracker::Waveform::Marked {
-                            id: 0,
-                            waveform: Box::new(waveform),
-                        },
-                        start: next_measure_start(&status),
-                        repeat_every: Some(duration_from_beats(args, repeat_every_beats)),
-                    })
-                    .unwrap();
+                let mut repeat_every_beats = args.beats_per_measure as u64;
+                if keymod.contains(Mod::LSHIFTMOD) || keymod.contains(Mod::RSHIFTMOD) {
+                    repeat_every_beats *= 2;
+                }
                 message = format!(
                     "Looping waveform {} every {:?} beats",
                     program_index, repeat_every_beats
                 );
+                repeat_every = Some(duration_from_beats(args, repeat_every_beats));
             } else {
                 // Otherwise, play it once
-                command_sender
-                    .send(Command::Play {
-                        id: WaveformId::Program(program_index),
-                        waveform: tracker::Waveform::Marked {
-                            id: 0,
-                            waveform: Box::new(waveform),
-                        },
-                        start: next_measure_start(&status),
-                        repeat_every: None,
-                    })
-                    .unwrap();
                 message = format!("Playing waveform {}", program_index);
+                repeat_every = None;
             }
+            command_sender
+                .send(Command::Play {
+                    // TODO maybe extend the mark to the full measure?
+                    id: WaveformId::Program(program_index),
+                    waveform: tracker::Waveform::Marked {
+                        id: 0,
+                        waveform: Box::new(waveform),
+                    },
+                    start: next_measure_start(&status),
+                    repeat_every,
+                })
+                .unwrap();
+
             return (
                 context,
                 Mode::Select {
