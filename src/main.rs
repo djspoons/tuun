@@ -42,7 +42,9 @@ struct Args {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum WaveformId {
-    Beats,
+    // Beats are silent waveforms that are used to keep time. The bool tracks whether
+    // it is an odd or even measure (false == odd).
+    Beats(bool),
     Program(usize), // Program index starts at 1
 }
 
@@ -258,14 +260,17 @@ pub fn main() {
     let mut event_pump = sdl_context.event_pump().unwrap();
     const BUFFER_REFRESH_INTERVAL: Duration = Duration::from_millis(200);
     let mut next_buffer_refresh = Instant::now();
+    // Play the odd Beats waveform starting immediately and repeating every two measures
     command_sender
         .send(Command::Play {
-            id: WaveformId::Beats,
+            id: WaveformId::Beats(false),
             waveform: beats_waveform(&args),
             start: Instant::now(),
-            repeat_every: Some(duration_from_beats(&args, args.beats_per_measure as u64)),
+            repeat_every: Some(duration_from_beats(&args, args.beats_per_measure as u64) * 2),
         })
         .unwrap();
+    // We need to wait to start the even Beats until we know when the odd Beats started
+    let mut need_to_start_even_beats = true;
     command_sender.send(Command::SendCurrentBuffer).unwrap();
     loop {
         for event in event_pump.poll_iter() {
@@ -293,6 +298,25 @@ pub fn main() {
         // TODO need to empty this receiver and skip to last status
         match status_receiver.recv_timeout(Duration::from_millis(10)) {
             Ok(tracker_status) => {
+                if need_to_start_even_beats {
+                    for mark in status.marks {
+                        if mark.waveform_id == WaveformId::Beats(false) && mark.mark_id == 0 {
+                            command_sender
+                                .send(Command::Play {
+                                    id: WaveformId::Beats(true),
+                                    waveform: beats_waveform(&args),
+                                    start: mark.start + mark.duration,
+                                    repeat_every: Some(
+                                        duration_from_beats(&args, args.beats_per_measure as u64)
+                                            * 2,
+                                    ),
+                                })
+                                .unwrap();
+                            need_to_start_even_beats = false;
+                            break;
+                        }
+                    }
+                }
                 if let Some(ratio) = tracker_status.tracker_load {
                     metrics.tracker_load.set(ratio);
                 }
@@ -715,9 +739,11 @@ fn process_event<I>(
 // Returns the start time of the next measure
 fn next_measure_start(status: &tracker::Status<WaveformId>) -> Instant {
     for mark in &status.marks {
-        if mark.waveform_id == WaveformId::Beats && mark.mark_id == 1 && mark.start > Instant::now()
-        {
-            return mark.start;
+        match mark.waveform_id {
+            WaveformId::Beats(_) if mark.mark_id == 0 && mark.start > Instant::now() => {
+                return mark.start;
+            }
+            _ => (),
         }
     }
     panic!("No next measure found in marks");

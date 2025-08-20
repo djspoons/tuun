@@ -131,7 +131,7 @@ impl Renderer {
         let now = Instant::now();
         let mut current_beat = 0;
         for mark in status.marks.iter() {
-            if mark.waveform_id == WaveformId::Beats {
+            if let WaveformId::Beats(_) = mark.waveform_id {
                 // XXX sometimes this doesn't match anything?
                 if mark.start <= status.buffer_start
                     && mark.start + mark.duration > status.buffer_start
@@ -424,47 +424,65 @@ impl Renderer {
             Color::RGB(0xFF, 0xAD, 0xC3),
             Color::RGB(0xFF, 0xDC, 0x85),
         ];
-        let mark_row_height = self.height as f32 / 4.0 / mark_colors.len() as f32;
-        let mark_y_padding = 6.0;
-        let mut marks_start = Instant::now();
-        let mut marks_duration = Duration::from_secs(0);
-        for mark in status.marks.iter() {
-            if mark.waveform_id == WaveformId::Beats && mark.mark_id == 0 {
-                marks_start = marks_start.min(mark.start);
-                marks_duration = 2 * mark.duration;
-            }
-        }
-        for mark in status.marks.iter() {
-            if mark.waveform_id == WaveformId::Beats || mark.mark_id < 1 {
-                continue; // Skip beats and top-level marks
-            }
-            if mark.start < now && mark.start + mark.duration >= now {
-                self.canvas
-                    .set_draw_color(mark_colors[(mark.mark_id - 1) as usize % mark_colors.len()]);
+        let marks_row_height = self.height as f32 / 4.0 / mark_colors.len() as f32;
+        let marks_y_padding = 6.0;
+        for even in [false, true] {
+            let mut marks_start = Instant::now() + Duration::from_secs(1000); // TODO something better?
+            let mut marks_duration = Duration::from_secs(0);
+            let marks_width = self.width as f32 / 4.0;
+            let marks_x_offset = if even {
+                self.width as f32 / 2.0
             } else {
-                let mut color = mark_colors[(mark.mark_id - 1) as usize % mark_colors.len()];
-                color.r = color.r / 2;
-                color.g = color.g / 2;
-                color.b = color.b / 2;
-                self.canvas.set_draw_color(color);
+                self.width as f32 / 4.0
+            };
+            // Find the start of the first Beats waveform that's odd/even
+            for mark in status.marks.iter() {
+                if mark.waveform_id == WaveformId::Beats(even) {
+                    if mark.mark_id == 0 {
+                        marks_start = marks_start.min(mark.start);
+                        marks_duration = mark.duration;
+                    }
+                }
             }
-            let x = (mark.start - marks_start).as_secs_f32() / marks_duration.as_secs_f32()
-                * self.width as f32
-                / 2.0
-                + self.width as f32 / 4.0;
-            let y = (mark.mark_id - 1) as f32 * mark_row_height + 2.0 * self.height as f32 / 3.0;
-            let width = mark.duration.as_secs_f32() / marks_duration.as_secs_f32()
-                * self.width as f32
-                / 2.0;
-            let height = mark_row_height - mark_y_padding;
-            self.canvas
-                .fill_rect(sdl2::rect::Rect::new(
-                    x as i32,
-                    y as i32,
-                    width as u32,
-                    height as u32,
-                ))
-                .unwrap();
+            for mark in status.marks.iter().rev() {
+                // Reverse so we draw earlier ones last
+                if let WaveformId::Beats(_) = mark.waveform_id {
+                    continue; // Skip beats
+                }
+                if mark.mark_id < 1
+                    || mark.start > marks_start + marks_duration
+                    || mark.start + mark.duration < marks_start
+                {
+                    continue; // Skip top-level marks and marks that don't start during the Beats waveform
+                }
+                if mark.start < now && mark.start + mark.duration >= now {
+                    self.canvas.set_draw_color(
+                        mark_colors[(mark.mark_id - 1) as usize % mark_colors.len()],
+                    );
+                } else {
+                    let mut color = mark_colors[(mark.mark_id - 1) as usize % mark_colors.len()];
+                    color.r = color.r / 2;
+                    color.g = color.g / 2;
+                    color.b = color.b / 2;
+                    self.canvas.set_draw_color(color);
+                }
+                let x = (mark.start - marks_start).as_secs_f32() / marks_duration.as_secs_f32()
+                    * marks_width
+                    + marks_x_offset;
+                let y =
+                    (mark.mark_id - 1) as f32 * marks_row_height + 2.0 * self.height as f32 / 3.0;
+                let width =
+                    mark.duration.as_secs_f32() / marks_duration.as_secs_f32() * marks_width;
+                let height = marks_row_height - marks_y_padding;
+                self.canvas
+                    .fill_rect(sdl2::rect::Rect::new(
+                        x as i32,
+                        y as i32,
+                        width as u32,
+                        height as u32,
+                    ))
+                    .unwrap();
+            }
         }
 
         // Draw the message
