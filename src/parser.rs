@@ -6,7 +6,7 @@ use std::{cell::RefCell, rc::Rc};
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_while},
-    character::complete::{alpha1, char, multispace0, multispace1},
+    character::complete::{alpha1, alphanumeric1, char, multispace0, multispace1},
     combinator::{all_consuming, map, not, opt, peek, recognize, verify},
     multi::{many0, separated_list0},
     number::complete::float,
@@ -218,7 +218,7 @@ fn parse_identifier(input: LocatedSpan) -> IResult<String> {
         alt((
             verify(recognize((
                     alpha1,
-                    many0(alt((alpha1, tag("_"), tag("#")))),
+                    many0(alt((alphanumeric1, tag("_"), tag("#")))),
                 )),
                 |s: &LocatedSpan| *s.fragment() != "fn" &&
                     *s.fragment() != "let" && *s.fragment() != "in" &&
