@@ -117,7 +117,7 @@ There are the arithmetic combinators that combine the samples themselves.
 
  * `a ~+ b` - adds sample points together
  * `a ~. b` - multiplies sample points together
- * `a ~* b` - convolves the points of `a` with `b`
+ * `Filter(a, b, c)` - filters `a` using a finite or infinite impulse response
 
 There are three combinators for describing periodic waveforms:
 
@@ -127,8 +127,8 @@ There are three combinators for describing periodic waveforms:
 
 And finally, there are these two waveforms that provide ways of dynamically interacting with waveforms through a user interface.
 
- * `Slider(_)` - generates samples dynamically based on user input
- * `Marked(a)` - generates the samples of `a` and also provides updates as to when `a` starts and stops
+ * `Slider(_)` - generates samples dynamically based on user input (for example, a track-pad)
+ * `Marked(a)` - provides updates as to when `a` starts and stops
 
 
 For comparison, here are the lengths and offsets of each waveform:
@@ -143,8 +143,8 @@ For comparison, here are the lengths and offsets of each waveform:
 | `Fin(duration, a)`   | duration                           | a.offset            |
 | `Seq(duration, a)`   | a.length                           | duration            |
 | `Sin(a)`             | a.length                           | a.offset            |
+| `Filter(a, b, c)`    | a.length                           | a.offset            |
 | `Marked(a)`          | a.length                           | a.offset            |
-| `a ~* b`             | a.length + (b.length / 2)          | a.offset            |
 | `a ~+ b`             | max(a.length, a.offset + b.length) | a.offset + b.offset |
 | `a ~. b`             | min(a.length, a.offset + b.length) | a.offset + b.offset |
 | `Res(trigger, a)`    | trigger.length                     | trigger.offset      |

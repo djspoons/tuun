@@ -56,10 +56,20 @@ pub fn exp(arguments: Vec<Expr>) -> Expr {
 }
 
 pub fn equals(arguments: Vec<Expr>) -> Expr {
-    match arguments[..] {
+    match &arguments[..] {
         [Bool(a), Bool(b)] => Expr::Bool(a == b),
         [Float(a), Float(b)] => Expr::Bool(a == b),
+        [Expr::String(a), Expr::String(b)] => Expr::Bool(a == b),
         _ => Expr::Error("Invalid arguments for ==".to_string()),
+    }
+}
+
+pub fn not_equals(arguments: Vec<Expr>) -> Expr {
+    match &arguments[..] {
+        [Bool(a), Bool(b)] => Expr::Bool(a != b),
+        [Float(a), Float(b)] => Expr::Bool(a != b),
+        [Expr::String(a), Expr::String(b)] => Expr::Bool(a != b),
+        _ => Expr::Error("Invalid arguments for !=".to_string()),
     }
 }
 
@@ -138,7 +148,7 @@ pub fn fixed(arguments: Vec<Expr>) -> Expr {
     }
 }
 
-fn filter(f: impl Fn(Box<Waveform>) -> Waveform + 'static) -> BuiltInFn {
+fn curry(f: impl Fn(Box<Waveform>) -> Waveform + 'static) -> BuiltInFn {
     BuiltInFn(Rc::new(move |mut arguments: Vec<Expr>| -> Expr {
         if arguments.len() != 1 {
             return Expr::Error("Expected waveform".to_string());
@@ -156,7 +166,7 @@ pub fn fin(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
         [Float(duration)] => BuiltIn {
             name: format!("fin({})", duration),
-            function: filter(move |waveform: Box<Waveform>| Waveform::Fin {
+            function: curry(move |waveform: Box<Waveform>| Waveform::Fin {
                 duration: Duration::from_secs_f32(duration),
                 waveform,
             }),
@@ -166,15 +176,22 @@ pub fn fin(arguments: Vec<Expr>) -> Expr {
 }
 
 pub fn seq(arguments: Vec<Expr>) -> Expr {
-    match arguments[..] {
-        [Float(duration)] => BuiltIn {
-            name: format!("seq({})", duration),
-            function: filter(move |waveform: Box<Waveform>| Waveform::Seq {
-                duration: Duration::from_secs_f32(duration),
-                waveform,
-            }),
-        },
-        _ => Expr::Error("Invalid arguments for seq".to_string()),
+    match &arguments[..] {
+        [Float(duration)] => {
+            let duration = duration.clone();
+            BuiltIn {
+                name: format!("seq({})", duration),
+                function: curry(move |waveform: Box<Waveform>| Waveform::Seq {
+                    duration: Duration::from_secs_f32(duration),
+                    waveform,
+                }),
+            }
+        }
+        [expr] => Expr::Error(format!("Invalid argument for seq: {}", expr)),
+        _ => Expr::Error(format!(
+            "Invalid number of arguments for seq: {}",
+            arguments.len()
+        )),
     }
 }
 
@@ -207,9 +224,14 @@ fn waveform_binary_op(
 }
 
 pub fn waveform_convolution(arguments: Vec<Expr>) -> Expr {
-    return waveform_binary_op(arguments, |waveform, kernel| Waveform::Convolution {
+    return waveform_binary_op(arguments, |waveform, kernel| Waveform::Filter {
         waveform,
-        kernel,
+        feed_forward: kernel,
+        feedback: Box::new(Waveform::Fin {
+            duration: Duration::ZERO,
+            waveform: Box::new(Waveform::Const(0.0)),
+        }),
+        state: (),
     });
 }
 
@@ -221,8 +243,34 @@ pub fn waveform_dot_product(arguments: Vec<Expr>) -> Expr {
     return waveform_binary_op(arguments, Waveform::DotProduct);
 }
 
+pub fn waveform_filter(mut arguments: Vec<Expr>) -> Expr {
+    if arguments.len() != 2 {
+        return Expr::Error("Expected two waveforms".to_string());
+    }
+    let feed_forward = match arguments.remove(0) {
+        Expr::Waveform(a) => a,
+        Float(value) => Waveform::Const(value),
+        _ => return Expr::Error("First argument must be a waveform or float".to_string()),
+    };
+    let feedback = match arguments.remove(0) {
+        Expr::Waveform(b) => b,
+        Float(value) => Waveform::Const(value),
+        _ => return Expr::Error("Second argument must be a waveform or float".to_string()),
+    };
+
+    BuiltIn {
+        name: format!("filter({}, {})", feed_forward, feedback),
+        function: curry(move |waveform: Box<Waveform>| Waveform::Filter {
+            waveform: waveform,
+            feed_forward: Box::new(feed_forward.clone()),
+            feedback: Box::new(feedback.clone()),
+            state: (),
+        }),
+    }
+}
+
 pub fn res(mut arguments: Vec<Expr>) -> Expr {
-    // TODO make it work in curried form
+    // TODO make it work in curried form?
     if arguments.len() != 2 {
         return Expr::Error("Expected two waveforms".to_string());
     }
@@ -242,7 +290,7 @@ pub fn res(mut arguments: Vec<Expr>) -> Expr {
 }
 
 pub fn alt(mut arguments: Vec<Expr>) -> Expr {
-    // TODO make it work in curried form
+    // TODO make it work in curried form?
     if arguments.len() != 3 {
         return Expr::Error("Expected three waveforms".to_string());
     }
@@ -273,7 +321,7 @@ fn mark(arguments: Vec<Expr>) -> Expr {
             let id = id.round() as u32;
             BuiltIn {
                 name: format!("mark({})", id),
-                function: filter(move |waveform: Box<Waveform>| Waveform::Marked { id, waveform }),
+                function: curry(move |waveform: Box<Waveform>| Waveform::Marked { id, waveform }),
             }
         }
         _ => Expr::Error("Invalid argument for mark".to_string()),
@@ -290,7 +338,7 @@ fn capture(mut arguments: Vec<Expr>) -> Expr {
     };
     BuiltIn {
         name: format!("capture({})", file_stem),
-        function: filter(move |waveform: Box<Waveform>| Waveform::Captured {
+        function: curry(move |waveform: Box<Waveform>| Waveform::Captured {
             file_stem: file_stem.clone(),
             waveform,
         }),
@@ -360,6 +408,7 @@ pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
         ("*", times),
         ("/", divide),
         ("==", equals),
+        ("!=", not_equals),
         ("pow", power),
         ("sqrt", sqrt),
         ("exp", exp),
@@ -370,6 +419,7 @@ pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
         ("fin", fin),
         ("seq", seq),
         ("sin", waveform_sin),
+        ("filter", waveform_filter),
         ("~*", waveform_convolution),
         ("~+", waveform_sum),
         ("~.", waveform_dot_product),

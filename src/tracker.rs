@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fmt;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::io::BufWriter;
@@ -65,8 +66,17 @@ pub enum Slider {
     Y,
 }
 
+impl fmt::Display for Slider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Slider::X => write!(f, "X"),
+            Slider::Y => write!(f, "Y"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
-pub enum Waveform {
+pub enum Waveform<State = ()> {
     /*
      * Const produces a stream of samples where each sample is the same constant value.
      */
@@ -89,45 +99,50 @@ pub enum Waveform {
      */
     Fin {
         duration: Duration,
-        waveform: Box<Waveform>,
+        waveform: Box<Waveform<State>>,
     },
     /*
      * Seq sets the offset to the given value (ignoring offset of the underlying waveform).
      */
     Seq {
         duration: Duration,
-        waveform: Box<Waveform>,
+        waveform: Box<Waveform<State>>,
     },
     /*
      * Sin computes the sine of each sample in the given waveform.
      */
-    Sin(Box<Waveform>),
+    Sin(Box<Waveform<State>>),
     /*
-     * Convolution computes a new sample for each sample in the waveform by computing the sum of the products of that sample and the kernel.
+     * Filter implements an impulse response filter with feed-forward and feedback coefficients. Assumes that the first
+     * feedback coefficient (a_0) is 1.0. If the filter has no feedback coefficients, then the filter has a finite
+     * response -- that is, it is a convolution.
      */
-    Convolution {
-        waveform: Box<Waveform>,
-        kernel: Box<Waveform>,
+    // TODO maybe add a_0 back in?
+    Filter {
+        waveform: Box<Waveform<State>>,
+        feed_forward: Box<Waveform<State>>, // b_0, b_1, ...
+        feedback: Box<Waveform<State>>,     // a_1, a_2, ...
+        state: State,
     },
-    Sum(Box<Waveform>, Box<Waveform>),
-    DotProduct(Box<Waveform>, Box<Waveform>),
+    Sum(Box<Waveform<State>>, Box<Waveform<State>>),
+    DotProduct(Box<Waveform<State>>, Box<Waveform<State>>),
     /*
      * Res generates a repeating waveform that restarts the given waveform whenever the trigger
      * waveform flips from negative values to positive values. Its length and offset are determined
      * by the trigger waveform.
      */
     Res {
-        trigger: Box<Waveform>,
-        waveform: Box<Waveform>,
+        trigger: Box<Waveform<State>>,
+        waveform: Box<Waveform<State>>,
     },
     /*
      * Alt generates a waveform by alternating between two waveforms based on the sign of
      * the trigger waveform.
      */
     Alt {
-        trigger: Box<Waveform>,
-        positive_waveform: Box<Waveform>,
-        negative_waveform: Box<Waveform>,
+        trigger: Box<Waveform<State>>,
+        positive_waveform: Box<Waveform<State>>,
+        negative_waveform: Box<Waveform<State>>,
     },
     /*
      * Slider generates samples from an interactive "slider" input.
@@ -140,15 +155,71 @@ pub enum Waveform {
      */
     Marked {
         id: u32,
-        waveform: Box<Waveform>,
+        waveform: Box<Waveform<State>>,
     },
     /* Captured waveforms generate the same samples as the inner waveform and also write them to a file
      * beginning with the given file stem.
      */
     Captured {
         file_stem: String,
-        waveform: Box<Waveform>,
+        waveform: Box<Waveform<State>>,
     },
+}
+
+impl fmt::Display for Waveform<()> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Waveform::Const(value) => write!(f, "Const({})", value),
+            Waveform::Time => write!(f, "Time"),
+            Waveform::Noise => write!(f, "Noise"),
+            Waveform::Fixed(samples) => write!(f, "Fixed({:?})", samples),
+            Waveform::Fin { duration, waveform } => {
+                write!(f, "Fin({}, {})", duration.as_secs_f32(), waveform)
+            }
+            Waveform::Seq { duration, waveform } => {
+                write!(f, "Seq({}, {})", duration.as_secs_f32(), waveform)
+            }
+            Waveform::Sin(waveform) => write!(f, "Sin({})", waveform),
+            Waveform::Filter {
+                waveform,
+                feed_forward,
+                feedback,
+                ..
+            } => write!(f, "Filter({}, {}, {})", waveform, feed_forward, feedback),
+            Waveform::Sum(a, b) => write!(f, "Sum({}, {})", a, b),
+            Waveform::DotProduct(a, b) => write!(f, "DotProduct({}, {})", a, b),
+            Waveform::Res { trigger, waveform } => {
+                write!(f, "Res({}, {})", trigger, waveform)
+            }
+            Waveform::Alt {
+                trigger,
+                positive_waveform,
+                negative_waveform,
+            } => write!(
+                f,
+                "Alt({}, {}, {})",
+                trigger, positive_waveform, negative_waveform
+            ),
+            Waveform::Slider(slider) => write!(f, "Slider({})", slider),
+            Waveform::Marked { id, waveform } => {
+                write!(f, "Marked({}, {})", id, waveform)
+            }
+            Waveform::Captured {
+                file_stem,
+                waveform,
+            } => {
+                write!(f, "Captured({}, {})", file_stem, waveform)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FilterState {
+    // The state of the filter, used to store previously generated samples as an input to
+    // feedback, indexed by position of the waveform corresponding to the point just after
+    // these samples.
+    previous_outs: RefCell<HashMap<usize, Vec<f32>>>,
 }
 
 struct SliderState {
@@ -175,6 +246,8 @@ struct Generator<'a> {
 // TODO add metrics for waveform expr depth and total ops
 
 impl<'a> Generator<'a> {
+    // Create a new generator with the given sample frequency. Note that slider_state and capture_state must be set
+    // before `generate` is called.
     fn new(sample_frequency: i32) -> Self {
         Generator {
             sample_frequency,
@@ -186,8 +259,15 @@ impl<'a> Generator<'a> {
     // Generate a vector of samples up to `desired` length. `position` indicates where
     // the beginning of the result is relative to the start of the waveform. If fewer than
     // 'desired' samples are generated, that indicates that this waveform has finished (and
-    // generate won't be called on it again).
-    fn generate(&self, waveform: &Waveform, position: usize, desired: usize) -> Vec<f32> {
+    // generate won't be called on it again). For waveforms other than Noise and Slider or
+    // waveforms that contain them, the result is determined only by the arguments (this
+    // function is pure).
+    fn generate(
+        &self,
+        waveform: &Waveform<FilterState>,
+        position: usize,
+        desired: usize,
+    ) -> Vec<f32> {
         match waveform {
             &Waveform::Const(value) => {
                 return vec![value; desired];
@@ -232,47 +312,66 @@ impl<'a> Generator<'a> {
                 }
                 return out;
             }
-            Waveform::Convolution { waveform, kernel } => {
-                let kernel_length = match self.length(&kernel) {
+            Waveform::Filter {
+                waveform,
+                feed_forward,
+                feedback,
+                state,
+            } => {
+                let extra_feed_forward_length = match self.length(&feed_forward) {
+                    Length::Finite(n) if n > 0 => Length::Finite(n - 1),
+                    len => len,
+                };
+                let extra_desired = match self.length(&feedback).max(extra_feed_forward_length) {
                     Length::Finite(length) => length,
                     Length::Infinite => {
-                        println!("Infinite kernel length, skipping generation");
+                        println!("Infinite filter coefficients, skipping generation");
                         return Vec::new();
                     }
                 };
-                let desired = match self.length(&waveform) {
-                    Length::Finite(length) => {
-                        if length + kernel_length / 2 > position {
-                            desired.min(length + kernel_length / 2 - position)
-                        } else {
-                            return Vec::new();
-                        }
-                    }
-                    Length::Infinite => desired,
-                };
-
-                // We want to generate additional samples on both ends to convolve with the kernel.
-                // position_diff is the number of additional samples generated on the left side.
-                let (position_diff, waveform_desired) = if position >= kernel_length / 2 {
-                    (kernel_length / 2, desired + kernel_length - 1)
-                } else {
-                    let position_diff = position.min(kernel_length / 2 - position);
-                    (position_diff, desired + position_diff + kernel_length / 2)
-                };
-                let waveform_out =
-                    self.generate(waveform, position - position_diff, waveform_desired);
-                let kernel_out = self.generate(kernel, 0, kernel_length);
-                let mut out = vec![0.0; desired];
-                for (i, x) in out.iter_mut().enumerate() {
-                    for (j, &k) in kernel_out.iter().enumerate() {
-                        if i + j + position_diff >= kernel_length / 2 {
-                            let a = waveform_out
-                                .get(i + j + position_diff - (kernel_length / 2))
-                                .unwrap_or(&0.0);
-                            *x += a * k;
-                        }
+                let feed_forward_out = self.generate(feed_forward, 0, extra_desired + 1); // XXX better than +1
+                let feedback_out = self.generate(feedback, 0, extra_desired);
+                // The goal here is to get waveform_out to be of length = desired + extra_desired
+                let mut waveform_out = Vec::new();
+                let mut left_padding = 0;
+                if position < extra_desired {
+                    left_padding = extra_desired - position;
+                    waveform_out.resize(left_padding, 0.0);
+                }
+                waveform_out.extend(self.generate(
+                    waveform,
+                    position + left_padding - extra_desired,
+                    desired + extra_desired - left_padding,
+                ));
+                if waveform_out.len() <= extra_desired {
+                    return Vec::new();
+                }
+                let mut out = vec![0.0; waveform_out.len()];
+                // We need to get (part of) the output from a previous call to generate for this Filter.
+                let mut previous_outs = state.previous_outs.borrow_mut();
+                // Assume that extra_desired is consistent across all calls to generate...
+                // unless this is the first call to generate, in which case there's nothing to copy.
+                if let Some(previous_out) = previous_outs.get(&position) {
+                    for i in 0..extra_desired {
+                        out[i] = previous_out[i];
                     }
                 }
+                // Run the filter!!
+                for i in extra_desired..out.len() {
+                    for (j, &ff) in feed_forward_out.iter().enumerate() {
+                        out[i] += ff * waveform_out[i - j];
+                    }
+                    for (j, &fb) in feedback_out.iter().enumerate() {
+                        out[i] -= fb * out[i - j - 1];
+                    }
+                }
+                // Save the last few samples for the next call to generate.
+                let mut new_previous_out = vec![0.0; extra_desired];
+                for (i, x) in new_previous_out.iter_mut().enumerate() {
+                    *x = out[i + out.len() - extra_desired];
+                }
+                out.drain(0..extra_desired);
+                previous_outs.insert(position + out.len(), new_previous_out);
                 return out;
             }
             Waveform::Sum(a, b) => {
@@ -444,8 +543,8 @@ impl<'a> Generator<'a> {
     fn generate_binary_op(
         &self,
         op: fn(f32, f32) -> f32,
-        a: &Waveform,
-        b: &Waveform,
+        a: &Waveform<FilterState>,
+        b: &Waveform<FilterState>,
         position: usize,
         desired: usize,
     ) -> Vec<f32> {
@@ -500,8 +599,9 @@ impl<'a> Generator<'a> {
         return left;
     }
 
-    // Returns the length of the waveform in samples.
-    fn length(&self, waveform: &Waveform) -> Length {
+    // Returns the length of `waveform` in samples. This is determined entirely by `waveform` (this function
+    // is pure).
+    fn length<State>(&self, waveform: &Waveform<State>) -> Length {
         match waveform {
             Waveform::Const { .. } => Length::Infinite,
             Waveform::Time => Length::Infinite,
@@ -512,9 +612,7 @@ impl<'a> Generator<'a> {
             }
             Waveform::Seq { waveform, .. } => self.length(waveform),
             Waveform::Sin(waveform) => self.length(waveform),
-            Waveform::Convolution { waveform, kernel } => {
-                self.length(waveform) + self.length(kernel) / 2.into()
-            }
+            Waveform::Filter { waveform, .. } => self.length(waveform),
             Waveform::Sum(a, b) => {
                 let length = Length::Finite(self.offset(a)) + self.length(b);
                 self.length(a).max(length)
@@ -531,7 +629,9 @@ impl<'a> Generator<'a> {
         }
     }
 
-    fn offset(&self, waveform: &Waveform) -> usize {
+    // Returns the offset at which the next waveform should start (in samples). This is determined entirely by
+    // `waveform` (this function is pure).
+    fn offset<State>(&self, waveform: &Waveform<State>) -> usize {
         match waveform {
             Waveform::Const { .. } => 0,
             Waveform::Time => 0,
@@ -542,7 +642,7 @@ impl<'a> Generator<'a> {
                 (duration.as_secs_f32() * self.sample_frequency as f32) as usize
             }
             Waveform::Sin(waveform) => self.offset(waveform),
-            Waveform::Convolution { waveform, .. } => self.offset(waveform),
+            Waveform::Filter { waveform, .. } => self.offset(waveform),
             Waveform::Sum(a, b) | Waveform::DotProduct(a, b) => self.offset(a) + self.offset(b),
             Waveform::Res { trigger, .. } | Waveform::Alt { trigger, .. } => self.offset(trigger),
             Waveform::Slider { .. } => 0,
@@ -610,7 +710,7 @@ where
     I: Clone,
 {
     id: I,
-    waveform: Waveform,
+    waveform: Waveform<FilterState>,
     marks: Vec<Mark<I>>,
     position: usize,
     // Open files used by Captured waveforms
@@ -624,6 +724,75 @@ struct PendingWaveform<I> {
     start: Instant,
     repeat_every: Option<Duration>,
     marks: Vec<Mark<I>>,
+}
+
+fn waveform_with_state(waveform: Waveform) -> Waveform<FilterState> {
+    use Waveform::{
+        Alt, Captured, Const, DotProduct, Filter, Fin, Fixed, Marked, Noise, Res, Seq, Sin, Slider,
+        Sum, Time,
+    };
+    match waveform {
+        Const(value) => Const(value),
+        Time => Time,
+        Noise => Noise,
+        Fixed(samples) => Fixed(samples),
+        Fin { duration, waveform } => Fin {
+            duration,
+            waveform: Box::new(waveform_with_state(*waveform)),
+        },
+        Seq { duration, waveform } => Seq {
+            duration,
+            waveform: Box::new(waveform_with_state(*waveform)),
+        },
+        Sin(waveform) => Sin(Box::new(waveform_with_state(*waveform))),
+        // For Filter, we need to set the state to an empty FilterState
+        Filter {
+            waveform,
+            feed_forward,
+            feedback,
+            ..
+        } => Filter {
+            waveform: Box::new(waveform_with_state(*waveform)),
+            feed_forward: Box::new(waveform_with_state(*feed_forward)),
+            feedback: Box::new(waveform_with_state(*feedback)),
+            state: FilterState {
+                previous_outs: RefCell::new(HashMap::new()),
+            },
+        },
+        Sum(a, b) => Sum(
+            Box::new(waveform_with_state(*a)),
+            Box::new(waveform_with_state(*b)),
+        ),
+        DotProduct(a, b) => DotProduct(
+            Box::new(waveform_with_state(*a)),
+            Box::new(waveform_with_state(*b)),
+        ),
+        Res { trigger, waveform } => Res {
+            trigger: Box::new(waveform_with_state(*trigger)),
+            waveform: Box::new(waveform_with_state(*waveform)),
+        },
+        Alt {
+            trigger,
+            positive_waveform,
+            negative_waveform,
+        } => Alt {
+            trigger: Box::new(waveform_with_state(*trigger)),
+            positive_waveform: Box::new(waveform_with_state(*positive_waveform)),
+            negative_waveform: Box::new(waveform_with_state(*negative_waveform)),
+        },
+        Slider(slider) => Slider(slider),
+        Marked { id, waveform } => Marked {
+            id,
+            waveform: Box::new(waveform_with_state(*waveform)),
+        },
+        Captured {
+            file_stem,
+            waveform,
+        } => Captured {
+            file_stem,
+            waveform: Box::new(waveform_with_state(*waveform)),
+        },
+    }
 }
 
 pub struct Tracker<I>
@@ -677,8 +846,8 @@ where
         out: &mut Vec<Mark<I>>,
     ) {
         use Waveform::{
-            Alt, Captured, Const, Convolution, DotProduct, Fin, Fixed, Marked, Noise, Res, Seq,
-            Sin, Slider, Sum, Time,
+            Alt, Captured, Const, DotProduct, Filter, Fin, Fixed, Marked, Noise, Res, Seq, Sin,
+            Slider, Sum, Time,
         };
         match waveform {
             Const(_) | Time | Noise | Fixed(_) | Slider { .. } => {
@@ -687,7 +856,7 @@ where
             Fin { waveform, .. }
             | Seq { waveform, .. }
             | Sin(waveform)
-            | Convolution { waveform, .. }
+            | Filter { waveform, .. }
             | Res {
                 trigger: waveform, ..
             }
@@ -726,8 +895,8 @@ where
         out: &mut HashMap<String, hound::WavWriter<BufWriter<std::fs::File>>>,
     ) {
         use Waveform::{
-            Alt, Captured, Const, Convolution, DotProduct, Fin, Fixed, Marked, Noise, Res, Seq,
-            Sin, Slider, Sum, Time,
+            Alt, Captured, Const, DotProduct, Filter, Fin, Fixed, Marked, Noise, Res, Seq, Sin,
+            Slider, Sum, Time,
         };
         match waveform {
             Const(_) | Time | Noise | Fixed(_) | Slider { .. } => {
@@ -736,7 +905,7 @@ where
             Fin { waveform, .. }
             | Seq { waveform, .. }
             | Sin(waveform)
-            | Convolution { waveform, .. }
+            | Filter { waveform, .. }
             | Res {
                 trigger: waveform, ..
             }
@@ -949,7 +1118,7 @@ where
                     self.process_captured(&pending.waveform, &mut capture_state);
                     self.active_waveforms.push(ActiveWaveform {
                         id: pending.id.clone(),
-                        waveform: pending.waveform.clone(),
+                        waveform: waveform_with_state(pending.waveform.clone()),
                         marks,
                         position: 0,
                         capture_state,
@@ -1054,7 +1223,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use Waveform::{Const, Convolution, DotProduct, Fin, Res, Seq, Sin, Sum, Time};
+    use Waveform::{Const, DotProduct, Filter, Fin, Res, Seq, Sin, Sum, Time};
 
     fn new_test_generator<'a>(sample_frequency: i32) -> Generator<'a> {
         Generator::new(sample_frequency)
@@ -1073,10 +1242,11 @@ mod tests {
     fn run_tests(waveform: &Waveform, desired: Vec<f32>) {
         for size in [1, 2, 4, 8] {
             let generator = new_test_generator(1);
+            let w = waveform_with_state(waveform.clone());
             //println!("Running tests for waveform {:?} with size {}", waveform, size);
             let mut out = vec![0.0; desired.len()];
             for n in 0..out.len() / size {
-                let tmp = generator.generate(waveform, n * size, size);
+                let tmp = generator.generate(&w, n * size, size);
                 (&mut out[n * size..(n * size + tmp.len())]).copy_from_slice(&tmp);
             }
             assert_eq!(out, desired);
@@ -1089,7 +1259,7 @@ mod tests {
         run_tests(&w1, vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
 
         let generator = new_test_generator(1);
-        let result = generator.generate(&w1, 0, 8);
+        let result = generator.generate(&waveform_with_state(w1), 0, 8);
         assert_eq!(result, vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
     }
 
@@ -1172,9 +1342,9 @@ mod tests {
 
         // Test a case to make sure that the sum generates enough samples, even when
         // the left-hand side is shorter and the right hasn't started yet.
-        let result = generator.generate(&w5, 0, 2);
+        let result = generator.generate(&waveform_with_state(w5.clone()), 0, 2);
         assert_eq!(result, vec![3.0, 0.0]);
-        let result = generator.generate(&w5, 1, 2);
+        let result = generator.generate(&waveform_with_state(w5), 1, 2);
         assert_eq!(result, vec![0.0, 0.0]);
 
         // This one is a little strange: the right-hand side doesn't generate any
@@ -1184,7 +1354,7 @@ mod tests {
             Box::new(finite_const_waveform(3.0, 1, 3)),
             Box::new(finite_const_waveform(2.0, 0, 0)),
         );
-        let result = generator.generate(&w6, 0, 2);
+        let result = generator.generate(&waveform_with_state(w6), 0, 2);
         assert_eq!(result, vec![3.0, 0.0]);
     }
 
@@ -1222,50 +1392,73 @@ mod tests {
     }
 
     #[test]
-    fn test_convolution() {
-        let w1 = Convolution {
+    fn test_filter() {
+        // FIRs
+        let w1 = Filter {
             waveform: Box::new(Time),
-            kernel: Box::new(finite_const_waveform(2.0, 3, 3)),
+            feed_forward: Box::new(finite_const_waveform(2.0, 3, 3)),
+            feedback: Box::new(finite_const_waveform(0.0, 0, 0)),
+            state: (),
         };
-        run_tests(&w1, vec![2.0, 6.0, 12.0, 18.0, 24.0, 30.0, 36.0, 42.0]);
+        run_tests(&w1, vec![0.0, 2.0, 6.0, 12.0, 18.0, 24.0, 30.0, 36.0]);
 
-        let w2 = Convolution {
+        let w2 = Filter {
             waveform: Box::new(Fin {
                 duration: Duration::from_secs(5),
                 waveform: Box::new(Time),
             }),
-            kernel: Box::new(finite_const_waveform(2.0, 3, 3)),
+            feed_forward: Box::new(finite_const_waveform(2.0, 3, 3)),
+            feedback: Box::new(finite_const_waveform(0.0, 0, 0)),
+            state: (),
         };
 
         let generator = new_test_generator(1);
-        assert_eq!(generator.length(&w2), Length::Finite(6));
-        run_tests(&w2, vec![2.0, 6.0, 12.0, 18.0, 14.0, 8.0, 0.0, 0.0]);
+        assert_eq!(generator.length(&w2), Length::Finite(5));
+        run_tests(&w2, vec![0.0, 2.0, 6.0, 12.0, 18.0, 0.0, 0.0, 0.0]);
 
-        let w3 = Convolution {
+        let w3 = Filter {
             waveform: Box::new(Fin {
                 duration: Duration::from_secs(3),
                 waveform: Box::new(Time),
             }),
-            kernel: Box::new(finite_const_waveform(2.0, 5, 5)),
+            feed_forward: Box::new(finite_const_waveform(2.0, 5, 5)),
+            feedback: Box::new(finite_const_waveform(0.0, 0, 0)),
+            state: (),
         };
         let generator = new_test_generator(1);
-        assert_eq!(generator.length(&w3), Length::Finite(5));
-        run_tests(&w3, vec![6.0, 6.0, 6.0, 6.0, 4.0, 0.0, 0.0, 0.0]);
+        assert_eq!(generator.length(&w3), Length::Finite(3));
+        run_tests(&w3, vec![0.0, 2.0, 6.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
 
-        let w4 = Convolution {
+        let w4 = Filter {
             waveform: Box::new(Res {
                 trigger: sin_waveform(1.0 / 3.0),
                 waveform: Box::new(Time),
             }),
-            kernel: Box::new(finite_const_waveform(2.0, 5, 5)),
+            feed_forward: Box::new(finite_const_waveform(2.0, 5, 5)),
+            feedback: Box::new(finite_const_waveform(0.0, 0, 0)),
+            state: (),
         };
-        run_tests(&w4, vec![6.0, 6.0, 8.0, 12.0, 10.0, 8.0, 12.0, 10.0]);
+        run_tests(&w4, vec![0.0, 2.0, 6.0, 6.0, 8.0, 12.0, 10.0, 8.0]);
 
-        let w5 = Convolution {
+        let w5 = Filter {
             waveform: Box::new(Const(1.0)),
-            kernel: Box::new(finite_const_waveform(0.2, 5, 5)),
+            feed_forward: Box::new(finite_const_waveform(0.2, 5, 5)),
+            feedback: Box::new(finite_const_waveform(0.0, 0, 0)),
+            state: (),
         };
-        run_tests(&w5, vec![0.6, 0.8, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+        run_tests(&w5, vec![0.2, 0.4, 0.6, 0.8, 1.0, 1.0, 1.0, 1.0]);
+
+        // IIRs
+        let w1 = Filter {
+            waveform: Box::new(Time),
+            feed_forward: Box::new(finite_const_waveform(0.5, 1, 1)),
+            feedback: Box::new(finite_const_waveform(-0.5, 1, 1)),
+            state: (),
+        };
+        run_tests(
+            &w1,
+            vec![0.0, 0.5, 1.25, 2.125, 3.0625, 4.03125, 5.015625, 6.0078125],
+        );
     }
 
     // TODO test for forgetting to sort pending waveforms
