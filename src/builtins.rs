@@ -162,15 +162,33 @@ fn curry(f: impl Fn(Box<Waveform>) -> Waveform + 'static) -> BuiltInFn {
     }))
 }
 
-pub fn fin(arguments: Vec<Expr>) -> Expr {
-    match arguments[..] {
-        [Float(duration)] => BuiltIn {
-            name: format!("fin({})", duration),
-            function: curry(move |waveform: Box<Waveform>| Waveform::Fin {
-                duration: Duration::from_secs_f32(duration),
-                waveform,
-            }),
-        },
+pub fn fin(mut arguments: Vec<Expr>) -> Expr {
+    if arguments.len() != 1 {
+        return Expr::Error(format!("Expected one argument for fin{}", arguments.len()));
+    }
+    let arg = arguments.remove(0);
+    match arg {
+        // Note that we are treating floats here as a const waveform, not a duration
+        Expr::Float(f) => {
+            let w = Waveform::Const(f);
+            BuiltIn {
+                name: format!("fin({})", w),
+                function: curry(move |waveform: Box<Waveform>| Waveform::Fin {
+                    duration: Box::new(w.clone()),
+                    waveform,
+                }),
+            }
+        }
+        Expr::Waveform(duration) => {
+            let duration = duration;
+            BuiltIn {
+                name: format!("fin({})", duration),
+                function: curry(move |waveform: Box<Waveform>| Waveform::Fin {
+                    duration: Box::new(duration.clone()),
+                    waveform,
+                }),
+            }
+        }
         _ => Expr::Error("Invalid arguments for fin".to_string()),
     }
 }
@@ -349,7 +367,7 @@ pub fn chord(arguments: Vec<Expr>) -> Expr {
     match &arguments[..] {
         [List(exprs)] => {
             let mut result = Waveform::Fin {
-                duration: Duration::ZERO,
+                duration: Box::new(Waveform::Const(0.0)),
                 waveform: Box::new(Waveform::Const(0.0)),
             };
             for expr in exprs.iter().rev() {
@@ -376,7 +394,7 @@ pub fn sequence(arguments: Vec<Expr>) -> Expr {
     match &arguments[..] {
         [List(exprs)] => {
             let mut result = Waveform::Fin {
-                duration: Duration::ZERO,
+                duration: Box::new(Waveform::Const(0.0)),
                 waveform: Box::new(Waveform::Const(0.0)),
             };
             for expr in exprs.iter().rev() {

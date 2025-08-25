@@ -18,10 +18,10 @@ linear = fn(initial, slope) => initial ~+ (time ~. slope),
 
 // ENVELOPES
 // Create waveforms for the four parts of the envelope.
-Aw = fn(dur) => linear(0.0, 1.0 / dur) | fin(dur) | seq(dur),
-Dw = fn(dur, level) => linear(1.0, (level - 1.0) / dur) | fin(dur) | seq(dur),
-Sw = fn(dur, level) => level | fin(dur) | seq(dur),
-Rw = fn(dur, level) => linear(level, -level / dur) | fin(dur) | seq(dur),
+Aw = fn(dur) => linear(0.0, 1.0 / dur) | fin(time ~+ -dur) | seq(dur),
+Dw = fn(dur, level) => linear(1.0, (level - 1.0) / dur) | fin(time ~+ -dur) | seq(dur),
+Sw = fn(dur, level) => level | fin(time ~+ -dur) | seq(dur),
+Rw = fn(dur, level) => linear(level, -level / dur) | fin(time ~+ -dur) | seq(dur),
 // Combine them to create a new filter.
 ADSR = fn(attack_dur, decay_dur, sustain_level, sustain_dur, release_dur) =>
   fn(w) => (w | seq(0)) ~. <[Aw(attack_dur),
@@ -65,10 +65,10 @@ Q = W / 4,
 E = W / 8,
 
 // Notes as waveforms: use with ~.
-Ww = 1 | fin(W) | seq(W),
-Hw = 1 | fin(H) | seq(H),
-Qw = 1 | fin(Q) | seq(Q),
-Ew = 1 | fin(E) | seq(E),
+Ww = 1 | fin(time ~+ -W) | seq(W),
+Hw = 1 | fin(time ~+ -H) | seq(H),
+Qw = 1 | fin(time ~+ -Q) | seq(Q),
+Ew = 1 | fin(time ~+ -E) | seq(E),
 
 // Rests as waveforms: use with <> or ~+
 Wrw = 0 | fin(0) | seq(W),

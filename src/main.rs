@@ -191,7 +191,10 @@ fn beats_waveform(args: &Args) -> tracker::Waveform {
         ws.push(parser::Expr::Waveform(tracker::Waveform::Marked {
             id: i + 1,
             waveform: Box::new(tracker::Waveform::Fin {
-                duration: seconds_per_beat,
+                duration: Box::new(tracker::Waveform::Sum(
+                    Box::new(tracker::Waveform::Time),
+                    Box::new(tracker::Waveform::Const(-seconds_per_beat.as_secs_f32())),
+                )),
                 waveform: Box::new(tracker::Waveform::Seq {
                     duration: seconds_per_beat,
                     waveform: Box::new(tracker::Waveform::Const(0.0)),
