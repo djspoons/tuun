@@ -633,10 +633,7 @@ impl<'a> Generator<'a> {
     // `waveform` (this function is pure).
     fn offset<State>(&self, waveform: &Waveform<State>) -> usize {
         match waveform {
-            Waveform::Const { .. } => 0,
-            Waveform::Time => 0,
-            Waveform::Noise => 0,
-            Waveform::Fixed(_) => 0,
+            Waveform::Const { .. } | Waveform::Time | Waveform::Noise | Waveform::Fixed(_) => 0,
             Waveform::Fin { waveform, .. } => self.offset(waveform),
             Waveform::Seq { duration, .. } => {
                 (duration.as_secs_f32() * self.sample_frequency as f32) as usize
@@ -726,7 +723,7 @@ struct PendingWaveform<I> {
     marks: Vec<Mark<I>>,
 }
 
-fn waveform_with_state(waveform: Waveform) -> Waveform<FilterState> {
+fn initialize_state(waveform: Waveform) -> Waveform<FilterState> {
     use Waveform::{
         Alt, Captured, Const, DotProduct, Filter, Fin, Fixed, Marked, Noise, Res, Seq, Sin, Slider,
         Sum, Time,
@@ -738,13 +735,13 @@ fn waveform_with_state(waveform: Waveform) -> Waveform<FilterState> {
         Fixed(samples) => Fixed(samples),
         Fin { duration, waveform } => Fin {
             duration,
-            waveform: Box::new(waveform_with_state(*waveform)),
+            waveform: Box::new(initialize_state(*waveform)),
         },
         Seq { duration, waveform } => Seq {
             duration,
-            waveform: Box::new(waveform_with_state(*waveform)),
+            waveform: Box::new(initialize_state(*waveform)),
         },
-        Sin(waveform) => Sin(Box::new(waveform_with_state(*waveform))),
+        Sin(waveform) => Sin(Box::new(initialize_state(*waveform))),
         // For Filter, we need to set the state to an empty FilterState
         Filter {
             waveform,
@@ -752,45 +749,45 @@ fn waveform_with_state(waveform: Waveform) -> Waveform<FilterState> {
             feedback,
             ..
         } => Filter {
-            waveform: Box::new(waveform_with_state(*waveform)),
-            feed_forward: Box::new(waveform_with_state(*feed_forward)),
-            feedback: Box::new(waveform_with_state(*feedback)),
+            waveform: Box::new(initialize_state(*waveform)),
+            feed_forward: Box::new(initialize_state(*feed_forward)),
+            feedback: Box::new(initialize_state(*feedback)),
             state: FilterState {
                 previous_outs: RefCell::new(HashMap::new()),
             },
         },
         Sum(a, b) => Sum(
-            Box::new(waveform_with_state(*a)),
-            Box::new(waveform_with_state(*b)),
+            Box::new(initialize_state(*a)),
+            Box::new(initialize_state(*b)),
         ),
         DotProduct(a, b) => DotProduct(
-            Box::new(waveform_with_state(*a)),
-            Box::new(waveform_with_state(*b)),
+            Box::new(initialize_state(*a)),
+            Box::new(initialize_state(*b)),
         ),
         Res { trigger, waveform } => Res {
-            trigger: Box::new(waveform_with_state(*trigger)),
-            waveform: Box::new(waveform_with_state(*waveform)),
+            trigger: Box::new(initialize_state(*trigger)),
+            waveform: Box::new(initialize_state(*waveform)),
         },
         Alt {
             trigger,
             positive_waveform,
             negative_waveform,
         } => Alt {
-            trigger: Box::new(waveform_with_state(*trigger)),
-            positive_waveform: Box::new(waveform_with_state(*positive_waveform)),
-            negative_waveform: Box::new(waveform_with_state(*negative_waveform)),
+            trigger: Box::new(initialize_state(*trigger)),
+            positive_waveform: Box::new(initialize_state(*positive_waveform)),
+            negative_waveform: Box::new(initialize_state(*negative_waveform)),
         },
         Slider(slider) => Slider(slider),
         Marked { id, waveform } => Marked {
             id,
-            waveform: Box::new(waveform_with_state(*waveform)),
+            waveform: Box::new(initialize_state(*waveform)),
         },
         Captured {
             file_stem,
             waveform,
         } => Captured {
             file_stem,
-            waveform: Box::new(waveform_with_state(*waveform)),
+            waveform: Box::new(initialize_state(*waveform)),
         },
     }
 }
@@ -1118,7 +1115,7 @@ where
                     self.process_captured(&pending.waveform, &mut capture_state);
                     self.active_waveforms.push(ActiveWaveform {
                         id: pending.id.clone(),
-                        waveform: waveform_with_state(pending.waveform.clone()),
+                        waveform: initialize_state(pending.waveform.clone()),
                         marks,
                         position: 0,
                         capture_state,
@@ -1242,7 +1239,7 @@ mod tests {
     fn run_tests(waveform: &Waveform, desired: Vec<f32>) {
         for size in [1, 2, 4, 8] {
             let generator = new_test_generator(1);
-            let w = waveform_with_state(waveform.clone());
+            let w = initialize_state(waveform.clone());
             //println!("Running tests for waveform {:?} with size {}", waveform, size);
             let mut out = vec![0.0; desired.len()];
             for n in 0..out.len() / size {
@@ -1259,7 +1256,7 @@ mod tests {
         run_tests(&w1, vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
 
         let generator = new_test_generator(1);
-        let result = generator.generate(&waveform_with_state(w1), 0, 8);
+        let result = generator.generate(&initialize_state(w1), 0, 8);
         assert_eq!(result, vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
     }
 
@@ -1342,9 +1339,9 @@ mod tests {
 
         // Test a case to make sure that the sum generates enough samples, even when
         // the left-hand side is shorter and the right hasn't started yet.
-        let result = generator.generate(&waveform_with_state(w5.clone()), 0, 2);
+        let result = generator.generate(&initialize_state(w5.clone()), 0, 2);
         assert_eq!(result, vec![3.0, 0.0]);
-        let result = generator.generate(&waveform_with_state(w5), 1, 2);
+        let result = generator.generate(&initialize_state(w5), 1, 2);
         assert_eq!(result, vec![0.0, 0.0]);
 
         // This one is a little strange: the right-hand side doesn't generate any
@@ -1354,7 +1351,7 @@ mod tests {
             Box::new(finite_const_waveform(3.0, 1, 3)),
             Box::new(finite_const_waveform(2.0, 0, 0)),
         );
-        let result = generator.generate(&waveform_with_state(w6), 0, 2);
+        let result = generator.generate(&initialize_state(w6), 0, 2);
         assert_eq!(result, vec![3.0, 0.0]);
     }
 

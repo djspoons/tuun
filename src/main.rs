@@ -3,13 +3,10 @@ use std::fs;
 use std::time::{Duration, Instant};
 
 use chrono;
-
-extern crate sdl2;
+use clap::Parser as ClapParser;
 use sdl2::audio::AudioSpecDesired;
 use sdl2::event::Event;
 use sdl2::ttf::Sdl2TtfContext;
-
-use clap::Parser as ClapParser;
 
 mod builtins;
 mod metric;
@@ -17,10 +14,8 @@ use metric::Metric;
 mod parser;
 mod renderer;
 use renderer::Renderer;
-mod tracker;
+pub mod tracker;
 use tracker::Command;
-
-use crate::builtins::sequence;
 
 #[derive(ClapParser, Debug)]
 #[command(version, about, long_about = None)]
@@ -31,13 +26,13 @@ struct Args {
     beats_per_measure: u32,
     #[arg(long, default_value_t = 44100)]
     sample_frequency: i32,
+    #[arg(short = 'C', long = "context_file", number_of_values = 1)]
+    context_files: Vec<String>,
     #[arg(short = 'P', long = "programs_file", default_value = "programs.tnp")]
     programs_file: String,
     // Additional programs to load
     #[arg(short, long = "program", default_value = "", number_of_values = 1)]
     programs: Vec<String>,
-    #[arg(short = 'C', long = "context_file", number_of_values = 1)]
-    context_files: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -199,7 +194,7 @@ fn beats_waveform(args: &Args) -> tracker::Waveform {
             }),
         }));
     }
-    match sequence(vec![parser::Expr::List(ws)]) {
+    match builtins::sequence(vec![parser::Expr::List(ws)]) {
         parser::Expr::Waveform(waveform) => tracker::Waveform::Marked {
             id: 0,
             waveform: Box::new(waveform),

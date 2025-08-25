@@ -227,10 +227,7 @@ pub fn waveform_convolution(arguments: Vec<Expr>) -> Expr {
     return waveform_binary_op(arguments, |waveform, kernel| Waveform::Filter {
         waveform,
         feed_forward: kernel,
-        feedback: Box::new(Waveform::Fin {
-            duration: Duration::ZERO,
-            waveform: Box::new(Waveform::Const(0.0)),
-        }),
+        feedback: Box::new(Waveform::Fixed(vec![])),
         state: (),
     });
 }
