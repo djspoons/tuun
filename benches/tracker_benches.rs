@@ -1,5 +1,7 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use std::hint::black_box;
+use tuun::builtins;
+use tuun::parser;
 
 use tuun::renderer;
 use tuun::tracker;
@@ -41,11 +43,19 @@ fn bench_filter(c: &mut Criterion) {
 
 fn bench_marks(c: &mut Criterion) {
     let generator = tracker::Generator::new(44100);
-    let w = renderer::beats_waveform(120, 4);
+    let mut ws = Vec::new();
+    for _ in 0..40 {
+        ws.push(parser::Expr::Waveform(renderer::beats_waveform(120, 4)));
+    }
+    let w = match builtins::sequence(vec![parser::Expr::List(ws)]) {
+        parser::Expr::Waveform(w) => w,
+        _ => panic!("Expected waveform"),
+    };
     let w = tracker::initialize_state(w);
-    c.bench_function("marks_4_120", |b| {
+    c.bench_function("marks_4_40", |b| {
         b.iter(|| {
-            for i in 0..43 {
+            for i in 0..3438 {
+                // Approx. the length of the waveform
                 generator.generate(&w, black_box(i * 1024), 1024);
             }
         });
