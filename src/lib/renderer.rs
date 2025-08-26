@@ -1,14 +1,14 @@
 use std::time::Duration;
 use std::time::Instant;
 
+use sdl2::Sdl;
 use sdl2::pixels::Color;
 use sdl2::render::{TextureCreator, TextureQuery};
 use sdl2::ttf::{Font, Sdl2TtfContext};
 use sdl2::video::WindowContext;
-use sdl2::Sdl;
 
-use realfft::num_complex::{Complex, ComplexFloat};
 use realfft::RealFftPlanner;
+use realfft::num_complex::{Complex, ComplexFloat};
 
 use crate::builtins;
 use crate::metric::Metric;

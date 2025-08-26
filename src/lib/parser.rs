@@ -4,6 +4,7 @@ use std::ops::Range;
 use std::{cell::RefCell, rc::Rc};
 
 use nom::{
+    Parser,
     branch::alt,
     bytes::complete::{tag, take_while},
     character::complete::{alpha1, alphanumeric1, char, multispace0, multispace1},
@@ -11,7 +12,6 @@ use nom::{
     multi::{many0, separated_list0},
     number::complete::float,
     sequence::{delimited, preceded, terminated},
-    Parser,
 };
 
 use crate::tracker;

@@ -551,7 +551,10 @@ impl<'a> Generator<'a> {
                 match self.greater_or_equals_at(&duration, 0.0, position, max) {
                     Some(new_position) => new_position,
                     None => {
-                        println!("Warning: unable to determine length of Fin duration cheaply, generating up to max: {:?}", duration);
+                        println!(
+                            "Warning: unable to determine length of Fin duration cheaply, generating up to max: {:?}",
+                            duration
+                        );
                         let out = self.generate(duration, position, max);
                         for (i, &x) in out.iter().enumerate() {
                             if x >= 0.0 {
@@ -1185,8 +1188,12 @@ where
                 }
                 if tmp.len() > segment_length {
                     panic!(
-                        "Generated more samples than desired: {} > {} for waveform id {:?} at position {}: {:?}", 
-                        tmp.len(), segment_length, active.id, active.position, active.waveform
+                        "Generated more samples than desired: {} > {} for waveform id {:?} at position {}: {:?}",
+                        tmp.len(),
+                        segment_length,
+                        active.id,
+                        active.position,
+                        active.waveform
                     );
                 }
                 if i == 0 {
