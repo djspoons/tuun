@@ -10,9 +10,38 @@ use sdl2::Sdl;
 use realfft::num_complex::{Complex, ComplexFloat};
 use realfft::RealFftPlanner;
 
+use crate::builtins;
 use crate::metric::Metric;
-use crate::tracker::{Slider, Status};
-use crate::{is_active_program, is_pending_program, Mode, WaveformId};
+use crate::parser;
+use crate::tracker;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum WaveformId {
+    // Beats are silent waveforms that are used to keep time. The bool tracks whether
+    // it is an odd or even measure (false == odd).
+    Beats(bool),
+    Program(usize), // Program index starts at 1
+}
+
+#[derive(Debug)]
+pub enum Mode {
+    Select {
+        program_index: usize,
+        message: String,
+    },
+    Edit {
+        program_index: usize,
+        // TODO unicode!!
+        cursor_position: usize, // Cursor is located before the character this position
+        errors: Vec<parser::Error>,
+        message: String,
+    },
+    MoveSliders {
+        program_index: usize, // Don't forget this
+        message: String,
+    },
+    Exit,
+}
 
 fn make_texture<'a>(
     font: &Font<'a, 'static>,
@@ -123,7 +152,7 @@ impl Renderer {
         &mut self,
         ttf_context: &Sdl2TtfContext,
         programs: &[String],
-        status: &Status<WaveformId>,
+        status: &tracker::Status<WaveformId>,
         mode: &Mode,
         metrics: &mut Metrics,
     ) {
@@ -346,7 +375,11 @@ impl Renderer {
         self.canvas
             .fill_rect(sdl2::rect::Rect::new(
                 (self.width / 2) as i32
-                    + (self.width as f32 * *status.slider_values.get(&Slider::X).unwrap_or(&0.0)
+                    + (self.width as f32
+                        * *status
+                            .slider_values
+                            .get(&tracker::Slider::X)
+                            .unwrap_or(&0.0)
                         / 2.0) as i32
                     - 3,
                 0,
@@ -358,7 +391,11 @@ impl Renderer {
             .fill_rect(sdl2::rect::Rect::new(
                 0,
                 (self.height / 2) as i32
-                    - (self.height as f32 * *status.slider_values.get(&Slider::Y).unwrap_or(&0.0)
+                    - (self.height as f32
+                        * *status
+                            .slider_values
+                            .get(&tracker::Slider::Y)
+                            .unwrap_or(&0.0)
                         / 2.0) as i32
                     - 3,
                 16,
@@ -636,4 +673,53 @@ impl Renderer {
             )
             .unwrap();
     }
+}
+
+pub fn duration_from_beats(beats_per_minute: u32, beats: u64) -> Duration {
+    Duration::from_secs_f32(beats as f32 * 60.0 / beats_per_minute as f32)
+}
+
+pub fn beats_waveform(beats_per_minute: u32, beats_per_measure: u32) -> tracker::Waveform {
+    let seconds_per_beat = duration_from_beats(beats_per_minute, 1);
+    let mut ws = Vec::new();
+    for i in 0..beats_per_measure {
+        ws.push(parser::Expr::Waveform(tracker::Waveform::Marked {
+            id: i + 1,
+            waveform: Box::new(tracker::Waveform::Fin {
+                duration: seconds_per_beat,
+                waveform: Box::new(tracker::Waveform::Seq {
+                    duration: seconds_per_beat,
+                    waveform: Box::new(tracker::Waveform::Const(0.0)),
+                }),
+            }),
+        }));
+    }
+    match builtins::sequence(vec![parser::Expr::List(ws)]) {
+        parser::Expr::Waveform(waveform) => tracker::Waveform::Marked {
+            id: 0,
+            waveform: Box::new(waveform),
+        },
+        parser::Expr::Error(e) => panic!("Error creating beats waveform: {}", e),
+        _ => panic!("Error creating beats waveform"),
+    }
+}
+
+pub fn is_pending_program(
+    status: &tracker::Status<WaveformId>,
+    now: Instant,
+    program_index: usize,
+) -> bool {
+    status.marks.iter().any(|w| {
+        w.waveform_id == WaveformId::Program(program_index) && w.mark_id == 0 && w.start > now
+    })
+}
+
+pub fn is_active_program(
+    status: &tracker::Status<WaveformId>,
+    now: Instant,
+    program_index: usize,
+) -> bool {
+    status.marks.iter().any(|w| {
+        w.waveform_id == WaveformId::Program(program_index) && w.mark_id == 0 && w.start <= now
+    })
 }

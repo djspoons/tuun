@@ -215,7 +215,7 @@ impl fmt::Display for Waveform<()> {
 }
 
 #[derive(Debug, Clone)]
-struct FilterState {
+pub struct FilterState {
     // The state of the filter, used to store previously generated samples as an input to
     // feedback, indexed by position of the waveform corresponding to the point just after
     // these samples.
@@ -236,7 +236,7 @@ struct SliderState {
 /*
  * Generator converts waveforms into sequences of samples.
  */
-struct Generator<'a> {
+pub struct Generator<'a> {
     sample_frequency: i32,
     slider_state: Option<&'a SliderState>,
     capture_state:
@@ -248,7 +248,7 @@ struct Generator<'a> {
 impl<'a> Generator<'a> {
     // Create a new generator with the given sample frequency. Note that slider_state and capture_state must be set
     // before `generate` is called.
-    fn new(sample_frequency: i32) -> Self {
+    pub fn new(sample_frequency: i32) -> Self {
         Generator {
             sample_frequency,
             slider_state: None,
@@ -262,7 +262,7 @@ impl<'a> Generator<'a> {
     // generate won't be called on it again). For waveforms other than Noise and Slider or
     // waveforms that contain them, the result is determined only by the arguments (this
     // function is pure).
-    fn generate(
+    pub fn generate(
         &self,
         waveform: &Waveform<FilterState>,
         position: usize,
@@ -723,7 +723,7 @@ struct PendingWaveform<I> {
     marks: Vec<Mark<I>>,
 }
 
-fn initialize_state(waveform: Waveform) -> Waveform<FilterState> {
+pub fn initialize_state(waveform: Waveform) -> Waveform<FilterState> {
     use Waveform::{
         Alt, Captured, Const, DotProduct, Filter, Fin, Fixed, Marked, Noise, Res, Seq, Sin, Slider,
         Sum, Time,

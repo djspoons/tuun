@@ -8,14 +8,14 @@ use sdl2::audio::AudioSpecDesired;
 use sdl2::event::Event;
 use sdl2::ttf::Sdl2TtfContext;
 
-mod builtins;
-mod metric;
 use metric::Metric;
-mod parser;
-mod renderer;
-use renderer::Renderer;
-pub mod tracker;
+use renderer::{Mode, Renderer, WaveformId};
 use tracker::Command;
+use tuun::builtins;
+use tuun::metric;
+use tuun::parser;
+use tuun::renderer;
+use tuun::tracker;
 
 #[derive(ClapParser, Debug)]
 #[command(version, about, long_about = None)]
@@ -33,54 +33,6 @@ struct Args {
     // Additional programs to load
     #[arg(short, long = "program", default_value = "", number_of_values = 1)]
     programs: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum WaveformId {
-    // Beats are silent waveforms that are used to keep time. The bool tracks whether
-    // it is an odd or even measure (false == odd).
-    Beats(bool),
-    Program(usize), // Program index starts at 1
-}
-
-pub fn is_pending_program(
-    status: &tracker::Status<WaveformId>,
-    now: Instant,
-    program_index: usize,
-) -> bool {
-    status.marks.iter().any(|w| {
-        w.waveform_id == WaveformId::Program(program_index) && w.mark_id == 0 && w.start > now
-    })
-}
-
-pub fn is_active_program(
-    status: &tracker::Status<WaveformId>,
-    now: Instant,
-    program_index: usize,
-) -> bool {
-    status.marks.iter().any(|w| {
-        w.waveform_id == WaveformId::Program(program_index) && w.mark_id == 0 && w.start <= now
-    })
-}
-
-#[derive(Debug)]
-enum Mode {
-    Select {
-        program_index: usize,
-        message: String,
-    },
-    Edit {
-        program_index: usize,
-        // TODO unicode!!
-        cursor_position: usize, // Cursor is located before the character this position
-        errors: Vec<parser::Error>,
-        message: String,
-    },
-    MoveSliders {
-        program_index: usize, // Don't forget this
-        message: String,
-    },
-    Exit,
 }
 
 fn load_context(program_index: usize, args: &Args) -> (Vec<(String, parser::Expr)>, Mode) {
@@ -179,31 +131,6 @@ fn load_programs(args: &Args, programs: &mut Vec<String>) {
     }
 }
 
-fn beats_waveform(args: &Args) -> tracker::Waveform {
-    let seconds_per_beat = duration_from_beats(args, 1);
-    let mut ws = Vec::new();
-    for i in 0..args.beats_per_measure {
-        ws.push(parser::Expr::Waveform(tracker::Waveform::Marked {
-            id: i + 1,
-            waveform: Box::new(tracker::Waveform::Fin {
-                duration: seconds_per_beat,
-                waveform: Box::new(tracker::Waveform::Seq {
-                    duration: seconds_per_beat,
-                    waveform: Box::new(tracker::Waveform::Const(0.0)),
-                }),
-            }),
-        }));
-    }
-    match builtins::sequence(vec![parser::Expr::List(ws)]) {
-        parser::Expr::Waveform(waveform) => tracker::Waveform::Marked {
-            id: 0,
-            waveform: Box::new(waveform),
-        },
-        parser::Expr::Error(e) => panic!("Error creating beats waveform: {}", e),
-        _ => panic!("Error creating beats waveform"),
-    }
-}
-
 pub fn main() {
     let args = Args::parse();
     let sdl_context = sdl2::init().unwrap();
@@ -259,9 +186,12 @@ pub fn main() {
     command_sender
         .send(Command::Play {
             id: WaveformId::Beats(false),
-            waveform: beats_waveform(&args),
+            waveform: renderer::beats_waveform(args.beats_per_minute, args.beats_per_measure),
             start: Instant::now(),
-            repeat_every: Some(duration_from_beats(&args, args.beats_per_measure as u64) * 2),
+            repeat_every: Some(
+                renderer::duration_from_beats(args.beats_per_minute, args.beats_per_measure as u64)
+                    * 2,
+            ),
         })
         .unwrap();
     // We need to wait to start the even Beats until we know when the odd Beats started
@@ -299,11 +229,16 @@ pub fn main() {
                             command_sender
                                 .send(Command::Play {
                                     id: WaveformId::Beats(true),
-                                    waveform: beats_waveform(&args),
+                                    waveform: renderer::beats_waveform(
+                                        args.beats_per_minute,
+                                        args.beats_per_measure,
+                                    ),
                                     start: mark.start + mark.duration,
                                     repeat_every: Some(
-                                        duration_from_beats(&args, args.beats_per_measure as u64)
-                                            * 2,
+                                        renderer::duration_from_beats(
+                                            args.beats_per_minute,
+                                            args.beats_per_measure as u64,
+                                        ) * 2,
                                     ),
                                 })
                                 .unwrap();
@@ -381,7 +316,7 @@ fn process_event<I>(
                     }
                     // Check to see whether or not the current index is in the tracker's
                     // pending waveforms
-                    if is_pending_program(&status, Instant::now(), program_index) {
+                    if renderer::is_pending_program(&status, Instant::now(), program_index) {
                         // If it is, send a command to remove it.
                         command_sender
                             .send(Command::RemovePending {
@@ -415,7 +350,7 @@ fn process_event<I>(
 
                     if keymod.contains(Mod::LGUIMOD)
                         || keymod.contains(Mod::RGUIMOD)
-                            && is_active_program(&status, Instant::now(), program_index)
+                            && renderer::is_active_program(&status, Instant::now(), program_index)
                     {
                         // If the program is active, stop it
                         command_sender
@@ -426,7 +361,7 @@ fn process_event<I>(
                         message = format!("Stopped program {}", program_index);
                     } else if !keymod.contains(Mod::LGUIMOD)
                         && !keymod.contains(Mod::RGUIMOD)
-                        && is_pending_program(&status, Instant::now(), program_index)
+                        && renderer::is_pending_program(&status, Instant::now(), program_index)
                     {
                         // If it is, send a command to remove it.
                         command_sender
@@ -744,10 +679,6 @@ fn next_measure_start(status: &tracker::Status<WaveformId>) -> Instant {
     panic!("No next measure found in marks");
 }
 
-fn duration_from_beats(args: &Args, beats: u64) -> Duration {
-    Duration::from_secs_f32(beats as f32 * 60.0 / args.beats_per_minute as f32)
-}
-
 enum WaveformOrMode {
     Waveform(tracker::Waveform),
     Mode(Mode),
@@ -778,7 +709,10 @@ fn play_waveform(
                     "Looping waveform {} every {:?} beats",
                     program_index, repeat_every_beats
                 );
-                repeat_every = Some(duration_from_beats(args, repeat_every_beats));
+                repeat_every = Some(renderer::duration_from_beats(
+                    args.beats_per_minute,
+                    repeat_every_beats,
+                ));
             } else {
                 // Otherwise, play it once
                 message = format!("Playing waveform {}", program_index);
