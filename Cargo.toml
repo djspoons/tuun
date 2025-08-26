@@ -3,8 +3,13 @@ name = "tuun"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "tuun"
+bench = false
+
 [lib]
 path = "src/lib/mod.rs"
+bench = false
 
 [dependencies]
 chrono = "0.4.41"
