@@ -548,14 +548,19 @@ impl<'a> Generator<'a> {
                 }
             }
             Waveform::Fin { duration, .. } => {
-                // XXX probably need to optimize for the case of Time or Time ~+ Const
-                let out = self.generate(duration, position, max);
-                for (i, &x) in out.iter().enumerate() {
-                    if x >= 0.0 {
-                        return i;
+                match self.greater_or_equals_at(&duration, 0.0, position, max) {
+                    Some(new_position) => new_position,
+                    None => {
+                        println!("Warning: unable to determine length of Fin duration cheaply, generating up to max: {:?}", duration);
+                        let out = self.generate(duration, position, max);
+                        for (i, &x) in out.iter().enumerate() {
+                            if x >= 0.0 {
+                                return i;
+                            }
+                        }
+                        return out.len().min(max);
                     }
                 }
-                return out.len().min(max);
             }
             Waveform::Seq { waveform, .. }
             | Waveform::Sin(waveform)
@@ -586,6 +591,48 @@ impl<'a> Generator<'a> {
             Waveform::Marked { waveform, .. } | Waveform::Captured { waveform, .. } => {
                 self.remaining(waveform, position, max)
             }
+        }
+    }
+
+    // If `waveform` will be greater than or equal to `value` at some point between `position` and `position + max`,
+    // return that position or None if that can't be determined cheaply.
+    fn greater_or_equals_at(
+        &self,
+        waveform: &Waveform<FilterState>,
+        value: f32,
+        position: usize,
+        max: usize,
+    ) -> Option<usize> {
+        use Waveform::{Const, Sum, Time};
+        match waveform {
+            Const(v) if *v == value => Some(0),
+            Time => {
+                let current_value = position as f32 / self.sample_frequency as f32;
+                if current_value >= value {
+                    Some(0)
+                } else {
+                    let target_position = (value * self.sample_frequency as f32).ceil() as usize;
+                    Some(max.min(target_position - position))
+                }
+            }
+            Sum(a, b) => {
+                if self.offset(a) != 0 {
+                    return None;
+                }
+                match (&**a, &**b) {
+                    (Const(va), Const(vb)) => {
+                        if va + vb == value {
+                            Some(0)
+                        } else {
+                            None
+                        }
+                    }
+                    (Const(va), _) => self.greater_or_equals_at(b, value - va, position, max),
+                    (_, Const(vb)) => self.greater_or_equals_at(a, value - vb, position, max),
+                    _ => None,
+                }
+            }
+            _ => None,
         }
     }
 
@@ -1435,6 +1482,27 @@ mod tests {
             &w1,
             vec![0.0, 0.5, 1.25, 2.125, 3.0625, 4.03125, 5.015625, 6.0078125],
         );
+    }
+
+    #[test]
+    fn test_greater_equals_at() {
+        let w1 = Sum(Box::new(Time), Box::new(Const(-5.0)));
+        let w2 = Fin {
+            duration: Box::new(w1.clone()),
+            waveform: Box::new(Time),
+        };
+        let generator = new_test_generator(1);
+        let out = generator.generate(&initialize_state(w2), 0, 10);
+        let position = generator.greater_or_equals_at(&initialize_state(w1), 0.0, 0, 10);
+        assert!(position.is_some());
+        assert_eq!(position.unwrap(), out.len());
+        for (i, x) in out.iter().enumerate() {
+            if i < position.unwrap() {
+                assert_eq!(*x, i as f32);
+            } else if i == position.unwrap() {
+                assert!(*x >= 0.0);
+            }
+        }
     }
 
     // TODO test for forgetting to sort pending waveforms
