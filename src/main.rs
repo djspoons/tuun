@@ -593,6 +593,27 @@ fn process_event<I>(
                                 message: format!("Saved to {}", &filename),
                             },
                         );
+                    } else if text == "D" {
+                        // Dump the current waveform definition to the console
+                        match play_waveform_helper(
+                            &context,
+                            program_index,
+                            programs[program_index - 1].len(),
+                            programs[program_index - 1].as_str(),
+                        ) {
+                            WaveformOrMode::Waveform(waveform) => {
+                                println!("Waveform definition for program {}:", program_index);
+                                println!("{:#?}", waveform);
+                            }
+                            _ => (),
+                        }
+                        return (
+                            context,
+                            Mode::Select {
+                                program_index,
+                                message: format!("Dumped waveform to console"),
+                            },
+                        );
                     } else {
                         return (
                             context,
