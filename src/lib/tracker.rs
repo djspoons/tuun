@@ -12,6 +12,8 @@ use fastrand;
 extern crate sdl2;
 use sdl2::audio::AudioCallback;
 
+//use crate::optimizer;
+
 // TODO move this out of the tracker?
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Slider {
@@ -28,7 +30,7 @@ impl fmt::Display for Slider {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Waveform<State = ()> {
     /*
      * Const produces a stream of samples where each sample is the same constant value.
@@ -59,6 +61,14 @@ pub enum Waveform<State = ()> {
      * Seq sets the offset to the given value (ignoring offset of the underlying waveform).
      */
     Seq {
+        duration: Duration,
+        waveform: Box<Waveform<State>>,
+    },
+    Append(
+        Box<Waveform<State>>,
+        Box<Waveform<State>>,
+    ),
+    Delay {
         duration: Duration,
         waveform: Box<Waveform<State>>,
     },
@@ -132,6 +142,9 @@ impl fmt::Display for Waveform<()> {
             }
             Waveform::Seq { duration, waveform } => {
                 write!(f, "Seq({}, {})", duration.as_secs_f32(), waveform)
+            }
+            Waveform::Delay { duration, waveform } => {
+                write!(f, "Delay({}, {})", duration.as_secs_f32(), waveform)
             }
             Waveform::Sin(waveform) => write!(f, "Sin({})", waveform),
             Waveform::Filter {
@@ -252,6 +265,18 @@ impl<'a> Generator<'a> {
             }
             Waveform::Seq { waveform, .. } => {
                 return self.generate(waveform, position, desired);
+            }
+            Waveform::Delay { duration, waveform } => {
+                let delay_samples = (duration.as_secs_f32() * self.sample_frequency as f32) as usize;
+                if position < delay_samples {
+                    // Still in the delay period
+                    let mut out = vec![0.0; desired.min(delay_samples - position)];
+                    let tmp = self.generate(waveform, 0, desired - out.len());
+                    out.extend(tmp);
+                    return out;
+                } else {
+                    return self.generate(waveform, position - delay_samples, desired);
+                }
             }
             Waveform::Sin(waveform) => {
                 let mut out = self.generate(waveform, position, desired);
@@ -502,6 +527,7 @@ impl<'a> Generator<'a> {
 
             if position < offset {
                 // ... and the right waveform starts after position
+                // TODO If b is const then don't generate, it just apply the op (or nothing if it's 0)
                 let right = self.generate(b, 0, desired - (offset - position));
                 // Merge the overlapping portion
                 for (i, x) in left[offset - position..].iter_mut().enumerate() {
@@ -515,7 +541,8 @@ impl<'a> Generator<'a> {
                     left.extend_from_slice(&right[(left.len() + position - offset)..]);
                 }
             } else {
-                // ... and the right waveform starts before  position
+                // ... and the right waveform starts before position
+                // TODO same here -- If b is const then don't generate, it just apply the op (or nothing if it's 0)
                 let right = self.generate(b, position - offset, desired);
                 // Merge the overlapping portion
                 for (i, x) in left.iter_mut().enumerate() {
@@ -568,6 +595,16 @@ impl<'a> Generator<'a> {
             Waveform::Seq { waveform, .. }
             | Waveform::Sin(waveform)
             | Waveform::Filter { waveform, .. } => self.remaining(waveform, position, max),
+            Waveform::Delay { duration, waveform } => {
+                let delay_samples = (duration.as_secs_f32() * self.sample_frequency as f32) as usize;
+                if position < delay_samples {
+                    let in_delay = (delay_samples - position).min(max);
+                    let after_delay = self.remaining(waveform, 0, max - in_delay);
+                    in_delay + after_delay
+                } else {
+                    self.remaining(waveform, position - delay_samples, max)
+                }
+            }
             Waveform::Sum(a, b) | Waveform::DotProduct(a, b) => {
                 let offset = self.offset(a);
                 let from_b = if position + max < offset {
@@ -648,6 +685,7 @@ impl<'a> Generator<'a> {
             Waveform::Seq { duration, .. } => {
                 (duration.as_secs_f32() * self.sample_frequency as f32) as usize
             }
+            Waveform::Delay { waveform, .. } => self.offset(waveform),
             Waveform::Sin(waveform) => self.offset(waveform),
             Waveform::Filter { waveform, .. } => self.offset(waveform),
             Waveform::Sum(a, b) | Waveform::DotProduct(a, b) => self.offset(a) + self.offset(b),
@@ -735,7 +773,7 @@ struct PendingWaveform<I> {
 
 pub fn initialize_state(waveform: Waveform) -> Waveform<FilterState> {
     use Waveform::{
-        Alt, Captured, Const, DotProduct, Filter, Fin, Fixed, Marked, Noise, Res, Seq, Sin, Slider,
+        Alt, Captured, Const, Delay, DotProduct, Filter, Fin, Fixed, Marked, Noise, Res, Seq, Sin, Slider,
         Sum, Time,
     };
     match waveform {
@@ -748,6 +786,10 @@ pub fn initialize_state(waveform: Waveform) -> Waveform<FilterState> {
             waveform: Box::new(initialize_state(*waveform)),
         },
         Seq { duration, waveform } => Seq {
+            duration,
+            waveform: Box::new(initialize_state(*waveform)),
+        },
+        Delay { duration, waveform } => Delay {
             duration,
             waveform: Box::new(initialize_state(*waveform)),
         },
@@ -853,7 +895,7 @@ where
         out: &mut Vec<Mark<I>>,
     ) {
         use Waveform::{
-            Alt, Captured, Const, DotProduct, Filter, Fin, Fixed, Marked, Noise, Res, Seq, Sin,
+            Alt, Captured, Const, Delay, DotProduct, Filter, Fin, Fixed, Marked, Noise, Res, Seq, Sin,
             Slider, Sum, Time,
         };
         match waveform {
@@ -871,6 +913,10 @@ where
                 trigger: waveform, ..
             }
             | Captured { waveform, .. } => {
+                self.process_marked(waveform_id, start, &*waveform, out);
+            }
+            Delay { duration, waveform } => {
+                let start = start + *duration;
                 self.process_marked(waveform_id, start, &*waveform, out);
             }
             Sum(a, b) | DotProduct(a, b) => {
@@ -903,7 +949,7 @@ where
         out: &mut HashMap<String, hound::WavWriter<BufWriter<std::fs::File>>>,
     ) {
         use Waveform::{
-            Alt, Captured, Const, DotProduct, Filter, Fin, Fixed, Marked, Noise, Res, Seq, Sin,
+            Alt, Captured, Const, Delay, DotProduct, Filter, Fin, Fixed, Marked, Noise, Res, Seq, Sin,
             Slider, Sum, Time,
         };
         match waveform {
@@ -912,6 +958,7 @@ where
             }
             Fin { waveform, .. }
             | Seq { waveform, .. }
+            | Delay { waveform, .. }
             | Sin(waveform)
             | Filter { waveform, .. }
             | Res {
@@ -1511,6 +1558,5 @@ mod tests {
             }
         }
     }
-
     // TODO test for forgetting to sort pending waveforms
 }
