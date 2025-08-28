@@ -18,10 +18,10 @@ linear = fn(initial, slope) => initial ~+ (time ~. slope),
 
 // ENVELOPES
 // Create waveforms for the four parts of the envelope.
-Aw = fn(dur) => linear(0.0, 1.0 / dur) | fin(time ~+ -dur) | seq(dur),
-Dw = fn(dur, level) => linear(1.0, (level - 1.0) / dur) | fin(time ~+ -dur) | seq(dur),
-Sw = fn(dur, level) => level | fin(time ~+ -dur) | seq(dur),
-Rw = fn(dur, level) => linear(level, -level / dur) | fin(time ~+ -dur) | seq(dur),
+Aw = fn(dur) => linear(0.0, 1.0 / dur) | fin(time ~+ -dur) | seq(time ~+ -dur),
+Dw = fn(dur, level) => linear(1.0, (level - 1.0) / dur) | fin(time ~+ -dur) | seq(time ~+ -dur),
+Sw = fn(dur, level) => level | fin(time ~+ -dur) | seq(time ~+ -dur),
+Rw = fn(dur, level) => linear(level, -level / dur) | fin(time ~+ -dur) | seq(time ~+ -dur),
 // Combine them to create a new filter.
 ADSR = fn(attack_dur, decay_dur, sustain_level, sustain_dur, release_dur) =>
   fn(w) => (w | seq(0)) ~. <[Aw(attack_dur),
@@ -49,7 +49,7 @@ harmonica = fn(dur, freq) =>
       d = 0.33,
       r = 0.33,
       s = dur - (a + d + r) in
-  hrm(freq) | ADSR(a, d, 0.5, s, r) | seq(dur),
+  hrm(freq) | ADSR(a, d, 0.5, s, r) | seq(time ~+ -dur),
 
 // Convert from MIDI note numbers to frequency
 @ = fn(m) => pow(2, (m - 69) / 12) * 440,
@@ -65,16 +65,16 @@ Q = W / 4,
 E = W / 8,
 
 // Notes as waveforms: use with ~.
-Ww = 1 | fin(time ~+ -W) | seq(W),
-Hw = 1 | fin(time ~+ -H) | seq(H),
-Qw = 1 | fin(time ~+ -Q) | seq(Q),
-Ew = 1 | fin(time ~+ -E) | seq(E),
+Ww = 1 | fin(time ~+ -W) | seq(time ~+ -W),
+Hw = 1 | fin(time ~+ -H) | seq(time ~+ -H),
+Qw = 1 | fin(time ~+ -Q) | seq(time ~+ -Q),
+Ew = 1 | fin(time ~+ -E) | seq(time ~+ -E),
 
 // Rests as waveforms: use with <> or ~+
-Wrw = 0 | fin(0) | seq(W),
-Hrw = 0 | fin(0) | seq(H),
-Qrw = 0 | fin(0) | seq(Q),
-Erw = 0 | fin(0) | seq(E),
+Wrw = 0 | fin(0) | seq(time ~+ -W),
+Hrw = 0 | fin(0) | seq(time ~+ -H),
+Qrw = 0 | fin(0) | seq(time ~+ -Q),
+Erw = 0 | fin(0) | seq(time ~+ -E),
 
 
 // These take the root as a MIDI note number
@@ -82,11 +82,11 @@ major_triad = fn(root) => fn(fw) => [fw(@root), fw(@(root + 4)), fw(@(root + 7))
 // major_triad = fn(root, dur, inst) => [inst(dur, @root), inst(dur, @(root + 4)), inst(dur, @(root + 7))],
 minor_triad = fn(root) => fn(fw) => [fw(@root), fw(@(root + 3)), fw(@(root + 7))],
 // These get a little distorted... may need to scale a bit
-I = fn(key) => fn(inst) => fn(dur) => {major_triad(key)(fn(freq) => inst(dur, freq))} | seq(dur),
-// I = fn(key) => fn(inst) => fn(dur) => {major_triad(key, dur, inst)} | seq(dur),
-II = fn(key) => fn(inst) => fn(dur) => {major_triad(key + 2)(fn(freq) => inst(dur, freq))} | seq(dur),
-III = fn(key) => fn(inst) => fn(dur) => {major_triad(key + 4)(fn(freq) => inst(dur, freq))} | seq(dur),
-i = fn(key) => fn(inst) => fn(dur) => {minor_triad(key)(fn(freq) => inst(dur, freq))} | seq(dur),
+I = fn(key) => fn(inst) => fn(dur) => {major_triad(key)(fn(freq) => inst(dur, freq))} | seq(time ~+ -dur),
+// I = fn(key) => fn(inst) => fn(dur) => {major_triad(key, dur, inst)} | seq(time ~+ -dur),
+II = fn(key) => fn(inst) => fn(dur) => {major_triad(key + 2)(fn(freq) => inst(dur, freq))} | seq(time ~+ -dur),
+III = fn(key) => fn(inst) => fn(dur) => {major_triad(key + 4)(fn(freq) => inst(dur, freq))} | seq(time ~+ -dur),
+i = fn(key) => fn(inst) => fn(dur) => {minor_triad(key)(fn(freq) => inst(dur, freq))} | seq(time ~+ -dur),
 
 // In the key of C
 I = I(60),
@@ -101,7 +101,7 @@ III = III(harmonica),
 i = i(harmonica),
 
 // Just notes on harmonica
-Hh = fn(freq) => harmonica(H, freq) | seq(H),
+Hh = fn(freq) => harmonica(H, freq) | seq(time ~+ -H),
 
 // <[I H, III H, i H]>
 // <[Hh(@67), Hh(@69)]>
@@ -112,6 +112,6 @@ on_beats = fn(w, bs) => let
   f = fn((offset, prev, ws), play_at_beat) =>
       if offset == play_at_beat
       then (play_at_beat, w, append(ws, [prev | seq(0)]))
-      else (play_at_beat, w, append(ws, [prev | seq(duration_from_beats(play_at_beat - offset))])),
+      else (play_at_beat, w, append(ws, [prev | seq(time ~+ -(duration_from_beats(play_at_beat - offset)))])),
   (offset, prev, ws) = reduce(f, (1, 0 | fin(0), []), bs),
   in <append(ws, [prev])>,

@@ -1,5 +1,4 @@
 use std::rc::Rc;
-use std::time::Duration;
 
 use crate::parser::{BuiltInFn, Expr, simplify};
 use crate::tracker::{Slider, Waveform};
@@ -193,23 +192,34 @@ pub fn fin(mut arguments: Vec<Expr>) -> Expr {
     }
 }
 
-pub fn seq(arguments: Vec<Expr>) -> Expr {
-    match &arguments[..] {
-        [Float(duration)] => {
-            let duration = duration.clone();
+pub fn seq(mut arguments: Vec<Expr>) -> Expr {
+    if arguments.len() != 1 {
+        return Expr::Error(format!("Expected one argument for fin{}", arguments.len()));
+    }
+    let arg = arguments.remove(0);
+    match arg {
+        // Note that we are treating floats here as a const waveform, not a duration
+        Expr::Float(f) => {
+            let w = Waveform::Const(f);
             BuiltIn {
-                name: format!("seq({})", duration),
+                name: format!("seq({})", w),
                 function: curry(move |waveform: Box<Waveform>| Waveform::Seq {
-                    duration: Duration::from_secs_f32(duration),
+                    duration: Box::new(w.clone()),
                     waveform,
                 }),
             }
         }
-        [expr] => Expr::Error(format!("Invalid argument for seq: {}", expr)),
-        _ => Expr::Error(format!(
-            "Invalid number of arguments for seq: {}",
-            arguments.len()
-        )),
+        Expr::Waveform(duration) => {
+            let duration = duration;
+            BuiltIn {
+                name: format!("seq({})", duration),
+                function: curry(move |waveform: Box<Waveform>| Waveform::Seq {
+                    duration: Box::new(duration.clone()),
+                    waveform,
+                }),
+            }
+        }
+        _ => Expr::Error("Invalid arguments for seq".to_string()),
     }
 }
 
@@ -375,7 +385,7 @@ pub fn chord(arguments: Vec<Expr>) -> Expr {
                 };
                 result = Waveform::Sum(
                     Box::new(Waveform::Seq {
-                        duration: Duration::ZERO,
+                        duration: Box::new(Waveform::Const(0.0)),
                         waveform,
                     }),
                     Box::new(result),
