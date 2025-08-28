@@ -62,5 +62,63 @@ fn bench_marks(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_filter, bench_marks);
+fn bench_large(c: &mut Criterion) {
+    let mut context = Vec::new();
+    builtins::add_prelude(&mut context);
+    match parser::parse_context(
+        r#"
+    pi = 3.14159265,
+    $ = fn(freq) => sin((2 * pi) ~. freq ~. time),
+    triangle = fn(freq) => let t = $freq, slope = 4*freq, a = time ~. slope ~+ -1, b = time ~. -slope ~+ 3 in alt(t, res(t, a), res(t, b)),
+    linear = fn(initial, slope) => initial ~+ (time ~. slope),
+    Rw = fn(dur, level) => linear(level, -level / dur) | fin(time ~+ -dur) | seq(dur),
+    R = fn(dur, level) => fn(w) => w ~. Rw(dur, level),"#,
+    ) {
+        Ok(bindings) => {
+            for (pattern, expr) in bindings {
+                //println!("Parsed binding: {:?} = {:}", &pattern, &expr);
+                match parser::simplify(&context, expr) {
+                    Ok(expr) => {
+                        //println!("Simplified to: {:}", &expr);
+                        match parser::extend_context(&mut context, &pattern, &expr) {
+                            Ok(()) => {}
+                            Err(e) => panic!("Failed to extend context: {:?}", e),
+                        }
+                    }
+                    Err(e) => panic!("Simplify failed: {:?}", e),
+                }
+            }
+        }
+        Err(e) => panic!("Failed to parse context: {:?}", e),
+    }
+
+    let program = "triangle(55) ~+ (noise ~. 0.2) | R(1.0, 1.0) | seq(1) | mark(2)";
+    match parser::parse_program(program) {
+        Ok(expr) => {
+            println!("Parser returned: {:}", &expr);
+            match parser::simplify(&context, expr) {
+                Ok(expr) => {
+                    println!("Simplify returned: {:}", &expr);
+                    if let parser::Expr::Waveform(waveform) = expr {
+                        let generator = tracker::Generator::new(44100);
+                        let w = tracker::initialize_state(waveform);
+                        c.bench_function("large_440", |b| {
+                            b.iter(|| {
+                                for i in 0..43 {
+                                    generator.generate(&w, black_box(i * 1024), 1024);
+                                }
+                            });
+                        });
+                    } else {
+                        panic!("Expected waveform");
+                    }
+                }
+                Err(e) => panic!("Simplify failed: {:?}", e),
+            }
+        }
+        _ => panic!("Parse failed"),
+    }
+}
+
+criterion_group!(benches, bench_filter, bench_marks, bench_large);
 criterion_main!(benches);
