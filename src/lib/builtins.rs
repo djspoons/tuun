@@ -173,17 +173,17 @@ pub fn fin(mut arguments: Vec<Expr>) -> Expr {
             BuiltIn {
                 name: format!("fin({})", w),
                 function: curry(move |waveform: Box<Waveform>| Waveform::Fin {
-                    duration: Box::new(w.clone()),
+                    length: Box::new(w.clone()),
                     waveform,
                 }),
             }
         }
-        Expr::Waveform(duration) => {
-            let duration = duration;
+        Expr::Waveform(length) => {
+            let length = length;
             BuiltIn {
-                name: format!("fin({})", duration),
+                name: format!("fin({})", length),
                 function: curry(move |waveform: Box<Waveform>| Waveform::Fin {
-                    duration: Box::new(duration.clone()),
+                    length: Box::new(length.clone()),
                     waveform,
                 }),
             }
@@ -204,17 +204,17 @@ pub fn seq(mut arguments: Vec<Expr>) -> Expr {
             BuiltIn {
                 name: format!("seq({})", w),
                 function: curry(move |waveform: Box<Waveform>| Waveform::Seq {
-                    duration: Box::new(w.clone()),
+                    offset: Box::new(w.clone()),
                     waveform,
                 }),
             }
         }
-        Expr::Waveform(duration) => {
-            let duration = duration;
+        Expr::Waveform(offset) => {
+            let offset = offset;
             BuiltIn {
-                name: format!("seq({})", duration),
+                name: format!("seq({})", offset),
                 function: curry(move |waveform: Box<Waveform>| Waveform::Seq {
-                    duration: Box::new(duration.clone()),
+                    offset: Box::new(offset.clone()),
                     waveform,
                 }),
             }
@@ -374,7 +374,7 @@ pub fn chord(arguments: Vec<Expr>) -> Expr {
     match &arguments[..] {
         [List(exprs)] => {
             let mut result = Waveform::Fin {
-                duration: Box::new(Waveform::Const(0.0)),
+                length: Box::new(Waveform::Const(0.0)),
                 waveform: Box::new(Waveform::Const(0.0)),
             };
             for expr in exprs.iter().rev() {
@@ -385,7 +385,7 @@ pub fn chord(arguments: Vec<Expr>) -> Expr {
                 };
                 result = Waveform::Sum(
                     Box::new(Waveform::Seq {
-                        duration: Box::new(Waveform::Const(0.0)),
+                        offset: Box::new(Waveform::Const(0.0)),
                         waveform,
                     }),
                     Box::new(result),
@@ -401,7 +401,7 @@ pub fn sequence(arguments: Vec<Expr>) -> Expr {
     match &arguments[..] {
         [List(exprs)] => {
             let mut result = Waveform::Fin {
-                duration: Box::new(Waveform::Const(0.0)),
+                length: Box::new(Waveform::Const(0.0)),
                 waveform: Box::new(Waveform::Const(0.0)),
             };
             for expr in exprs.iter().rev() {

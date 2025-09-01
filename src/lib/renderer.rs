@@ -687,12 +687,12 @@ pub fn beats_waveform(beats_per_minute: u32, beats_per_measure: u32) -> tracker:
             id: i + 1,
             waveform: Box::new(tracker::Waveform::Fin {
                 // TODO don't really need to such a long length here... could be just Fixed
-                duration: Box::new(tracker::Waveform::Sum(
+                length: Box::new(tracker::Waveform::Sum(
                     Box::new(tracker::Waveform::Time),
                     Box::new(tracker::Waveform::Const(-seconds_per_beat.as_secs_f32())),
                 )),
                 waveform: Box::new(tracker::Waveform::Seq {
-                    duration: Box::new(tracker::Waveform::Sum(
+                    offset: Box::new(tracker::Waveform::Sum(
                         Box::new(tracker::Waveform::Time),
                         Box::new(tracker::Waveform::Const(-seconds_per_beat.as_secs_f32())),
                     )),

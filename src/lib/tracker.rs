@@ -28,7 +28,7 @@ impl fmt::Display for Slider {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Waveform<State = ()> {
     /*
      * Const produces a stream of samples where each sample is the same constant value.
@@ -47,23 +47,28 @@ pub enum Waveform<State = ()> {
      */
     Fixed(Vec<f32>),
     /*
-     * Fin generates a finite waveform, truncating the underlying waveform. The duration is determined
-     * by the first point at which the `duration` waveform is >= 0.0. For example, `Fin(Const(0.0), _)`
+     * Fin generates a finite waveform, truncating the underlying waveform. The length is determined
+     * by the first point at which the `length` waveform is >= 0.0. For example, `Fin(Const(0.0), _)`
      * is 0 seconds in length and `Fin(Sum(Time, Const(-2.0)), _)` is 2 seconds in length.
      */
     Fin {
-        duration: Box<Waveform<State>>,
+        length: Box<Waveform<State>>,
         waveform: Box<Waveform<State>>,
     },
     /*
-     * Seq sets the offset according to the given waveform. The duration is determined by the first point
-     * at which the `duration` waveform is >= 0.0. For example, `Seq(Const(0.0), _)` is has an offset 0
-     * seconds and `Seq(Sum(Time, Const(-2.0)))` has an offset of 2 seconds.
+     * Seq sets the offset of `waveform`. The offset is determined by the first point at which the `offset` waveform
+     * is >= 0.0. For example, `Seq(Const(0.0), _)` is has an offset 0 seconds and `Seq(Sum(Time, Const(-2.0)))` has
+     * an offset of 2 seconds.
      */
     Seq {
-        duration: Box<Waveform<State>>,
+        offset: Box<Waveform<State>>,
         waveform: Box<Waveform<State>>,
     },
+    /*
+     * Append concatenates two waveforms, generating all samples from the first waveform and
+     * then all samples from the second (regardless of the offset of the first).
+     */
+    Append(Box<Waveform<State>>, Box<Waveform<State>>),
     /*
      * Sin computes the sine of each sample in the given waveform.
      */
@@ -124,30 +129,32 @@ pub enum Waveform<State = ()> {
 
 impl fmt::Display for Waveform<()> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use Waveform::*;
         match self {
-            Waveform::Const(value) => write!(f, "Const({})", value),
-            Waveform::Time => write!(f, "Time"),
-            Waveform::Noise => write!(f, "Noise"),
-            Waveform::Fixed(samples) => write!(f, "Fixed({:?})", samples),
-            Waveform::Fin { duration, waveform } => {
-                write!(f, "Fin({}, {})", duration, waveform)
+            Const(value) => write!(f, "Const({})", value),
+            Time => write!(f, "Time"),
+            Noise => write!(f, "Noise"),
+            Fixed(samples) => write!(f, "Fixed({:?})", samples),
+            Fin { length, waveform } => {
+                write!(f, "Fin({}, {})", length, waveform)
             }
-            Waveform::Seq { duration, waveform } => {
-                write!(f, "Seq({}, {})", duration, waveform)
+            Seq { offset, waveform } => {
+                write!(f, "Seq({}, {})", offset, waveform)
             }
-            Waveform::Sin(waveform) => write!(f, "Sin({})", waveform),
-            Waveform::Filter {
+            Append(a, b) => write!(f, "Append({}, {})", a, b),
+            Sin(waveform) => write!(f, "Sin({})", waveform),
+            Filter {
                 waveform,
                 feed_forward,
                 feedback,
                 ..
             } => write!(f, "Filter({}, {}, {})", waveform, feed_forward, feedback),
-            Waveform::Sum(a, b) => write!(f, "Sum({}, {})", a, b),
-            Waveform::DotProduct(a, b) => write!(f, "DotProduct({}, {})", a, b),
-            Waveform::Res { trigger, waveform } => {
+            Sum(a, b) => write!(f, "Sum({}, {})", a, b),
+            DotProduct(a, b) => write!(f, "DotProduct({}, {})", a, b),
+            Res { trigger, waveform } => {
                 write!(f, "Res({}, {})", trigger, waveform)
             }
-            Waveform::Alt {
+            Alt {
                 trigger,
                 positive_waveform,
                 negative_waveform,
@@ -156,11 +163,11 @@ impl fmt::Display for Waveform<()> {
                 "Alt({}, {}, {})",
                 trigger, positive_waveform, negative_waveform
             ),
-            Waveform::Slider(slider) => write!(f, "Slider({})", slider),
-            Waveform::Marked { id, waveform } => {
+            Slider(slider) => write!(f, "Slider({})", slider),
+            Marked { id, waveform } => {
                 write!(f, "Marked({}, {})", id, waveform)
             }
-            Waveform::Captured {
+            Captured {
                 file_stem,
                 waveform,
             } => {
@@ -224,45 +231,61 @@ impl<'a> Generator<'a> {
         position: usize,
         desired: usize,
     ) -> Vec<f32> {
+        use Waveform::*;
         match waveform {
-            &Waveform::Const(value) => {
+            &Const(value) => {
                 return vec![value; desired];
             }
-            Waveform::Time => {
+            Time => {
                 let mut out = vec![0.0; desired];
                 for (i, x) in out.iter_mut().enumerate() {
                     *x = (i + position) as f32 / self.sample_frequency as f32;
                 }
                 return out;
             }
-            Waveform::Noise => {
+            Noise => {
                 let mut out = vec![0.0; desired];
                 for x in out.iter_mut() {
                     *x = fastrand::f32() * 2.0 - 1.0;
                 }
                 return out;
             }
-            Waveform::Fixed(samples) => {
+            Fixed(samples) => {
                 return samples.clone();
             }
-            Waveform::Fin {
+            Fin {
                 waveform: inner_waveform,
                 ..
             } => {
                 let remaining = self.remaining(waveform, position, desired);
                 return self.generate(inner_waveform, position, remaining);
             }
-            Waveform::Seq { waveform, .. } => {
+            Seq { waveform, .. } => {
                 return self.generate(waveform, position, desired);
             }
-            Waveform::Sin(waveform) => {
+            Append(a, b) => {
+                let remaining = self.remaining(a, position, desired);
+                if remaining >= desired {
+                    return self.generate(a, position, desired);
+                } else if remaining > 0 {
+                    let mut out = self.generate(a, position, remaining);
+                    out.extend(self.generate(b, 0, desired - out.len()));
+                    return out;
+                } else {
+                    // remaining == 0
+                    // Need to figure out how far into b we are
+                    let remaining = self.remaining(a, 0, desired + position);
+                    return self.generate(b, position - remaining, desired);
+                }
+            }
+            Sin(waveform) => {
                 let mut out = self.generate(waveform, position, desired);
                 for f in out.iter_mut() {
                     *f = (*f).sin();
                 }
                 return out;
             }
-            Waveform::Filter {
+            Filter {
                 waveform,
                 feed_forward,
                 feedback,
@@ -319,16 +342,16 @@ impl<'a> Generator<'a> {
                 previous_outs.insert(position + out.len(), new_previous_out);
                 return out;
             }
-            Waveform::Sum(a, b) => {
+            Sum(a, b) => {
                 return self.generate_binary_op(|x, y| x + y, a, b, position, desired);
             }
-            Waveform::DotProduct(a, b) => {
+            DotProduct(a, b) => {
                 // Like sum, but we need to make sure we generate a length based on
                 // the shorter waveform.
                 let remaining = self.remaining(waveform, position, desired);
                 return self.generate_binary_op(|x, y| x * y, a, b, position, remaining);
             }
-            Waveform::Res { trigger, waveform } => {
+            Res { trigger, waveform } => {
                 // TODO think about all of these unwrap_ors
                 // TODO generate the trigger in blocks?
                 // Maybe cache the last trigger position and signum and use it if position doesn't change?
@@ -382,7 +405,7 @@ impl<'a> Generator<'a> {
                 }
                 return out;
             }
-            Waveform::Alt {
+            Alt {
                 trigger,
                 positive_waveform,
                 negative_waveform,
@@ -401,7 +424,7 @@ impl<'a> Generator<'a> {
                 }
                 return out;
             }
-            Waveform::Slider(slider) => {
+            Slider(slider) => {
                 if self.slider_state.is_none() {
                     println!("Warning: Slider waveform used, but no slider state set");
                     return vec![0.0; desired];
@@ -438,10 +461,10 @@ impl<'a> Generator<'a> {
                 */
                 return out;
             }
-            Waveform::Marked { waveform, .. } => {
+            Marked { waveform, .. } => {
                 return self.generate(waveform, position, desired);
             }
-            Waveform::Captured {
+            Captured {
                 file_stem,
                 waveform,
             } => {
@@ -504,6 +527,7 @@ impl<'a> Generator<'a> {
 
             if position < offset {
                 // ... and the right waveform starts after position
+                // TODO If b is const then don't generate, it just apply the op (or nothing if it's 0)
                 let right = self.generate(b, 0, desired - (offset - position));
                 // Merge the overlapping portion
                 for (i, x) in left[offset - position..].iter_mut().enumerate() {
@@ -517,7 +541,8 @@ impl<'a> Generator<'a> {
                     left.extend_from_slice(&right[(left.len() + position - offset)..]);
                 }
             } else {
-                // ... and the right waveform starts before  position
+                // ... and the right waveform starts before position
+                // TODO same here -- If b is const then don't generate, it just apply the op (or nothing if it's 0)
                 let right = self.generate(b, position - offset, desired);
                 // Merge the overlapping portion
                 for (i, x) in left.iter_mut().enumerate() {
@@ -538,39 +563,50 @@ impl<'a> Generator<'a> {
     // Returns the number of samples that `waveform` will generate starting from `position` or `max`, whichever is
     // smaller. When `position` is zero, this is the length of the waveform (or, again, `max`).
     fn remaining(&self, waveform: &Waveform<FilterState>, position: usize, max: usize) -> usize {
+        use Waveform::*;
         match waveform {
-            Waveform::Const { .. } => max,
-            Waveform::Time => max,
-            Waveform::Noise => max,
-            Waveform::Fixed(samples) => {
+            Const { .. } => max,
+            Time => max,
+            Noise => max,
+            Fixed(samples) => {
                 if position >= samples.len() {
                     0
                 } else {
                     (samples.len() - position).min(max)
                 }
             }
-            Waveform::Fin { duration, .. } => {
-                match self.greater_or_equals_at(&duration, 0.0, position, max) {
-                    Some(new_position) => new_position,
-                    None => {
-                        println!(
-                            "Warning: unable to determine length of Fin duration cheaply, generating up to max: {:?}",
-                            duration
-                        );
-                        let out = self.generate(duration, position, max);
-                        for (i, &x) in out.iter().enumerate() {
-                            if x >= 0.0 {
-                                return i;
-                            }
+            Fin { length, .. } => match self.greater_or_equals_at(&length, 0.0, position, max) {
+                Some(new_position) => new_position,
+                None => {
+                    println!(
+                        "Warning: unable to determine length of Fin length cheaply, generating up to max: {:?}",
+                        length
+                    );
+                    let out = self.generate(length, position, max);
+                    for (i, &x) in out.iter().enumerate() {
+                        if x >= 0.0 {
+                            return i;
                         }
-                        return out.len().min(max);
                     }
+                    return out.len().min(max);
+                }
+            },
+            Seq { waveform, .. } | Sin(waveform) | Filter { waveform, .. } => {
+                self.remaining(waveform, position, max)
+            }
+            Append(a, b) => {
+                let a_remaining = self.remaining(a, position, max);
+                if a_remaining == max {
+                    a_remaining
+                } else if a_remaining > 0 {
+                    a_remaining + self.remaining(b, 0, max - a_remaining)
+                } else {
+                    // a_remaining == 0
+                    let a_length = self.remaining(a, 0, position + max);
+                    self.remaining(b, position - a_length, max)
                 }
             }
-            Waveform::Seq { waveform, .. }
-            | Waveform::Sin(waveform)
-            | Waveform::Filter { waveform, .. } => self.remaining(waveform, position, max),
-            Waveform::Sum(a, b) | Waveform::DotProduct(a, b) => {
+            Sum(a, b) | DotProduct(a, b) => {
                 let offset = self.offset(a, 0, position + max);
                 let from_b = if position + max < offset {
                     max
@@ -584,16 +620,14 @@ impl<'a> Generator<'a> {
                 };
                 let from_a = self.remaining(a, position, max);
                 match waveform {
-                    Waveform::Sum(_, _) => from_a.max(from_b),
-                    Waveform::DotProduct(_, _) => from_a.min(from_b),
+                    Sum(_, _) => from_a.max(from_b),
+                    DotProduct(_, _) => from_a.min(from_b),
                     _ => unreachable!(),
                 }
             }
-            Waveform::Res { trigger, .. } | Waveform::Alt { trigger, .. } => {
-                self.remaining(trigger, position, max)
-            }
-            Waveform::Slider { .. } => max,
-            Waveform::Marked { waveform, .. } | Waveform::Captured { waveform, .. } => {
+            Res { trigger, .. } | Alt { trigger, .. } => self.remaining(trigger, position, max),
+            Slider { .. } => max,
+            Marked { waveform, .. } | Captured { waveform, .. } => {
                 self.remaining(waveform, position, max)
             }
         }
@@ -608,7 +642,7 @@ impl<'a> Generator<'a> {
         position: usize,
         max: usize,
     ) -> Option<usize> {
-        use Waveform::{Const, Sum, Time};
+        use Waveform::{Append, Const, Sum, Time};
         match waveform {
             Const(v) if *v == value => Some(0),
             Time => {
@@ -618,6 +652,26 @@ impl<'a> Generator<'a> {
                 } else {
                     let target_position = (value * self.sample_frequency as f32).ceil() as usize;
                     Some(max.min(target_position - position))
+                }
+            }
+            Append(a, b) => {
+                if self.offset(a, position, max) != 0 {
+                    return None;
+                }
+                match self.greater_or_equals_at(a, value, position, max) {
+                    Some(new_position) => Some(new_position),
+                    None => {
+                        let a_remaining = self.remaining(a, position, max);
+                        if a_remaining > 0 {
+                            // We didn't reach the end of a
+                            None
+                        } else {
+                            // a_remaining == 0
+                            // Find how far we are into b
+                            let a_length = self.remaining(a, 0, position + max);
+                            self.greater_or_equals_at(b, value, position - a_length, max - a_length)
+                        }
+                    }
                 }
             }
             Sum(a, b) => {
@@ -647,15 +701,15 @@ impl<'a> Generator<'a> {
         match waveform {
             Waveform::Const { .. } | Waveform::Time | Waveform::Noise | Waveform::Fixed(_) => 0,
             Waveform::Fin { waveform, .. } => self.offset(waveform, position, max),
-            Waveform::Seq { duration, .. } => {
-                match self.greater_or_equals_at(&duration, 0.0, position, max) {
+            Waveform::Seq { offset, .. } => {
+                match self.greater_or_equals_at(&offset, 0.0, position, max) {
                     Some(new_position) => new_position,
                     None => {
                         println!(
-                            "Warning: unable to determine offset of Seq duration cheaply, generating up to max: {:?}",
-                            duration
+                            "Warning: unable to determine offset of Seq offset cheaply, generating up to max: {:?}",
+                            offset
                         );
-                        let out = self.generate(duration, position, max);
+                        let out = self.generate(offset, position, max);
                         for (i, &x) in out.iter().enumerate() {
                             if x >= 0.0 {
                                 return i;
@@ -664,6 +718,10 @@ impl<'a> Generator<'a> {
                         return out.len().min(max);
                     }
                 }
+            }
+            Waveform::Append(a, b) => {
+                // XXX this is totally not right
+                self.offset(a, position, max) + self.offset(b, 0, max)
             }
             Waveform::Sin(waveform) => self.offset(waveform, position, max),
             Waveform::Filter { waveform, .. } => self.offset(waveform, position, max),
@@ -760,23 +818,24 @@ struct PendingWaveform<I> {
 }
 
 pub fn initialize_state(waveform: Waveform) -> Waveform<FilterState> {
-    use Waveform::{
-        Alt, Captured, Const, DotProduct, Filter, Fin, Fixed, Marked, Noise, Res, Seq, Sin, Slider,
-        Sum, Time,
-    };
+    use Waveform::*;
     match waveform {
         Const(value) => Const(value),
         Time => Time,
         Noise => Noise,
         Fixed(samples) => Fixed(samples),
-        Fin { duration, waveform } => Fin {
-            duration: Box::new(initialize_state(*duration)),
+        Fin { length, waveform } => Fin {
+            length: Box::new(initialize_state(*length)),
             waveform: Box::new(initialize_state(*waveform)),
         },
-        Seq { duration, waveform } => Seq {
-            duration: Box::new(initialize_state(*duration)),
+        Seq { offset, waveform } => Seq {
+            offset: Box::new(initialize_state(*offset)),
             waveform: Box::new(initialize_state(*waveform)),
         },
+        Append(a, b) => Append(
+            Box::new(initialize_state(*a)),
+            Box::new(initialize_state(*b)),
+        ),
         Sin(waveform) => Sin(Box::new(initialize_state(*waveform))),
         // For Filter, we need to set the state to an empty FilterState
         Filter {
@@ -878,10 +937,7 @@ where
         waveform: &Waveform<FilterState>,
         out: &mut Vec<Mark<I>>,
     ) {
-        use Waveform::{
-            Alt, Captured, Const, DotProduct, Filter, Fin, Fixed, Marked, Noise, Res, Seq, Sin,
-            Slider, Sum, Time,
-        };
+        use Waveform::*;
         match waveform {
             Const(_) | Time | Noise | Fixed(_) | Slider { .. } => {
                 return;
@@ -898,6 +954,17 @@ where
             }
             | Captured { waveform, .. } => {
                 self.process_marked(waveform_id, start, &*waveform, out);
+            }
+            Append(a, b) => {
+                self.process_marked(waveform_id, start, &*a, out);
+                let remaining = Generator::new(self.sample_frequency).remaining(
+                    &*a,
+                    0,
+                    10 * self.sample_frequency as usize, // XXX
+                );
+                let start = start
+                    + Duration::from_secs_f32(remaining as f32 / self.sample_frequency as f32);
+                self.process_marked(waveform_id, start, &*b, out);
             }
             Sum(a, b) | DotProduct(a, b) => {
                 self.process_marked(waveform_id, start, &*a, out);
@@ -932,10 +999,7 @@ where
         waveform: &Waveform,
         out: &mut HashMap<String, hound::WavWriter<BufWriter<std::fs::File>>>,
     ) {
-        use Waveform::{
-            Alt, Captured, Const, DotProduct, Filter, Fin, Fixed, Marked, Noise, Res, Seq, Sin,
-            Slider, Sum, Time,
-        };
+        use Waveform::*;
         match waveform {
             Const(_) | Time | Noise | Fixed(_) | Slider { .. } => {
                 return;
@@ -953,7 +1017,7 @@ where
             | Marked { waveform, .. } => {
                 self.process_captured(&*waveform, out);
             }
-            Sum(a, b) | DotProduct(a, b) => {
+            Append(a, b) | Sum(a, b) | DotProduct(a, b) => {
                 self.process_captured(&*a, out);
                 self.process_captured(&*b, out);
             }
@@ -1265,6 +1329,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::optimizer;
     use Waveform::{Const, DotProduct, Filter, Fin, Res, Seq, Sin, Sum, Time};
 
     const MAX_LENGTH: usize = 1000;
@@ -1275,25 +1340,44 @@ mod tests {
 
     fn finite_const_waveform(value: f32, fin_duration: u64, seq_duration: u64) -> Waveform {
         return Seq {
-            duration: Box::new(Sum(Box::new(Time), Box::new(Const(-(seq_duration as f32))))),
+            offset: Box::new(Sum(Box::new(Time), Box::new(Const(-(seq_duration as f32))))),
             waveform: Box::new(Fin {
-                duration: Box::new(Sum(Box::new(Time), Box::new(Const(-(fin_duration as f32))))),
+                length: Box::new(Sum(Box::new(Time), Box::new(Const(-(fin_duration as f32))))),
                 waveform: Box::new(Const(value)),
             }),
         };
     }
 
     fn run_tests(waveform: &Waveform, desired: Vec<f32>) {
-        for size in [4, 8] {
+        for size in [1, 2, 4, 8] {
             let generator = new_test_generator(1);
             let w = initialize_state(waveform.clone());
-            //println!("Running tests for waveform {:?} with size {}", waveform, size);
             let mut out = vec![0.0; desired.len()];
             for n in 0..out.len() / size {
                 let tmp = generator.generate(&w, n * size, size);
                 (&mut out[n * size..(n * size + tmp.len())]).copy_from_slice(&tmp);
             }
-            assert_eq!(out, desired);
+            assert_eq!(
+                out, desired,
+                "Failed for size {} on waveform:\n{:#?}",
+                size, waveform
+            );
+        }
+
+        for size in [1, 2, 4, 8] {
+            let generator = new_test_generator(1);
+            let (_, optimized_waveform) = optimizer::replace_seq(waveform.clone());
+            let w = initialize_state(optimized_waveform.clone());
+            let mut out = vec![0.0; desired.len()];
+            for n in 0..out.len() / size {
+                let tmp = generator.generate(&w, n * size, size);
+                (&mut out[n * size..(n * size + tmp.len())]).copy_from_slice(&tmp);
+            }
+            assert_eq!(
+                out, desired,
+                "Failed on size {} for waveform\n{:#?}\noptimized to\n{:#?}",
+                size, waveform, optimized_waveform
+            );
         }
     }
 
@@ -1327,7 +1411,7 @@ mod tests {
 
         let w2 = Res {
             trigger: Box::new(Fin {
-                duration: Box::new(Sum(Box::new(Time), Box::new(Const(-6.0)))),
+                length: Box::new(Sum(Box::new(Time), Box::new(Const(-6.0)))),
                 waveform: sin_waveform(0.25),
             }),
             waveform: Box::new(Time),
@@ -1342,7 +1426,7 @@ mod tests {
         let w3 = Res {
             trigger: sin_waveform(0.25),
             waveform: Box::new(Waveform::Fin {
-                duration: Box::new(Sum(Box::new(Time), Box::new(Const(-3.0)))),
+                length: Box::new(Sum(Box::new(Time), Box::new(Const(-3.0)))),
                 waveform: Box::new(Waveform::Time),
             }),
         };
@@ -1367,19 +1451,19 @@ mod tests {
         run_tests(&w1, vec![1.0, 1.0, 2.0, 2.0, 2.0, 1.0, 1.0, 0.0]);
 
         let w2 = Fin {
-            duration: Box::new(Sum(Box::new(Time), Box::new(Const(-8.0)))),
+            length: Box::new(Sum(Box::new(Time), Box::new(Const(-8.0)))),
             waveform: Box::new(Sum(
                 Box::new(Seq {
-                    duration: Box::new(Const(0.0)),
+                    offset: Box::new(Const(0.0)),
                     waveform: Box::new(Const(1.0)),
                 }),
                 Box::new(Sum(
                     Box::new(Seq {
-                        duration: Box::new(Const(0.0)),
+                        offset: Box::new(Const(0.0)),
                         waveform: Box::new(Const(2.0)),
                     }),
                     Box::new(Fin {
-                        duration: Box::new(Const(0.0)),
+                        length: Box::new(Const(0.0)),
                         waveform: Box::new(Const(0.0)),
                     }),
                 )),
@@ -1435,14 +1519,14 @@ mod tests {
         run_tests(&w2, vec![3.0, 3.0, 6.0, 6.0, 6.0, 0.0, 0.0, 0.0]);
 
         let w3 = Fin {
-            duration: Box::new(Sum(Box::new(Time), Box::new(Const(-8.0)))),
+            length: Box::new(Sum(Box::new(Time), Box::new(Const(-8.0)))),
             waveform: Box::new(DotProduct(Box::new(Const(3.0)), Box::new(Const(2.0)))),
         };
         run_tests(&w3, vec![6.0; 8]);
 
         let w4 = DotProduct(
             Box::new(Seq {
-                duration: Box::new(Sum(Box::new(Time), Box::new(Const(-1.0)))),
+                offset: Box::new(Sum(Box::new(Time), Box::new(Const(-1.0)))),
                 waveform: Box::new(Const(3.0)),
             }),
             Box::new(finite_const_waveform(2.0, 5, 5)),
@@ -1463,7 +1547,7 @@ mod tests {
 
         let w2 = Filter {
             waveform: Box::new(Fin {
-                duration: Box::new(Sum(Box::new(Time), Box::new(Const(-5.0)))),
+                length: Box::new(Sum(Box::new(Time), Box::new(Const(-5.0)))),
 
                 waveform: Box::new(Time),
             }),
@@ -1481,7 +1565,7 @@ mod tests {
 
         let w3 = Filter {
             waveform: Box::new(Fin {
-                duration: Box::new(Sum(Box::new(Time), Box::new(Const(-3.0)))),
+                length: Box::new(Sum(Box::new(Time), Box::new(Const(-3.0)))),
                 waveform: Box::new(Time),
             }),
             feed_forward: Box::new(finite_const_waveform(2.0, 5, 5)),
@@ -1531,7 +1615,7 @@ mod tests {
     fn test_greater_equals_at() {
         let w1 = Sum(Box::new(Time), Box::new(Const(-5.0)));
         let w2 = Fin {
-            duration: Box::new(w1.clone()),
+            length: Box::new(w1.clone()),
             waveform: Box::new(Time),
         };
         let generator = new_test_generator(1);

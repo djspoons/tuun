@@ -13,6 +13,7 @@ use renderer::{Mode, Renderer, WaveformId};
 use tracker::Command;
 use tuun::builtins;
 use tuun::metric;
+use tuun::optimizer;
 use tuun::parser;
 use tuun::renderer;
 use tuun::tracker;
@@ -778,6 +779,8 @@ fn play_waveform_helper(
                 Ok(expr) => {
                     println!("Simplify returned: {:}", &expr);
                     if let parser::Expr::Waveform(waveform) = expr {
+                        let (_, waveform) = optimizer::replace_seq(waveform);
+                        println!("replace_seq returned: {:?}", &waveform);
                         return WaveformOrMode::Waveform(waveform);
                     } else {
                         println!("Expression is not a waveform, cannot play: {:#?}", expr);
