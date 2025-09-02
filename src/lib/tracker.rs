@@ -528,33 +528,56 @@ impl<'a> Generator<'a> {
 
             if position < offset {
                 // ... and the right waveform starts after position
-                // TODO If b is const then don't generate, it just apply the op (or nothing if it's 0)
-                let right = self.generate(b, 0, desired - (offset - position));
-                // Merge the overlapping portion
-                for (i, x) in left[offset - position..].iter_mut().enumerate() {
-                    if i >= right.len() {
-                        break;
+                match b {
+                    // If the right waveform is a constant, then don't generate it, just apply the op
+                    Waveform::Const(f) => {
+                        for x in left[offset - position..].iter_mut() {
+                            *x = op(*x, *f);
+                        }
+                        if desired > left.len() {
+                            left.resize(desired, op(0.0, *f));
+                        }
                     }
-                    *x = op(*x, right[i]);
-                }
-                // If the left side is shorter than the right, than append.
-                if right.len() + offset > left.len() + position {
-                    left.extend_from_slice(&right[(left.len() + position - offset)..]);
+                    _ => {
+                        let right = self.generate(b, 0, desired - (offset - position));
+                        // Merge the overlapping portion
+                        for (i, x) in left[offset - position..].iter_mut().enumerate() {
+                            if i >= right.len() {
+                                break;
+                            }
+                            *x = op(*x, right[i]);
+                        }
+                        // If the left side is shorter than the right, than append.
+                        if right.len() + offset > left.len() + position {
+                            left.extend_from_slice(&right[(left.len() + position - offset)..]);
+                        }
+                    }
                 }
             } else {
                 // ... and the right waveform starts before position
-                // TODO same here -- If b is const then don't generate, it just apply the op (or nothing if it's 0)
-                let right = self.generate(b, position - offset, desired);
-                // Merge the overlapping portion
-                for (i, x) in left.iter_mut().enumerate() {
-                    if i >= right.len() {
-                        break;
+                match b {
+                    Waveform::Const(f) => {
+                        for x in left.iter_mut() {
+                            *x = op(*x, *f);
+                        }
+                        if desired > left.len() {
+                            left.resize(desired, op(0.0, *f));
+                        }
                     }
-                    *x = op(*x, right[i]);
-                }
-                // If the left side is shorter than the right, than append.
-                if right.len() > left.len() {
-                    left.extend_from_slice(&right[left.len()..]);
+                    _ => {
+                        let right = self.generate(b, position - offset, desired);
+                        // Merge the overlapping portion
+                        for (i, x) in left.iter_mut().enumerate() {
+                            if i >= right.len() {
+                                break;
+                            }
+                            *x = op(*x, right[i]);
+                        }
+                        // If the left side is shorter than the right, than append.
+                        if right.len() > left.len() {
+                            left.extend_from_slice(&right[left.len()..]);
+                        }
+                    }
                 }
             }
         }
