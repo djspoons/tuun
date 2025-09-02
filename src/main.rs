@@ -34,7 +34,11 @@ struct Args {
     // Additional programs to load
     #[arg(short, long = "program", default_value = "", number_of_values = 1)]
     programs: Vec<String>,
-    #[arg(long, default_value_t = true)]
+    #[arg(long,
+        num_args(0..=1), // Allows --flag or --flag=value
+        action = clap::ArgAction::Set,
+        default_value = "true", // Default if the flag is not present
+        default_missing_value = "true")]
     optimize: bool,
 }
 
