@@ -110,7 +110,7 @@ b                        ==>   b_offset,               b'
 a ~+ b                   ==>   a_offset + b_offset,    a' ~+ Append(Fin(a_offset, Const(0)), b')
 ```
 
-Happily, we can now reorder the two operands to `~+` or distribute `~+` over the arguments to `~*`. This will make it easier to optimize waveforms so that they can be used to generate samples more efficiently.
+Happily, we can now reorder the two operands to `~+` or distribute `~*` over the arguments to `~+`. This will make it easier to optimize waveforms so that they can be used to generate samples more efficiently.
 
 Our last example show how to combine waveforms at a much smaller scale. Up until now, we've considered combining waveforms that last for one or two seconds. What about waveforms that last for 0.002 seconds? The tones we've created so far have all been sine waves at their root. Sine waves are one type of periodic waveform, but they can be used to create other periodic waveforms as well. The `Alt` combinator picks between two waveforms based on the value of a third, called a trigger. For example, the following will generate a square wave.
 

@@ -411,6 +411,7 @@ impl<'a> Generator<'a> {
                 negative_waveform,
             } => {
                 let mut out = self.generate(trigger, position, desired);
+                // TODO better to generate just one of the two alternates based on runs of signum?
                 let mut positive_out = self.generate(positive_waveform, position, desired);
                 positive_out.resize(out.len(), 0.0);
                 let mut negative_out = self.generate(negative_waveform, position, desired);
@@ -942,6 +943,7 @@ where
             Const(_) | Time | Noise | Fixed(_) | Slider { .. } => {
                 return;
             }
+            // TODO Fin seems not quite right here, since its length might truncate any marks inside it
             Fin { waveform, .. }
             | Seq { waveform, .. }
             | Sin(waveform)
@@ -1367,6 +1369,23 @@ mod tests {
         for size in [1, 2, 4, 8] {
             let generator = new_test_generator(1);
             let (_, optimized_waveform) = optimizer::replace_seq(waveform.clone());
+            let w = initialize_state(optimized_waveform.clone());
+            let mut out = vec![0.0; desired.len()];
+            for n in 0..out.len() / size {
+                let tmp = generator.generate(&w, n * size, size);
+                (&mut out[n * size..(n * size + tmp.len())]).copy_from_slice(&tmp);
+            }
+            assert_eq!(
+                out, desired,
+                "Failed on size {} for waveform\n{:#?}\nwith seq's removed\n{:#?}",
+                size, waveform, optimized_waveform
+            );
+        }
+
+        for size in [1, 2, 4, 8] {
+            let generator = new_test_generator(1);
+            let (_, optimized_waveform) = optimizer::replace_seq(waveform.clone());
+            let optimized_waveform = optimizer::simplify(optimized_waveform.clone());
             let w = initialize_state(optimized_waveform.clone());
             let mut out = vec![0.0; desired.len()];
             for n in 0..out.len() / size {

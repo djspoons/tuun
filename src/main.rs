@@ -34,6 +34,8 @@ struct Args {
     // Additional programs to load
     #[arg(short, long = "program", default_value = "", number_of_values = 1)]
     programs: Vec<String>,
+    #[arg(long, default_value_t = true)]
+    optimize: bool,
 }
 
 fn load_context(program_index: usize, args: &Args) -> (Vec<(String, parser::Expr)>, Mode) {
@@ -601,6 +603,7 @@ fn process_event<I>(
                             program_index,
                             programs[program_index - 1].len(),
                             programs[program_index - 1].as_str(),
+                            args.optimize,
                         ) {
                             WaveformOrMode::Waveform(waveform) => {
                                 println!("Waveform definition for program {}:", program_index);
@@ -717,7 +720,13 @@ fn play_waveform(
     keymod: sdl2::keyboard::Mod,
 ) -> (Vec<(String, parser::Expr)>, Mode) {
     use sdl2::keyboard::Mod;
-    match play_waveform_helper(&context, program_index, cursor_position, program) {
+    match play_waveform_helper(
+        &context,
+        program_index,
+        cursor_position,
+        program,
+        args.optimize,
+    ) {
         WaveformOrMode::Waveform(waveform) => {
             let message;
             let repeat_every;
@@ -771,16 +780,21 @@ fn play_waveform_helper(
     program_index: usize,
     cursor_position: usize,
     program: &str,
+    optimize: bool,
 ) -> WaveformOrMode {
     match parser::parse_program(program) {
         Ok(expr) => {
             println!("Parser returned: {:}", &expr);
             match parser::simplify(context, expr) {
                 Ok(expr) => {
-                    println!("Simplify returned: {:}", &expr);
+                    println!("parser::simplify returned: {:}", &expr);
                     if let parser::Expr::Waveform(waveform) = expr {
-                        let (_, waveform) = optimizer::replace_seq(waveform);
+                        let (_, mut waveform) = optimizer::replace_seq(waveform);
                         println!("replace_seq returned: {:?}", &waveform);
+                        if optimize {
+                            waveform = optimizer::simplify(waveform);
+                            println!("optimizer::simplify returned: {:?}", &waveform);
+                        }
                         return WaveformOrMode::Waveform(waveform);
                     } else {
                         println!("Expression is not a waveform, cannot play: {:#?}", expr);

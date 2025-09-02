@@ -177,3 +177,290 @@ pub fn replace_seq(waveform: Waveform) -> (Waveform, Waveform) {
         }
     }
 }
+
+// Simplify waveform expressions by...
+//   * eliminating constants in binary operators and Sin
+//   * re-associates binary operations so that Consts are on the right
+//   * pulling Fin's up and combining nested Fin's
+//   * replacing zero-length waveforms with the canonical `Fixed(vec![])`
+//   * handling some common cases of Fin in Sum and DotProduct
+// This function must be called after replace_seq.
+pub fn simplify(waveform: Waveform) -> Waveform {
+    use Waveform::*;
+    match waveform {
+        // No changes for these:
+        w @ (Const(_) | Time | Noise | Fixed(_)) => w,
+        Fin { length, waveform } => {
+            let length = simplify(*length);
+            match length {
+                // Zero length
+                Const(a) if a >= 0.0 => Fixed(vec![]),
+                Fixed(v) if v.len() >= 1 && v[0] >= 0.0 => Fixed(vec![]),
+                Time => Fixed(vec![]),
+                length => match simplify(*waveform) {
+                    // Nested Fin's
+                    Fin {
+                        length: inner_length,
+                        waveform,
+                    } => match (first_root(&length), first_root(&*inner_length)) {
+                        (Some(a), Some(b)) => Fin {
+                            length: Box::new(Sum(Box::new(Time), Box::new(Const(-(a.min(b)))))),
+                            waveform,
+                        },
+                        _ => Fin {
+                            length: Box::new(length),
+                            waveform: Box::new(Fin {
+                                length: inner_length,
+                                waveform,
+                            }),
+                        },
+                    },
+                    waveform => Fin {
+                        length: Box::new(length),
+                        waveform: Box::new(waveform),
+                    },
+                },
+            }
+        }
+        Seq { .. } => {
+            panic!("Seq should have been replaced by replace_seq before simplify is called");
+        }
+        Append(a, b) => {
+            let a = simplify(*a);
+            let b = simplify(*b);
+            match (a, b) {
+                (Fixed(a), b) if a.len() == 0 => b,
+                (a, Fixed(b)) if b.len() == 0 => a,
+                (Fixed(a), Fixed(b)) => Fixed([a, b].concat()),
+                (a, b) => Append(Box::new(a), Box::new(b)),
+            }
+        }
+        // Check to see if we can precompute the sine function:
+        Sin(waveform) => {
+            let waveform = simplify(*waveform);
+            match waveform {
+                Const(a) => Const(a.sin()),
+                Fixed(v) => {
+                    let v = v.into_iter().map(|x| x.sin()).collect();
+                    Fixed(v)
+                }
+                waveform => Sin(Box::new(waveform)),
+            }
+        }
+        Filter {
+            waveform,
+            feed_forward,
+            feedback,
+            state,
+        } => Filter {
+            waveform: Box::new(simplify(*waveform)),
+            feed_forward: Box::new(simplify(*feed_forward)),
+            feedback: Box::new(simplify(*feedback)),
+            state,
+        },
+        Sum(a, b) => {
+            match (simplify(*a), simplify(*b)) {
+                (Fixed(a), b) if a.len() == 0 => b,
+                (a, Fixed(b)) if b.len() == 0 => a,
+                (Const(0.0), b) => b,
+                (a, Const(0.0)) => a,
+                (Const(a), Const(b)) => Const(a + b),
+                // Commute
+                (Const(a), b) => simplify(Sum(Box::new(b), Box::new(Const(a)))),
+                // Re-associate
+                (Sum(a, b), Const(c)) => Sum(a, Box::new(simplify(Sum(b, Box::new(Const(c)))))),
+                // TODO could distribute constants over Append(Fin, _), Res, and Alt
+                // ... though currently Alt generates both branches, so better not to do too much work
+
+                // Combine sum of Fin and an Append who first argument is Fin -- this occurs for expressions of
+                // the form `w | fin(t) | seq(t)`.
+                (
+                    Fin {
+                        length: a_length,
+                        waveform: a,
+                    },
+                    Append(b, c),
+                ) => match *b {
+                    Fin {
+                        length: b_length,
+                        waveform: b,
+                    } if first_root(&a_length) == first_root(&b_length) => simplify(Append(
+                        Box::new(Fin {
+                            length: a_length,
+                            waveform: Box::new(Sum(a, b)),
+                        }),
+                        c,
+                    )),
+                    _ => Sum(
+                        Box::new(Fin {
+                            length: a_length,
+                            waveform: a,
+                        }),
+                        Box::new(Append(b, c)),
+                    ),
+                },
+                (
+                    Fin {
+                        length: a_length,
+                        waveform: a,
+                    },
+                    Fin {
+                        length: b_length,
+                        waveform: b,
+                    },
+                ) if first_root(&a_length) == first_root(&b_length) => Fin {
+                    length: a_length,
+                    waveform: Box::new(Sum(a, b)),
+                },
+                (a, b) => Sum(Box::new(a), Box::new(b)),
+            }
+        }
+        DotProduct(a, b) => {
+            match (simplify(*a), simplify(*b)) {
+                (Fixed(a), _) if a.len() == 0 => Fixed(vec![]),
+                (_, Fixed(b)) if b.len() == 0 => Fixed(vec![]),
+                (Const(0.0), _) => Fixed(vec![]),
+                (_, Const(0.0)) => Fixed(vec![]),
+                (Const(1.0), b) => b,
+                (a, Const(1.0)) => a,
+                (Const(a), Const(b)) => Const(a * b),
+                // Commute
+                (Const(a), b) => simplify(DotProduct(Box::new(b), Box::new(Const(a)))),
+                // Re-associate
+                (DotProduct(a, b), Const(c)) => {
+                    DotProduct(a, Box::new(simplify(DotProduct(b, Box::new(Const(c))))))
+                }
+                // Distribute
+                (Sum(a, b), Const(c)) => Sum(
+                    Box::new(simplify(DotProduct(a, Box::new(Const(c))))),
+                    Box::new(simplify(DotProduct(b, Box::new(Const(c))))),
+                ),
+                // TODO could distribute constants over, Append, Res, and Alt
+                // ... though currently Alt generates both branches, so better not to do too much work
+
+                // Pull Fin out
+                (Fin { length, waveform }, b) => simplify(Fin {
+                    length,
+                    waveform: Box::new(simplify(DotProduct(waveform, Box::new(b)))),
+                }),
+                (a, Fin { length, waveform }) => simplify(Fin {
+                    length,
+                    waveform: Box::new(simplify(DotProduct(Box::new(a), waveform))),
+                }),
+                (a, b) => DotProduct(Box::new(a), Box::new(b)),
+            }
+        }
+        Res { trigger, waveform } => Res {
+            trigger: Box::new(simplify(*trigger)),
+            waveform: Box::new(simplify(*waveform)),
+        },
+        Alt {
+            trigger,
+            positive_waveform,
+            negative_waveform,
+        } => Alt {
+            trigger: Box::new(simplify(*trigger)),
+            positive_waveform: Box::new(simplify(*positive_waveform)),
+            negative_waveform: Box::new(simplify(*negative_waveform)),
+        },
+        w @ Slider(_) => w,
+        Marked { id, waveform } => {
+            // TODO could pull out Fin if process_marks better implemented Fin
+            Marked {
+                id,
+                waveform: Box::new(simplify(*waveform)),
+            }
+        }
+        Captured {
+            file_stem,
+            waveform,
+        } => Captured {
+            file_stem,
+            waveform: Box::new(simplify(*waveform)),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use Waveform::*;
+
+    #[test]
+    fn test_simplify() {
+        let w1 = Sum(
+            Box::new(Sum(
+                Box::new(Const(1.0)),
+                Box::new(Sum(Box::new(Const(2.0)), Box::new(Const(3.0)))),
+            )),
+            Box::new(Const(4.0)),
+        );
+        assert_eq!(simplify(w1), Const(10.0));
+
+        let w2 = Sum(
+            Box::new(Sum(
+                Box::new(Const(2.0)),
+                Box::new(Sum(Box::new(Const(3.0)), Box::new(Sin(Box::new(Time))))),
+            )),
+            Box::new(Const(5.0)),
+        );
+        assert_eq!(
+            simplify(w2),
+            Sum(Box::new(Sin(Box::new(Time))), Box::new(Const(10.0))),
+        );
+
+        let w3 = DotProduct(
+            Box::new(DotProduct(
+                Box::new(Const(2.0)),
+                Box::new(DotProduct(
+                    Box::new(Const(3.0)),
+                    Box::new(Sin(Box::new(Time))),
+                )),
+            )),
+            Box::new(Const(5.0)),
+        );
+        assert_eq!(
+            simplify(w3),
+            DotProduct(Box::new(Sin(Box::new(Time))), Box::new(Const(30.0))),
+        );
+
+        let w4 = DotProduct(
+            Box::new(Sum(
+                Box::new(Const(2.0)),
+                Box::new(DotProduct(
+                    Box::new(Const(3.0)),
+                    Box::new(Sin(Box::new(Time))),
+                )),
+            )),
+            Box::new(Const(5.0)),
+        );
+        assert_eq!(
+            simplify(w4),
+            Sum(
+                Box::new(DotProduct(
+                    Box::new(Sin(Box::new(Time))),
+                    Box::new(Const(15.0))
+                )),
+                Box::new(Const(10.0))
+            ),
+        );
+
+        let w5 = DotProduct(
+            Box::new(Fin {
+                length: Box::new(Sum(Box::new(Time), Box::new(Const(-2.0)))),
+                waveform: Box::new(Const(3.0)),
+            }),
+            Box::new(Fin {
+                length: Box::new(Sum(Box::new(Time), Box::new(Const(-1.5)))),
+                waveform: Box::new(Const(5.0)),
+            }),
+        );
+        assert_eq!(
+            simplify(w5),
+            Fin {
+                length: Box::new(Sum(Box::new(Time), Box::new(Const(-1.5)))),
+                waveform: Box::new(Const(15.0)),
+            }
+        );
+    }
+}
