@@ -1,5 +1,5 @@
 // Amplitude
 $440 ~. ((Y ~+ 1) ~. 0.5)
 
-// Duration
-let w = $440 | fin(time ~+ ((X ~+ 1) ~. -1)) | seq(duration_from_beats(2)) in <[w, w]>
+// Duration (best in 4 beats per measure)
+let w = $440 | fin(time ~+ ((X ~+ 1) ~. -(duration_from_beats(1)))) | seq(time ~+ -(duration_from_beats(2))) in <[w, w]>

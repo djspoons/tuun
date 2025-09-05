@@ -1,14 +1,22 @@
 use crate::tracker::Waveform;
 
-fn first_root(waveform: &Waveform) -> Option<f32> {
+// First root returns the first non-negative value at which the given waveform is zero. This is implemented for waveforms of the form Sum(Time, _); returns None otherwise.
+fn first_root(waveform: &Waveform) -> Option<Waveform> {
     use Waveform::*;
     match waveform {
-        Const(0.0) => Some(0.0),
+        Const(0.0) => Some(Const(0.0)),
         Const(_) => None,
-        Time => Some(0.0),
+        Time => Some(Const(0.0)),
         Sum(a, b) => match (&**a, &**b) {
-            (Time, Const(x)) => Some(-x),
-            (Const(x), Time) => Some(-x),
+            // TODO should really check that Time doesn't appear on the other side too
+            (Time, w) => Some(simplify(DotProduct(
+                Box::new(w.clone()),
+                Box::new(Const(-1.0)),
+            ))),
+            (w, Time) => Some(simplify(DotProduct(
+                Box::new(w.clone()),
+                Box::new(Const(-1.0)),
+            ))),
             _ => None,
         },
         _ => None,
@@ -21,8 +29,11 @@ fn add_offsets(a: Waveform, b: Waveform) -> Waveform {
     use Waveform::*;
     match (first_root(&a), first_root(&b)) {
         (Some(a_root), Some(b_root)) => {
-            let new_root = a_root + b_root;
-            Sum(Box::new(Time), Box::new(Const(-new_root)))
+            let b = simplify(DotProduct(
+                Box::new(Sum(Box::new(a_root), Box::new(b_root))),
+                Box::new(Const(-1.0)),
+            ));
+            Sum(Box::new(Time), Box::new(b))
         }
         (a_root, b_root) => {
             panic!(
@@ -203,7 +214,7 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                         length: inner_length,
                         waveform,
                     } => match (first_root(&length), first_root(&*inner_length)) {
-                        (Some(a), Some(b)) => Fin {
+                        (Some(Const(a)), Some(Const(b))) => Fin {
                             length: Box::new(Sum(Box::new(Time), Box::new(Const(-(a.min(b)))))),
                             waveform,
                         },
