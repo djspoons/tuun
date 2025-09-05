@@ -191,7 +191,7 @@ expr ::= float
      | ...
 
 unary_op ::= - | $ | @ | ...
-binary_op ::= + | - | * | / | ~+ | ~. | ...
+binary_op ::= + | - | * | / | ...
 ```
 
 Floating point literals, functions, variables, application, tuples, lists, operators, and "let" bindings are all pretty standard!
@@ -205,41 +205,41 @@ expr ::= ...
 
 Tuun supports special syntax for chords and sequences – by "chords", we really just mean combining waveforms so that they are played simultaneously. Curly brackets (`{` and `}`) take a tuple of waveforms and turn that tuple into a single waveform representing a chord. Angle brackets (`<` and `>`) take a tuple of waveforms and sequence them. (As you might guess from above, those waveforms must include proper offsets to create a true sequence!)
 
-All waveforms are values, and Tuun provides built-in functions to create them. When a floating point value appears in the context of a waveform, it's implicitly coerced into a constant waveform. Note that, by convention, the specification language built-ins for waveforms (like `fin`, `seq`, and `time`) are written in lowercase.
+All waveforms are values, and Tuun provides built-in functions to create them. When a floating point value appears in the context of a waveform, it's implicitly coerced into a constant waveform. Functions like `sin` are overloaded so that they can take either floating point values or waveforms. Note that, by convention, the specification language built-ins for waveforms (like `fin`, `seq`, and `time`) are written in lowercase.
 
 We can now give a slightly more extensive version of the harmonics example, in part by defining a helper function that creates overtones.
 
 ```
-$ = fn(freq) => sin((2 * pi * freq) ~. time),
-overtone = fn(freq) => fn (x) => $(freq*x) ~. (1/x),
+$ = fn(freq) => sin(2 * pi * freq * time),
+overtone = fn(freq) => fn (x) => $(freq*x) * (1/x),
 harmonics = fn(freq) => {map(overtone(freq), [1, 3, 5, 7, 9, 11])},
 ```
-The `overtone` function creates a waveform by multiplying `freq` by `x` and then multiplying that waveform by a constant waveform to scale it down. Notice that there are _two_ types of multiplication here: multiplication in the specification language using `*` and multiplication in the waveform language using `~.`.
+The `overtone` function creates a waveform by multiplying `freq` by `x` and then multiplying that waveform by a constant waveform to scale it down. Notice that there are _two_ types of multiplication here: multiplication in the specification language and multiplication in the waveform language (written as `~.` for clarity).
 
 | Expression           | Evaluates to...                                      |
 | ----------           | ---------------                                      |
 | `3 * 440`            | `1320`                                               |
 | `overtone(440)(3)`   | `Sin(Const(2 * PI * 1320) ~. Time) ~. Const(.3333)`  |
 
-You can write `~.` in the specification language since it is bound to a built-in operator, but all that operator does is to create the combinator that will be evaluated by the tracker.
+Notice that, since `*` is overloaded in the specification language, the function `$` (which creates a sine wave) can take the frequency a single floating point value or as a waveform.
 
 We can also revisit our envelope example from above. This example makes use of the `|` operator, which denotes reverse application (enabling you to write the argument before the function you are passing it to). It's conventional in Tuun to write filters like ADSR in a curried-form, as shown below, so that they can be chained together.
 
-This example first provides functions to create waveforms for the four steps of the filter. The filter function itself takes the five parameters, builds those waveforms, sequences them, and then combines them with the given waveform using `~.`. (Remember that `<...>` is shorthand for a sequence of waveforms, that is, for reducing the given list of waveforms using `~+`.)
+This example first provides functions to create waveforms for the four steps of the filter. The filter function itself takes the five parameters, builds those waveforms, sequences them, and then combines them with the given waveform using `*`. (Remember that `<...>` is shorthand for a sequence of waveforms, that is, for reducing the given list of waveforms using `+`.)
 
 ```
 // Helper function that takes a pair of floats and returns a linear waveform
-linear = fn(initial, slope) => initial ~+ (time ~. slope),
+linear = fn(initial, slope) => initial + (time * slope),
 // Create waveforms for the four parts of the envelope:
-Aw = fn(dur) => linear(0.0, 1.0 / dur) | fin(time ~+ -dur) | seq(time ~+ -dur),
-Dw = fn(dur, level) => linear(1.0, (level - 1.0) / dur) | fin(time ~+ -dur) | seq(time ~+ -dur),
-Sw = fn(dur, level) => level | fin(time ~+ -dur) | seq(time ~+ -dur),
-Rw = fn(dur, level) => linear(level, -level / dur) | fin(time ~+ -dur) | seq(time ~+ -dur),
+Aw = fn(dur) => linear(0.0, 1.0 / dur) | fin(time + -dur) | seq(time + -dur),
+Dw = fn(dur, level) => linear(1.0, (level - 1.0) / dur) | fin(time + -dur) | seq(time + -dur),
+Sw = fn(dur, level) => level | fin(time + -dur) | seq(time + -dur),
+Rw = fn(dur, level) => linear(level, -level / dur) | fin(time + -dur) | seq(time + -dur),
 // Combine them to create a new filter:
 ADSR = fn(attack_dur, decay_dur, sustain_level, sustain_dur, release_dur) =>
-  fn(w) => (w | seq(0)) ~. <[Aw(attack_dur),
-                             Dw(decay_dur, sustain_level),
-                             Sw(sustain_dur, sustain_level),
-                             Rw(release_dur, sustain_level)]>,
+  fn(w) => (w | seq(0)) * <[Aw(attack_dur),
+                            Dw(decay_dur, sustain_level),
+                            Sw(sustain_dur, sustain_level),
+                            Rw(release_dur, sustain_level)]>,
 ```
 (If you want to use quartic instead of linear ramps, you'll just need to replace `linear` with a different waveform!)

@@ -403,7 +403,7 @@ fn parse_multiplicative(input: LocatedSpan) -> IResult<Expr> {
         (
             parse_application,
             many0((
-                ws(alt((tag("*"), tag("/"), tag("~."), tag("~*")))),
+                ws(alt((tag("*"), tag("/"),tag("~*")))),
                 expect(parse_application, "expected expression after operator"),
             )),
         ),
@@ -427,7 +427,7 @@ fn parse_additive(input: LocatedSpan) -> IResult<Expr> {
         (
             parse_multiplicative,
             many0((
-                ws(alt((tag("+"), tag("-"), tag("~+")))),
+                ws(alt((tag("+"), tag("-")))),
                 expect(parse_multiplicative, "expected expression after operator"),
             )),
         ),

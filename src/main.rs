@@ -48,6 +48,10 @@ fn load_context(program_index: usize, args: &Args) -> (Vec<(String, parser::Expr
         "tempo".to_string(),
         parser::Expr::Float(args.beats_per_minute as f32),
     ));
+    context.push((
+        "sampling_frequency".to_string(),
+        parser::Expr::Float(args.sample_frequency as f32),
+    ));
     builtins::add_prelude(&mut context);
     let mut bindings = 0;
     let mut errors = Vec::new();

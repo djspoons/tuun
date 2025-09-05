@@ -4,11 +4,56 @@ use crate::parser::{BuiltInFn, Expr, simplify};
 use crate::tracker::{Slider, Waveform};
 use Expr::{Application, Bool, BuiltIn, Error, Float, List, Tuple};
 
-pub fn plus(arguments: Vec<Expr>) -> Expr {
-    match arguments[..] {
-        [Float(a), Float(b)] => Expr::Float(a + b),
-        _ => Expr::Error("Invalid arguments for +".to_string()),
+fn unary_op(
+    mut arguments: Vec<Expr>,
+    name: String,
+    float_op: fn(f32) -> f32,
+    waveform_op: fn(Box<Waveform>) -> Waveform,
+) -> Expr {
+    if arguments.len() != 1 {
+        return Expr::Error(format!("Expected one argument for {}", name));
     }
+    match arguments.remove(0) {
+        Float(a) => Expr::Float(float_op(a)),
+        Expr::Waveform(a) => Expr::Waveform(waveform_op(Box::new(a))),
+        a => Expr::Error(format!("Invalid argument for {}: {:?}", name, a)),
+    }
+}
+
+fn binary_op(
+    mut arguments: Vec<Expr>,
+    name: String,
+    float_op: fn(f32, f32) -> f32,
+    waveform_op: fn(Box<Waveform>, Box<Waveform>) -> Waveform,
+) -> Expr {
+    if arguments.len() != 2 {
+        return Expr::Error(format!("Expected two arguments for {}", name));
+    }
+    match (arguments.remove(0), arguments.remove(0)) {
+        (Float(a), Float(b)) => Expr::Float(float_op(a, b)),
+        (Expr::Waveform(a), Expr::Waveform(b)) => {
+            Expr::Waveform(waveform_op(Box::new(a), Box::new(b)))
+        }
+        (Expr::Waveform(a), Float(b)) => {
+            Expr::Waveform(waveform_op(Box::new(a), Box::new(Waveform::Const(b))))
+        }
+        (Float(a), Expr::Waveform(b)) => {
+            Expr::Waveform(waveform_op(Box::new(Waveform::Const(a)), Box::new(b)))
+        }
+        (a, b) => Expr::Error(format!(
+            "Invalid arguments for {}: {:?} and {:?}",
+            name, a, b
+        )),
+    }
+}
+
+pub fn plus(arguments: Vec<Expr>) -> Expr {
+    return binary_op(
+        arguments,
+        "+".to_string(),
+        std::ops::Add::add,
+        Waveform::Sum,
+    );
 }
 
 pub fn minus(arguments: Vec<Expr>) -> Expr {
@@ -20,10 +65,12 @@ pub fn minus(arguments: Vec<Expr>) -> Expr {
 }
 
 pub fn times(arguments: Vec<Expr>) -> Expr {
-    match arguments[..] {
-        [Float(a), Float(b)] => Expr::Float(a * b),
-        _ => Expr::Error("Invalid arguments for *".to_string()),
-    }
+    return binary_op(
+        arguments,
+        "*".to_string(),
+        std::ops::Mul::mul,
+        Waveform::DotProduct,
+    );
 }
 
 pub fn divide(arguments: Vec<Expr>) -> Expr {
@@ -51,6 +98,19 @@ pub fn exp(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
         [Float(value)] => Expr::Float(value.exp()),
         _ => Expr::Error("Invalid argument for exp".to_string()),
+    }
+}
+
+pub fn sin(arguments: Vec<Expr>) -> Expr {
+    unary_op(arguments, "sin".to_string(), f32::sin, |waveform| {
+        Waveform::Sin(waveform)
+    })
+}
+
+pub fn cos(arguments: Vec<Expr>) -> Expr {
+    match arguments[..] {
+        [Float(value)] => Expr::Float(value.cos()),
+        _ => Expr::Error("Invalid argument for cos".to_string()),
     }
 }
 
@@ -231,41 +291,24 @@ pub fn waveform_sin(arguments: Vec<Expr>) -> Expr {
     }
 }
 
-fn waveform_binary_op(
-    mut arguments: Vec<Expr>,
-    op: fn(Box<Waveform>, Box<Waveform>) -> Waveform,
-) -> Expr {
+pub fn waveform_convolution(mut arguments: Vec<Expr>) -> Expr {
     if arguments.len() != 2 {
-        return Expr::Error("Expected two waveforms".to_string());
+        return Expr::Error(format!("Expected two arguments for ~*"));
     }
-    let a = match arguments.remove(0) {
-        Expr::Waveform(a) => Box::new(a),
-        Float(value) => Box::new(Waveform::Const(value)),
-        _ => return Expr::Error("First argument must be a waveform or float".to_string()),
-    };
-    let b = match arguments.remove(0) {
-        Expr::Waveform(b) => Box::new(b),
-        Float(value) => Box::new(Waveform::Const(value)),
-        _ => return Expr::Error("Second argument must be a waveform or float".to_string()),
-    };
-    return Expr::Waveform(op(a, b));
-}
-
-pub fn waveform_convolution(arguments: Vec<Expr>) -> Expr {
-    return waveform_binary_op(arguments, |waveform, kernel| Waveform::Filter {
-        waveform,
-        feed_forward: kernel,
-        feedback: Box::new(Waveform::Fixed(vec![])),
-        state: (),
-    });
-}
-
-pub fn waveform_sum(arguments: Vec<Expr>) -> Expr {
-    return waveform_binary_op(arguments, Waveform::Sum);
-}
-
-pub fn waveform_dot_product(arguments: Vec<Expr>) -> Expr {
-    return waveform_binary_op(arguments, Waveform::DotProduct);
+    match (arguments.remove(0), arguments.remove(0)) {
+        (a, b) => {
+            let waveform = match (a, b) {
+                (Expr::Waveform(a), Expr::Waveform(b)) => Waveform::Filter {
+                    waveform: Box::new(a),
+                    feed_forward: Box::new(b),
+                    feedback: Box::new(Waveform::Fixed(vec![])),
+                    state: (),
+                },
+                _ => return Expr::Error("Invalid arguments for ~*".to_string()),
+            };
+            Expr::Waveform(waveform)
+        }
+    }
 }
 
 pub fn waveform_filter(mut arguments: Vec<Expr>) -> Expr {
@@ -437,17 +480,16 @@ pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
         ("pow", power),
         ("sqrt", sqrt),
         ("exp", exp),
+        ("sin", sin),
+        ("cos", cos),
         ("map", map),
         ("reduce", reduce),
         ("append", append),
         ("fixed", fixed),
         ("fin", fin),
         ("seq", seq),
-        ("sin", waveform_sin),
         ("filter", waveform_filter),
         ("~*", waveform_convolution),
-        ("~+", waveform_sum),
-        ("~.", waveform_dot_product),
         ("res", res),
         ("alt", alt),
         ("mark", mark),

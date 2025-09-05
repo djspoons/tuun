@@ -1,6 +1,6 @@
 use crate::tracker::Waveform;
 
-// First root returns the first non-negative value at which the given waveform is zero. This is implemented for waveforms of the form Sum(Time, _); returns None otherwise.
+// First root returns the first non-negative value at which the given waveform is zero. This is implemented for waveforms of the form Sum(Time, _), Time, and Const(0); returns None otherwise.
 fn first_root(waveform: &Waveform) -> Option<Waveform> {
     use Waveform::*;
     match waveform {
@@ -23,8 +23,7 @@ fn first_root(waveform: &Waveform) -> Option<Waveform> {
     }
 }
 
-// Assume offset waveforms are of the form `Time ~+ Const(x)` or `Const(x)`. (We can relax to other linear
-// functions of Time later.)
+// Assume offset waveforms are of the form `Time ~+ w` or `Const(x)`.
 fn add_offsets(a: Waveform, b: Waveform) -> Waveform {
     use Waveform::*;
     match (first_root(&a), first_root(&b)) {
