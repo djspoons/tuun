@@ -251,7 +251,10 @@ impl<'a> Generator<'a> {
                 return out;
             }
             Fixed(samples) => {
-                return samples.clone();
+                if position >= samples.len() {
+                    return vec![];
+                }
+                return samples.clone()[position..(position + desired).min(samples.len())].to_vec();
             }
             Fin {
                 waveform: inner_waveform,
@@ -599,22 +602,32 @@ impl<'a> Generator<'a> {
                     (samples.len() - position).min(max)
                 }
             }
-            Fin { length, .. } => match self.greater_or_equals_at(&length, 0.0, position, max) {
-                Some(new_position) => new_position,
-                None => {
-                    println!(
-                        "Warning: unable to determine length of Fin length cheaply, generating up to max: {:?}",
-                        length
-                    );
-                    let out = self.generate(length, position, max);
-                    for (i, &x) in out.iter().enumerate() {
-                        if x >= 0.0 {
-                            return i;
+            Fin { length, waveform } => {
+                // This is a little subtle, since Fin is not supposed to make waveforms longer. In particular, for
+                // optimizations that move Fin outside of a DotProduct, we need to check the length of the inner
+                // waveform.
+                // TODO figure out which of `length` or `length(waveform)` is cheaper and do that first.
+                let inner = self.remaining(waveform, position, max);
+                return match self.greater_or_equals_at(&length, 0.0, position, max) {
+                    Some(new_position) => new_position.min(inner),
+                    None => {
+                        println!(
+                            "Warning: unable to determine length of Fin length cheaply, generating up to max: {:?}",
+                            length
+                        );
+                        let out = self.generate(length, position, max);
+                        for (i, &x) in out.iter().enumerate() {
+                            if i >= inner {
+                                return inner;
+                            }
+                            if x >= 0.0 {
+                                return i;
+                            }
                         }
+                        return out.len().min(max);
                     }
-                    return out.len().min(max);
-                }
-            },
+                };
+            }
             Seq { waveform, .. } | Sin(waveform) | Filter { waveform, .. } => {
                 self.remaining(waveform, position, max)
             }
@@ -1355,7 +1368,7 @@ where
 mod tests {
     use super::*;
     use crate::optimizer;
-    use Waveform::{Const, DotProduct, Filter, Fin, Res, Seq, Sin, Sum, Time};
+    use Waveform::{Const, DotProduct, Filter, Fin, Fixed, Res, Seq, Sin, Sum, Time};
 
     const MAX_LENGTH: usize = 1000;
 
@@ -1374,6 +1387,8 @@ mod tests {
     }
 
     fn run_tests(waveform: &Waveform, desired: Vec<f32>) {
+        let length =
+            new_test_generator(1).remaining(&initialize_state(waveform.clone()), 0, desired.len());
         for size in [1, 2, 4, 8] {
             let generator = new_test_generator(1);
             let w = initialize_state(waveform.clone());
@@ -1384,7 +1399,7 @@ mod tests {
             }
             assert_eq!(
                 out, desired,
-                "Failed for size {} on waveform:\n{:#?}",
+                "Failed output for size {} on waveform:\n{:#?}",
                 size, waveform
             );
         }
@@ -1393,6 +1408,13 @@ mod tests {
             let generator = new_test_generator(1);
             let (_, optimized_waveform) = optimizer::replace_seq(waveform.clone());
             let w = initialize_state(optimized_waveform.clone());
+            assert_eq!(
+                length,
+                generator.remaining(&w, 0, desired.len()),
+                "Failed length on waveform\n{:#?}\nwith seq's removed\n{:#?}",
+                waveform,
+                optimized_waveform
+            );
             let mut out = vec![0.0; desired.len()];
             for n in 0..out.len() / size {
                 let tmp = generator.generate(&w, n * size, size);
@@ -1400,16 +1422,24 @@ mod tests {
             }
             assert_eq!(
                 out, desired,
-                "Failed on size {} for waveform\n{:#?}\nwith seq's removed\n{:#?}",
+                "Failed output for size {} on waveform\n{:#?}\nwith seq's removed\n{:#?}",
                 size, waveform, optimized_waveform
             );
         }
 
         for size in [1, 2, 4, 8] {
             let generator = new_test_generator(1);
-            let (_, optimized_waveform) = optimizer::replace_seq(waveform.clone());
-            let optimized_waveform = optimizer::simplify(optimized_waveform.clone());
+            let (_, no_seq_waveform) = optimizer::replace_seq(waveform.clone());
+            let optimized_waveform = optimizer::simplify(no_seq_waveform.clone());
             let w = initialize_state(optimized_waveform.clone());
+            assert_eq!(
+                length,
+                generator.remaining(&w, 0, desired.len()),
+                "Failed length on waveform\n{:#?}\nwith seq's removed\n{:#?}\noptimized to\n{:#?}",
+                waveform,
+                no_seq_waveform,
+                optimized_waveform
+            );
             let mut out = vec![0.0; desired.len()];
             for n in 0..out.len() / size {
                 let tmp = generator.generate(&w, n * size, size);
@@ -1417,7 +1447,7 @@ mod tests {
             }
             assert_eq!(
                 out, desired,
-                "Failed on size {} for waveform\n{:#?}\noptimized to\n{:#?}",
+                "Failed output for size {} on waveform\n{:#?}\noptimized to\n{:#?}",
                 size, waveform, optimized_waveform
             );
         }
@@ -1535,6 +1565,9 @@ mod tests {
         );
         let result = generator.generate(&initialize_state(w6), 0, 2);
         assert_eq!(result, vec![3.0, 0.0]);
+
+        let w7 = Sum(Box::new(Fixed(vec![1.0])), Box::new(Const(0.0)));
+        run_tests(&w7, vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]

@@ -272,8 +272,10 @@ pub fn simplify(waveform: Waveform) -> Waveform {
             match (simplify(*a), simplify(*b)) {
                 (Fixed(a), b) if a.len() == 0 => b,
                 (a, Fixed(b)) if b.len() == 0 => a,
-                (Const(0.0), b) => b,
-                (a, Const(0.0)) => a,
+                // NB. Can't collapse sums of Const(0.0) with finite waveforms as that would
+                // change the length of the output.
+                (Noise, Const(0.0)) => Noise,
+                (Time, Const(0.0)) => Time,
                 (Const(a), Const(b)) => Const(a + b),
                 // Commute
                 (Const(a), b) => simplify(Sum(Box::new(b), Box::new(Const(a)))),
