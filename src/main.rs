@@ -1,5 +1,6 @@
 use core::panic;
 use std::fs;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use chrono;
@@ -152,8 +153,8 @@ pub fn main() {
         samples: None,     // default buffer size
     };
 
-    let (status_sender, status_receiver) = std::sync::mpsc::channel();
-    let (command_sender, command_receiver) = std::sync::mpsc::channel();
+    let (status_sender, status_receiver) = mpsc::channel();
+    let (command_sender, command_receiver) = mpsc::channel();
 
     let device = audio_subsystem
         .open_playback(None, &desired_spec, |spec| {
@@ -174,10 +175,15 @@ pub fn main() {
         args.beats_per_minute,
         args.beats_per_measure,
     );
+    renderer.video_subsystem.text_input().start();
+    let mut event_pump = sdl_context.event_pump().unwrap();
 
     let (mut context, mut mode) = load_context(1, &args);
     let mut programs = Vec::new();
     load_programs(&args, &mut programs);
+
+    start_beats(&command_sender, &status_receiver, &args);
+
     let mut status = tracker::Status {
         buffer_start: Instant::now(),
         marks: Vec::new(),
@@ -189,24 +195,8 @@ pub fn main() {
         tracker_load: Metric::new(std::time::Duration::from_secs(10), 100),
     };
 
-    renderer.video_subsystem.text_input().start();
-    let mut event_pump = sdl_context.event_pump().unwrap();
     const BUFFER_REFRESH_INTERVAL: Duration = Duration::from_millis(200);
     let mut next_buffer_refresh = Instant::now();
-    // Play the odd Beats waveform starting immediately and repeating every two measures
-    command_sender
-        .send(Command::Play {
-            id: WaveformId::Beats(false),
-            waveform: renderer::beats_waveform(args.beats_per_minute, args.beats_per_measure),
-            start: Instant::now(),
-            repeat_every: Some(
-                renderer::duration_from_beats(args.beats_per_minute, args.beats_per_measure as u64)
-                    * 2,
-            ),
-        })
-        .unwrap();
-    // We need to wait to start the even Beats until we know when the odd Beats started
-    let mut need_to_start_even_beats = true;
     command_sender.send(Command::SendCurrentBuffer).unwrap();
     loop {
         for event in event_pump.poll_iter() {
@@ -231,38 +221,86 @@ pub fn main() {
             next_buffer_refresh = Instant::now() + BUFFER_REFRESH_INTERVAL;
         }
 
-        // TODO need to empty this receiver and skip to last status
-        match status_receiver.recv_timeout(Duration::from_millis(10)) {
-            Ok(tracker_status) => {
-                if need_to_start_even_beats {
-                    for mark in status.marks {
-                        if mark.waveform_id == WaveformId::Beats(false) && mark.mark_id == 0 {
-                            command_sender
-                                .send(Command::Play {
-                                    id: WaveformId::Beats(true),
-                                    waveform: renderer::beats_waveform(
-                                        args.beats_per_minute,
-                                        args.beats_per_measure,
-                                    ),
-                                    start: mark.start + mark.duration,
-                                    repeat_every: Some(
-                                        renderer::duration_from_beats(
-                                            args.beats_per_minute,
-                                            args.beats_per_measure as u64,
-                                        ) * 2,
-                                    ),
-                                })
-                                .unwrap();
-                            need_to_start_even_beats = false;
-                            break;
+        // Drain the status buffer, using the last status received. But don't wait more too long
+        // if there are no statuses available. (And don't wait at all if we've already received one).
+        let mut statuses_received = 0;
+        loop {
+            match status_receiver.try_recv() {
+                Ok(tracker_status) => {
+                    if let Some(ratio) = tracker_status.tracker_load {
+                        metrics.tracker_load.set(ratio);
+                    }
+                    status = tracker_status;
+                    statuses_received += 1;
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    if statuses_received > 0 {
+                        break;
+                    }
+                    match status_receiver.recv_timeout(Duration::from_millis(10)) {
+                        Ok(tracker_status) => {
+                            if let Some(ratio) = tracker_status.tracker_load {
+                                metrics.tracker_load.set(ratio);
+                            }
+                            status = tracker_status;
+                            statuses_received += 1;
                         }
+                        Err(mpsc::RecvTimeoutError::Timeout) => break,
+                        Err(e) => println!("Error receiving status with timeout: {:?}", e),
                     }
                 }
-                if let Some(ratio) = tracker_status.tracker_load {
-                    metrics.tracker_load.set(ratio);
+                Err(e) => println!("Error receiving status: {:?}", e),
+            }
+        }
+        if statuses_received > 1 {
+            println!("Received {} statuses", statuses_received);
+        }
+        renderer.render(&ttf_context, &programs, &status, &mode, &mut metrics);
+    }
+}
+
+fn start_beats(
+    command_sender: &mpsc::Sender<Command<WaveformId>>,
+    status_receiver: &mpsc::Receiver<tracker::Status<WaveformId>>,
+    args: &Args,
+) {
+    // Play the odd Beats waveform starting immediately and repeating every two measures
+    command_sender
+        .send(Command::Play {
+            id: WaveformId::Beats(false),
+            waveform: renderer::beats_waveform(args.beats_per_minute, args.beats_per_measure),
+            start: Instant::now(),
+            repeat_every: Some(
+                renderer::duration_from_beats(args.beats_per_minute, args.beats_per_measure as u64)
+                    * 2,
+            ),
+        })
+        .unwrap();
+    // We need to wait to start the even Beats until we know when the odd Beats started
+    'start_even_beats: loop {
+        match status_receiver.recv() {
+            Ok(status) => {
+                for mark in status.marks {
+                    if mark.waveform_id == WaveformId::Beats(false) && mark.mark_id == 0 {
+                        command_sender
+                            .send(Command::Play {
+                                id: WaveformId::Beats(true),
+                                waveform: renderer::beats_waveform(
+                                    args.beats_per_minute,
+                                    args.beats_per_measure,
+                                ),
+                                start: mark.start + mark.duration,
+                                repeat_every: Some(
+                                    renderer::duration_from_beats(
+                                        args.beats_per_minute,
+                                        args.beats_per_measure as u64,
+                                    ) * 2,
+                                ),
+                            })
+                            .unwrap();
+                        break 'start_even_beats;
+                    }
                 }
-                status = tracker_status;
-                renderer.render(&ttf_context, &programs, &status, &mode, &mut metrics);
             }
             Err(_) => {}
         }

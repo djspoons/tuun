@@ -4,7 +4,7 @@ use std::fmt;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::io::BufWriter;
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use fastrand;
@@ -929,8 +929,8 @@ where
     I: Clone + Send,
 {
     sample_frequency: i32,
-    command_receiver: Receiver<Command<I>>,
-    status_sender: Sender<Status<I>>,
+    command_receiver: mpsc::Receiver<Command<I>>,
+    status_sender: mpsc::Sender<Status<I>>,
 
     // Persistent generation state
     active_waveforms: Vec<ActiveWaveform<I>>,
@@ -946,8 +946,8 @@ where
 {
     pub fn new(
         sample_frequency: i32,
-        command_receiver: Receiver<Command<I>>,
-        status_sender: Sender<Status<I>>,
+        command_receiver: mpsc::Receiver<Command<I>>,
+        status_sender: mpsc::Sender<Status<I>>,
     ) -> Tracker<I> {
         return Tracker {
             sample_frequency,
@@ -1214,7 +1214,7 @@ where
         loop {
             match self.command_receiver.try_recv() {
                 Ok(command) => self.process_command(command),
-                Err(TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Empty) => break,
                 Err(e) => println!("Error receiving command: {:?}", e),
             }
         }
@@ -1240,6 +1240,10 @@ where
             // Check to see if any pending waveform starts at or before segment_start. If so, promote
             // them active waveforms.
             while !self.pending_waveforms.is_empty() {
+                // TODO This is wrong in the case where a long time has passed.
+                // For example, it's ok to adjust the start to segment_start if the difference is small,
+                // but if it's greater than repeat_every, then we can end up aligning the two Beats
+                // waveforms with each other (instead of interleaving them).
                 if self.pending_waveforms[0].start <= segment_start {
                     let mut pending = self.pending_waveforms.remove(0);
                     println!(
