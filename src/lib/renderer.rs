@@ -430,6 +430,13 @@ impl Renderer {
                     let x = (i as f32 * x_scale) as i32;
                     let y = (f * (waveform_height as f32 / 2.4) + (waveform_height as f32 / 2.0))
                         as i32;
+                    if f.abs() <= 0.95 {
+                        self.canvas.set_draw_color(Color::RGB(0x00, 0xFF, 0x00));
+                    } else if f.abs() <= 1.0 {
+                        self.canvas.set_draw_color(Color::RGB(0xFF, 0xDE, 0x21));
+                    } else {
+                        self.canvas.set_draw_color(Color::RGB(0xFF, 0x00, 0x00));
+                    }
                     self.canvas
                         .draw_line((x, last_y as i32), (x + x_scale as i32, y))
                         .unwrap();
