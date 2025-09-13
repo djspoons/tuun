@@ -11,13 +11,13 @@ Tuun serves two primary purposes:
 ## Installation
 
  * Install Rust
- * Install sdl2
+ * Install sdl2 and sdl2_ttf
 
 On my Mac this means:
 
 ```
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-brew install sdl2
+brew install sdl2 sdl2_ttf
 export LIBRARY_PATH="$LIBRARY_PATH:$(brew --prefix)/lib"
 ```
 
