@@ -34,6 +34,12 @@ Tuun reads specifications both from files and in the user interface. Files suppl
 cargo run -- -C context.tuun -p '$440 * Qw'
 ```
 
+Or for a slightly more complex example:
+
+```
+cargo run -- -C context.tuun -p 'let h = harmonica(Q, 440) in <[h, h, h, h]>'
+```
+
 Once Tuun has started, use the following keys to navigate and edit.
 
 In "select" mode (when a solid triangle appears at the left-hand side):

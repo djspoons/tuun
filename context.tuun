@@ -16,6 +16,9 @@ triangle = fn(freq) => let
 amp = fn(level) => fn(w) => w * level,
 // slope is in terms of level-change per second
 linear = fn(initial, slope) => initial + (time * slope),
+// Convert from MIDI note numbers to frequency
+@ = fn(m) => pow(2, (m - 69) / 12) * 440,
+
 
 // ENVELOPES
 // Create waveforms for the four parts of the envelope.
@@ -44,17 +47,33 @@ step = fn(freq,n) => freq * pow(2, n/12),
 just_third = fn(freq) => {[hrm(freq), hrm(freq * 5/4)]},
 equal_third = fn(freq) => {[hrm(freq), hrm(step(freq, 4))]},
 
-// Instruments
+
+// FILTERS
+// RBJ Cookbook
+lpf = fn(Q, fc) =>
+  let
+    w0 = 2*pi*fc/sampling_frequency,
+    alpha = sin(w0)/(2*Q),
+    b0 = (1 - cos(w0))/2,
+    b1 =  1 - cos(w0),
+    b2 = (1 - cos(w0))/2,
+    a0 =  1 + alpha,
+    a1 = -2*cos(w0),
+    a2 =  1 - alpha
+  in
+    filter(fixed([b0/a0, b1/a0, b2/a0]), fixed([a1/a0, a2/a0])),
+
+
+// INSTRUMENTS
 harmonica = fn(dur, freq) =>
   let a = 0.13,
       d = 0.33,
       r = 0.33,
       s = dur - (a + d + r) in
-  hrm(freq) | ADSR(a, d, 0.5, s, r) | seq(time + -dur),
+  hrm(freq) | lpf(0.5, 1600) | ADSR(a, d, 0.5, s, r) | seq(time + -dur),
 
-// Convert from MIDI note numbers to frequency
-@ = fn(m) => pow(2, (m - 69) / 12) * 440,
 
+// Time and Rests
 duration_from_beats = fn(beats) => beats * (60 / tempo),
 
 // 4-4 time! (Move to 4-4 file...)
@@ -77,6 +96,7 @@ Hrw = 0 | fin(0) | seq(time + -H),
 Qrw = 0 | fin(0) | seq(time + -Q),
 Erw = 0 | fin(0) | seq(time + -E),
 
+// Some explorations with chords below
 
 // These take the root as a MIDI note number
 major_triad = fn(root) => fn(fw) => [fw(@root), fw(@(root + 4)), fw(@(root + 7))],
