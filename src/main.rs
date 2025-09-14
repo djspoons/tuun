@@ -563,6 +563,40 @@ fn process_event<I>(
                         },
                     )
                 }
+                (
+                    Mode::Edit {
+                        program_index,
+                        cursor_position: _,
+                        errors,
+                        message,
+                    },
+                    Some(Scancode::A),
+                ) if keymod.contains(Mod::LCTRLMOD) || keymod.contains(Mod::RCTRLMOD) => (
+                    context,
+                    Mode::Edit {
+                        program_index,
+                        cursor_position: 0,
+                        errors,
+                        message,
+                    },
+                ),
+                (
+                    Mode::Edit {
+                        program_index,
+                        cursor_position: _,
+                        errors,
+                        message,
+                    },
+                    Some(Scancode::E),
+                ) if keymod.contains(Mod::LCTRLMOD) || keymod.contains(Mod::RCTRLMOD) => (
+                    context,
+                    Mode::Edit {
+                        program_index,
+                        cursor_position: programs[program_index - 1].len(),
+                        errors,
+                        message,
+                    },
+                ),
 
                 (mode, _) => return (context, mode),
             }
