@@ -11,6 +11,9 @@ triangle = fn(freq) => let
     a = time * slope + -1,
     b = time * -slope + 3
   in alt(t, res(t, a), res(t, b)),
+// frac should be a number between 0 and 0.5
+pwm = fn(frac) => fn(freq) => alt(triangle(freq) + (-1 * frac), -1, 1),
+
 
 // HELPERS
 amp = fn(level) => fn(w) => w * level,

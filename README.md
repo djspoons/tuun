@@ -37,8 +37,12 @@ cargo run -- -C context.tuun -p '$440 * Qw'
 Or for a slightly more complex example:
 
 ```
-cargo run -- -C context.tuun -p 'let h = harmonica(Q, 440) in <[h, h, h, h]>'
+cargo run -- -C context.tuun -p 'let h = harmonica(Q, 440) in <[h, h, h, h]>' -p 'pwm((X + 1) * 0.5)(440)'
 ```
+Try playing the second program, holding the option key, and moving your mouse to the left and right.
+
+
+### Keyboard Navigation
 
 Once Tuun has started, use the following keys to navigate and edit.
 
@@ -48,6 +52,7 @@ In "select" mode (when a solid triangle appears at the left-hand side):
 * shift + cmd + enter - evaluate current program and play the resulting waveform at the beginning of the next measure and every _other_ measure afterward
 * escape - stop playback of future iterations of the current waveform
 * cmd + escape - immediate stop playback of the current waveform
+* (hold) option - switch to "slider" mode
 * R - **reload** all context files
 * L - **load** all program files (and overwrite the current programs)
 * S - **save** all programs to a file
@@ -61,3 +66,8 @@ In "edit" mode (when the current program is rendered in white):
 * cmd + enter - evaluate current program and play the resulting waveform at the beginning of the next measure and every measure afterward
 * shift + cmd + enter - evaluate current program and play the resulting waveform at the beginning of the next measure and every _other_ measure afterward
 * escape - switch to "select" mode
+
+In "slider" mode (slider marks at top and left turn green):
+* move mouse (or track-pad) left and right - adjust "X" slider
+* move mouse (or track-pad) up and down - adjust "Y" slider
+* (release) option - return to "select" mode
