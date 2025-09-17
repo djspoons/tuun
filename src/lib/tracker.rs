@@ -207,6 +207,13 @@ pub struct Generator<'a> {
 
 // TODO add metrics for waveform expr depth and total ops
 
+#[derive(Debug, Copy, Clone)]
+enum MaybeOption<T> {
+    Some(T),
+    None,
+    Maybe, // The value may or may not be present
+}
+
 impl<'a> Generator<'a> {
     // Create a new generator with the given sample frequency. Note that slider_state and capture_state must be set
     // before `generate` is called.
@@ -708,22 +715,20 @@ impl<'a> Generator<'a> {
                 // TODO figure out which of `length` or `length(waveform)` is cheaper and do that first.
                 let inner = self.remaining(waveform, position, max);
                 return match self.greater_or_equals_at(&length, 0.0, position, max) {
-                    Some(new_position) => new_position.min(inner),
-                    None => {
+                    MaybeOption::Some(new_position) => new_position.min(inner),
+                    MaybeOption::None => inner,
+                    MaybeOption::Maybe => {
                         println!(
-                            "Warning: unable to determine length of Fin length cheaply, generating up to max: {:?}",
+                            "Warning: unable to determine length of Fin length cheaply, generating samples for: {:?}",
                             length
                         );
-                        let out = self.generate(length, position, max);
+                        let out = self.generate(length, position, inner);
                         for (i, &x) in out.iter().enumerate() {
-                            if i >= inner {
-                                return inner;
-                            }
                             if x >= 0.0 {
                                 return i;
                             }
                         }
-                        return out.len().min(max);
+                        return inner;
                     }
                 };
             }
@@ -789,38 +794,36 @@ impl<'a> Generator<'a> {
     }
 
     // If `waveform` will be greater than or equal to `value` at some point between `position` and `position + max`,
-    // return the difference between that point and position or None if that can't be determined cheaply.
+    // return Some of the difference between that point and position, None if `waveform` will not be greater
+    // than or equal in that range, or Maybe if that can't be determined cheaply.
     fn greater_or_equals_at(
         &self,
         waveform: &Waveform<FilterState>,
         value: f32,
         position: i64,
         max: usize,
-    ) -> Option<usize> {
+    ) -> MaybeOption<usize> {
         use Waveform::{Append, Const, Sum, Time};
         match waveform {
-            Const(v) if *v == value => Some(0),
+            Const(v) if *v >= value => MaybeOption::Some(0),
+            Const(_) => MaybeOption::None,
             Time => {
                 let current_value = position as f32 / self.sample_frequency as f32;
                 if current_value >= value {
-                    Some(0)
+                    MaybeOption::Some(0)
                 } else {
                     let target_position = (value * self.sample_frequency as f32).ceil() as i64;
-                    Some(max.min((target_position - position) as usize))
+                    MaybeOption::Some(max.min((target_position - position) as usize))
                 }
             }
             Append(a, b) => {
                 match self.greater_or_equals_at(a, value, position, max) {
-                    Some(size) => Some(size),
-                    None => {
-                        // XXX double check this... it's a little suspect that we keep going after
-                        // getting "None" from a, since there might be a point where a is >= value
-                        // but we just couldn't find it cheaply.
-                        // TODO maybe have a tri-state instead? Like Yes, No, or Maybe?
+                    MaybeOption::Some(size) => MaybeOption::Some(size),
+                    MaybeOption::None => {
                         let a_remaining = self.remaining(a, position, max);
                         if a_remaining == max {
-                            // We didn't reach the end of a
-                            None
+                            // We didn't reach the end of a, so b isn't relevant yet
+                            MaybeOption::None
                         } else if a_remaining == 0 {
                             // If a_remaining == 0 but max > 0, then position can't be negative (since no waveform can
                             // end before position 0).
@@ -838,6 +841,7 @@ impl<'a> Generator<'a> {
                             self.greater_or_equals_at(b, value, 0, max - a_remaining)
                         }
                     }
+                    MaybeOption::Maybe => MaybeOption::Maybe,
                 }
             }
             Sum(a, b) => {
@@ -845,22 +849,22 @@ impl<'a> Generator<'a> {
                 // separately, and since we don't expect this to be called on non-optimized waveforms (except
                 // in tests), just give up.
                 if self.offset(a, max) != 0 {
-                    return None;
+                    return MaybeOption::Maybe;
                 }
                 match (&**a, &**b) {
                     (Const(va), Const(vb)) => {
-                        if va + vb == value {
-                            Some(0)
+                        if va + vb >= value {
+                            MaybeOption::Some(0)
                         } else {
-                            None
+                            MaybeOption::None
                         }
                     }
                     (Const(va), _) => self.greater_or_equals_at(b, value - va, position, max),
                     (_, Const(vb)) => self.greater_or_equals_at(a, value - vb, position, max),
-                    _ => None,
+                    _ => MaybeOption::Maybe,
                 }
             }
-            _ => None,
+            _ => MaybeOption::Maybe,
         }
     }
 
@@ -871,8 +875,9 @@ impl<'a> Generator<'a> {
             Waveform::Const { .. } | Waveform::Time | Waveform::Noise | Waveform::Fixed(_) => 0,
             Waveform::Fin { waveform, .. } => self.offset(waveform, max),
             Waveform::Seq { offset, .. } => match self.greater_or_equals_at(&offset, 0.0, 0, max) {
-                Some(new_position) => new_position,
-                None => {
+                MaybeOption::Some(new_position) => new_position,
+                MaybeOption::None => max,
+                MaybeOption::Maybe => {
                     panic!(
                         "Unable to determine offset of Seq offset cheaply: {:?}",
                         offset
@@ -1497,6 +1502,19 @@ mod tests {
     use Waveform::{Append, Const, DotProduct, Filter, Fin, Fixed, Res, Seq, Sin, Sum, Time};
 
     const MAX_LENGTH: usize = 1000;
+
+    impl<T> MaybeOption<T> {
+        fn is_some(&self) -> bool {
+            matches!(self, MaybeOption::Some(_))
+        }
+
+        fn unwrap(self) -> T {
+            match self {
+                MaybeOption::Some(v) => v,
+                _ => panic!("Called unwrap on a MaybeOption that wasn't Some"),
+            }
+        }
+    }
 
     fn new_test_generator<'a>(sample_frequency: i32) -> Generator<'a> {
         Generator::new(sample_frequency)
