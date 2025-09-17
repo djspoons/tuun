@@ -181,7 +181,7 @@ impl fmt::Display for Waveform<()> {
 pub struct FilterState {
     // The state of the filter, used to store previously generated samples and the position of the first of those
     // samples. Used as an input to feedback.
-    previous_out: RefCell<(Vec<f32>, usize)>,
+    previous_out: RefCell<(Vec<f32>, i64)>,
 }
 
 struct SliderState {
@@ -223,11 +223,13 @@ impl<'a> Generator<'a> {
     // 'desired' samples are generated, that indicates that this waveform has finished (and
     // generate won't be called on it again). For waveforms other than Noise and Slider or
     // waveforms that contain them, the result is determined only by the arguments (this
-    // function is pure).
+    // function is pure). Note that position can be negative and that in that case, this
+    // will always return at least desired.min(-position) samples (that is, waveforms are not
+    // allowed to end before position 0).
     pub fn generate(
         &self,
         waveform: &Waveform<FilterState>,
-        position: usize,
+        position: i64,
         desired: usize,
     ) -> Vec<f32> {
         use Waveform::*;
@@ -241,7 +243,7 @@ impl<'a> Generator<'a> {
             Time => {
                 let mut out = vec![0.0; desired];
                 for (i, x) in out.iter_mut().enumerate() {
-                    *x = (i + position) as f32 / self.sample_frequency as f32;
+                    *x = (i as i64 + position) as f32 / self.sample_frequency as f32;
                 }
                 return out;
             }
@@ -253,10 +255,24 @@ impl<'a> Generator<'a> {
                 return out;
             }
             Fixed(samples) => {
-                if position >= samples.len() {
+                if position >= samples.len() as i64 {
                     return vec![];
+                } else if position < 0 {
+                    if desired <= -position as usize {
+                        return vec![0.0; desired];
+                    } else {
+                        let mut out = vec![0.0; -position as usize];
+                        out.extend_from_slice(
+                            &samples[0..(desired - (-position as usize)).min(samples.len())],
+                        );
+                        return out;
+                    }
+                } else {
+                    // position >= 0
+                    let position = position as usize;
+                    return samples.clone()[position..(position + desired).min(samples.len())]
+                        .to_vec();
                 }
-                return samples.clone()[position..(position + desired).min(samples.len())].to_vec();
             }
             Fin {
                 waveform: inner_waveform,
@@ -269,6 +285,7 @@ impl<'a> Generator<'a> {
                 return self.generate(waveform, position, desired);
             }
             Append(a, b) => {
+                // TODO can't we just generate and use the length of the result rather than calling remaining?
                 let remaining = self.remaining(a, position, desired);
                 if remaining >= desired {
                     return self.generate(a, position, desired);
@@ -277,10 +294,12 @@ impl<'a> Generator<'a> {
                     out.extend(self.generate(b, 0, desired - out.len()));
                     return out;
                 } else {
-                    // remaining == 0 at position, need to figure out how far into b we are, so get the length
-                    // of a, and use that to compute the position into b.
-                    let length = self.remaining(a, 0, desired + position);
-                    return self.generate(b, position - length, desired);
+                    // We have remaining for a == 0 at position, and we need to figure out how far into b we are.
+                    // Get the length of a, and use that to compute the position into b. If remaining is 0 then
+                    // position can't be negative (since no waveform can end before position 0).
+                    assert!(position >= 0);
+                    let length = self.remaining(a, 0, desired + position as usize);
+                    return self.generate(b, position - length as i64, desired);
                 }
             }
             Sin(waveform) => {
@@ -310,19 +329,21 @@ impl<'a> Generator<'a> {
                 // The goal here is to make sure out.len() >= feedback_out.len() and to fill in the first
                 // feedback_out.len() samples.
                 let mut out = vec![];
-                if position < feedback_out.len() {
-                    // We can't generate at position < 0, so just pad with zeros
-                    out.resize(feedback_out.len() - position, 0.0);
-                }
                 // previous_position is the position that we need to start reusing samples from
-                let previous_position = position + out.len() - feedback_out.len();
+                let mut previous_position = position - feedback_out.len() as i64;
                 let mut previous_out = state.previous_out.borrow_mut();
+                if previous_position < 0 {
+                    // We could generate from this waveform for negative positions... but we need to be a little
+                    // careful and filling with zeros here has less impact than the equivalent case for Res.
+                    out.resize(-previous_position as usize, 0.0);
+                    previous_position = 0;
+                }
                 if previous_position >= previous_out.1
-                    && previous_position < previous_out.1 + previous_out.0.len()
+                    && previous_position < previous_out.1 + previous_out.0.len() as i64
                 {
                     out.extend_from_slice(
-                        &previous_out.0[(previous_position - previous_out.1)
-                            ..(previous_position - previous_out.1
+                        &previous_out.0[(previous_position - previous_out.1) as usize
+                            ..((previous_position - previous_out.1) as usize
                                 + (feedback_out.len() - out.len()))],
                     );
                 }
@@ -335,16 +356,11 @@ impl<'a> Generator<'a> {
 
                 // The goal here is to get length of inner_out to be = desired + feed_forward_out.len() - 1
                 // if possible; if it's shorter then the output will be shorter too.
-                let mut inner_out = Vec::new();
-                if position < feed_forward_out.len() - 1 {
-                    // We can't generate at position < 0, so just pad with zeros
-                    inner_out.resize((feed_forward_out.len() - 1) - position, 0.0);
-                }
-                inner_out.extend(self.generate(
+                let inner_out = self.generate(
                     waveform,
-                    position + inner_out.len() - (feed_forward_out.len() - 1),
-                    desired + (feed_forward_out.len() - 1) - inner_out.len(),
-                ));
+                    position - (feed_forward_out.len() as i64 - 1),
+                    desired + (feed_forward_out.len() - 1),
+                );
                 if inner_out.len() < feed_forward_out.len() {
                     return vec![]; // Not enough input to generate any output
                 }
@@ -376,7 +392,7 @@ impl<'a> Generator<'a> {
                     let len = previous_out.0.len().saturating_sub(MAX_FILTER_LENGTH);
                     previous_out.0.drain(0..len);
                 }
-                previous_out.1 = position + out.len() - previous_out.0.len();
+                previous_out.1 = position + out.len() as i64 - previous_out.0.len() as i64;
                 return out;
             }
             Sum(a, b) => {
@@ -389,16 +405,26 @@ impl<'a> Generator<'a> {
                 return self.generate_binary_op(|x, y| x * y, a, b, position, remaining);
             }
             Res { trigger, waveform } => {
+                // Maybe cache the last trigger position and signum and use it if position doesn't change? So we don't need this constant...
+                let max_reset_lookback: i64 = 10000; // Maximum number of samples to look back for a reset trigger
                 // TODO think about all of these unwrap_ors
                 // TODO generate the trigger in blocks?
-                // Maybe cache the last trigger position and signum and use it if position doesn't change?
                 // TODO think about the interaction of this non-monotone position with Filter
 
                 // First go back and find the most recent trigger before position.
                 let mut last_trigger_position = position;
                 let trigger_out = self.generate(trigger, position, 1);
-                let mut last_signum = trigger_out.get(0).unwrap_or(&0.0).signum();
-                while last_trigger_position > 0 {
+                if trigger_out.is_empty() {
+                    return vec![];
+                }
+                let mut last_signum = trigger_out[0].signum();
+                loop {
+                    if position - last_trigger_position > max_reset_lookback {
+                        panic!(
+                            "No reset trigger found within {} samples before position {} in waveform {:?}",
+                            max_reset_lookback, position, trigger
+                        );
+                    }
                     let trigger_out = self.generate(trigger, last_trigger_position - 1, 1);
                     let new_signum = trigger_out.get(0).unwrap_or(&0.0).signum();
                     if last_signum >= 0.0 && new_signum < 0.0 {
@@ -438,7 +464,7 @@ impl<'a> Generator<'a> {
                     if reset_inner_position {
                         inner_position = 0;
                     } else {
-                        inner_position += inner_desired;
+                        inner_position += inner_desired as i64;
                     }
                 }
                 return out;
@@ -543,98 +569,136 @@ impl<'a> Generator<'a> {
         op: fn(f32, f32) -> f32,
         a: &Waveform<FilterState>,
         b: &Waveform<FilterState>,
-        position: usize,
+        position: i64,
         desired: usize,
     ) -> Vec<f32> {
-        let offset = self.offset(&a, 0, position + desired);
         let mut left = self.generate(a, position, desired);
+        // Note on negative positions and offsets: we assume that if a's offset is non-zero that the
+        // intention is that no negative positions should be generated for b. (This is consistent with
+        // how Seq is replaced by appending b to a finite Const waveform whose value is the identity for
+        // the op.). If a's offset is zero, then we do generate negative positions for b.
 
-        if offset >= position + desired {
-            // Make sure the left side is long enough so that we get another chance to
-            // generate the right-hand side.
-            left.resize(desired, 0.0);
+        // Also note that if we assume that offset(a) == 0 this is all much simpler, but I'm keeping this
+        // code around as a test of waveform optimizations (including removing Seq's).
+
+        // Calculate the maximum offset of a that is relevant for position and desired. This as the sum
+        // of positive portion of position (if any) and the positive portion of desired (again, if any).
+        let positive_position = if position < 0 { 0 } else { position as usize };
+        let positive_desired = if position < 0 {
+            if desired <= (-position) as usize {
+                0
+            } else {
+                desired - (-position) as usize
+            }
         } else {
-            // offset < position + desired
-            // There is an overlap between the desired portion and the right waveform...
-            //    1) ... and the right waveform starts after position
-            // or 2) ... and the right waveform starts before position
+            desired
+        };
+        let offset = self.offset(&a, positive_position + positive_desired);
 
-            if position + left.len() < offset {
-                // Either way, if the left side is shorter than the next offset, than extend it.
-                left.resize(offset - position, 0.0);
+        if offset > 0 {
+            if offset >= positive_position + positive_desired {
+                // offset should never be > max_offset so offset == max_offset, which means that b shouldn't
+                // generate here. Make sure the left side is long enough so that we get another chance to generate
+                // the right-hand side.
+                left.resize(desired, 0.0);
+                return left;
+            }
+            // offset < positive_position + positive_desired
+            // There is an overlap between the desired portion and the right waveform, we have two cases (below)
+            // to handle. But first, if the left side is shorter than the offset then extend it.
+            // TODO I think this might be simplified by combining it with the two cases below.
+            if position < 0 {
+                left.resize((offset + (-position) as usize).max(desired), 0.0);
+            } else if position + left.len() as i64 <= offset as i64 {
+                left.resize(offset - position as usize, 0.0);
             }
 
-            if position < offset {
-                // ... and the right waveform starts after position
-                match b {
-                    // If the right waveform is a constant, then don't generate it, just apply the op
-                    Waveform::Const(f) => {
-                        for x in left[offset - position..].iter_mut() {
-                            *x = op(*x, *f);
-                        }
-                        if desired > left.len() {
-                            left.resize(desired, op(0.0, *f));
-                        }
+            if positive_position <= offset {
+                // ... 1) the right waveform starts at or after positive_position
+                let right = self.generate(b, 0, positive_desired - (offset - positive_position));
+                // Merge the overlapping portion
+                // The index into left here could also be offset - positive_position - negative_position
+                for (i, x) in left[(offset as i64 - position) as usize..]
+                    .iter_mut()
+                    .enumerate()
+                {
+                    if i >= right.len() {
+                        break;
                     }
-                    _ => {
-                        let right = self.generate(b, 0, desired - (offset - position));
-                        // Merge the overlapping portion
-                        for (i, x) in left[offset - position..].iter_mut().enumerate() {
-                            if i >= right.len() {
-                                break;
-                            }
-                            *x = op(*x, right[i]);
-                        }
-                        // If the left side is shorter than the right, than append.
-                        if right.len() + offset > left.len() + position {
-                            left.extend_from_slice(&right[(left.len() + position - offset)..]);
-                        }
-                    }
+                    *x = op(*x, right[i]);
+                }
+                // If the left side is shorter than the right, than append.
+                // Another way of writing this would be to ask if:
+                //          right.len() + offset > left.len() + positive_position - negative_position
+                if (right.len() + offset) as i64 > left.len() as i64 + position {
+                    left.extend_from_slice(&right[(left.len() + positive_position - offset)..]);
                 }
             } else {
-                // ... and the right waveform starts before position
-                match b {
-                    Waveform::Const(f) => {
-                        for x in left.iter_mut() {
-                            *x = op(*x, *f);
-                        }
-                        if desired > left.len() {
-                            left.resize(desired, op(0.0, *f));
-                        }
+                // ... 2) the right waveform starts before positive_position
+                // Since offset >= 0 and offset < positive_position, we know that positive_position == position
+                // and that left has no samples corresponding to negative positions.
+                let right = self.generate(b, (positive_position - offset) as i64, desired);
+                // Merge the overlapping portion
+                for (i, x) in left.iter_mut().enumerate() {
+                    if i >= right.len() {
+                        break;
                     }
-                    _ => {
-                        let right = self.generate(b, position - offset, desired);
-                        // Merge the overlapping portion
-                        for (i, x) in left.iter_mut().enumerate() {
-                            if i >= right.len() {
-                                break;
-                            }
-                            *x = op(*x, right[i]);
+                    *x = op(*x, right[i]);
+                }
+                // If the left side is shorter than the right, than append.
+                if right.len() > left.len() {
+                    left.extend_from_slice(&right[left.len()..]);
+                }
+            }
+        } else {
+            // offset == 0, so we use the same position for both a and b
+            match b {
+                // In this branch (which is always taken if we've removed Seq's), check to see if we can
+                // avoid generating the right-hand side and instead just apply the op directly.
+                // TODO could also check f against the identity of op and skip the loop here
+                Waveform::Const(f) => {
+                    for x in left.iter_mut() {
+                        *x = op(*x, *f);
+                    }
+                    if desired > left.len() {
+                        left.resize(desired, op(0.0, *f));
+                    }
+                }
+                _ => {
+                    let right = self.generate(b, position - offset as i64, desired);
+                    // Merge the overlapping portion
+                    for (i, x) in left.iter_mut().enumerate() {
+                        if i >= right.len() {
+                            break;
                         }
-                        // If the left side is shorter than the right, than append.
-                        if right.len() > left.len() {
-                            left.extend_from_slice(&right[left.len()..]);
-                        }
+                        *x = op(*x, right[i]);
+                    }
+                    // If the left side is shorter than the right, than append.
+                    if right.len() > left.len() {
+                        left.extend_from_slice(&right[left.len()..]);
                     }
                 }
             }
         }
+
         return left;
     }
 
     // Returns the number of samples that `waveform` will generate starting from `position` or `max`, whichever is
     // smaller. When `position` is zero, this is the length of the waveform (or, again, `max`).
-    fn remaining(&self, waveform: &Waveform<FilterState>, position: usize, max: usize) -> usize {
+    fn remaining(&self, waveform: &Waveform<FilterState>, position: i64, max: usize) -> usize {
         use Waveform::*;
         match waveform {
             Const { .. } => max,
             Time => max,
             Noise => max,
             Fixed(samples) => {
-                if position >= samples.len() {
+                if position >= samples.len() as i64 {
                     0
+                } else if position < 0 {
+                    (samples.len() + (-position) as usize).min(max)
                 } else {
-                    (samples.len() - position).min(max)
+                    (samples.len() - position as usize).min(max)
                 }
             }
             Fin { length, waveform } => {
@@ -673,24 +737,43 @@ impl<'a> Generator<'a> {
                 } else if a_remaining > 0 {
                     a_remaining + self.remaining(b, 0, max - a_remaining)
                 } else {
-                    // a_remaining == 0
-                    let a_length = self.remaining(a, 0, position + max);
-                    self.remaining(b, position - a_length, max)
+                    // a_remaining == 0 and max > 0, so position can't be negative (since no waveform can
+                    // end before position 0).
+                    assert!(position >= 0);
+                    let a_length = self.remaining(a, 0, position as usize + max);
+                    self.remaining(b, position - a_length as i64, max)
                 }
             }
             Sum(a, b) | DotProduct(a, b) => {
-                let offset = self.offset(a, 0, position + max);
-                let from_b = if position + max < offset {
-                    max
-                } else if position < offset {
-                    // position + max >= offset
-                    // max >= offset - position
-                    self.remaining(b, 0, max - (offset - position)) + (offset - position)
-                } else {
-                    // position >= offset
-                    self.remaining(b, position - offset, max)
-                };
                 let from_a = self.remaining(a, position, max);
+                let positive_position = if position < 0 { 0 } else { position as usize };
+                let positive_max = if position < 0 {
+                    if max <= (-position) as usize {
+                        0
+                    } else {
+                        max - (-position) as usize
+                    }
+                } else {
+                    max
+                };
+                let offset = self.offset(a, positive_position + positive_max);
+                let from_b = if offset > 0 {
+                    if offset >= positive_position + positive_max {
+                        positive_max
+                    } else if positive_position < offset {
+                        // positive_position + positive_max > offset
+                        // positive_max > offset - positive_position
+                        self.remaining(b, 0, positive_max - (offset - positive_position))
+                            + (offset - positive_position)
+                    } else {
+                        // positive_position >= offset
+                        self.remaining(b, (positive_position - offset) as i64, max)
+                    }
+                } else {
+                    // offset == 0
+                    // In this case, position is the same for both a and b
+                    self.remaining(b, position, max)
+                };
                 match waveform {
                     Sum(_, _) => from_a.max(from_b),
                     DotProduct(_, _) => from_a.min(from_b),
@@ -706,12 +789,12 @@ impl<'a> Generator<'a> {
     }
 
     // If `waveform` will be greater than or equal to `value` at some point between `position` and `position + max`,
-    // return that position or None if that can't be determined cheaply.
+    // return the difference between that point and position or None if that can't be determined cheaply.
     fn greater_or_equals_at(
         &self,
         waveform: &Waveform<FilterState>,
         value: f32,
-        position: usize,
+        position: i64,
         max: usize,
     ) -> Option<usize> {
         use Waveform::{Append, Const, Sum, Time};
@@ -722,32 +805,46 @@ impl<'a> Generator<'a> {
                 if current_value >= value {
                     Some(0)
                 } else {
-                    let target_position = (value * self.sample_frequency as f32).ceil() as usize;
-                    Some(max.min(target_position - position))
+                    let target_position = (value * self.sample_frequency as f32).ceil() as i64;
+                    Some(max.min((target_position - position) as usize))
                 }
             }
             Append(a, b) => {
-                if self.offset(a, position, max) != 0 {
-                    return None;
-                }
                 match self.greater_or_equals_at(a, value, position, max) {
-                    Some(new_position) => Some(new_position),
+                    Some(size) => Some(size),
                     None => {
+                        // XXX double check this... it's a little suspect that we keep going after
+                        // getting "None" from a, since there might be a point where a is >= value
+                        // but we just couldn't find it cheaply.
+                        // TODO maybe have a tri-state instead? Like Yes, No, or Maybe?
                         let a_remaining = self.remaining(a, position, max);
-                        if a_remaining > 0 {
+                        if a_remaining == max {
                             // We didn't reach the end of a
                             None
-                        } else {
-                            // a_remaining == 0
+                        } else if a_remaining == 0 {
+                            // If a_remaining == 0 but max > 0, then position can't be negative (since no waveform can
+                            // end before position 0).
+                            assert!(position >= 0);
                             // Find how far we are into b
-                            let a_length = self.remaining(a, 0, position + max);
-                            self.greater_or_equals_at(b, value, position - a_length, max - a_length)
+                            let a_length = self.remaining(a, 0, position as usize + max);
+                            self.greater_or_equals_at(
+                                b,
+                                value,
+                                position - a_length as i64,
+                                max - a_length,
+                            )
+                        } else {
+                            // 0 < a_remaining < max, so b starts between position and position + max
+                            self.greater_or_equals_at(b, value, 0, max - a_remaining)
                         }
                     }
                 }
             }
             Sum(a, b) => {
-                if self.offset(a, position, max) != 0 {
+                // If a has an offset, we'd need to handle the overlapping and non-overlapping parts
+                // separately, and since we don't expect this to be called on non-optimized waveforms (except
+                // in tests), just give up.
+                if self.offset(a, max) != 0 {
                     return None;
                 }
                 match (&**a, &**b) {
@@ -769,48 +866,36 @@ impl<'a> Generator<'a> {
 
     // Returns the offset at which the next waveform should start (in samples). This is determined entirely by
     // `waveform` (this function is pure).
-    fn offset(&self, waveform: &Waveform<FilterState>, position: usize, max: usize) -> usize {
+    fn offset(&self, waveform: &Waveform<FilterState>, max: usize) -> usize {
         match waveform {
             Waveform::Const { .. } | Waveform::Time | Waveform::Noise | Waveform::Fixed(_) => 0,
-            Waveform::Fin { waveform, .. } => self.offset(waveform, position, max),
-            Waveform::Seq { offset, .. } => {
-                match self.greater_or_equals_at(&offset, 0.0, position, max) {
-                    Some(new_position) => new_position,
-                    None => {
-                        println!(
-                            "Warning: unable to determine offset of Seq offset cheaply, generating up to max: {:?}",
-                            offset
-                        );
-                        let out = self.generate(offset, position, max);
-                        for (i, &x) in out.iter().enumerate() {
-                            if x >= 0.0 {
-                                return i;
-                            }
-                        }
-                        return out.len().min(max);
-                    }
+            Waveform::Fin { waveform, .. } => self.offset(waveform, max),
+            Waveform::Seq { offset, .. } => match self.greater_or_equals_at(&offset, 0.0, 0, max) {
+                Some(new_position) => new_position,
+                None => {
+                    panic!(
+                        "Unable to determine offset of Seq offset cheaply: {:?}",
+                        offset
+                    );
                 }
-            }
-            Waveform::Append(a, b) => {
-                // XXX this is totally not right
-                self.offset(a, position, max) + self.offset(b, 0, max)
-            }
-            Waveform::Sin(waveform) => self.offset(waveform, position, max),
-            Waveform::Filter { waveform, .. } => self.offset(waveform, position, max),
+            },
+            Waveform::Append(a, b) => (self.offset(a, max) + self.offset(b, max)).min(max),
+            Waveform::Sin(waveform) => self.offset(waveform, max),
+            Waveform::Filter { waveform, .. } => self.offset(waveform, max),
             Waveform::Sum(a, b) | Waveform::DotProduct(a, b) => {
-                let a_offset = self.offset(a, 0, position + max);
-                if a_offset - position >= max {
+                let a_offset = self.offset(a, max);
+                if a_offset == max {
                     return max;
                 }
-                let b_offset = self.offset(b, 0, max - (a_offset - position));
-                return (a_offset - position + b_offset).min(max);
+                let b_offset = self.offset(b, max - a_offset);
+                return a_offset + b_offset;
             }
             Waveform::Res { trigger, .. } | Waveform::Alt { trigger, .. } => {
-                self.offset(trigger, position, max)
+                self.offset(trigger, max)
             }
             Waveform::Slider { .. } => 0,
             Waveform::Marked { waveform, .. } | Waveform::Captured { waveform, .. } => {
-                self.offset(waveform, position, max)
+                self.offset(waveform, max)
             }
         }
     }
@@ -1041,11 +1126,9 @@ where
             }
             Sum(a, b) | DotProduct(a, b) => {
                 self.process_marked(waveform_id, start, &*a, out);
-                let offset = Generator::new(self.sample_frequency).offset(
-                    &*a,
-                    0,
-                    10 * self.sample_frequency as usize,
-                ); // XXX
+                // TODO do something about this constant for max
+                let offset = Generator::new(self.sample_frequency)
+                    .offset(&*a, 10 * self.sample_frequency as usize);
                 let start =
                     start + Duration::from_secs_f32(offset as f32 / self.sample_frequency as f32);
                 self.process_marked(waveform_id, start, &*b, out);
@@ -1355,7 +1438,11 @@ where
                     generator.slider_state = Some(&self.slider_state);
                     let capture_state = RefCell::new(&mut active.capture_state);
                     generator.capture_state = Some(capture_state);
-                    tmp = generator.generate(&active.waveform, active.position, segment_length);
+                    tmp = generator.generate(
+                        &active.waveform,
+                        active.position as i64,
+                        segment_length,
+                    );
                 }
                 if tmp.len() > segment_length {
                     panic!(
@@ -1433,7 +1520,7 @@ mod tests {
             let w = initialize_state(waveform.clone());
             let mut out = vec![0.0; desired.len()];
             for n in 0..out.len() / size {
-                let tmp = generator.generate(&w, n * size, size);
+                let tmp = generator.generate(&w, (n * size) as i64, size);
                 (&mut out[n * size..(n * size + tmp.len())]).copy_from_slice(&tmp);
             }
             assert_eq!(
@@ -1456,7 +1543,7 @@ mod tests {
             );
             let mut out = vec![0.0; desired.len()];
             for n in 0..out.len() / size {
-                let tmp = generator.generate(&w, n * size, size);
+                let tmp = generator.generate(&w, (n * size) as i64, size);
                 (&mut out[n * size..(n * size + tmp.len())]).copy_from_slice(&tmp);
             }
             assert_eq!(
@@ -1481,7 +1568,7 @@ mod tests {
             );
             let mut out = vec![0.0; desired.len()];
             for n in 0..out.len() / size {
-                let tmp = generator.generate(&w, n * size, size);
+                let tmp = generator.generate(&w, (n * size) as i64, size);
                 (&mut out[n * size..(n * size + tmp.len())]).copy_from_slice(&tmp);
             }
             assert_eq!(
@@ -1502,20 +1589,23 @@ mod tests {
         assert_eq!(result, vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
     }
 
-    fn sin_waveform(frequency: f32) -> Box<Waveform> {
-        return Box::new(Sin(Box::new(DotProduct(
-            Box::new(Const(2.0)),
+    fn sin_waveform(frequency: f32, phase: f32) -> Box<Waveform> {
+        return Box::new(Sin(Box::new(Sum(
             Box::new(DotProduct(
-                Box::new(Const(std::f32::consts::PI)),
-                Box::new(DotProduct(Box::new(Const(frequency)), Box::new(Time))),
+                Box::new(Const(2.0)),
+                Box::new(DotProduct(
+                    Box::new(Const(std::f32::consts::PI)),
+                    Box::new(DotProduct(Box::new(Const(frequency)), Box::new(Time))),
+                )),
             )),
+            Box::new(Const(phase)),
         ))));
     }
 
     #[test]
     fn test_res() {
         let w1 = Res {
-            trigger: sin_waveform(0.25),
+            trigger: sin_waveform(0.25, 0.0),
             waveform: Box::new(Time),
         };
         run_tests(&w1, vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0, 3.0]);
@@ -1523,7 +1613,7 @@ mod tests {
         let w2 = Res {
             trigger: Box::new(Fin {
                 length: Box::new(Sum(Box::new(Time), Box::new(Const(-6.0)))),
-                waveform: sin_waveform(0.25),
+                waveform: sin_waveform(0.25, 0.0),
             }),
             waveform: Box::new(Time),
         };
@@ -1535,13 +1625,20 @@ mod tests {
         run_tests(&w2, vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 0.0, 0.0]);
 
         let w3 = Res {
-            trigger: sin_waveform(0.25),
+            trigger: sin_waveform(0.25, 0.0),
             waveform: Box::new(Waveform::Fin {
                 length: Box::new(Sum(Box::new(Time), Box::new(Const(-3.0)))),
                 waveform: Box::new(Waveform::Time),
             }),
         };
         run_tests(&w3, vec![0.0, 1.0, 2.0, 0.0, 0.0, 1.0, 2.0, 0.0]);
+
+        // Test a reset that occurs before time 0
+        let w4 = Res {
+            trigger: Box::new(Sum(Box::new(Time), Box::new(Const(2.0)))),
+            waveform: Box::new(Time),
+        };
+        run_tests(&w4, vec![2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]);
     }
 
     #[test]
@@ -1552,7 +1649,7 @@ mod tests {
             Box::new(finite_const_waveform(2.0, 3, 2)),
         );
         assert_eq!(
-            generator.offset(&initialize_state(w1.clone()), 0, MAX_LENGTH),
+            generator.offset(&initialize_state(w1.clone()), MAX_LENGTH),
             4
         );
         assert_eq!(
@@ -1570,7 +1667,7 @@ mod tests {
             Box::new(finite_const_waveform(1.0, 5, 2)),
         );
         assert_eq!(
-            generator.offset(&initialize_state(w1.clone()), 0, MAX_LENGTH),
+            generator.offset(&initialize_state(w1.clone()), MAX_LENGTH),
             4
         );
         assert_eq!(
@@ -1635,7 +1732,7 @@ mod tests {
             Box::new(finite_const_waveform(2.0, 5, 2)),
         );
         assert_eq!(
-            generator.offset(&initialize_state(w1.clone()), 0, MAX_LENGTH),
+            generator.offset(&initialize_state(w1.clone()), MAX_LENGTH),
             4
         );
         assert_eq!(
@@ -1671,36 +1768,34 @@ mod tests {
         // FIRs
         let w1 = Filter {
             waveform: Box::new(Time),
-            feed_forward: Box::new(finite_const_waveform(2.0, 3, 3)),
+            feed_forward: Box::new(Fixed(vec![2.0, 2.0, 2.0])),
             feedback: Box::new(Fixed(vec![])),
             state: (),
         };
-        run_tests(&w1, vec![0.0, 2.0, 6.0, 12.0, 18.0, 24.0, 30.0, 36.0]);
+        run_tests(&w1, vec![-6.0, 0.0, 6.0, 12.0, 18.0, 24.0, 30.0, 36.0]);
 
         let w2 = Filter {
             waveform: Box::new(Fin {
                 length: Box::new(Sum(Box::new(Time), Box::new(Const(-5.0)))),
-
                 waveform: Box::new(Time),
             }),
-            feed_forward: Box::new(finite_const_waveform(2.0, 3, 3)),
+            feed_forward: Box::new(Fixed(vec![2.0, 2.0, 2.0])),
             feedback: Box::new(Fixed(vec![])),
             state: (),
         };
-
         let generator = new_test_generator(1);
         assert_eq!(
             generator.remaining(&initialize_state(w2.clone()), 0, MAX_LENGTH),
             5
         );
-        run_tests(&w2, vec![0.0, 2.0, 6.0, 12.0, 18.0, 0.0, 0.0, 0.0]);
+        run_tests(&w2, vec![-6.0, 0.0, 6.0, 12.0, 18.0, 0.0, 0.0, 0.0]);
 
         let w3 = Filter {
             waveform: Box::new(Fin {
                 length: Box::new(Sum(Box::new(Time), Box::new(Const(-3.0)))),
                 waveform: Box::new(Time),
             }),
-            feed_forward: Box::new(finite_const_waveform(2.0, 5, 5)),
+            feed_forward: Box::new(Fixed(vec![2.0, 2.0, 2.0, 2.0, 2.0])),
             feedback: Box::new(Fixed(vec![])),
             state: (),
         };
@@ -1709,26 +1804,27 @@ mod tests {
             generator.remaining(&initialize_state(w3.clone()), 0, MAX_LENGTH),
             3
         );
-        run_tests(&w3, vec![0.0, 2.0, 6.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        run_tests(&w3, vec![-20.0, -10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
 
         let w4 = Filter {
             waveform: Box::new(Res {
-                trigger: sin_waveform(1.0 / 3.0),
+                // Pick a trigger that's far from zero on at our sampled points
+                trigger: sin_waveform(1.0 / 3.0, 3.0 * std::f32::consts::PI / 2.0),
                 waveform: Box::new(Time),
             }),
-            feed_forward: Box::new(finite_const_waveform(2.0, 5, 5)),
-            feedback: Box::new(finite_const_waveform(0.0, 0, 0)),
-            state: (),
-        };
-        run_tests(&w4, vec![0.0, 2.0, 6.0, 6.0, 8.0, 12.0, 10.0, 8.0]);
-
-        let w5 = Filter {
-            waveform: Box::new(Const(1.0)),
-            feed_forward: Box::new(finite_const_waveform(0.2, 5, 5)),
+            feed_forward: Box::new(Fixed(vec![2.0, 2.0])),
             feedback: Box::new(Fixed(vec![])),
             state: (),
         };
-        run_tests(&w5, vec![0.2, 0.4, 0.6, 0.8, 1.0, 1.0, 1.0, 1.0]);
+        run_tests(&w4, vec![6.0, 4.0, 2.0, 6.0, 4.0, 2.0, 6.0, 4.0]);
+
+        let w5 = Filter {
+            waveform: Box::new(Const(1.0)),
+            feed_forward: Box::new(Fixed(vec![0.2, 0.2, 0.2, 0.2, 0.2])),
+            feedback: Box::new(Fixed(vec![])),
+            state: (),
+        };
+        run_tests(&w5, vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
 
         // IIRs
         let w6 = Filter {

@@ -4,15 +4,22 @@ pi = 3.14159265,
 // Computes a sine wave at the given frequency (which must be a float or waveform)
 $ = fn(freq) => sin(2 * pi * freq * time),
 sawtooth = fn(freq) => (res($freq, freq * time) + -0.5) * 2,
-square = fn(freq) => alt($freq, -1, 1),
+square = fn(freq) => alt($freq, 1, -1),
 triangle = fn(freq) => let
     t = $freq,
     slope = 4 * freq,
     a = time * slope + -1,
     b = time * -slope + 3
   in alt(t, res(t, a), res(t, b)),
-// frac should be a number between 0 and 0.5
-pwm = fn(frac) => fn(freq) => alt(triangle(freq) + (-1 * frac), -1, 1),
+// frac should be a number between 0.0 and 1.0, where 0.0 is a square wave
+pwm = fn(frac, freq) =>
+  let
+    s = sin(2 * pi * freq * time + pi * 0.5 + frac * pi * 0.5),
+    slope = 4 * freq,
+    a = time * slope + -1,
+    b = time * -slope + 3
+  in
+    alt(alt(s, res(s, a), res(s, b)) + (-1 * frac), 1, -1),
 
 
 // HELPERS
@@ -46,7 +53,9 @@ R = fn(dur, level) => fn(w) => w * Rw(dur, level),
 over = fn(freq) => fn (x) => $(freq*x) * (1/x),
 hrm = fn(freq) => {map(over(freq), [1, 3, 5, 7, 9, 11])},
 
-step = fn(freq,n) => freq * pow(2, n/12),
+add_semitones = fn(freq, n) => freq * pow(2, n/12),
+add_cents = fn(freq, n) => freq * pow(2, n/1200),
+
 just_third = fn(freq) => {[hrm(freq), hrm(freq * 5/4)]},
 equal_third = fn(freq) => {[hrm(freq), hrm(step(freq, 4))]},
 
@@ -68,12 +77,24 @@ lpf = fn(Q, fc) =>
 
 
 // INSTRUMENTS
+
+// From Welsh's Synthesizer Cookbook
 harmonica = fn(dur, freq) =>
   let a = 0.13,
       d = 0.33,
       r = 0.33,
-      s = dur - (a + d + r) in
-  hrm(freq) | lpf(0.5, 1600) | ADSR(a, d, 0.5, s, r) | seq(time + -dur),
+      s = dur - (a + d + r),
+      osc1 = pwm(0.93 + $(1.6) * 0.05, freq),
+      osc2 = res(osc1, pwm(0.7, add_cents(add_semitones(freq, 8), 7))),
+      osc = osc1 * 0.375 + osc2 * 0.5
+    in
+//  (osc * ((X + 1) * 0.5)) +
+//    ((osc | lpf(0.5, 1900)) * (1 + (X + 1) * -0.5))
+  osc
+    | lpf(0.5, 1900)
+    | ADSR(a, d, 0.5, s, r)
+    | fin(time + -dur)
+    | seq(time + -dur),
 
 
 // Time and Rests

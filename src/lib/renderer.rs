@@ -424,11 +424,12 @@ impl Renderer {
             let waveform_height = self.height * 3 / 5;
             if self.samples.len() > 0 {
                 self.canvas.set_draw_color(Color::RGB(0x00, 0xFF, 0x00));
-                let mut last_y = (self.samples[0] * (waveform_height as f32 / 2.4)
-                    + (waveform_height as f32 / 2.0)) as i32;
+                let mut last_y = (waveform_height as f32
+                    - ((self.samples[0] + 1.0) * (waveform_height as f32 / 2.4)))
+                    as i32;
                 for (i, f) in self.samples.iter().enumerate() {
                     let x = (i as f32 * x_scale) as i32;
-                    let y = (f * (waveform_height as f32 / 2.4) + (waveform_height as f32 / 2.0))
+                    let y = (waveform_height as f32 - ((f + 1.0) * (waveform_height as f32 / 2.4)))
                         as i32;
                     if f.abs() <= 0.95 {
                         self.canvas.set_draw_color(Color::RGB(0x00, 0xFF, 0x00));

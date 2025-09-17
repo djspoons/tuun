@@ -171,7 +171,7 @@ For comparison, here are the lengths and offsets of each waveform:
 | `Res(trigger, a)`    | trigger.length                     | trigger.offset              |
 | `Alt(trigger, a, b)` | trigger.length                     | trigger.offset              |
 
-This might seem like a small set of combinators, but it's enough to create synthesizers, filters, and even musical compositions with the help of the Tuun specification language.
+This small set of combinators is enough to create synthesizers, filters, and even musical compositions with the help of the Tuun specification language.
 
 
 ## Tuun Specification Language

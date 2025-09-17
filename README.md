@@ -37,7 +37,7 @@ cargo run -- -C context.tuun -p '$440 * Qw'
 Or for a slightly more complex example:
 
 ```
-cargo run -- -C context.tuun -p 'let h = harmonica(Q, 440) in <[h, h, h, h]>' -p 'pwm((X + 1) * 0.5)(440)'
+cargo run -- -C context.tuun -p 'let h = harmonica(Q, 440) in <[h, h, h, h]>' -p 'pwm((X + 1) * 0.5, 440)'
 ```
 Try playing the second program, holding the option key, and moving your mouse to the left and right.
 
