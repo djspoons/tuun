@@ -1,24 +1,36 @@
+use crate::tracker::Operator;
 use crate::tracker::Waveform;
 
-// First root returns the first non-negative value at which the given waveform is zero. This is implemented for waveforms of the form Sum(Time, _), Time, and Const(0); returns None otherwise.
+// First root returns the first non-negative value at which the given waveform is zero. This is implemented for waveforms of the form BinaryPointOp(Operator::Add|Operator::Subtract, Time, _), Time, and Const(0); returns None otherwise.
 fn first_root(waveform: &Waveform) -> Option<Waveform> {
     use Waveform::*;
     match waveform {
         Const(0.0) => Some(Const(0.0)),
         Const(_) => None,
         Time => Some(Const(0.0)),
-        Sum(a, b) => match (&**a, &**b) {
+        BinaryPointOp(Operator::Add, a, b) => match (&**a, &**b) {
             // TODO should really check that Time doesn't appear on the other side too
-            (Time, w) => Some(simplify(DotProduct(
+            (Time, w) => Some(simplify(BinaryPointOp(
+                Operator::Multiply,
                 Box::new(w.clone()),
                 Box::new(Const(-1.0)),
             ))),
-            (w, Time) => Some(simplify(DotProduct(
+            (w, Time) => Some(simplify(BinaryPointOp(
+                Operator::Multiply,
                 Box::new(w.clone()),
                 Box::new(Const(-1.0)),
             ))),
             _ => None,
         },
+        BinaryPointOp(Operator::Subtract, a, b) => first_root(&BinaryPointOp(
+            Operator::Add,
+            a.clone(),
+            Box::new(simplify(BinaryPointOp(
+                Operator::Multiply,
+                b.clone(),
+                Box::new(Const(-1.0)),
+            ))),
+        )),
         _ => None,
     }
 }
@@ -28,11 +40,16 @@ fn add_offsets(a: Waveform, b: Waveform) -> Waveform {
     use Waveform::*;
     match (first_root(&a), first_root(&b)) {
         (Some(a_root), Some(b_root)) => {
-            let b = simplify(DotProduct(
-                Box::new(Sum(Box::new(a_root), Box::new(b_root))),
+            let b = simplify(BinaryPointOp(
+                Operator::Multiply,
+                Box::new(BinaryPointOp(
+                    Operator::Add,
+                    Box::new(a_root),
+                    Box::new(b_root),
+                )),
                 Box::new(Const(-1.0)),
             ));
-            Sum(Box::new(Time), Box::new(b))
+            BinaryPointOp(Operator::Add, Box::new(Time), Box::new(b))
         }
         (a_root, b_root) => {
             panic!(
@@ -96,15 +113,16 @@ pub fn replace_seq(waveform: Waveform) -> (Waveform, Waveform) {
                 },
             )
         }
-        Sum(a, b) => {
+        BinaryPointOp(op @ (Operator::Add | Operator::Subtract), a, b) => {
             let (a_offset, a) = replace_seq(*a);
             let (b_offset, b) = replace_seq(*b);
             if a_offset == Const(0.0) {
-                return (b_offset, Sum(Box::new(a), Box::new(b)));
+                return (b_offset, BinaryPointOp(op, Box::new(a), Box::new(b)));
             }
             (
                 add_offsets(a_offset.clone(), b_offset),
-                Sum(
+                BinaryPointOp(
+                    op,
                     Box::new(a),
                     Box::new(Append(
                         Box::new(Fin {
@@ -116,15 +134,16 @@ pub fn replace_seq(waveform: Waveform) -> (Waveform, Waveform) {
                 ),
             )
         }
-        DotProduct(a, b) => {
+        BinaryPointOp(op @ (Operator::Multiply | Operator::Divide), a, b) => {
             let (a_offset, a) = replace_seq(*a);
             let (b_offset, b) = replace_seq(*b);
             if a_offset == Const(0.0) {
-                return (b_offset, DotProduct(Box::new(a), Box::new(b)));
+                return (b_offset, BinaryPointOp(op, Box::new(a), Box::new(b)));
             }
             (
                 add_offsets(a_offset.clone(), b_offset),
-                DotProduct(
+                BinaryPointOp(
+                    op,
                     Box::new(a),
                     Box::new(Append(
                         Box::new(Fin {
@@ -214,7 +233,11 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                         waveform,
                     } => match (first_root(&length), first_root(&*inner_length)) {
                         (Some(Const(a)), Some(Const(b))) => Fin {
-                            length: Box::new(Sum(Box::new(Time), Box::new(Const(-(a.min(b)))))),
+                            length: Box::new(simplify(BinaryPointOp(
+                                Operator::Subtract,
+                                Box::new(Time),
+                                Box::new(Const(a.min(b))),
+                            ))),
                             waveform,
                         },
                         _ => Fin {
@@ -268,7 +291,7 @@ pub fn simplify(waveform: Waveform) -> Waveform {
             feedback: Box::new(simplify(*feedback)),
             state,
         },
-        Sum(a, b) => {
+        BinaryPointOp(Operator::Add, a, b) => {
             match (simplify(*a), simplify(*b)) {
                 (Fixed(a), b) if a.len() == 0 => b,
                 (a, Fixed(b)) if b.len() == 0 => a,
@@ -277,10 +300,22 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                 (Noise, Const(0.0)) => Noise,
                 (Time, Const(0.0)) => Time,
                 (Const(a), Const(b)) => Const(a + b),
-                // Commute
-                (Const(a), b) => simplify(Sum(Box::new(b), Box::new(Const(a)))),
+                // Commute (moving constants to the right)
+                (Const(a), b) => simplify(BinaryPointOp(
+                    Operator::Add,
+                    Box::new(b),
+                    Box::new(Const(a)),
+                )),
                 // Re-associate
-                (Sum(a, b), Const(c)) => Sum(a, Box::new(simplify(Sum(b, Box::new(Const(c)))))),
+                (BinaryPointOp(Operator::Add, a, b), Const(c)) => BinaryPointOp(
+                    Operator::Add,
+                    a,
+                    Box::new(simplify(BinaryPointOp(
+                        Operator::Add,
+                        b,
+                        Box::new(Const(c)),
+                    ))),
+                ),
                 // TODO could distribute constants over Append(Fin, _), Res, and Alt
                 // ... though currently Alt generates both branches, so better not to do too much work
 
@@ -299,11 +334,12 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                     } if first_root(&a_length) == first_root(&b_length) => simplify(Append(
                         Box::new(Fin {
                             length: a_length,
-                            waveform: Box::new(Sum(a, b)),
+                            waveform: Box::new(BinaryPointOp(Operator::Add, a, b)),
                         }),
                         c,
                     )),
-                    _ => Sum(
+                    _ => BinaryPointOp(
+                        Operator::Add,
                         Box::new(Fin {
                             length: a_length,
                             waveform: a,
@@ -322,30 +358,70 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                     },
                 ) if first_root(&a_length) == first_root(&b_length) => Fin {
                     length: a_length,
-                    waveform: Box::new(Sum(a, b)),
+                    waveform: Box::new(simplify(BinaryPointOp(Operator::Add, a, b))),
                 },
-                (a, b) => Sum(Box::new(a), Box::new(b)),
+                (a, b) => BinaryPointOp(Operator::Add, Box::new(a), Box::new(b)),
             }
         }
-        DotProduct(a, b) => {
+        BinaryPointOp(Operator::Subtract, a, b) => simplify(BinaryPointOp(
+            Operator::Add,
+            a,
+            Box::new(simplify(BinaryPointOp(
+                Operator::Multiply,
+                b,
+                Box::new(Const(-1.0)),
+            ))),
+        )),
+        BinaryPointOp(Operator::Multiply, a, b) => {
             match (simplify(*a), simplify(*b)) {
                 (Fixed(a), _) if a.len() == 0 => Fixed(vec![]),
                 (_, Fixed(b)) if b.len() == 0 => Fixed(vec![]),
+                // TODO double check that this makes sense: should we shorten a waveform when multiplying by Const(0.0)?
                 (Const(0.0), _) => Fixed(vec![]),
                 (_, Const(0.0)) => Fixed(vec![]),
                 (Const(1.0), b) => b,
                 (a, Const(1.0)) => a,
                 (Const(a), Const(b)) => Const(a * b),
-                // Commute
-                (Const(a), b) => simplify(DotProduct(Box::new(b), Box::new(Const(a)))),
+                // Commute (moving constants to the right)
+                (Const(a), b) => simplify(BinaryPointOp(
+                    Operator::Multiply,
+                    Box::new(b),
+                    Box::new(Const(a)),
+                )),
                 // Re-associate
-                (DotProduct(a, b), Const(c)) => {
-                    DotProduct(a, Box::new(simplify(DotProduct(b, Box::new(Const(c))))))
-                }
+                (BinaryPointOp(Operator::Multiply, a, b), Const(c)) => BinaryPointOp(
+                    Operator::Multiply,
+                    a,
+                    Box::new(simplify(BinaryPointOp(
+                        Operator::Multiply,
+                        b,
+                        Box::new(Const(c)),
+                    ))),
+                ),
                 // Distribute
-                (Sum(a, b), Const(c)) => Sum(
-                    Box::new(simplify(DotProduct(a, Box::new(Const(c))))),
-                    Box::new(simplify(DotProduct(b, Box::new(Const(c))))),
+                // (a + b) * c == (a * c) + (b * c)
+                (BinaryPointOp(Operator::Add, a, b), Const(c)) => BinaryPointOp(
+                    Operator::Add,
+                    Box::new(simplify(BinaryPointOp(
+                        Operator::Multiply,
+                        a,
+                        Box::new(Const(c)),
+                    ))),
+                    Box::new(simplify(BinaryPointOp(
+                        Operator::Multiply,
+                        b,
+                        Box::new(Const(c)),
+                    ))),
+                ),
+                // (a / b) * c == (a * c) / b
+                (BinaryPointOp(Operator::Divide, a, b), Const(c)) => BinaryPointOp(
+                    Operator::Divide,
+                    Box::new(simplify(BinaryPointOp(
+                        Operator::Multiply,
+                        a,
+                        Box::new(Const(c)),
+                    ))),
+                    b,
                 ),
                 // TODO could distribute constants over, Append, Res, and Alt
                 // ... though currently Alt generates both branches, so better not to do too much work
@@ -353,13 +429,63 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                 // Pull Fin out
                 (Fin { length, waveform }, b) => simplify(Fin {
                     length,
-                    waveform: Box::new(simplify(DotProduct(waveform, Box::new(b)))),
+                    waveform: Box::new(simplify(BinaryPointOp(
+                        Operator::Multiply,
+                        waveform,
+                        Box::new(b),
+                    ))),
                 }),
                 (a, Fin { length, waveform }) => simplify(Fin {
                     length,
-                    waveform: Box::new(simplify(DotProduct(Box::new(a), waveform))),
+                    waveform: Box::new(simplify(BinaryPointOp(
+                        Operator::Multiply,
+                        Box::new(a),
+                        waveform,
+                    ))),
                 }),
-                (a, b) => DotProduct(Box::new(a), Box::new(b)),
+                (a, b) => BinaryPointOp(Operator::Multiply, Box::new(a), Box::new(b)),
+            }
+        }
+        BinaryPointOp(Operator::Divide, a, b) => {
+            match (simplify(*a), simplify(*b)) {
+                (_, Fixed(b)) if b.len() == 0 => Fixed(vec![]),
+                // Prefer multiplication
+                (a, Const(b)) => simplify(BinaryPointOp(
+                    Operator::Multiply,
+                    Box::new(a),
+                    Box::new(Const(1.0 / b)),
+                )),
+                // ((a / b) / c) == (a / (b * c))
+                (BinaryPointOp(Operator::Divide, a, b), c) => BinaryPointOp(
+                    Operator::Divide,
+                    a,
+                    Box::new(simplify(BinaryPointOp(Operator::Multiply, b, Box::new(c)))),
+                ),
+                // (a / (b / c)) == (a * c) / b
+                (a, BinaryPointOp(Operator::Divide, b, c)) => BinaryPointOp(
+                    Operator::Divide,
+                    Box::new(simplify(BinaryPointOp(Operator::Multiply, Box::new(a), c))),
+                    b,
+                ),
+
+                // Pull Fin out
+                (Fin { length, waveform }, b) => simplify(Fin {
+                    length,
+                    waveform: Box::new(simplify(BinaryPointOp(
+                        Operator::Divide,
+                        waveform,
+                        Box::new(b),
+                    ))),
+                }),
+                (a, Fin { length, waveform }) => simplify(Fin {
+                    length,
+                    waveform: Box::new(simplify(BinaryPointOp(
+                        Operator::Divide,
+                        Box::new(a),
+                        waveform,
+                    ))),
+                }),
+                (a, b) => BinaryPointOp(Operator::Divide, Box::new(a), Box::new(b)),
             }
         }
         Res { trigger, waveform } => Res {
@@ -400,31 +526,50 @@ mod tests {
 
     #[test]
     fn test_simplify() {
-        let w1 = Sum(
-            Box::new(Sum(
+        let w1 = BinaryPointOp(
+            Operator::Add,
+            Box::new(BinaryPointOp(
+                Operator::Add,
                 Box::new(Const(1.0)),
-                Box::new(Sum(Box::new(Const(2.0)), Box::new(Const(3.0)))),
+                Box::new(BinaryPointOp(
+                    Operator::Add,
+                    Box::new(Const(2.0)),
+                    Box::new(Const(3.0)),
+                )),
             )),
             Box::new(Const(4.0)),
         );
         assert_eq!(simplify(w1), Const(10.0));
 
-        let w2 = Sum(
-            Box::new(Sum(
+        let w2 = BinaryPointOp(
+            Operator::Add,
+            Box::new(BinaryPointOp(
+                Operator::Add,
                 Box::new(Const(2.0)),
-                Box::new(Sum(Box::new(Const(3.0)), Box::new(Sin(Box::new(Time))))),
+                Box::new(BinaryPointOp(
+                    Operator::Add,
+                    Box::new(Const(3.0)),
+                    Box::new(Sin(Box::new(Time))),
+                )),
             )),
             Box::new(Const(5.0)),
         );
         assert_eq!(
             simplify(w2),
-            Sum(Box::new(Sin(Box::new(Time))), Box::new(Const(10.0))),
+            BinaryPointOp(
+                Operator::Add,
+                Box::new(Sin(Box::new(Time))),
+                Box::new(Const(10.0))
+            ),
         );
 
-        let w3 = DotProduct(
-            Box::new(DotProduct(
+        let w3 = BinaryPointOp(
+            Operator::Multiply,
+            Box::new(BinaryPointOp(
+                Operator::Multiply,
                 Box::new(Const(2.0)),
-                Box::new(DotProduct(
+                Box::new(BinaryPointOp(
+                    Operator::Multiply,
                     Box::new(Const(3.0)),
                     Box::new(Sin(Box::new(Time))),
                 )),
@@ -433,13 +578,20 @@ mod tests {
         );
         assert_eq!(
             simplify(w3),
-            DotProduct(Box::new(Sin(Box::new(Time))), Box::new(Const(30.0))),
+            BinaryPointOp(
+                Operator::Multiply,
+                Box::new(Sin(Box::new(Time))),
+                Box::new(Const(30.0))
+            ),
         );
 
-        let w4 = DotProduct(
-            Box::new(Sum(
+        let w4 = BinaryPointOp(
+            Operator::Multiply,
+            Box::new(BinaryPointOp(
+                Operator::Add,
                 Box::new(Const(2.0)),
-                Box::new(DotProduct(
+                Box::new(BinaryPointOp(
+                    Operator::Multiply,
                     Box::new(Const(3.0)),
                     Box::new(Sin(Box::new(Time))),
                 )),
@@ -448,8 +600,10 @@ mod tests {
         );
         assert_eq!(
             simplify(w4),
-            Sum(
-                Box::new(DotProduct(
+            BinaryPointOp(
+                Operator::Add,
+                Box::new(BinaryPointOp(
+                    Operator::Multiply,
                     Box::new(Sin(Box::new(Time))),
                     Box::new(Const(15.0))
                 )),
@@ -457,20 +611,33 @@ mod tests {
             ),
         );
 
-        let w5 = DotProduct(
+        let w5 = BinaryPointOp(
+            Operator::Multiply,
             Box::new(Fin {
-                length: Box::new(Sum(Box::new(Time), Box::new(Const(-2.0)))),
+                length: Box::new(BinaryPointOp(
+                    Operator::Add,
+                    Box::new(Time),
+                    Box::new(Const(-2.0)),
+                )),
                 waveform: Box::new(Const(3.0)),
             }),
             Box::new(Fin {
-                length: Box::new(Sum(Box::new(Time), Box::new(Const(-1.5)))),
+                length: Box::new(BinaryPointOp(
+                    Operator::Add,
+                    Box::new(Time),
+                    Box::new(Const(-1.5)),
+                )),
                 waveform: Box::new(Const(5.0)),
             }),
         );
         assert_eq!(
             simplify(w5),
             Fin {
-                length: Box::new(Sum(Box::new(Time), Box::new(Const(-1.5)))),
+                length: Box::new(BinaryPointOp(
+                    Operator::Add,
+                    Box::new(Time),
+                    Box::new(Const(-1.5))
+                )),
                 waveform: Box::new(Const(15.0)),
             }
         );

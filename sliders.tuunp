@@ -1,5 +1,8 @@
 // Amplitude
-$440 ~. ((Y ~+ 1) ~. 0.5)
+$440 * ((Y + 1) / 2)
 
 // Duration (best in 4 beats per measure)
-let w = $440 | fin(time ~+ ((X ~+ 1) ~. -(duration_from_beats(1)))) | seq(time ~+ -(duration_from_beats(2))) in <[w, w]>
+let w = $440 | fin(time + ((X + 1) * -(duration_from_beats(1)))) | seq(time - (duration_from_beats(2))) in <[w, w]>
+
+// Pulse width modulation
+pwm((X + 1) / 2, 440)

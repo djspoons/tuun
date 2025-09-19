@@ -45,23 +45,23 @@ Every waveform has an intrinsic property called its _length_, which may be finit
 Since it's often useful to have waveforms that *don't* go on forever, Tuun includes the `Fin` combinator, which modifies a waveform to be finite. For example, the following will generate a tone at 440Hz for 2 seconds.
 
 ```
-Fin(Time ~+ Const(-2), Sin(Const(2 * PI * 440) ~. Time))
+Fin(Time ~- Const(-2), Sin(Const(2 * PI * 440) ~. Time))
 ```
 
-The length of `Fin` is given by its first parameter: `Fin` generates samples from this waveform until it gets a sample >= 0, at which point it stops. In the example above, it generates samples from the waveform `Time ~+ Const(-2)`. (As you might expect, the `~+` combinator _adds_ each pair of corresponding samples and is analogous to `~.`.) You can think of this waveform a bit like a countdown clock: it starts at -2 and then "counts down" (well... up) until it reaches 0.
+The length of `Fin` is given by its first parameter: `Fin` generates samples from this waveform until it gets a sample >= 0, at which point it stops. In the example above, it generates samples from the waveform `Time ~- Const(2)`. (As you might expect, the `~-` combinator _subtracts_ each pair of corresponding samples and is analogous to `~.`.) You can think of this waveform a bit like a countdown clock: it starts at -2 and then "counts down" (well... "up") until it reaches 0.
 
-> The length of a waveform `a ~+ b` is the _maximum_ of the length of `a` and the length of `b` (since the sum can continue generating samples as long as one of the components is), and the length of a waveform `a ~. b` is the _minimum_ of the length of `a` and the length of `b` (since once the length of one waveform has been exceeded, it's as if it will generate only zeros forever).
+> The length of a waveform like `a ~+ b` or `a ~- b` is the _maximum_ of the length of `a` and the length of `b` (since the sum can continue generating samples as long as one of the components is), and the length of a waveform `a ~. b` (and `a ~/ b`) is the _minimum_ of the length of `a` and the length of `b` (since once the length of one waveform has been exceeded, it's as if it will generate only zeros forever).
 
 We used the `~.` combinator above to combine the inputs to `Sin`, and we can also use it to modify its output. This combinator multiplies each sample in the first waveform by the corresponding sample in the second waveform. Below it's used to control the amplitude of a waveform. For example, we can half the amplitude of the sine wave by multiplying by a constant waveform.
 
 ```
-Fin(Time ~+ Const(-2), Sin(Const(2 * PI * 440) ~. Time) ~. Const(0.5))
+Fin(Time ~- Const(2), Sin(Const(2 * PI * 440) ~. Time) ~. Const(0.5))
 ```
 
 Putting these combinators together enables us to create more interesting sounds. For example, we can generate harmonics by applying progressively smaller constants to higher frequencies like the following.
 
 ```
-Fin(Time ~+ Const(-4), Sin(Const(2 * PI * 440) ~. Time) ~+ Sin(Const(2 * PI * 1320) ~. Time) ~. Const(0.33) ~+ Sin(Const(2 * PI * 2200) ~. Time) ~. Const(0.2))
+Fin(Time ~- Const(4), Sin(Const(2 * PI * 440) ~. Time) ~+ Sin(Const(2 * PI * 1320) ~. Time) ~. Const(0.33) ~+ Sin(Const(2 * PI * 2200) ~. Time) ~. Const(0.2))
 ```
 
 Writing this out is starting to get a little tedious, though, and we'll see how to use the waveform specification language below to build a library of functions for easily generating harmonics and other complex waveforms.
@@ -78,14 +78,14 @@ You could imagine a combinator called `Then` that takes two waveforms `a` and `b
 
 ```
 Then(
-    Seq(1, Fin(Time ~+ Const(-2), Sin(Const(2 * PI * 440) ~. Time))),
-    Fin(Time ~+ Const(-2), Sin(Const(2 * PI * 880) ~. Time))
+    Seq(1, Fin(Time ~- Const(2), Sin(Const(2 * PI * 440) ~. Time))),
+    Fin(Time ~- Const(2), Sin(Const(2 * PI * 880) ~. Time))
 )
 ```
 
 Why do we need separate notions of length and offset? One example where we want both is when emulating notes played on a piano with the sustain pedal held down: we might want the second note to start on the second beat, but we don't want the first note to stop until the pedal is released. Again, a waveform's length is essential to how it generates its own samples, while its offset controls how it is combined with other waveforms.
 
-We need to revisit the behavior of `~+` and `~.` for waveforms with offsets. In the examples above, they were only applied to waveforms with offsets equal to 0. However, the offset of the left argument is used by both combinators: the second waveform only takes effect _after_ the offset indicated by the first. Thus in the case of `a ~+ b`, the samples of `b` are added to `a` only starting at the offset of `a` -- any samples in the left-hand operand that occur before its offset are just passed through. This means that for waveforms with non-zero offsets, `~+` and `~.` are not communicative combinators! This is not very convenient for optimizing waveforms, and we'll see how to eliminate offsets below.
+We need to revisit the behavior of operators like `~+` and `~.` for waveforms with offsets. In the examples above, they were only applied to waveforms with offsets equal to 0. However, the offset of the left argument is used by both combinators: the second waveform only takes effect _after_ the offset indicated by the first. Thus in the case of `a ~+ b`, the samples of `b` are added to `a` only starting at the offset of `a` -- any samples in the left-hand operand that occur before its offset are just passed through. This means that for waveforms with non-zero offsets, `~+` and `~.` are not communicative combinators! This is not very convenient for optimizing waveforms, and we'll see how to eliminate offsets below.
 
 Given this, we can now see there no need for a separate `Then` combinator: `~+` already provides the required functionality! That is, `a ~+ b` generates samples from `a` until the offset of `a` is reached, at which point it adds corresponding samples from the two waveforms together. When the length of `a` is less than or equal to its offset (as in the example above), `~+` works like a pure sequence, and it also allows waveforms to be combined in other ways.
 
@@ -95,10 +95,10 @@ In the harmonics example above, we knew that the offsets of all of the component
 Seq(0, a) ~+ b
 ```
 
-As another example of how to use offsets, let's create a simple envelope using `~+`, `~.`, and the `Time` waveform.
+As another example of how to use offsets, let's create a simple envelope using `~+`, `~-`, `~.`, and the `Time` waveform.
 
 ```
-Sin(Const(2 * PI * 440) ~. Time) ~. (Seq(2, Fin(Time ~+ Const(-2), Const(0.5) ~. Time)) ~+ Fin(Time ~+ Const(-1), Const(1.0) ~+ Const(-1.0) ~. Time))
+Sin(Const(2 * PI * 440) ~. Time) ~. (Seq(2, Fin(Time ~- Const(2), Const(0.5) ~. Time)) ~+ Fin(Time ~- Const(1), Const(1.0) ~+ Const(-1.0) ~. Time))
 ```
 This plays a 440Hz tone for three seconds, increasing the amplitude for the first two seconds (the "attack") and decreasing it to silence during the third (the "release"). Notice how the `~+` and `Seq` combinators are used to sequence the attack and release, and how the `~.` is used to combine the envelope with the tone. 
 
@@ -136,8 +136,10 @@ These combinators that change how a waveform behaves in time and in relation to 
 There are the arithmetic combinators that combine the samples themselves.
 
  * `a ~+ b` - adds sample points together
+ * `a ~- b` - subtracts sample points
  * `a ~. b` - multiplies sample points together
- * `Filter(a, b, c)` - filters `a` using a finite or infinite impulse response
+ * `a ~/ b` - divides sample points
+ * `Filter(a, b, c)` - modifies `a` using a finite or infinite impulse response filter
 
 There are three combinators for describing periodic waveforms:
 
@@ -231,10 +233,10 @@ This example first provides functions to create waveforms for the four steps of 
 // Helper function that takes a pair of floats and returns a linear waveform
 linear = fn(initial, slope) => initial + (time * slope),
 // Create waveforms for the four parts of the envelope:
-Aw = fn(dur) => linear(0.0, 1.0 / dur) | fin(time + -dur) | seq(time + -dur),
-Dw = fn(dur, level) => linear(1.0, (level - 1.0) / dur) | fin(time + -dur) | seq(time + -dur),
-Sw = fn(dur, level) => level | fin(time + -dur) | seq(time + -dur),
-Rw = fn(dur, level) => linear(level, -level / dur) | fin(time + -dur) | seq(time + -dur),
+Aw = fn(dur) => linear(0.0, 1.0 / dur) | fin(time - dur) | seq(time - dur),
+Dw = fn(dur, level) => linear(1.0, (level - 1.0) / dur) | fin(time - dur) | seq(time - dur),
+Sw = fn(dur, level) => level | fin(time - dur) | seq(time - dur),
+Rw = fn(dur, level) => linear(level, -level / dur) | fin(time - dur) | seq(time - dur),
 // Combine them to create a new filter:
 ADSR = fn(attack_dur, decay_dur, sustain_level, sustain_dur, release_dur) =>
   fn(w) => (w | seq(0)) * <[Aw(attack_dur),

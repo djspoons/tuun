@@ -688,23 +688,26 @@ pub fn duration_from_beats(beats_per_minute: u32, beats: u64) -> Duration {
 }
 
 pub fn beats_waveform(beats_per_minute: u32, beats_per_measure: u32) -> tracker::Waveform {
+    use tracker::{Operator, Waveform};
     let seconds_per_beat = duration_from_beats(beats_per_minute, 1);
     let mut ws = Vec::new();
     for i in 0..beats_per_measure {
-        ws.push(parser::Expr::Waveform(tracker::Waveform::Marked {
+        ws.push(parser::Expr::Waveform(Waveform::Marked {
             id: i + 1,
-            waveform: Box::new(tracker::Waveform::Fin {
+            waveform: Box::new(Waveform::Fin {
                 // TODO don't really need to such a long length here... could be just Fixed
-                length: Box::new(tracker::Waveform::Sum(
-                    Box::new(tracker::Waveform::Time),
-                    Box::new(tracker::Waveform::Const(-seconds_per_beat.as_secs_f32())),
+                length: Box::new(Waveform::BinaryPointOp(
+                    Operator::Add,
+                    Box::new(Waveform::Time),
+                    Box::new(Waveform::Const(-seconds_per_beat.as_secs_f32())),
                 )),
-                waveform: Box::new(tracker::Waveform::Seq {
-                    offset: Box::new(tracker::Waveform::Sum(
-                        Box::new(tracker::Waveform::Time),
-                        Box::new(tracker::Waveform::Const(-seconds_per_beat.as_secs_f32())),
+                waveform: Box::new(Waveform::Seq {
+                    offset: Box::new(Waveform::BinaryPointOp(
+                        Operator::Add,
+                        Box::new(Waveform::Time),
+                        Box::new(Waveform::Const(-seconds_per_beat.as_secs_f32())),
                     )),
-                    waveform: Box::new(tracker::Waveform::Const(0.0)),
+                    waveform: Box::new(Waveform::Const(0.0)),
                 }),
             }),
         }));

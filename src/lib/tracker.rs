@@ -29,6 +29,14 @@ impl fmt::Display for Slider {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum Operator {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Waveform<State = ()> {
     /*
      * Const produces a stream of samples where each sample is the same constant value.
@@ -49,7 +57,7 @@ pub enum Waveform<State = ()> {
     /*
      * Fin generates a finite waveform, truncating the underlying waveform. The length is determined
      * by the first point at which the `length` waveform is >= 0.0. For example, `Fin(Const(0.0), _)`
-     * is 0 seconds in length and `Fin(Sum(Time, Const(-2.0)), _)` is 2 seconds in length.
+     * is 0 seconds in length and `Fin(Subtract(Time, Const(2.0)), _)` is 2 seconds in length.
      */
     Fin {
         length: Box<Waveform<State>>,
@@ -57,7 +65,7 @@ pub enum Waveform<State = ()> {
     },
     /*
      * Seq sets the offset of `waveform`. The offset is determined by the first point at which the `offset` waveform
-     * is >= 0.0. For example, `Seq(Const(0.0), _)` is has an offset 0 seconds and `Seq(Sum(Time, Const(-2.0)))` has
+     * is >= 0.0. For example, `Seq(Const(0.0), _)` has an offset 0 seconds and `Seq(Subtract(Time, Const(2.0)), _)` has
      * an offset of 2 seconds.
      */
     Seq {
@@ -85,8 +93,7 @@ pub enum Waveform<State = ()> {
         feedback: Box<Waveform<State>>,     // a_1, a_2, ...
         state: State,
     },
-    Sum(Box<Waveform<State>>, Box<Waveform<State>>),
-    DotProduct(Box<Waveform<State>>, Box<Waveform<State>>),
+    BinaryPointOp(Operator, Box<Waveform<State>>, Box<Waveform<State>>),
     /*
      * Res generates a repeating waveform that restarts the given waveform whenever the trigger
      * waveform flips from negative values to positive values. Its length and offset are determined
@@ -149,8 +156,9 @@ impl fmt::Display for Waveform<()> {
                 feedback,
                 ..
             } => write!(f, "Filter({}, {}, {})", waveform, feed_forward, feedback),
-            Sum(a, b) => write!(f, "Sum({}, {})", a, b),
-            DotProduct(a, b) => write!(f, "DotProduct({}, {})", a, b),
+            BinaryPointOp(op, a, b) => {
+                write!(f, "{:?}({}, {})", op, a, b)
+            }
             Res { trigger, waveform } => {
                 write!(f, "Res({}, {})", trigger, waveform)
             }
@@ -402,14 +410,23 @@ impl<'a> Generator<'a> {
                 previous_out.1 = position + out.len() as i64 - previous_out.0.len() as i64;
                 return out;
             }
-            Sum(a, b) => {
-                return self.generate_binary_op(|x, y| x + y, a, b, position, desired);
-            }
-            DotProduct(a, b) => {
-                // Like sum, but we need to make sure we generate a length based on
-                // the shorter waveform.
-                let remaining = self.remaining(waveform, position, desired);
-                return self.generate_binary_op(|x, y| x * y, a, b, position, remaining);
+            BinaryPointOp(op, a, b) => {
+                let desired = match op {
+                    Operator::Multiply | Operator::Divide => {
+                        // We need to make sure we generate a length based on the shorter waveform.
+                        self.remaining(waveform, position, desired)
+                    }
+                    _ => desired,
+                };
+                let op = match op {
+                    Operator::Add => std::ops::Add::add,
+                    Operator::Subtract => std::ops::Sub::sub,
+                    Operator::Multiply => std::ops::Mul::mul,
+                    Operator::Divide => |a: f32, b: f32| {
+                        if b == 0.0 { 0.0 } else { a / b }
+                    },
+                };
+                return self.generate_binary_op(op, a, b, position, desired);
             }
             Res { trigger, waveform } => {
                 // Maybe cache the last trigger position and signum and use it if position doesn't change? So we don't need this constant...
@@ -749,7 +766,7 @@ impl<'a> Generator<'a> {
                     self.remaining(b, position - a_length as i64, max)
                 }
             }
-            Sum(a, b) | DotProduct(a, b) => {
+            BinaryPointOp(op, a, b) => {
                 let from_a = self.remaining(a, position, max);
                 let positive_position = if position < 0 { 0 } else { position as usize };
                 let positive_max = if position < 0 {
@@ -779,10 +796,9 @@ impl<'a> Generator<'a> {
                     // In this case, position is the same for both a and b
                     self.remaining(b, position, max)
                 };
-                match waveform {
-                    Sum(_, _) => from_a.max(from_b),
-                    DotProduct(_, _) => from_a.min(from_b),
-                    _ => unreachable!(),
+                match op {
+                    Operator::Add | Operator::Subtract => from_a.max(from_b),
+                    Operator::Multiply | Operator::Divide => from_a.min(from_b),
                 }
             }
             Res { trigger, .. } | Alt { trigger, .. } => self.remaining(trigger, position, max),
@@ -803,7 +819,7 @@ impl<'a> Generator<'a> {
         position: i64,
         max: usize,
     ) -> MaybeOption<usize> {
-        use Waveform::{Append, Const, Sum, Time};
+        use Waveform::{Append, BinaryPointOp, Const, Time};
         match waveform {
             Const(v) if *v >= value => MaybeOption::Some(0),
             Const(_) => MaybeOption::None,
@@ -844,23 +860,26 @@ impl<'a> Generator<'a> {
                     MaybeOption::Maybe => MaybeOption::Maybe,
                 }
             }
-            Sum(a, b) => {
+            BinaryPointOp(op @ (Operator::Add | Operator::Subtract), a, b) => {
+                use Operator::{Add, Subtract};
                 // If a has an offset, we'd need to handle the overlapping and non-overlapping parts
                 // separately, and since we don't expect this to be called on non-optimized waveforms (except
                 // in tests), just give up.
                 if self.offset(a, max) != 0 {
                     return MaybeOption::Maybe;
                 }
-                match (&**a, &**b) {
-                    (Const(va), Const(vb)) => {
-                        if va + vb >= value {
-                            MaybeOption::Some(0)
-                        } else {
-                            MaybeOption::None
-                        }
+                match (op, &**a, &**b) {
+                    (Add, Const(va), Const(vb)) if va + vb >= value => MaybeOption::Some(0),
+                    (Add, Const(_), Const(_)) => MaybeOption::None,
+                    (Add, Const(va), _) => self.greater_or_equals_at(b, value - va, position, max),
+                    (Add, _, Const(vb)) => self.greater_or_equals_at(a, value - vb, position, max),
+
+                    (Subtract, Const(va), Const(vb)) if va - vb >= value => MaybeOption::Some(0),
+                    (Subtract, Const(_), Const(_)) => MaybeOption::None,
+                    (Subtract, _, Const(vb)) => {
+                        self.greater_or_equals_at(a, value + vb, position, max)
                     }
-                    (Const(va), _) => self.greater_or_equals_at(b, value - va, position, max),
-                    (_, Const(vb)) => self.greater_or_equals_at(a, value - vb, position, max),
+
                     _ => MaybeOption::Maybe,
                 }
             }
@@ -887,7 +906,7 @@ impl<'a> Generator<'a> {
             Waveform::Append(a, b) => (self.offset(a, max) + self.offset(b, max)).min(max),
             Waveform::Sin(waveform) => self.offset(waveform, max),
             Waveform::Filter { waveform, .. } => self.offset(waveform, max),
-            Waveform::Sum(a, b) | Waveform::DotProduct(a, b) => {
+            Waveform::BinaryPointOp(_, a, b) => {
                 let a_offset = self.offset(a, max);
                 if a_offset == max {
                     return max;
@@ -1013,11 +1032,8 @@ pub fn initialize_state(waveform: Waveform) -> Waveform<FilterState> {
                 previous_out: RefCell::new((vec![], 0)),
             },
         },
-        Sum(a, b) => Sum(
-            Box::new(initialize_state(*a)),
-            Box::new(initialize_state(*b)),
-        ),
-        DotProduct(a, b) => DotProduct(
+        BinaryPointOp(op, a, b) => BinaryPointOp(
+            op,
             Box::new(initialize_state(*a)),
             Box::new(initialize_state(*b)),
         ),
@@ -1129,7 +1145,7 @@ where
                     + Duration::from_secs_f32(remaining as f32 / self.sample_frequency as f32);
                 self.process_marked(waveform_id, start, &*b, out);
             }
-            Sum(a, b) | DotProduct(a, b) => {
+            BinaryPointOp(_, a, b) => {
                 self.process_marked(waveform_id, start, &*a, out);
                 // TODO do something about this constant for max
                 let offset = Generator::new(self.sample_frequency)
@@ -1178,7 +1194,7 @@ where
             | Marked { waveform, .. } => {
                 self.process_captured(&*waveform, out);
             }
-            Append(a, b) | Sum(a, b) | DotProduct(a, b) => {
+            Append(a, b) | BinaryPointOp(_, a, b) => {
                 self.process_captured(&*a, out);
                 self.process_captured(&*b, out);
             }
@@ -1369,10 +1385,12 @@ where
                 // waveforms with each other (instead of interleaving them).
                 if self.pending_waveforms[0].start <= segment_start {
                     let mut pending = self.pending_waveforms.remove(0);
+                    /*
                     println!(
                         "Activating waveform {:?} at time {:?}",
                         pending.id, segment_start
                     );
+                    */
                     let mut marks = pending.marks;
                     if pending.start < segment_start {
                         // If the pending waveform starts before the segment start, then we need to
@@ -1392,12 +1410,14 @@ where
                     });
                     // Check to see if this waveform should repeat
                     if let Some(duration) = pending.repeat_every {
+                        /*
                         println!(
                             "Scheduling waveform {:?} to repeat after {:?} (at {:?})",
                             pending.id,
                             duration,
                             segment_start + duration
                         );
+                        */
                         pending.start = segment_start + duration;
                         pending.marks = Vec::new();
                         self.process_marked(
@@ -1470,6 +1490,7 @@ where
                 }
                 if tmp.len() < segment_length {
                     // If we didn't generate enough samples, then remove this waveform from the active list
+                    /*
                     println!(
                         "Removing waveform {:?} at position {} and time {:?}",
                         active.id,
@@ -1479,6 +1500,7 @@ where
                                 tmp.len() as f32 / self.sample_frequency as f32
                             )
                     );
+                    */
                     let active = self.active_waveforms.remove(i);
                     finished.push(active);
                 } else {
@@ -1499,7 +1521,7 @@ where
 mod tests {
     use super::*;
     use crate::optimizer;
-    use Waveform::{Append, Const, DotProduct, Filter, Fin, Fixed, Res, Seq, Sin, Sum, Time};
+    use Waveform::{Append, BinaryPointOp, Const, Filter, Fin, Fixed, Res, Seq, Sin, Time};
 
     const MAX_LENGTH: usize = 1000;
 
@@ -1522,9 +1544,17 @@ mod tests {
 
     fn finite_const_waveform(value: f32, fin_duration: u64, seq_duration: u64) -> Waveform {
         return Seq {
-            offset: Box::new(Sum(Box::new(Time), Box::new(Const(-(seq_duration as f32))))),
+            offset: Box::new(BinaryPointOp(
+                Operator::Subtract,
+                Box::new(Time),
+                Box::new(Const(seq_duration as f32)),
+            )),
             waveform: Box::new(Fin {
-                length: Box::new(Sum(Box::new(Time), Box::new(Const(-(fin_duration as f32))))),
+                length: Box::new(BinaryPointOp(
+                    Operator::Subtract,
+                    Box::new(Time),
+                    Box::new(Const(fin_duration as f32)),
+                )),
                 waveform: Box::new(Const(value)),
             }),
         };
@@ -1608,12 +1638,19 @@ mod tests {
     }
 
     fn sin_waveform(frequency: f32, phase: f32) -> Box<Waveform> {
-        return Box::new(Sin(Box::new(Sum(
-            Box::new(DotProduct(
+        return Box::new(Sin(Box::new(BinaryPointOp(
+            Operator::Add,
+            Box::new(BinaryPointOp(
+                Operator::Multiply,
                 Box::new(Const(2.0)),
-                Box::new(DotProduct(
+                Box::new(BinaryPointOp(
+                    Operator::Multiply,
                     Box::new(Const(std::f32::consts::PI)),
-                    Box::new(DotProduct(Box::new(Const(frequency)), Box::new(Time))),
+                    Box::new(BinaryPointOp(
+                        Operator::Multiply,
+                        Box::new(Const(frequency)),
+                        Box::new(Time),
+                    )),
                 )),
             )),
             Box::new(Const(phase)),
@@ -1630,7 +1667,11 @@ mod tests {
 
         let w2 = Res {
             trigger: Box::new(Fin {
-                length: Box::new(Sum(Box::new(Time), Box::new(Const(-6.0)))),
+                length: Box::new(BinaryPointOp(
+                    Operator::Subtract,
+                    Box::new(Time),
+                    Box::new(Const(6.0)),
+                )),
                 waveform: sin_waveform(0.25, 0.0),
             }),
             waveform: Box::new(Time),
@@ -1645,7 +1686,11 @@ mod tests {
         let w3 = Res {
             trigger: sin_waveform(0.25, 0.0),
             waveform: Box::new(Waveform::Fin {
-                length: Box::new(Sum(Box::new(Time), Box::new(Const(-3.0)))),
+                length: Box::new(BinaryPointOp(
+                    Operator::Subtract,
+                    Box::new(Time),
+                    Box::new(Const(3.0)),
+                )),
                 waveform: Box::new(Waveform::Time),
             }),
         };
@@ -1653,7 +1698,11 @@ mod tests {
 
         // Test a reset that occurs before time 0
         let w4 = Res {
-            trigger: Box::new(Sum(Box::new(Time), Box::new(Const(2.0)))),
+            trigger: Box::new(BinaryPointOp(
+                Operator::Add,
+                Box::new(Time),
+                Box::new(Const(2.0)),
+            )),
             waveform: Box::new(Time),
         };
         run_tests(&w4, vec![2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]);
@@ -1680,7 +1729,8 @@ mod tests {
     #[test]
     fn test_sum() {
         let generator = new_test_generator(1);
-        let w1 = Sum(
+        let w1 = BinaryPointOp(
+            Operator::Add,
             Box::new(finite_const_waveform(1.0, 5, 2)),
             Box::new(finite_const_waveform(1.0, 5, 2)),
         );
@@ -1695,13 +1745,19 @@ mod tests {
         run_tests(&w1, vec![1.0, 1.0, 2.0, 2.0, 2.0, 1.0, 1.0, 0.0]);
 
         let w2 = Fin {
-            length: Box::new(Sum(Box::new(Time), Box::new(Const(-8.0)))),
-            waveform: Box::new(Sum(
+            length: Box::new(BinaryPointOp(
+                Operator::Subtract,
+                Box::new(Time),
+                Box::new(Const(8.0)),
+            )),
+            waveform: Box::new(BinaryPointOp(
+                Operator::Add,
                 Box::new(Seq {
                     offset: Box::new(Const(0.0)),
                     waveform: Box::new(Const(1.0)),
                 }),
-                Box::new(Sum(
+                Box::new(BinaryPointOp(
+                    Operator::Add,
                     Box::new(Seq {
                         offset: Box::new(Const(0.0)),
                         waveform: Box::new(Const(2.0)),
@@ -1715,7 +1771,8 @@ mod tests {
         };
         run_tests(&w2, vec![3.0; 8]);
 
-        let w5 = Sum(
+        let w5 = BinaryPointOp(
+            Operator::Add,
             Box::new(finite_const_waveform(3.0, 1, 3)),
             Box::new(finite_const_waveform(2.0, 2, 2)),
         );
@@ -1731,21 +1788,27 @@ mod tests {
         // This one is a little strange: the right-hand side doesn't generate any
         // samples but we still want length(a ~+ b) to be
         //   max(length(a), offset(a) + length(b)).
-        let w6 = Sum(
+        let w6 = BinaryPointOp(
+            Operator::Add,
             Box::new(finite_const_waveform(3.0, 1, 3)),
             Box::new(finite_const_waveform(2.0, 0, 0)),
         );
         let result = generator.generate(&initialize_state(w6), 0, 2);
         assert_eq!(result, vec![3.0, 0.0]);
 
-        let w7 = Sum(Box::new(Fixed(vec![1.0])), Box::new(Const(0.0)));
+        let w7 = BinaryPointOp(
+            Operator::Add,
+            Box::new(Fixed(vec![1.0])),
+            Box::new(Const(0.0)),
+        );
         run_tests(&w7, vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]
     fn test_dot_product() {
         let generator = new_test_generator(1);
-        let w1 = DotProduct(
+        let w1 = BinaryPointOp(
+            Operator::Multiply,
             Box::new(finite_const_waveform(3.0, 8, 2)),
             Box::new(finite_const_waveform(2.0, 5, 2)),
         );
@@ -1759,21 +1822,35 @@ mod tests {
         );
         run_tests(&w1, vec![3.0, 3.0, 6.0, 6.0, 6.0, 6.0, 6.0, 0.0]);
 
-        let w2 = DotProduct(
+        let w2 = BinaryPointOp(
+            Operator::Multiply,
             Box::new(finite_const_waveform(3.0, 5, 2)),
             Box::new(finite_const_waveform(2.0, 5, 2)),
         );
         run_tests(&w2, vec![3.0, 3.0, 6.0, 6.0, 6.0, 0.0, 0.0, 0.0]);
 
         let w3 = Fin {
-            length: Box::new(Sum(Box::new(Time), Box::new(Const(-8.0)))),
-            waveform: Box::new(DotProduct(Box::new(Const(3.0)), Box::new(Const(2.0)))),
+            length: Box::new(BinaryPointOp(
+                Operator::Subtract,
+                Box::new(Time),
+                Box::new(Const(8.0)),
+            )),
+            waveform: Box::new(BinaryPointOp(
+                Operator::Multiply,
+                Box::new(Const(3.0)),
+                Box::new(Const(2.0)),
+            )),
         };
         run_tests(&w3, vec![6.0; 8]);
 
-        let w4 = DotProduct(
+        let w4 = BinaryPointOp(
+            Operator::Multiply,
             Box::new(Seq {
-                offset: Box::new(Sum(Box::new(Time), Box::new(Const(-1.0)))),
+                offset: Box::new(BinaryPointOp(
+                    Operator::Subtract,
+                    Box::new(Time),
+                    Box::new(Const(1.0)),
+                )),
                 waveform: Box::new(Const(3.0)),
             }),
             Box::new(finite_const_waveform(2.0, 5, 5)),
@@ -1794,7 +1871,11 @@ mod tests {
 
         let w2 = Filter {
             waveform: Box::new(Fin {
-                length: Box::new(Sum(Box::new(Time), Box::new(Const(-5.0)))),
+                length: Box::new(BinaryPointOp(
+                    Operator::Subtract,
+                    Box::new(Time),
+                    Box::new(Const(5.0)),
+                )),
                 waveform: Box::new(Time),
             }),
             feed_forward: Box::new(Fixed(vec![2.0, 2.0, 2.0])),
@@ -1810,7 +1891,11 @@ mod tests {
 
         let w3 = Filter {
             waveform: Box::new(Fin {
-                length: Box::new(Sum(Box::new(Time), Box::new(Const(-3.0)))),
+                length: Box::new(BinaryPointOp(
+                    Operator::Subtract,
+                    Box::new(Time),
+                    Box::new(Const(3.0)),
+                )),
                 waveform: Box::new(Time),
             }),
             feed_forward: Box::new(Fixed(vec![2.0, 2.0, 2.0, 2.0, 2.0])),
@@ -1878,7 +1963,7 @@ mod tests {
 
     #[test]
     fn test_greater_equals_at() {
-        let w1 = Sum(Box::new(Time), Box::new(Const(-5.0)));
+        let w1 = BinaryPointOp(Operator::Add, Box::new(Time), Box::new(Const(-5.0)));
         let w2 = Fin {
             length: Box::new(w1.clone()),
             waveform: Box::new(Time),

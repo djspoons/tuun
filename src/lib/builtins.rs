@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use crate::parser::{BuiltInFn, Expr, simplify};
-use crate::tracker::{Slider, Waveform};
+use crate::tracker::{Operator, Slider, Waveform};
 use Expr::{Application, Bool, BuiltIn, Error, Float, List, Tuple};
 
 fn unary_op(
@@ -48,36 +48,41 @@ fn binary_op(
 }
 
 pub fn plus(arguments: Vec<Expr>) -> Expr {
-    return binary_op(
-        arguments,
-        "+".to_string(),
-        std::ops::Add::add,
-        Waveform::Sum,
-    );
+    return binary_op(arguments, "+".to_string(), std::ops::Add::add, |a, b| {
+        Waveform::BinaryPointOp(Operator::Add, a, b)
+    });
 }
 
 pub fn minus(arguments: Vec<Expr>) -> Expr {
-    match arguments[..] {
-        [Float(a)] => Expr::Float(-a),
-        [Float(a), Float(b)] => Expr::Float(a - b),
-        _ => Expr::Error(format!("Invalid arguments for -: {:?}", arguments)),
+    if arguments.len() == 1 {
+        return unary_op(
+            arguments,
+            "-".to_string(),
+            |a| -a,
+            |waveform| {
+                Waveform::BinaryPointOp(
+                    Operator::Multiply,
+                    Box::new(Waveform::Const(-1.0)),
+                    waveform,
+                )
+            },
+        );
     }
+    return binary_op(arguments, "-".to_string(), std::ops::Sub::sub, |a, b| {
+        Waveform::BinaryPointOp(Operator::Subtract, a, b)
+    });
 }
 
 pub fn times(arguments: Vec<Expr>) -> Expr {
-    return binary_op(
-        arguments,
-        "*".to_string(),
-        std::ops::Mul::mul,
-        Waveform::DotProduct,
-    );
+    return binary_op(arguments, "*".to_string(), std::ops::Mul::mul, |a, b| {
+        Waveform::BinaryPointOp(Operator::Multiply, a, b)
+    });
 }
 
 pub fn divide(arguments: Vec<Expr>) -> Expr {
-    match arguments[..] {
-        [Float(a), Float(b)] => Expr::Float(a / b),
-        _ => Expr::Error("Invalid arguments for /".to_string()),
-    }
+    binary_op(arguments, "/".to_string(), std::ops::Div::div, |a, b| {
+        Waveform::BinaryPointOp(Operator::Divide, a, b)
+    })
 }
 
 pub fn power(arguments: Vec<Expr>) -> Expr {
@@ -426,7 +431,8 @@ pub fn chord(arguments: Vec<Expr>) -> Expr {
                     &Expr::Float(value) => Box::new(Waveform::Const(value)),
                     _ => return Expr::Error(format!("Invalid element in chord: {}", expr)),
                 };
-                result = Waveform::Sum(
+                result = Waveform::BinaryPointOp(
+                    Operator::Add,
                     Box::new(Waveform::Seq {
                         offset: Box::new(Waveform::Const(0.0)),
                         waveform,
@@ -453,7 +459,7 @@ pub fn sequence(arguments: Vec<Expr>) -> Expr {
                     &Expr::Float(value) => Box::new(Waveform::Const(value)),
                     _ => return Expr::Error(format!("Invalid element in sequence: {}", expr)),
                 };
-                result = Waveform::Sum(waveform, Box::new(result));
+                result = Waveform::BinaryPointOp(Operator::Add, waveform, Box::new(result));
             }
             return Expr::Waveform(result);
         }
