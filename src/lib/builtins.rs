@@ -113,8 +113,13 @@ pub fn sin(arguments: Vec<Expr>) -> Expr {
 }
 
 pub fn cos(arguments: Vec<Expr>) -> Expr {
-    match arguments[..] {
+    match &arguments[..] {
         [Float(value)] => Expr::Float(value.cos()),
+        [Expr::Waveform(a)] => Expr::Waveform(Waveform::Sin(Box::new(Waveform::BinaryPointOp(
+            Operator::Add,
+            Box::new(a.clone()),
+            Box::new(Waveform::Const(std::f32::consts::FRAC_PI_2)),
+        )))),
         _ => Expr::Error("Invalid argument for cos".to_string()),
     }
 }
@@ -191,6 +196,9 @@ pub fn append(arguments: Vec<Expr>) -> Expr {
             let mut result = a.clone();
             result.extend(b.clone());
             Expr::List(result)
+        }
+        [Expr::Waveform(a), Expr::Waveform(b)] => {
+            Expr::Waveform(Waveform::Append(Box::new(a.clone()), Box::new(b.clone())))
         }
         _ => Expr::Error("Invalid arguments for append".to_string()),
     }

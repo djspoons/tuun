@@ -6,3 +6,6 @@ let w = $440 | fin(time + ((X + 1) * -(duration_from_beats(1)))) | seq(time - (d
 
 // Pulse width modulation
 pwm((X + 1) / 2, 440)
+
+// Filters
+square(440) | lpf((X + 1) / 2, (Y + 1) / 8 * sampling_frequency)

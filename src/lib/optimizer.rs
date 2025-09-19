@@ -225,6 +225,7 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                 // Zero length
                 Const(a) if a >= 0.0 => Fixed(vec![]),
                 Fixed(v) if v.len() >= 1 && v[0] >= 0.0 => Fixed(vec![]),
+                // TODO for longer Fixed, replace with * Fixed(vec![1.0; v.len()])?
                 Time => Fixed(vec![]),
                 length => match simplify(*waveform) {
                     // Nested Fin's
@@ -382,6 +383,7 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                 (Const(1.0), b) => b,
                 (a, Const(1.0)) => a,
                 (Const(a), Const(b)) => Const(a * b),
+                (Fixed(a), Const(b)) => Fixed(a.into_iter().map(|x| x * b).collect()),
                 // Commute (moving constants to the right)
                 (Const(a), b) => simplify(BinaryPointOp(
                     Operator::Multiply,
