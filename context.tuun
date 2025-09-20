@@ -1,4 +1,7 @@
 
+// math
+max = fn(x, y) => if x < y then y else x,
+
 // WAVES
 pi = 3.14159265,
 // Computes a sine wave at the given frequency (which must be a float or waveform)
@@ -86,7 +89,7 @@ harmonica = fn(dur, freq) =>
   let a = 0.13,
       d = 0.33,
       r = 0.33,
-      s = dur - (a + d + r),
+      s = max(dur - (a + d + r), 0),
       osc1 = pwm(0.93 + $(1.6) * 0.05, freq),
       osc2 = res(osc1, pwm(0.7, add_cents(add_semitones(freq, 8), 7))),
       osc = osc1 * 0.375 + osc2 * 0.5

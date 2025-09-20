@@ -182,27 +182,32 @@ Tuun waveforms are designed to be simple, and they are more like an assembly lan
 
 ```
 expr ::= float
-     | fn (var, ...) => expr
+     | "fn" "(" var "," ... ")" "=>" expr
      | var 
-     | expr expr
-     | (expr, ...)
-     | [expr, ...]
+     | expr "(" expr ")"
+     | "(" expr "," ... ")"
+     | "[" expr "," ... "]"
      | expr binary_op expr
      | unary_op expr
-     | let var = expr, ... in expr
+     | "let" binding, ... "in" expr
      | ...
 
-unary_op ::= - | $ | @ | ...
-binary_op ::= + | - | * | / | ...
+pattern ::= var
+        | "(" pattern, ... ")"
+
+binding ::= pattern "=" expr
+
+unary_op ::= "-" | "$" | "@" | ...
+binary_op ::= "+" | "-" | "*" | "/" | "==" | "!=" | "<" | ...
 ```
 
 Floating point literals, functions, variables, application, tuples, lists, operators, and "let" bindings are all pretty standard!
 
 ```
 expr ::= ...
-     | {expr}
-     | <expr>
-     | pow | sqrt | map | reduce | time | noise | fixed | fin | seq | mark | sin | res | alt | ...
+     | "{" expr "}"
+     | "<" expr ">"
+     | expr "|" expr
 ```
 
 Tuun supports special syntax for chords and sequences – by "chords", we really just mean combining waveforms so that they are played simultaneously. Curly brackets (`{` and `}`) take a tuple of waveforms and turn that tuple into a single waveform representing a chord. Angle brackets (`<` and `>`) take a tuple of waveforms and sequence them. (As you might guess from above, those waveforms must include proper offsets to create a true sequence!)

@@ -154,7 +154,7 @@ pub enum Expr {
     String(String),
     Waveform(tracker::Waveform),
     Function {
-        arguments: Pattern,
+        pattern: Pattern,
         body: Box<Expr>,
     },
     BuiltIn {
@@ -172,7 +172,7 @@ pub enum Expr {
     Variable(String),
     Application {
         function: Box<Expr>,
-        arguments: Box<Expr>,
+        argument: Box<Expr>,
     },
     // Compound expressions
     Tuple(Vec<Expr>),
@@ -274,8 +274,8 @@ fn parse_function(input: LocatedSpan) -> IResult<Expr> {
             )),
             ws(expect(tag("=>"), "expected '=>'"))),
             parse_expr,
-        )).map(|(arguments, body)| {
-            Expr::Function { arguments, body: Box::new(body) }
+        )).map(|(pattern, body)| {
+            Expr::Function { pattern, body: Box::new(body) }
         }).parse(input)?;
     return Ok((rest, expr));
 }
@@ -311,10 +311,10 @@ fn parse_let(input: LocatedSpan) -> IResult<Expr> {
             for (pattern, binding) in bindings.into_iter().rev() {
                 expr = Expr::Application {
                     function: Box::new(Expr::Function {
-                        arguments: pattern,
+                        pattern,
                         body: Box::new(expr),
                     }),
-                    arguments: Box::new(binding),
+                    argument: Box::new(binding),
                 }
             }
             expr
@@ -354,7 +354,7 @@ fn parse_primitive(input: LocatedSpan) -> IResult<Expr> {
         (parse_unary_operator, parse_primitive).map(
             |(op, expr)| Expr::Application {
                 function: Box::new(Expr::Variable(op.fragment().to_string())),
-                arguments: Box::new(expr),
+                argument: Box::new(expr),
             },
         ),
         parse_identifier.map(Expr::Variable),
@@ -373,14 +373,7 @@ fn parse_application(input: LocatedSpan) -> IResult<Expr> {
             parse_primitive,
             many0(preceded(
                 multispace0,
-                preceded(
-                    // Maybe sort of a hack, but don't allow unary operators
-                    // in the middle of an application (require parens instead)
-                    // ... or maybe just disallow '-'? Or something else?
-                    // TODO fix this so we can use unary operators in the middle of applications
-                    not(peek(parse_unary_operator)),
-                    parse_primitive,
-                )
+                parse_tuple,
             )),
         ),
         |(func, exprs)| {
@@ -388,7 +381,7 @@ fn parse_application(input: LocatedSpan) -> IResult<Expr> {
             for expr in exprs  {
                 result = Expr::Application {
                     function: Box::new(result),
-                    arguments: Box::new(expr),
+                    argument: Box::new(expr),
                 };
             }
             return result;
@@ -412,7 +405,7 @@ fn parse_multiplicative(input: LocatedSpan) -> IResult<Expr> {
             for (op, factor) in op_factors {
                 expr = Expr::Application {
                     function: Box::new(Expr::Variable(op.fragment().to_string())),
-                    arguments: Box::new(Expr::Tuple(vec![expr, factor.unwrap_or_default()])),
+                    argument: Box::new(Expr::Tuple(vec![expr, factor.unwrap_or_default()])),
                 };
             }
             return expr;
@@ -436,7 +429,7 @@ fn parse_additive(input: LocatedSpan) -> IResult<Expr> {
             for (op, term) in op_terms {
                 expr = Expr::Application {
                     function: Box::new(Expr::Variable(op.fragment().to_string())),
-                    arguments: Box::new(Expr::Tuple(vec![expr, term.unwrap_or_default()])),
+                    argument: Box::new(Expr::Tuple(vec![expr, term.unwrap_or_default()])),
                 };
             }
             return expr;
@@ -451,15 +444,15 @@ fn parse_relational(input: LocatedSpan) -> IResult<Expr> {
         (
             parse_additive,
             many0((
-                ws(alt((tag("=="), tag("!=")))),
-                expect(parse_additive, "expected expression after operator"),
+                ws(alt((tag("=="), tag("!="), tag("<="), tag(">="), tag("<"), tag(">")))),
+                parse_additive,
             )),
         ),
         |(mut expr, op_exprs)| {
             for (op, term) in op_exprs {
                 expr = Expr::Application {
                     function: Box::new(Expr::Variable(op.fragment().to_string())),
-                    arguments: Box::new(Expr::Tuple(vec![expr, term.unwrap_or_default()])),
+                    argument: Box::new(Expr::Tuple(vec![expr, term])),
                 };
             }
             return expr;
@@ -479,7 +472,7 @@ fn parse_chord(input: LocatedSpan) -> IResult<Expr> {
         rest,
         Expr::Application {
             function: Box::new(Expr::Variable(("_chord").to_string())),
-            arguments: Box::new(expr),
+            argument: Box::new(expr),
         },
     ));
 }
@@ -495,11 +488,13 @@ fn parse_sequence(input: LocatedSpan) -> IResult<Expr> {
         rest,
         Expr::Application {
             function: Box::new(Expr::Variable(("_sequence").to_string())),
-            arguments: Box::new(expr),
+            argument: Box::new(expr),
         },
     ));
 }
 
+/// Parses a parenthesized expression or expressions. If there is only one element, returns just that element;
+/// otherwise returns a Tuple of elements.
 fn parse_tuple(input: LocatedSpan) -> IResult<Expr> {
     #[rustfmt::skip]
     let (rest, mut exprs) = delimited(
@@ -546,7 +541,7 @@ fn parse_expr(input: LocatedSpan) -> IResult<Expr> {
                     Some(function) => {
                         expr = Expr::Application {
                             function: Box::new(function),
-                            arguments: Box::new(expr),
+                            argument: Box::new(expr),
                         }
                     }
                     None => {
@@ -616,6 +611,8 @@ pub fn parse_context(input: &str) -> Result<Vec<(Pattern, Expr)>, Vec<Error>> {
     translate_parse_result(result)
 }
 
+/// Extends the context with a binding for each identifier in the pattern that is bound to
+/// itself.
 fn extend_with_trivial_context(context: &mut Vec<(String, Expr)>, pattern: &Pattern) {
     match pattern {
         Pattern::Identifier(name) => {
@@ -636,12 +633,12 @@ fn substitute(context: &Vec<(String, Expr)>, expr: Expr) -> Expr {
     match expr {
         Bool(_) | Float(_) | String(_) => expr,
         Expr::Waveform(waveform) => Expr::Waveform(waveform),
-        Function { arguments, body } => {
+        Function { pattern, body } => {
             let mut context = context.clone();
-            extend_with_trivial_context(&mut context, &arguments);
+            extend_with_trivial_context(&mut context, &pattern);
             let body = substitute(&context, *body);
             Expr::Function {
-                arguments,
+                pattern,
                 body: Box::new(body),
             }
         }
@@ -668,15 +665,12 @@ fn substitute(context: &Vec<(String, Expr)>, expr: Expr) -> Expr {
                 else_,
             }
         }
-        Application {
-            function,
-            arguments,
-        } => {
+        Application { function, argument } => {
             let function = substitute(context, *function);
-            let arguments = substitute(context, *arguments);
+            let argument = substitute(context, *argument);
             Expr::Application {
                 function: Box::new(function),
-                arguments: Box::new(arguments),
+                argument: Box::new(argument),
             }
         }
         Tuple(exprs) => Expr::Tuple(exprs.into_iter().map(|e| substitute(context, e)).collect()),
@@ -726,11 +720,11 @@ impl fmt::Display for Expr {
             Expr::Waveform(waveform) => {
                 write!(f, "{:?}", waveform)
             }
-            Expr::Function { arguments, body } => {
+            Expr::Function { pattern, body } => {
                 write!(f, "fn ")?;
-                match arguments {
+                match pattern {
                     Pattern::Identifier(name) => write!(f, "({})", name)?,
-                    Pattern::Tuple(_) => write!(f, "{}", arguments)?,
+                    Pattern::Tuple(_) => write!(f, "{}", pattern)?,
                 }
                 write!(f, " => {}", body)
             }
@@ -743,15 +737,12 @@ impl fmt::Display for Expr {
             } => {
                 write!(f, "if {} then {} else {}", condition, then, else_)
             }
-            Expr::Application {
-                function,
-                arguments,
-            } => {
+            Expr::Application { function, argument } => {
                 fmt_with_parens(function, f)?;
-                if let Expr::Tuple(_) = &**arguments {
-                    write!(f, "{}", arguments)
+                if let Expr::Tuple(_) = &**argument {
+                    write!(f, "{}", argument)
                 } else {
-                    write!(f, "({})", arguments)
+                    write!(f, "({})", argument)
                 }
             }
             Expr::Tuple(exprs) => {
@@ -782,22 +773,22 @@ impl fmt::Display for Expr {
 pub fn extend_context(
     context: &mut Vec<(String, Expr)>,
     pattern: &Pattern,
-    actual: &Expr,
+    argument: &Expr,
 ) -> Result<(), Error> {
-    match (pattern, actual) {
-        (Pattern::Identifier(name), actual) => {
-            context.push((name.clone(), actual.clone()));
+    match (pattern, argument) {
+        (Pattern::Identifier(name), argument) => {
+            context.push((name.clone(), argument.clone()));
             Ok(())
         }
-        (Pattern::Tuple(patterns), Expr::Tuple(actuals)) => {
-            for (pattern, actual) in patterns.iter().zip(actuals) {
-                extend_context(context, pattern, actual)?;
+        (Pattern::Tuple(patterns), Expr::Tuple(arguments)) => {
+            for (pattern, argument) in patterns.iter().zip(arguments) {
+                extend_context(context, pattern, argument)?;
             }
             Ok(())
         }
         _ => Err(Error::new(format!(
             "Pattern {:?} does not match actual expression {:?}",
-            pattern, actual
+            pattern, argument
         ))),
     }
 }
@@ -823,22 +814,13 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
             Bool(false) => return simplify_closed(*else_),
             _ => return Err(Error::new("Expected boolean condition".to_string())),
         },
-        Application {
-            function,
-            arguments,
-        } => {
+        Application { function, argument } => {
             let function = simplify_closed(*function)?;
-            let arguments = simplify_closed(*arguments)?;
-            match (function, arguments) {
-                (
-                    Function {
-                        arguments: formals,
-                        body,
-                    },
-                    actuals,
-                ) => {
+            let argument = simplify_closed(*argument)?;
+            match (function, argument) {
+                (Function { pattern, body }, argument) => {
                     let mut context = Vec::new();
-                    extend_context(&mut context, &formals, &actuals)?;
+                    extend_context(&mut context, &pattern, &argument)?;
                     let body = substitute(&context, *body);
                     simplify_closed(body)
                 }
@@ -988,6 +970,11 @@ mod tests {
         let result = parse_program(input);
         assert!(result.is_ok());
         assert_eq!(format!("{}", result.unwrap()), "Q($(@(70)))");
+
+        let input = "f(-1) - 1 < 0";
+        let result = parse_program(input);
+        assert!(result.is_ok());
+        assert_eq!(format!("{}", result.unwrap()), "<(-(f(-(1)), 1), 0)");
     }
 
     #[test]

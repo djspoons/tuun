@@ -142,6 +142,34 @@ pub fn not_equals(arguments: Vec<Expr>) -> Expr {
     }
 }
 
+pub fn less_than(arguments: Vec<Expr>) -> Expr {
+    match arguments[..] {
+        [Float(a), Float(b)] => Expr::Bool(a < b),
+        _ => Expr::Error("Invalid arguments for <".to_string()),
+    }
+}
+
+pub fn less_than_equals(arguments: Vec<Expr>) -> Expr {
+    match arguments[..] {
+        [Float(a), Float(b)] => Expr::Bool(a <= b),
+        _ => Expr::Error("Invalid arguments for <=".to_string()),
+    }
+}
+
+pub fn greater_than(arguments: Vec<Expr>) -> Expr {
+    match arguments[..] {
+        [Float(a), Float(b)] => Expr::Bool(a > b),
+        _ => Expr::Error("Invalid arguments for >".to_string()),
+    }
+}
+
+pub fn greater_than_equals(arguments: Vec<Expr>) -> Expr {
+    match arguments[..] {
+        [Float(a), Float(b)] => Expr::Bool(a >= b),
+        _ => Expr::Error("Invalid arguments for >=".to_string()),
+    }
+}
+
 pub fn map(arguments: Vec<Expr>) -> Expr {
     match &arguments[..] {
         [function, List(exprs)] => {
@@ -152,7 +180,7 @@ pub fn map(arguments: Vec<Expr>) -> Expr {
                     &context,
                     Application {
                         function: Box::new(function.clone()),
-                        arguments: Box::new(expr.clone()), // can we avoid this clone?
+                        argument: Box::new(expr.clone()), // can we avoid this clone?
                     },
                 );
                 match result {
@@ -176,7 +204,7 @@ pub fn reduce(arguments: Vec<Expr>) -> Expr {
                     &context,
                     Application {
                         function: Box::new(function.clone()),
-                        arguments: Box::new(Tuple(vec![acc, expr.clone()])), // can we avoid this clone?
+                        argument: Box::new(Tuple(vec![acc, expr.clone()])), // can we avoid this clone?
                     },
                 );
                 acc = match result {
@@ -491,6 +519,10 @@ pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
         ("/", divide),
         ("==", equals),
         ("!=", not_equals),
+        ("<", less_than),
+        ("<=", less_than_equals),
+        (">", greater_than),
+        (">=", greater_than_equals),
         ("pow", power),
         ("sqrt", sqrt),
         ("exp", exp),
