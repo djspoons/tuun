@@ -523,7 +523,7 @@ impl<'a> Generator<'a> {
                     .last_values
                     .get(&slider)
                     .cloned()
-                    .unwrap_or(0.0);
+                    .unwrap_or(0.5);
                 let change = slider_state.changes.get(&slider).cloned().unwrap_or(0.0);
                 // Use a linear interpolation between the last value and the change. This is almost right, but if
                 // a slider waveform is used in a binary op, then buffer_position + position might not be large
@@ -536,7 +536,7 @@ impl<'a> Generator<'a> {
                                 / slider_state.buffer_length as f32)
                                 + i as f32 / desired as f32)
                                 .min(1.0)
-                                .max(-1.0);
+                                .max(0.0);
                 }
                 /*
                 println!(
@@ -869,6 +869,7 @@ impl<'a> Generator<'a> {
                     return MaybeOption::Maybe;
                 }
                 match (op, &**a, &**b) {
+                    // TODO need to consider Sliders and constant functions of Sliders as const
                     (Add, Const(va), Const(vb)) if va + vb >= value => MaybeOption::Some(0),
                     (Add, Const(_), Const(_)) => MaybeOption::None,
                     (Add, Const(va), _) => self.greater_or_equals_at(b, value - va, position, max),
@@ -1263,10 +1264,10 @@ where
 
         // Update the slider values based on the changes
         for (slider, change) in self.slider_state.changes.iter() {
-            let last_value = self.slider_state.last_values.remove(slider).unwrap_or(0.0);
+            let last_value = self.slider_state.last_values.remove(slider).unwrap_or(0.5);
             self.slider_state
                 .last_values
-                .insert(slider.clone(), (last_value + change).min(1.0).max(-1.0));
+                .insert(slider.clone(), (last_value + change).min(1.0).max(0.0));
         }
         self.slider_state.changes.clear();
 

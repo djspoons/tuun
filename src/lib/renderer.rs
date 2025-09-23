@@ -374,13 +374,11 @@ impl Renderer {
             });
         self.canvas
             .fill_rect(sdl2::rect::Rect::new(
-                (self.width / 2) as i32
-                    + (self.width as f32
-                        * *status
-                            .slider_values
-                            .get(&tracker::Slider::X)
-                            .unwrap_or(&0.0)
-                        / 2.0) as i32
+                (self.width as f32
+                    * *status
+                        .slider_values
+                        .get(&tracker::Slider::X)
+                        .unwrap_or(&0.5)) as i32
                     - 3,
                 0,
                 6,
@@ -390,13 +388,12 @@ impl Renderer {
         self.canvas
             .fill_rect(sdl2::rect::Rect::new(
                 0,
-                (self.height / 2) as i32
+                self.height as i32
                     - (self.height as f32
                         * *status
                             .slider_values
                             .get(&tracker::Slider::Y)
-                            .unwrap_or(&0.0)
-                        / 2.0) as i32
+                            .unwrap_or(&0.5)) as i32
                     - 3,
                 16,
                 6,

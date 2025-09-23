@@ -94,8 +94,6 @@ harmonica = fn(dur, freq) =>
       osc2 = res(osc1, pwm(0.7, add_cents(add_semitones(freq, 8), 7))),
       osc = osc1 * 0.375 + osc2 * 0.5
     in
-//  (osc * ((X + 1) * 0.5)) +
-//    ((osc | lpf(0.5, 1900)) * (1 + (X + 1) * -0.5))
   osc
     | lpf(0.5, 1900)
     | ADSR(a, d, 0.5, s, r)
