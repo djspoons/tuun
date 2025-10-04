@@ -4,6 +4,7 @@ use std::fmt;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::io::BufWriter;
+use std::path;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -1071,6 +1072,7 @@ where
     I: Clone + Send,
 {
     sample_frequency: i32,
+    captured_output_dir: path::PathBuf,
     captured_date_format: String,
     command_receiver: mpsc::Receiver<Command<I>>,
     status_sender: mpsc::Sender<Status<I>>,
@@ -1089,12 +1091,14 @@ where
 {
     pub fn new(
         sample_frequency: i32,
+        captured_output_dir: path::PathBuf,
         captured_date_format: String,
         command_receiver: mpsc::Receiver<Command<I>>,
         status_sender: mpsc::Sender<Status<I>>,
     ) -> Tracker<I> {
         return Tracker {
             sample_frequency,
+            captured_output_dir,
             captured_date_format,
             command_receiver,
             status_sender,
@@ -1214,7 +1218,7 @@ where
                 }
                 let datetime = chrono::Local::now().format(&self.captured_date_format);
                 let file_name = format!("{}{}.wav", &file_stem, &datetime);
-                let path = std::path::Path::new(&file_name);
+                let path = self.captured_output_dir.join(file_name);
                 let file = std::fs::File::create(path).expect("Failed to create file");
                 let spec = WavSpec {
                     channels: 1,

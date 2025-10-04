@@ -53,6 +53,8 @@ struct Args {
         default_value = "true", // Default if the flag is not present
         default_missing_value = "true")]
     ui: bool, // When set to value, just runs each of the programs once then exits
+    #[arg(short = 'O', long, default_value = ".")]
+    output_dir: String, // Captures waveforms to the specified directory
 }
 
 fn load_context(program_index: usize, args: &Args) -> (Vec<(String, parser::Expr)>, Mode) {
@@ -69,7 +71,8 @@ fn load_context(program_index: usize, args: &Args) -> (Vec<(String, parser::Expr
     let mut bindings = 0;
     let mut errors = Vec::new();
     for file in args.context_files.iter() {
-        let raw_context = std::fs::read_to_string(file).unwrap();
+        let raw_context = std::fs::read_to_string(file)
+            .expect(format!("Failed to read context file: {}", file).as_str());
         // Strip out comments (that is any after // on a line)
         let raw_context: String = raw_context
             .lines()
@@ -172,6 +175,7 @@ pub fn main() {
         programs = programs.iter().filter(|p| !p.is_empty()).cloned().collect();
         let mut tracker = tracker::Tracker::<WaveformId>::new(
             args.sample_frequency,
+            args.output_dir.clone().into(),
             args.date_format.clone(),
             command_receiver,
             status_sender,
@@ -235,6 +239,7 @@ pub fn main() {
             println!("Spec: {:?}", spec);
             tracker::Tracker::<WaveformId>::new(
                 args.sample_frequency,
+                args.output_dir.clone().into(),
                 args.date_format.clone(),
                 command_receiver,
                 status_sender,
