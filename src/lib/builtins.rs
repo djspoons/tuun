@@ -218,6 +218,32 @@ pub fn reduce(arguments: Vec<Expr>) -> Expr {
     }
 }
 
+pub fn unfold(arguments: Vec<Expr>) -> Expr {
+    match &arguments[..] {
+        [function, seed, Float(n)] if *n >= 0.0 && n.fract() == 0.0 => {
+            let context = vec![];
+            let mut results = Vec::new();
+            let mut current = seed.clone();
+            for _ in 0..(*n as u32) {
+                results.push(current.clone());
+                let result = simplify(
+                    &context,
+                    Application {
+                        function: Box::new(function.clone()),
+                        argument: Box::new(current.clone()),
+                    },
+                );
+                current = match result {
+                    Ok(expr) => expr,
+                    Err(err) => return Expr::Error(err.to_string()),
+                };
+            }
+            Expr::List(results)
+        }
+        _ => Expr::Error("Invalid arguments for unfold".to_string()),
+    }
+}
+
 pub fn append(arguments: Vec<Expr>) -> Expr {
     match &arguments[..] {
         [List(a), List(b)] => {
@@ -324,14 +350,6 @@ pub fn seq(mut arguments: Vec<Expr>) -> Expr {
     }
 }
 
-pub fn waveform_sin(arguments: Vec<Expr>) -> Expr {
-    match &arguments[..] {
-        [Expr::Waveform(a)] => Expr::Waveform(Waveform::Sin(Box::new(a.clone()))),
-        [Float(value)] => Expr::Waveform(Waveform::Sin(Box::new(Waveform::Const(*value)))),
-        _ => Expr::Error("Invalid argument for sin".to_string()),
-    }
-}
-
 pub fn waveform_convolution(mut arguments: Vec<Expr>) -> Expr {
     if arguments.len() != 2 {
         return Expr::Error(format!("Expected two arguments for ~*"));
@@ -426,7 +444,7 @@ pub fn alt(mut arguments: Vec<Expr>) -> Expr {
 
 fn mark(arguments: Vec<Expr>) -> Expr {
     match &arguments[..] {
-        [Float(id)] if *id >= 1.0 => {
+        [Float(id)] if *id >= 1.0 && id.fract() == 0.0 => {
             let id = id.round() as u32;
             BuiltIn {
                 name: format!("mark({})", id),
@@ -530,6 +548,7 @@ pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
         ("cos", cos),
         ("map", map),
         ("reduce", reduce),
+        ("unfold", unfold),
         ("append", append),
         ("fixed", fixed),
         ("fin", fin),

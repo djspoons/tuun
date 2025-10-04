@@ -4,6 +4,7 @@
         "ADSR",
         "chrono",
         "fastrand",
+        "fract",
         "freqs",
         "keymod",
         "LALTMOD",
