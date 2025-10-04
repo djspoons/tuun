@@ -519,13 +519,46 @@ fn process_event<I>(
                     );
                     (context, mode)
                 }
-                (Mode::Edit { program_index, .. }, Some(Scancode::Escape)) => (
-                    context,
-                    Mode::Select {
+                (
+                    Mode::Edit {
                         program_index,
-                        message: String::new(),
+                        cursor_position,
+                        errors,
+                        ..
                     },
-                ),
+                    Some(Scancode::Escape),
+                ) => {
+                    if keymod.contains(Mod::LGUIMOD)
+                        || keymod.contains(Mod::RGUIMOD)
+                            && renderer::is_active_program(&status, Instant::now(), program_index)
+                    {
+                        // If the program is active, stop it
+                        command_sender
+                            .send(Command::Stop {
+                                id: WaveformId::Program(program_index),
+                            })
+                            .unwrap();
+                        let message = format!("Stopped program {}", program_index);
+                        return (
+                            context,
+                            Mode::Edit {
+                                program_index,
+                                cursor_position,
+                                errors,
+                                message,
+                            },
+                        );
+                    }
+
+                    // Otherwise, return to select mode
+                    return (
+                        context,
+                        Mode::Select {
+                            program_index,
+                            message: String::new(),
+                        },
+                    );
+                }
                 (
                     Mode::Edit {
                         program_index,
@@ -535,12 +568,30 @@ fn process_event<I>(
                     },
                     Some(Scancode::Left),
                 ) => {
-                    let cursor_position = cursor_position.saturating_sub(1);
+                    let new_cursor_position;
+                    if keymod.contains(Mod::LALTMOD) {
+                        let program = &programs[program_index - 1];
+                        if let Some(char_index) =
+                            program[..cursor_position].rfind(|e: char| !e.is_whitespace())
+                        {
+                            if let Some(space_index) =
+                                program[..char_index].rfind(char::is_whitespace)
+                            {
+                                new_cursor_position = space_index + 1;
+                            } else {
+                                new_cursor_position = 0;
+                            }
+                        } else {
+                            new_cursor_position = 0;
+                        }
+                    } else {
+                        new_cursor_position = cursor_position.saturating_sub(1);
+                    }
                     (
                         context,
                         Mode::Edit {
                             program_index,
-                            cursor_position,
+                            cursor_position: new_cursor_position,
                             errors,
                             message,
                         },
@@ -555,6 +606,7 @@ fn process_event<I>(
                     },
                     Some(Scancode::Right),
                 ) => {
+                    // TODO check for LALTMOD and move to next word
                     let cursor_position =
                         programs[program_index - 1].len().min(cursor_position + 1);
                     (
