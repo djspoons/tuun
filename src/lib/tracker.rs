@@ -1071,6 +1071,7 @@ where
     I: Clone + Send,
 {
     sample_frequency: i32,
+    captured_date_format: String,
     command_receiver: mpsc::Receiver<Command<I>>,
     status_sender: mpsc::Sender<Status<I>>,
 
@@ -1088,11 +1089,13 @@ where
 {
     pub fn new(
         sample_frequency: i32,
+        captured_date_format: String,
         command_receiver: mpsc::Receiver<Command<I>>,
         status_sender: mpsc::Sender<Status<I>>,
     ) -> Tracker<I> {
         return Tracker {
             sample_frequency,
+            captured_date_format,
             command_receiver,
             status_sender,
 
@@ -1205,15 +1208,12 @@ where
             } => {
                 use hound::{SampleFormat, WavSpec, WavWriter};
                 self.process_captured(&*waveform, out);
-                // If we haven't already opened a file for this waveform, then open it now.
                 if out.contains_key(file_stem) {
-                    panic!(
-                        "Captured waveform called with duplicate file stem: {}",
-                        file_stem
-                    );
+                    // TODO in theory we could check for this earlier
+                    panic!("Captured waveform with duplicate file stem: {}", file_stem);
                 }
-                let datetime = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
-                let file_name = format!("{}_{}.wav", &file_stem, &datetime);
+                let datetime = chrono::Local::now().format(&self.captured_date_format);
+                let file_name = format!("{}{}.wav", &file_stem, &datetime);
                 let path = std::path::Path::new(&file_name);
                 let file = std::fs::File::create(path).expect("Failed to create file");
                 let spec = WavSpec {

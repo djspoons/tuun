@@ -38,6 +38,9 @@ struct Args {
     // Additional programs to load
     #[arg(short, long = "program", default_value = "", number_of_values = 1)]
     programs: Vec<String>,
+    // Date format to use when saving captured waveforms
+    #[arg(long, default_value = "_%Y-%m-%d_%H-%M-%S")]
+    date_format: String,
     #[arg(long,
         num_args(0..=1), // Allows --flag or --flag=value
         action = clap::ArgAction::Set,
@@ -169,6 +172,7 @@ pub fn main() {
         programs = programs.iter().filter(|p| !p.is_empty()).cloned().collect();
         let mut tracker = tracker::Tracker::<WaveformId>::new(
             args.sample_frequency,
+            args.date_format.clone(),
             command_receiver,
             status_sender,
         );
@@ -231,6 +235,7 @@ pub fn main() {
             println!("Spec: {:?}", spec);
             tracker::Tracker::<WaveformId>::new(
                 args.sample_frequency,
+                args.date_format.clone(),
                 command_receiver,
                 status_sender,
             )
