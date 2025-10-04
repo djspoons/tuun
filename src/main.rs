@@ -28,9 +28,11 @@ struct Args {
     beats_per_measure: u32,
     #[arg(long, default_value_t = 44100)]
     sample_frequency: i32,
+    #[arg(long, default_value_t = 2048)]
+    buffer_size: u16,
     #[arg(short = 'C', long = "context_file", number_of_values = 1)]
     context_files: Vec<String>,
-    #[arg(short = 'P', long = "programs_file", default_value = "programs.tnp")]
+    #[arg(short = 'P', long = "programs_file", default_value = "")]
     programs_file: String,
     // Additional programs to load
     #[arg(short, long = "program", default_value = "", number_of_values = 1)]
@@ -116,21 +118,23 @@ const NUM_PROGRAMS: usize = 8;
 
 fn load_programs(args: &Args, programs: &mut Vec<String>) {
     *programs = Vec::new();
-    let mut count = 0;
-    let contents = fs::read_to_string(&args.programs_file).unwrap_or_default();
-    for line in contents.lines() {
-        let line = if let Some(comment_index) = line.find("//") {
-            &line[..comment_index]
-        } else {
-            line
+    if !args.programs_file.is_empty() {
+        let mut count = 0;
+        let contents = fs::read_to_string(&args.programs_file).unwrap_or_default();
+        for line in contents.lines() {
+            let line = if let Some(comment_index) = line.find("//") {
+                &line[..comment_index]
+            } else {
+                line
+            }
+            .trim();
+            if !line.is_empty() {
+                programs.push(line.to_string());
+                count += 1;
+            }
         }
-        .trim();
-        if !line.is_empty() {
-            programs.push(line.to_string());
-            count += 1;
-        }
+        println!("Loaded {} programs from {}", count, args.programs_file);
     }
-    println!("Loaded {} programs from {}", count, args.programs_file);
     // Add in any additional programs specified on the command line
     for program in &args.programs {
         if !program.is_empty() {
@@ -150,7 +154,7 @@ pub fn main() {
     let desired_spec = AudioSpecDesired {
         freq: Some(args.sample_frequency),
         channels: Some(1), // mono
-        samples: None,     // default buffer size
+        samples: Some(args.buffer_size),
     };
 
     let (status_sender, status_receiver) = mpsc::channel();
