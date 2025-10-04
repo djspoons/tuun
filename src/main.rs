@@ -1,5 +1,6 @@
 use core::panic;
 use std::fs;
+use std::process;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -43,6 +44,12 @@ struct Args {
         default_value = "true", // Default if the flag is not present
         default_missing_value = "true")]
     optimize: bool,
+    #[arg(long,
+        num_args(0..=1), // Allows --flag or --flag=value
+        action = clap::ArgAction::Set,
+        default_value = "true", // Default if the flag is not present
+        default_missing_value = "true")]
+    ui: bool, // When set to value, just runs each of the programs once then exits
 }
 
 fn load_context(program_index: usize, args: &Args) -> (Vec<(String, parser::Expr)>, Mode) {
@@ -149,6 +156,69 @@ fn load_programs(args: &Args, programs: &mut Vec<String>) {
 
 pub fn main() {
     let args = Args::parse();
+    let (mut context, mut mode) = load_context(1, &args);
+    let mut programs = Vec::new();
+    load_programs(&args, &mut programs);
+
+    let (status_sender, status_receiver) = mpsc::channel();
+    let (command_sender, command_receiver) = mpsc::channel();
+
+    if !args.ui {
+        println!("Starting in non-UI mode");
+        // Filter out any empty programs
+        programs = programs.iter().filter(|p| !p.is_empty()).cloned().collect();
+        let mut tracker = tracker::Tracker::<WaveformId>::new(
+            args.sample_frequency,
+            command_receiver,
+            status_sender,
+        );
+        use sdl2::audio::AudioCallback;
+        let mut out = vec![0.0f32; args.buffer_size as usize];
+        // Call the callback to get at least one status update
+        tracker.callback(&mut out);
+        let mut status = status_receiver.recv().unwrap();
+        // We need to add one Beats mark so that we can reuse the helper below to play waveforms
+        status.marks = vec![tracker::Mark {
+            waveform_id: WaveformId::Beats(false),
+            mark_id: 0,
+            start: Instant::now() + Duration::from_millis(100), // Some time in the near future
+
+            duration: Duration::from_secs(4), // Doesn't matter
+        }];
+        const MARK_ID: u32 = 100;
+        // Parse and send commands to play all of the waveforms.
+        for (i, program) in programs.iter().enumerate() {
+            println!("Playing program {}: {}", i + 1, program);
+            // Wrap each program in a mark so that we can wait for it to finish
+            let _ = play_waveform(
+                context.clone(),
+                &status,
+                &args,
+                i + 1,
+                program.len(),
+                format!("({}) | mark({})", program, MARK_ID).as_str(),
+                &command_sender,
+                sdl2::keyboard::Mod::empty(),
+            );
+        }
+        // Call the tracker's callback until all of the waveforms have finished playing
+        loop {
+            tracker.callback(&mut out);
+            let status = status_receiver.recv().unwrap();
+            let mark_count = status
+                .marks
+                .iter()
+                .filter(|mark| mark.mark_id == MARK_ID)
+                .count();
+            if mark_count == 0 {
+                println!("All waveforms finished");
+                break;
+            }
+            println!("Still running, {} waveforms remaining", mark_count);
+        }
+        process::exit(0);
+    }
+
     let sdl_context = sdl2::init().unwrap();
     let audio_subsystem = sdl_context.audio().unwrap();
     let desired_spec = AudioSpecDesired {
@@ -156,10 +226,6 @@ pub fn main() {
         channels: Some(1), // mono
         samples: Some(args.buffer_size),
     };
-
-    let (status_sender, status_receiver) = mpsc::channel();
-    let (command_sender, command_receiver) = mpsc::channel();
-
     let device = audio_subsystem
         .open_playback(None, &desired_spec, |spec| {
             println!("Spec: {:?}", spec);
@@ -181,10 +247,6 @@ pub fn main() {
     );
     renderer.video_subsystem.text_input().start();
     let mut event_pump = sdl_context.event_pump().unwrap();
-
-    let (mut context, mut mode) = load_context(1, &args);
-    let mut programs = Vec::new();
-    load_programs(&args, &mut programs);
 
     start_beats(&command_sender, &status_receiver, &args);
 
