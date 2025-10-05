@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::f64;
 use std::fmt;
 use std::fmt::Debug;
 use std::hash::Hash;
@@ -11,7 +12,7 @@ use std::time::{Duration, Instant};
 use fastrand;
 
 extern crate sdl2;
-use sdl2::audio::AudioCallback;
+use sdl2::audio;
 
 // TODO move this out of the tracker?
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -38,7 +39,7 @@ pub enum Operator {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Waveform<State = ()> {
+pub enum Waveform<FilterState = (), SinState = ()> {
     /*
      * Const produces a stream of samples where each sample is the same constant value.
      */
@@ -61,8 +62,8 @@ pub enum Waveform<State = ()> {
      * is 0 seconds in length and `Fin(Subtract(Time, Const(2.0)), _)` is 2 seconds in length.
      */
     Fin {
-        length: Box<Waveform<State>>,
-        waveform: Box<Waveform<State>>,
+        length: Box<Waveform<FilterState, SinState>>,
+        waveform: Box<Waveform<FilterState, SinState>>,
     },
     /*
      * Seq sets the offset of `waveform`. The offset is determined by the first point at which the `offset` waveform
@@ -70,18 +71,21 @@ pub enum Waveform<State = ()> {
      * an offset of 2 seconds.
      */
     Seq {
-        offset: Box<Waveform<State>>,
-        waveform: Box<Waveform<State>>,
+        offset: Box<Waveform<FilterState, SinState>>,
+        waveform: Box<Waveform<FilterState, SinState>>,
     },
     /*
      * Append concatenates two waveforms, generating all samples from the first waveform and
      * then all samples from the second (regardless of the offset of the first).
      */
-    Append(Box<Waveform<State>>, Box<Waveform<State>>),
+    Append(
+        Box<Waveform<FilterState, SinState>>,
+        Box<Waveform<FilterState, SinState>>,
+    ),
     /*
      * Sin computes the sine of each sample in the given waveform.
      */
-    Sin(Box<Waveform<State>>),
+    Sin(Box<Waveform<FilterState, SinState>>, SinState),
     /*
      * Filter implements an impulse response filter with feed-forward and feedback coefficients. Assumes that the first
      * feedback coefficient (a_0) is 1.0. If the filter has no feedback coefficients, then the filter has a finite
@@ -89,29 +93,33 @@ pub enum Waveform<State = ()> {
      */
     // TODO maybe add a_0 back in?
     Filter {
-        waveform: Box<Waveform<State>>,
-        feed_forward: Box<Waveform<State>>, // b_0, b_1, ...
-        feedback: Box<Waveform<State>>,     // a_1, a_2, ...
-        state: State,
+        waveform: Box<Waveform<FilterState, SinState>>,
+        feed_forward: Box<Waveform<FilterState, SinState>>, // b_0, b_1, ...
+        feedback: Box<Waveform<FilterState, SinState>>,     // a_1, a_2, ...
+        state: FilterState,
     },
-    BinaryPointOp(Operator, Box<Waveform<State>>, Box<Waveform<State>>),
+    BinaryPointOp(
+        Operator,
+        Box<Waveform<FilterState, SinState>>,
+        Box<Waveform<FilterState, SinState>>,
+    ),
     /*
      * Res generates a repeating waveform that restarts the given waveform whenever the trigger
      * waveform flips from negative values to positive values. Its length and offset are determined
      * by the trigger waveform.
      */
     Res {
-        trigger: Box<Waveform<State>>,
-        waveform: Box<Waveform<State>>,
+        trigger: Box<Waveform<FilterState, SinState>>,
+        waveform: Box<Waveform<FilterState, SinState>>,
     },
     /*
      * Alt generates a waveform by alternating between two waveforms based on the sign of
      * the trigger waveform.
      */
     Alt {
-        trigger: Box<Waveform<State>>,
-        positive_waveform: Box<Waveform<State>>,
-        negative_waveform: Box<Waveform<State>>,
+        trigger: Box<Waveform<FilterState, SinState>>,
+        positive_waveform: Box<Waveform<FilterState, SinState>>,
+        negative_waveform: Box<Waveform<FilterState, SinState>>,
     },
     /*
      * Slider generates samples from an interactive "slider" input.
@@ -124,14 +132,14 @@ pub enum Waveform<State = ()> {
      */
     Marked {
         id: u32,
-        waveform: Box<Waveform<State>>,
+        waveform: Box<Waveform<FilterState, SinState>>,
     },
     /* Captured waveforms generate the same samples as the inner waveform and also write them to a file
      * beginning with the given file stem.
      */
     Captured {
         file_stem: String,
-        waveform: Box<Waveform<State>>,
+        waveform: Box<Waveform<FilterState, SinState>>,
     },
 }
 
@@ -150,7 +158,7 @@ impl fmt::Display for Waveform<()> {
                 write!(f, "Seq({}, {})", offset, waveform)
             }
             Append(a, b) => write!(f, "Append({}, {})", a, b),
-            Sin(waveform) => write!(f, "Sin({})", waveform),
+            Sin(waveform, _) => write!(f, "Sin({})", waveform),
             Filter {
                 waveform,
                 feed_forward,
@@ -193,6 +201,12 @@ pub struct FilterState {
     previous_out: RefCell<(Vec<f32>, i64)>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SinState {
+    // The phase of the sine wave at positions starting from the second element.
+    previous_phases: RefCell<(Vec<f64>, i64)>,
+}
+
 struct SliderState {
     // The final values of sliders at the end of the last generate call
     last_values: HashMap<Slider, f32>,
@@ -223,6 +237,8 @@ enum MaybeOption<T> {
     Maybe, // The value may or may not be present
 }
 
+const MAX_FILTER_LENGTH: usize = 1000; // Maximum length of the filter coefficients
+
 impl<'a> Generator<'a> {
     // Create a new generator with the given sample frequency. Note that slider_state and capture_state must be set
     // before `generate` is called.
@@ -244,7 +260,7 @@ impl<'a> Generator<'a> {
     // allowed to end before position 0).
     pub fn generate(
         &self,
-        waveform: &Waveform<FilterState>,
+        waveform: &Waveform<FilterState, SinState>,
         position: i64,
         desired: usize,
     ) -> Vec<f32> {
@@ -310,7 +326,7 @@ impl<'a> Generator<'a> {
                     out.extend(self.generate(b, 0, desired - out.len()));
                     return out;
                 } else {
-                    // We have remaining for a == 0 at position, and we need to figure out how far into b we are.
+                    // We have remaining(a, position) == 0 so we need to figure out how far into b we are.
                     // Get the length of a, and use that to compute the position into b. If remaining is 0 then
                     // position can't be negative (since no waveform can end before position 0).
                     assert!(position >= 0);
@@ -318,8 +334,110 @@ impl<'a> Generator<'a> {
                     return self.generate(b, position - length as i64, desired);
                 }
             }
-            Sin(waveform) => {
-                let mut out = self.generate(waveform, position, desired);
+            Sin(waveform, state) => {
+                let mut previous_phases = state.previous_phases.borrow_mut();
+
+                let mut phase;
+                if position >= previous_phases.1
+                    && position < previous_phases.1 + previous_phases.0.len() as i64
+                {
+                    phase = previous_phases.0[(position - previous_phases.1) as usize];
+                } else if position < 0 {
+                    // This is not as accurate as directly computing the phase, but it's simpler and... probably fine?
+                    // Especially since we don't ever hear sine waves for very negative positions.
+                    let out = self.generate(waveform, position, -position as usize);
+                    previous_phases.0.clear();
+                    previous_phases.0.push(out[out.len() - 1] as f64);
+                    previous_phases.1 = position;
+                    phase = previous_phases.0[0];
+                } else {
+                    println!(
+                        "Warning: no previous phase for Sin at position {}, resetting to 0.0",
+                        position
+                    );
+                    previous_phases.0 = vec![0.0];
+                    previous_phases.1 = position;
+                    phase = previous_phases.0[0];
+                }
+                // Figure out which phases we need to save for future calls to generate
+                let previous_phase_start_position;
+                if desired >= MAX_FILTER_LENGTH + 1 {
+                    previous_phase_start_position =
+                        position + desired as i64 - (MAX_FILTER_LENGTH as i64 + 1);
+                    previous_phases.0.clear();
+                    // We'll starting computing phases at previous_phase_start_position, when we'll add the phase at
+                    // the end of the loop to the set; this corresponds to the phase used at the beginning of computing
+                    //`previous_phase_start_position + 1.
+                    previous_phases.1 = previous_phase_start_position + 1;
+                } else {
+                    // Note that this means we will add a phase to the set starting at the end of computing `previous_phases.1 + previous_phases.0.len() - 1`,
+                    // which is the phase used at the beginning of `previous_phases.1 + previous_phases.0.len()`.
+                    previous_phase_start_position =
+                        previous_phases.1 + previous_phases.0.len() as i64 - 1;
+                    // Trim any old phases
+                    if position + desired as i64 - previous_phases.1 > MAX_FILTER_LENGTH as i64 {
+                        let len = (position + desired as i64
+                            - previous_phases.1
+                            - MAX_FILTER_LENGTH as i64) as usize;
+                        previous_phases.0.drain(0..len);
+                        previous_phases.1 += len as i64;
+                    }
+                }
+
+                let mut out;
+                match &**waveform {
+                    Time => {
+                        let mut out = vec![0.0; desired];
+                        let phase_inc = 1.0 / self.sample_frequency as f64;
+                        for (i, x) in out.iter_mut().enumerate() {
+                            *x = phase.sin() as f32;
+                            phase = (phase + phase_inc).rem_euclid(f64::consts::TAU);
+                            if position + i as i64 >= previous_phase_start_position {
+                                previous_phases.0.push(phase);
+                            }
+                        }
+                        return out;
+                    }
+                    BinaryPointOp(Operator::Multiply, a, b) => match (&**a, &**b) {
+                        (Const(v), Time) | (Time, Const(v)) => {
+                            let mut out = vec![0.0; desired];
+                            let phase_inc = *v as f64 / self.sample_frequency as f64;
+                            for (i, x) in out.iter_mut().enumerate() {
+                                *x = phase.sin() as f32;
+                                phase = (phase + phase_inc).rem_euclid(f64::consts::TAU);
+                                if position + i as i64 >= previous_phase_start_position {
+                                    previous_phases.0.push(phase);
+                                }
+                            }
+                            return out;
+                        }
+                        (inner, Time) | (Time, inner) => {
+                            let mut out = self.generate(inner, position, desired);
+                            for (i, x) in out.iter_mut().enumerate() {
+                                let phase_inc = *x as f64 / self.sample_frequency as f64;
+                                *x = phase.sin() as f32;
+                                phase = (phase + phase_inc).rem_euclid(f64::consts::TAU);
+                                if position + i as i64 >= previous_phase_start_position {
+                                    previous_phases.0.push(phase);
+                                }
+                            }
+                            return out;
+                        }
+                        _ => {
+                            println!(
+                                "Warning: unable to determine frequency of Sin; numerical errors may distort output"
+                            );
+                            out = self.generate(waveform, position, desired);
+                        }
+                    },
+                    _ => {
+                        // XXX Need to handle phase offsets
+                        println!(
+                            "Warning: unable to determine frequency of Sin; numerical errors may distort output"
+                        );
+                        out = self.generate(waveform, position, desired);
+                    }
+                }
                 for f in out.iter_mut() {
                     *f = (*f).sin();
                 }
@@ -337,7 +455,6 @@ impl<'a> Generator<'a> {
                     position, desired, waveform, feed_forward, feedback, state
                 );
                 */
-                const MAX_FILTER_LENGTH: usize = 1000; // Maximum length of the filter coefficients
                 // Generate the filter coefficients
                 let feed_forward_out = self.generate(feed_forward, 0, MAX_FILTER_LENGTH);
                 let feedback_out = self.generate(feedback, 0, MAX_FILTER_LENGTH);
@@ -431,7 +548,8 @@ impl<'a> Generator<'a> {
             }
             Res { trigger, waveform } => {
                 // Maybe cache the last trigger position and signum and use it if position doesn't change? So we don't need this constant...
-                let max_reset_lookback: i64 = 10000; // Maximum number of samples to look back for a reset trigger
+                // XXX Ugh... this constant...
+                let max_reset_lookback: i64 = self.sample_frequency as i64 * 10000; // Maximum number of samples to look back for a reset trigger
                 // TODO think about all of these unwrap_ors
                 // TODO generate the trigger in blocks?
                 // TODO think about the interaction of this non-monotone position with Filter
@@ -592,8 +710,8 @@ impl<'a> Generator<'a> {
     fn generate_binary_op(
         &self,
         op: fn(f32, f32) -> f32,
-        a: &Waveform<FilterState>,
-        b: &Waveform<FilterState>,
+        a: &Waveform<FilterState, SinState>,
+        b: &Waveform<FilterState, SinState>,
         position: i64,
         desired: usize,
     ) -> Vec<f32> {
@@ -711,7 +829,12 @@ impl<'a> Generator<'a> {
 
     // Returns the number of samples that `waveform` will generate starting from `position` or `max`, whichever is
     // smaller. When `position` is zero, this is the length of the waveform (or, again, `max`).
-    fn remaining(&self, waveform: &Waveform<FilterState>, position: i64, max: usize) -> usize {
+    fn remaining(
+        &self,
+        waveform: &Waveform<FilterState, SinState>,
+        position: i64,
+        max: usize,
+    ) -> usize {
         use Waveform::*;
         match waveform {
             Const { .. } => max,
@@ -750,7 +873,7 @@ impl<'a> Generator<'a> {
                     }
                 };
             }
-            Seq { waveform, .. } | Sin(waveform) | Filter { waveform, .. } => {
+            Seq { waveform, .. } | Sin(waveform, ..) | Filter { waveform, .. } => {
                 self.remaining(waveform, position, max)
             }
             Append(a, b) => {
@@ -815,7 +938,7 @@ impl<'a> Generator<'a> {
     // than or equal in that range, or Maybe if that can't be determined cheaply.
     fn greater_or_equals_at(
         &self,
-        waveform: &Waveform<FilterState>,
+        waveform: &Waveform<FilterState, SinState>,
         value: f32,
         position: i64,
         max: usize,
@@ -891,7 +1014,7 @@ impl<'a> Generator<'a> {
 
     // Returns the offset at which the next waveform should start (in samples). This is determined entirely by
     // `waveform` (this function is pure).
-    fn offset(&self, waveform: &Waveform<FilterState>, max: usize) -> usize {
+    fn offset(&self, waveform: &Waveform<FilterState, SinState>, max: usize) -> usize {
         match waveform {
             Waveform::Const { .. } | Waveform::Time | Waveform::Noise | Waveform::Fixed(_) => 0,
             Waveform::Fin { waveform, .. } => self.offset(waveform, max),
@@ -906,7 +1029,7 @@ impl<'a> Generator<'a> {
                 }
             },
             Waveform::Append(a, b) => (self.offset(a, max) + self.offset(b, max)).min(max),
-            Waveform::Sin(waveform) => self.offset(waveform, max),
+            Waveform::Sin(waveform, ..) => self.offset(waveform, max),
             Waveform::Filter { waveform, .. } => self.offset(waveform, max),
             Waveform::BinaryPointOp(_, a, b) => {
                 let a_offset = self.offset(a, max);
@@ -984,7 +1107,7 @@ where
     I: Clone,
 {
     id: I,
-    waveform: Waveform<FilterState>,
+    waveform: Waveform<FilterState, SinState>,
     marks: Vec<Mark<I>>,
     position: usize,
     // Open files used by Captured waveforms
@@ -1000,7 +1123,7 @@ struct PendingWaveform<I> {
     marks: Vec<Mark<I>>,
 }
 
-pub fn initialize_state(waveform: Waveform) -> Waveform<FilterState> {
+pub fn initialize_state(waveform: Waveform) -> Waveform<FilterState, SinState> {
     use Waveform::*;
     match waveform {
         Const(value) => Const(value),
@@ -1019,7 +1142,12 @@ pub fn initialize_state(waveform: Waveform) -> Waveform<FilterState> {
             Box::new(initialize_state(*a)),
             Box::new(initialize_state(*b)),
         ),
-        Sin(waveform) => Sin(Box::new(initialize_state(*waveform))),
+        Sin(waveform, _) => Sin(
+            Box::new(initialize_state(*waveform)),
+            SinState {
+                previous_phases: RefCell::new((vec![0.0], 0)),
+            },
+        ),
         // For Filter, we need to set the state to an empty FilterState
         Filter {
             waveform,
@@ -1120,7 +1248,7 @@ where
         &self,
         waveform_id: &I,
         start: Instant,
-        waveform: &Waveform<FilterState>,
+        waveform: &Waveform<FilterState, SinState>,
         out: &mut Vec<Mark<I>>,
     ) {
         use Waveform::*;
@@ -1131,7 +1259,7 @@ where
             // TODO Fin seems not quite right here, since its length might truncate any marks inside it
             Fin { waveform, .. }
             | Seq { waveform, .. }
-            | Sin(waveform)
+            | Sin(waveform, _)
             | Filter { waveform, .. }
             | Res {
                 trigger: waveform, ..
@@ -1191,7 +1319,7 @@ where
             }
             Fin { waveform, .. }
             | Seq { waveform, .. }
-            | Sin(waveform)
+            | Sin(waveform, _)
             | Filter { waveform, .. }
             | Res {
                 trigger: waveform, ..
@@ -1234,7 +1362,7 @@ where
     }
 }
 
-impl<'a, I> AudioCallback for Tracker<I>
+impl<'a, I> audio::AudioCallback for Tracker<I>
 where
     I: Clone + PartialEq + Send + Debug,
 {
@@ -1527,6 +1655,7 @@ mod tests {
     use super::*;
     use crate::optimizer;
     use Waveform::{Append, BinaryPointOp, Const, Filter, Fin, Fixed, Res, Seq, Sin, Time};
+    use std::f32;
 
     const MAX_LENGTH: usize = 1000;
 
@@ -1643,23 +1772,120 @@ mod tests {
     }
 
     fn sin_waveform(frequency: f32, phase: f32) -> Box<Waveform> {
-        return Box::new(Sin(Box::new(BinaryPointOp(
-            Operator::Add,
-            Box::new(BinaryPointOp(
-                Operator::Multiply,
-                Box::new(Const(2.0)),
+        // TODO remove this case once we can directly synthesize Sin waves with frequency and phase
+        if phase == 0.0 {
+            return Box::new(Sin(
                 Box::new(BinaryPointOp(
                     Operator::Multiply,
-                    Box::new(Const(std::f32::consts::PI)),
+                    Box::new(Time),
+                    Box::new(BinaryPointOp(
+                        Operator::Multiply,
+                        Box::new(Const(frequency)),
+                        Box::new(Const(f32::consts::TAU)),
+                    )),
+                )),
+                (),
+            ));
+        }
+        return Box::new(Sin(
+            Box::new(BinaryPointOp(
+                Operator::Add,
+                Box::new(BinaryPointOp(
+                    Operator::Multiply,
+                    Box::new(Const(f32::consts::TAU)),
                     Box::new(BinaryPointOp(
                         Operator::Multiply,
                         Box::new(Const(frequency)),
                         Box::new(Time),
                     )),
                 )),
+                Box::new(Const(phase)),
             )),
-            Box::new(Const(phase)),
-        ))));
+            (),
+        ));
+    }
+
+    #[test]
+    fn test_sin() {
+        let generator = new_test_generator(100);
+
+        let w1 = initialize_state(Sin(
+            Box::new(BinaryPointOp(
+                Operator::Multiply,
+                Box::new(Const(f32::consts::TAU)),
+                Box::new(Time),
+            )),
+            (),
+        ));
+        let expected = generator.generate(&w1, 0, 8);
+        // Now generate from the same point in the sine wave at a much greater position
+        generator.generate(&w1, 8, 9992);
+        let result = generator.generate(&w1, 10000, 8);
+        assert_ne!(
+            result[0], expected[0],
+            "First sample shouldn't match exactly"
+        );
+        for (i, &x) in result.iter().enumerate() {
+            assert!(
+                x - expected[i] < 1e-4,
+                "result = {}, expected = {}, result - expected = {}",
+                x,
+                expected[i],
+                x - expected[i]
+            );
+        }
+
+        let w2 = initialize_state(Sin(
+            Box::new(BinaryPointOp(
+                Operator::Multiply,
+                Box::new(Const(f32::consts::TAU)),
+                Box::new(Time),
+            )),
+            (),
+        ));
+        generator.generate(&w2, 0, 3);
+        let expected = generator.generate(&w2, 3, 8);
+        // Same but from the middle of the sine wave.
+        generator.generate(&w2, 11, 9992);
+        let result = generator.generate(&w2, 10003, 8);
+        assert_ne!(
+            result[0], expected[0],
+            "First sample shouldn't match exactly"
+        );
+        for (i, &x) in result.iter().enumerate() {
+            assert!(
+                x - expected[i] < 1e-4,
+                "result = {}, expected = {}, result - expected = {}",
+                x,
+                expected[i],
+                x - expected[i]
+            );
+        }
+
+        let w3 = initialize_state(Sin(
+            Box::new(BinaryPointOp(
+                Operator::Multiply,
+                Box::new(Const(3.0 * 2.0 * std::f32::consts::PI)),
+                Box::new(Time),
+            )),
+            (),
+        ));
+        let expected = generator.generate(&w3, 0, 8);
+        generator.generate(&w3, 8, 92);
+        let result = generator.generate(&w3, 100, 8);
+        assert_ne!(
+            result[0], expected[0],
+            "First sample shouldn't match exactly"
+        );
+        for (i, &x) in result.iter().enumerate() {
+            assert!(
+                x - expected[i] < 1e-4,
+                "result = {}, expected = {}, result - expected = {}",
+                x,
+                expected[i],
+                x - expected[i]
+            );
+        }
     }
 
     #[test]

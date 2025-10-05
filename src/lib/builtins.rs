@@ -108,18 +108,22 @@ pub fn exp(arguments: Vec<Expr>) -> Expr {
 
 pub fn sin(arguments: Vec<Expr>) -> Expr {
     unary_op(arguments, "sin".to_string(), f32::sin, |waveform| {
-        Waveform::Sin(waveform)
+        Waveform::Sin(waveform, ())
     })
 }
 
 pub fn cos(arguments: Vec<Expr>) -> Expr {
+    // TODO use unary_op
     match &arguments[..] {
         [Float(value)] => Expr::Float(value.cos()),
-        [Expr::Waveform(a)] => Expr::Waveform(Waveform::Sin(Box::new(Waveform::BinaryPointOp(
-            Operator::Add,
-            Box::new(a.clone()),
-            Box::new(Waveform::Const(std::f32::consts::FRAC_PI_2)),
-        )))),
+        [Expr::Waveform(a)] => Expr::Waveform(Waveform::Sin(
+            Box::new(Waveform::BinaryPointOp(
+                Operator::Add,
+                Box::new(a.clone()),
+                Box::new(Waveform::Const(std::f32::consts::FRAC_PI_2)),
+            )),
+            (),
+        )),
         _ => Expr::Error("Invalid argument for cos".to_string()),
     }
 }

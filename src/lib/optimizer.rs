@@ -92,9 +92,9 @@ pub fn replace_seq(waveform: Waveform) -> (Waveform, Waveform) {
                 Append(Box::new(a), Box::new(b)),
             )
         }
-        Sin(waveform) => {
+        Sin(waveform, state) => {
             let (offset, waveform) = replace_seq(*waveform);
-            (offset, Sin(Box::new(waveform)))
+            (offset, Sin(Box::new(waveform), state))
         }
         Filter {
             waveform,
@@ -270,7 +270,7 @@ pub fn simplify(waveform: Waveform) -> Waveform {
             }
         }
         // Check to see if we can precompute the sine function:
-        Sin(waveform) => {
+        Sin(waveform, state) => {
             let waveform = simplify(*waveform);
             match waveform {
                 Const(a) => Const(a.sin()),
@@ -278,7 +278,7 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                     let v = v.into_iter().map(|x| x.sin()).collect();
                     Fixed(v)
                 }
-                waveform => Sin(Box::new(waveform)),
+                waveform => Sin(Box::new(waveform), state),
             }
         }
         Filter {
@@ -551,7 +551,7 @@ mod tests {
                 Box::new(BinaryPointOp(
                     Operator::Add,
                     Box::new(Const(3.0)),
-                    Box::new(Sin(Box::new(Time))),
+                    Box::new(Sin(Box::new(Time), ())),
                 )),
             )),
             Box::new(Const(5.0)),
@@ -560,7 +560,7 @@ mod tests {
             simplify(w2),
             BinaryPointOp(
                 Operator::Add,
-                Box::new(Sin(Box::new(Time))),
+                Box::new(Sin(Box::new(Time), ())),
                 Box::new(Const(10.0))
             ),
         );
@@ -573,7 +573,7 @@ mod tests {
                 Box::new(BinaryPointOp(
                     Operator::Multiply,
                     Box::new(Const(3.0)),
-                    Box::new(Sin(Box::new(Time))),
+                    Box::new(Sin(Box::new(Time), ())),
                 )),
             )),
             Box::new(Const(5.0)),
@@ -582,7 +582,7 @@ mod tests {
             simplify(w3),
             BinaryPointOp(
                 Operator::Multiply,
-                Box::new(Sin(Box::new(Time))),
+                Box::new(Sin(Box::new(Time), ())),
                 Box::new(Const(30.0))
             ),
         );
@@ -595,7 +595,7 @@ mod tests {
                 Box::new(BinaryPointOp(
                     Operator::Multiply,
                     Box::new(Const(3.0)),
-                    Box::new(Sin(Box::new(Time))),
+                    Box::new(Sin(Box::new(Time), ())),
                 )),
             )),
             Box::new(Const(5.0)),
@@ -606,7 +606,7 @@ mod tests {
                 Operator::Add,
                 Box::new(BinaryPointOp(
                     Operator::Multiply,
-                    Box::new(Sin(Box::new(Time))),
+                    Box::new(Sin(Box::new(Time), ())),
                     Box::new(Const(15.0))
                 )),
                 Box::new(Const(10.0))
