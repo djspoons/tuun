@@ -198,7 +198,7 @@ pub fn main() {
         for (i, program) in programs.iter().enumerate() {
             println!("Playing program {}: {}", i + 1, program);
             // Wrap each program in a mark so that we can wait for it to finish
-            let _ = play_waveform(
+            let (_, mode) = play_waveform(
                 context.clone(),
                 &status,
                 &args,
@@ -208,6 +208,14 @@ pub fn main() {
                 &command_sender,
                 sdl2::keyboard::Mod::empty(),
             );
+            match mode {
+                // If mode is Edit, there was an error; print it and exit.
+                Mode::Edit { message, .. } => {
+                    println!("{}", message);
+                    process::exit(1);
+                }
+                _ => (),
+            }
         }
         // Call the tracker's callback until all of the waveforms have finished playing
         loop {
