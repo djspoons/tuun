@@ -155,13 +155,18 @@ pub fn replace_seq(waveform: Waveform) -> (Waveform, Waveform) {
                 ),
             )
         }
-        Res { trigger, waveform } => {
+        Res {
+            trigger,
+            waveform,
+            state,
+        } => {
             let (offset, trigger) = replace_seq(*trigger);
             (
                 offset,
                 Res {
                     trigger: Box::new(trigger),
                     waveform: Box::new(replace_seq(*waveform).1),
+                    state,
                 },
             )
         }
@@ -490,9 +495,14 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                 (a, b) => BinaryPointOp(Operator::Divide, Box::new(a), Box::new(b)),
             }
         }
-        Res { trigger, waveform } => Res {
+        Res {
+            trigger,
+            waveform,
+            state,
+        } => Res {
             trigger: Box::new(simplify(*trigger)),
             waveform: Box::new(simplify(*waveform)),
+            state,
         },
         Alt {
             trigger,

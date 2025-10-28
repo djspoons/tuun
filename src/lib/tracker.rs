@@ -39,7 +39,7 @@ pub enum Operator {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Waveform<FilterState = (), SinState = ()> {
+pub enum Waveform<FilterState = (), SinState = (), ResState = ()> {
     /*
      * Const produces a stream of samples where each sample is the same constant value.
      */
@@ -62,8 +62,8 @@ pub enum Waveform<FilterState = (), SinState = ()> {
      * is 0 seconds in length and `Fin(Subtract(Time, Const(2.0)), _)` is 2 seconds in length.
      */
     Fin {
-        length: Box<Waveform<FilterState, SinState>>,
-        waveform: Box<Waveform<FilterState, SinState>>,
+        length: Box<Waveform<FilterState, SinState, ResState>>,
+        waveform: Box<Waveform<FilterState, SinState, ResState>>,
     },
     /*
      * Seq sets the offset of `waveform`. The offset is determined by the first point at which the `offset` waveform
@@ -71,21 +71,21 @@ pub enum Waveform<FilterState = (), SinState = ()> {
      * an offset of 2 seconds.
      */
     Seq {
-        offset: Box<Waveform<FilterState, SinState>>,
-        waveform: Box<Waveform<FilterState, SinState>>,
+        offset: Box<Waveform<FilterState, SinState, ResState>>,
+        waveform: Box<Waveform<FilterState, SinState, ResState>>,
     },
     /*
      * Append concatenates two waveforms, generating all samples from the first waveform and
      * then all samples from the second (regardless of the offset of the first).
      */
     Append(
-        Box<Waveform<FilterState, SinState>>,
-        Box<Waveform<FilterState, SinState>>,
+        Box<Waveform<FilterState, SinState, ResState>>,
+        Box<Waveform<FilterState, SinState, ResState>>,
     ),
     /*
      * Sin computes the sine of each sample in the given waveform.
      */
-    Sin(Box<Waveform<FilterState, SinState>>, SinState),
+    Sin(Box<Waveform<FilterState, SinState, ResState>>, SinState),
     /*
      * Filter implements an impulse response filter with feed-forward and feedback coefficients. Assumes that the first
      * feedback coefficient (a_0) is 1.0. If the filter has no feedback coefficients, then the filter has a finite
@@ -93,15 +93,15 @@ pub enum Waveform<FilterState = (), SinState = ()> {
      */
     // TODO maybe add a_0 back in?
     Filter {
-        waveform: Box<Waveform<FilterState, SinState>>,
-        feed_forward: Box<Waveform<FilterState, SinState>>, // b_0, b_1, ...
-        feedback: Box<Waveform<FilterState, SinState>>,     // a_1, a_2, ...
+        waveform: Box<Waveform<FilterState, SinState, ResState>>,
+        feed_forward: Box<Waveform<FilterState, SinState, ResState>>, // b_0, b_1, ...
+        feedback: Box<Waveform<FilterState, SinState, ResState>>,     // a_1, a_2, ...
         state: FilterState,
     },
     BinaryPointOp(
         Operator,
-        Box<Waveform<FilterState, SinState>>,
-        Box<Waveform<FilterState, SinState>>,
+        Box<Waveform<FilterState, SinState, ResState>>,
+        Box<Waveform<FilterState, SinState, ResState>>,
     ),
     /*
      * Res generates a repeating waveform that restarts the given waveform whenever the trigger
@@ -109,17 +109,18 @@ pub enum Waveform<FilterState = (), SinState = ()> {
      * by the trigger waveform.
      */
     Res {
-        trigger: Box<Waveform<FilterState, SinState>>,
-        waveform: Box<Waveform<FilterState, SinState>>,
+        trigger: Box<Waveform<FilterState, SinState, ResState>>,
+        waveform: Box<Waveform<FilterState, SinState, ResState>>,
+        state: ResState,
     },
     /*
      * Alt generates a waveform by alternating between two waveforms based on the sign of
      * the trigger waveform.
      */
     Alt {
-        trigger: Box<Waveform<FilterState, SinState>>,
-        positive_waveform: Box<Waveform<FilterState, SinState>>,
-        negative_waveform: Box<Waveform<FilterState, SinState>>,
+        trigger: Box<Waveform<FilterState, SinState, ResState>>,
+        positive_waveform: Box<Waveform<FilterState, SinState, ResState>>,
+        negative_waveform: Box<Waveform<FilterState, SinState, ResState>>,
     },
     /*
      * Slider generates samples from an interactive "slider" input.
@@ -132,14 +133,14 @@ pub enum Waveform<FilterState = (), SinState = ()> {
      */
     Marked {
         id: u32,
-        waveform: Box<Waveform<FilterState, SinState>>,
+        waveform: Box<Waveform<FilterState, SinState, ResState>>,
     },
     /* Captured waveforms generate the same samples as the inner waveform and also write them to a file
      * beginning with the given file stem.
      */
     Captured {
         file_stem: String,
-        waveform: Box<Waveform<FilterState, SinState>>,
+        waveform: Box<Waveform<FilterState, SinState, ResState>>,
     },
 }
 
@@ -168,7 +169,9 @@ impl fmt::Display for Waveform<()> {
             BinaryPointOp(op, a, b) => {
                 write!(f, "{:?}({}, {})", op, a, b)
             }
-            Res { trigger, waveform } => {
+            Res {
+                trigger, waveform, ..
+            } => {
                 write!(f, "Res({}, {})", trigger, waveform)
             }
             Alt {
@@ -205,6 +208,12 @@ pub struct FilterState {
 pub struct SinState {
     // The phase of the sine wave at positions starting from the second element.
     previous_phases: RefCell<(Vec<f64>, i64)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResState {
+    // The positions of previous resets, along with a range within which no reset occurs; both values are inclusive.
+    previous_resets: RefCell<Vec<(i64, i64)>>,
 }
 
 struct SliderState {
@@ -260,7 +269,7 @@ impl<'a> Generator<'a> {
     // allowed to end before position 0).
     pub fn generate(
         &self,
-        waveform: &Waveform<FilterState, SinState>,
+        waveform: &Waveform<FilterState, SinState, ResState>,
         position: i64,
         desired: usize,
     ) -> Vec<f32> {
@@ -342,20 +351,25 @@ impl<'a> Generator<'a> {
                     && position < previous_phases.1 + previous_phases.0.len() as i64
                 {
                     phase = previous_phases.0[(position - previous_phases.1) as usize];
+                    /*
+                    println!("Found previous phase for position {}: {}", position, phase);
+                    */
                 } else if position < 0 {
                     // This is not as accurate as directly computing the phase, but it's simpler and... probably fine?
-                    // Especially since we don't ever hear sine waves for very negative positions.
-                    let out = self.generate(waveform, position, -position as usize);
+                    // Especially since we don't really hear sine waves for very negative positions.
+                    let out = self.generate(waveform, position, 1);
                     previous_phases.0.clear();
-                    previous_phases.0.push(out[out.len() - 1] as f64);
+                    previous_phases.0.push(out[0] as f64);
                     previous_phases.1 = position;
                     phase = previous_phases.0[0];
                 } else {
+                    let out = self.generate(waveform, position, 1);
                     println!(
-                        "Warning: no previous phase for Sin at position {}, resetting to 0.0",
-                        position
+                        "Warning: no previous phase for Sin at position {}, resetting to computed value {}",
+                        position, out[0] as f64
                     );
-                    previous_phases.0 = vec![0.0];
+                    previous_phases.0.clear();
+                    previous_phases.0.push(out[0] as f64);
                     previous_phases.1 = position;
                     phase = previous_phases.0[0];
                 }
@@ -546,13 +560,24 @@ impl<'a> Generator<'a> {
                 };
                 return self.generate_binary_op(op, a, b, position, desired);
             }
-            Res { trigger, waveform } => {
-                // Maybe cache the last trigger position and signum and use it if position doesn't change? So we don't need this constant...
+            Res {
+                trigger,
+                waveform,
+                state,
+            } => {
                 // XXX Ugh... this constant...
                 let max_reset_lookback: i64 = self.sample_frequency as i64 * 10000; // Maximum number of samples to look back for a reset trigger
                 // TODO think about all of these unwrap_ors
                 // TODO generate the trigger in blocks?
                 // TODO think about the interaction of this non-monotone position with Filter
+
+                let mut previous_resets = state.previous_resets.borrow_mut();
+                /*
+                println!(
+                    "previous_resets when position = {}: {:?}",
+                    position, previous_resets
+                );
+                */
 
                 // First go back and find the most recent trigger before position.
                 let mut last_trigger_position = position;
@@ -561,7 +586,22 @@ impl<'a> Generator<'a> {
                     return vec![];
                 }
                 let mut last_signum = trigger_out[0].signum();
-                loop {
+                'find_last_trigger_position: loop {
+                    for (start, end) in previous_resets.iter_mut() {
+                        if last_trigger_position >= *start && last_trigger_position <= *end {
+                            /*
+                            println!(
+                                "Found previous reset during init for position {} at {} (ended with {}, now ending with {})",
+                                last_trigger_position, start, end, position
+                            );
+                            */
+                            last_trigger_position = *start;
+                            last_signum = 1.0;
+                            *end = position;
+                            break 'find_last_trigger_position;
+                        }
+                    }
+
                     if position - last_trigger_position > max_reset_lookback {
                         panic!(
                             "No reset trigger found within {} samples before position {} in waveform {:?}",
@@ -571,6 +611,13 @@ impl<'a> Generator<'a> {
                     let trigger_out = self.generate(trigger, last_trigger_position - 1, 1);
                     let new_signum = trigger_out.get(0).unwrap_or(&0.0).signum();
                     if last_signum >= 0.0 && new_signum < 0.0 {
+                        /*
+                        println!(
+                            "Adding new reset during init as ({}, {})",
+                            last_trigger_position, position
+                        );
+                        */
+                        previous_resets.push((last_trigger_position, position));
                         break;
                     }
                     last_signum = new_signum;
@@ -592,6 +639,41 @@ impl<'a> Generator<'a> {
                             inner_desired = i;
                             reset_inner_position = true;
                             last_signum = x.signum();
+                            // Update previous_resets
+                            if i > 0 {
+                                let mut found = false;
+                                for (start, end) in previous_resets.iter_mut() {
+                                    if position + generated as i64 >= *start
+                                        && position + generated as i64 <= *end
+                                    {
+                                        /*
+                                        println!(
+                                            "Updating previous reset during generate for position {} at {} (ended with {}, now ending at {})",
+                                            position + generated as i64,
+                                            start,
+                                            end,
+                                            position + (generated + i) as i64 - 1
+                                        );
+                                        */
+                                        *end = position + (generated + i) as i64 - 1;
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                                if !found {
+                                    /*
+                                    println!(
+                                        "Adding new reset during generate as ({}, {})",
+                                        position + generated as i64,
+                                        position + (generated + i) as i64
+                                    );
+                                    */
+                                    previous_resets.push((
+                                        position + generated as i64,
+                                        position + (generated + i) as i64 - 1,
+                                    ));
+                                }
+                            }
                             break;
                         } else if last_signum >= 0.0 && x < 0.0 {
                             last_signum = x.signum();
@@ -603,12 +685,47 @@ impl<'a> Generator<'a> {
                         tmp.resize(inner_desired, 0.0);
                     }
                     out.extend(tmp);
-                    generated += inner_desired;
                     if reset_inner_position {
                         inner_position = 0;
                     } else {
                         inner_position += inner_desired as i64;
+                        // Update the previous_resets
+                        let mut found = false;
+                        for (start, end) in previous_resets.iter_mut() {
+                            if position + generated as i64 >= *start
+                                && position + generated as i64 <= *end
+                            {
+                                println!(
+                                    "Updating previous reset after generate for position {} at {} (ended with {}, now ending at {})",
+                                    position + (generated + inner_desired) as i64,
+                                    start,
+                                    end,
+                                    position + (generated + inner_desired) as i64 - 1
+                                );
+                                *end = position + (generated + inner_desired) as i64 - 1;
+                                found = true;
+                                break;
+                            }
+                        }
+                        if !found {
+                            println!(
+                                "Adding new reset after generate as ({}, {})",
+                                position + generated as i64,
+                                position + (generated + inner_desired) as i64
+                            );
+                            previous_resets.push((
+                                position + generated as i64,
+                                position + (generated + inner_desired) as i64,
+                            ));
+                        }
                     }
+                    generated += inner_desired;
+                }
+
+                // TODO think harder about what a reasonable number is here
+                if previous_resets.len() > 10 {
+                    let length = previous_resets.len();
+                    previous_resets.drain(..length - 10);
                 }
                 return out;
             }
@@ -710,8 +827,8 @@ impl<'a> Generator<'a> {
     fn generate_binary_op(
         &self,
         op: fn(f32, f32) -> f32,
-        a: &Waveform<FilterState, SinState>,
-        b: &Waveform<FilterState, SinState>,
+        a: &Waveform<FilterState, SinState, ResState>,
+        b: &Waveform<FilterState, SinState, ResState>,
         position: i64,
         desired: usize,
     ) -> Vec<f32> {
@@ -831,7 +948,7 @@ impl<'a> Generator<'a> {
     // smaller. When `position` is zero, this is the length of the waveform (or, again, `max`).
     fn remaining(
         &self,
-        waveform: &Waveform<FilterState, SinState>,
+        waveform: &Waveform<FilterState, SinState, ResState>,
         position: i64,
         max: usize,
     ) -> usize {
@@ -938,7 +1055,7 @@ impl<'a> Generator<'a> {
     // than or equal in that range, or Maybe if that can't be determined cheaply.
     fn greater_or_equals_at(
         &self,
-        waveform: &Waveform<FilterState, SinState>,
+        waveform: &Waveform<FilterState, SinState, ResState>,
         value: f32,
         position: i64,
         max: usize,
@@ -1014,7 +1131,7 @@ impl<'a> Generator<'a> {
 
     // Returns the offset at which the next waveform should start (in samples). This is determined entirely by
     // `waveform` (this function is pure).
-    fn offset(&self, waveform: &Waveform<FilterState, SinState>, max: usize) -> usize {
+    fn offset(&self, waveform: &Waveform<FilterState, SinState, ResState>, max: usize) -> usize {
         match waveform {
             Waveform::Const { .. } | Waveform::Time | Waveform::Noise | Waveform::Fixed(_) => 0,
             Waveform::Fin { waveform, .. } => self.offset(waveform, max),
@@ -1107,7 +1224,7 @@ where
     I: Clone,
 {
     id: I,
-    waveform: Waveform<FilterState, SinState>,
+    waveform: Waveform<FilterState, SinState, ResState>,
     marks: Vec<Mark<I>>,
     position: usize,
     // Open files used by Captured waveforms
@@ -1123,7 +1240,7 @@ struct PendingWaveform<I> {
     marks: Vec<Mark<I>>,
 }
 
-pub fn initialize_state(waveform: Waveform) -> Waveform<FilterState, SinState> {
+pub fn initialize_state(waveform: Waveform) -> Waveform<FilterState, SinState, ResState> {
     use Waveform::*;
     match waveform {
         Const(value) => Const(value),
@@ -1167,9 +1284,14 @@ pub fn initialize_state(waveform: Waveform) -> Waveform<FilterState, SinState> {
             Box::new(initialize_state(*a)),
             Box::new(initialize_state(*b)),
         ),
-        Res { trigger, waveform } => Res {
+        Res {
+            trigger, waveform, ..
+        } => Res {
             trigger: Box::new(initialize_state(*trigger)),
             waveform: Box::new(initialize_state(*waveform)),
+            state: ResState {
+                previous_resets: RefCell::new(vec![]),
+            },
         },
         Alt {
             trigger,
@@ -1248,7 +1370,7 @@ where
         &self,
         waveform_id: &I,
         start: Instant,
-        waveform: &Waveform<FilterState, SinState>,
+        waveform: &Waveform<FilterState, SinState, ResState>,
         out: &mut Vec<Mark<I>>,
     ) {
         use Waveform::*;
@@ -1893,6 +2015,7 @@ mod tests {
         let w1 = Res {
             trigger: sin_waveform(0.25, 0.0),
             waveform: Box::new(Time),
+            state: (),
         };
         run_tests(&w1, vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0, 3.0]);
 
@@ -1906,6 +2029,7 @@ mod tests {
                 waveform: sin_waveform(0.25, 0.0),
             }),
             waveform: Box::new(Time),
+            state: (),
         };
         let generator = new_test_generator(1);
         assert_eq!(
@@ -1924,6 +2048,7 @@ mod tests {
                 )),
                 waveform: Box::new(Waveform::Time),
             }),
+            state: (),
         };
         run_tests(&w3, vec![0.0, 1.0, 2.0, 0.0, 0.0, 1.0, 2.0, 0.0]);
 
@@ -1935,8 +2060,16 @@ mod tests {
                 Box::new(Const(2.0)),
             )),
             waveform: Box::new(Time),
+            state: (),
         };
         run_tests(&w4, vec![2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]);
+
+        let w5 = Res {
+            trigger: sin_waveform(0.25, f32::consts::PI),
+            waveform: Box::new(Time),
+            state: (),
+        };
+        run_tests(&w5, vec![2.0, 3.0, 0.0, 1.0, 2.0, 3.0, 0.0, 1.0]);
     }
 
     #[test]
@@ -2145,6 +2278,7 @@ mod tests {
                 // Pick a trigger that's far from zero on at our sampled points
                 trigger: sin_waveform(1.0 / 3.0, 3.0 * std::f32::consts::PI / 2.0),
                 waveform: Box::new(Time),
+                state: (),
             }),
             feed_forward: Box::new(Fixed(vec![2.0, 2.0])),
             feedback: Box::new(Fixed(vec![])),

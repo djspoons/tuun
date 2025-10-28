@@ -417,6 +417,7 @@ pub fn res(mut arguments: Vec<Expr>) -> Expr {
     Expr::Waveform(Waveform::Res {
         trigger: Box::new(trigger),
         waveform: Box::new(waveform),
+        state: (),
     })
 }
 
