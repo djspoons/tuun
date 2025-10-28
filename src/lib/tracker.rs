@@ -695,6 +695,7 @@ impl<'a> Generator<'a> {
                             if position + generated as i64 >= *start
                                 && position + generated as i64 <= *end
                             {
+                                /*
                                 println!(
                                     "Updating previous reset after generate for position {} at {} (ended with {}, now ending at {})",
                                     position + (generated + inner_desired) as i64,
@@ -702,20 +703,23 @@ impl<'a> Generator<'a> {
                                     end,
                                     position + (generated + inner_desired) as i64 - 1
                                 );
+                                */
                                 *end = position + (generated + inner_desired) as i64 - 1;
                                 found = true;
                                 break;
                             }
                         }
                         if !found {
+                            /*
                             println!(
                                 "Adding new reset after generate as ({}, {})",
                                 position + generated as i64,
-                                position + (generated + inner_desired) as i64
+                                position + (generated + inner_desired) as i64 - 1
                             );
+                            */
                             previous_resets.push((
                                 position + generated as i64,
-                                position + (generated + inner_desired) as i64,
+                                position + (generated + inner_desired) as i64 - 1,
                             ));
                         }
                     }
@@ -2070,6 +2074,20 @@ mod tests {
             state: (),
         };
         run_tests(&w5, vec![2.0, 3.0, 0.0, 1.0, 2.0, 3.0, 0.0, 1.0]);
+
+        // Test where a reset lines up with the buffer boundary and where there are multiple
+        // resets in a buffer.
+        let w6 = Res {
+            trigger: sin_waveform(0.25, 0.0),
+            waveform: Box::new(Time),
+            state: (),
+        };
+        run_tests(
+            &w6,
+            vec![
+                0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0, 3.0,
+            ],
+        );
     }
 
     #[test]
