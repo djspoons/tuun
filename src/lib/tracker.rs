@@ -14,6 +14,8 @@ use fastrand;
 extern crate sdl2;
 use sdl2::audio;
 
+use crate::optimizer;
+
 // TODO move this out of the tracker?
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Slider {
@@ -83,7 +85,9 @@ pub enum Waveform<FilterState = (), SinState = (), ResState = ()> {
         Box<Waveform<FilterState, SinState, ResState>>,
     ),
     /*
-     * Sin computes the sine of each sample in the given waveform.
+     * Sin computes the sine of each sample in the given waveform. Note that Sin is used both as the basis for periodic
+     * waveforms (in which case its argument will depend on Time) and as a general-purpose sine function, for example,
+     * as a parameter of a Filter (in which it will not depend on Time).
      */
     Sin(Box<Waveform<FilterState, SinState, ResState>>, SinState),
     /*
@@ -346,114 +350,157 @@ impl<'a> Generator<'a> {
             Sin(waveform, state) => {
                 let mut previous_phases = state.previous_phases.borrow_mut();
 
+                let mut position = position;
+                let mut desired = desired;
+                // Phase at the current position if using direct synthesis
                 let mut phase;
-                if position >= previous_phases.1
-                    && position < previous_phases.1 + previous_phases.0.len() as i64
-                {
-                    phase = previous_phases.0[(position - previous_phases.1) as usize];
-                    /*
-                    println!("Found previous phase for position {}: {}", position, phase);
-                    */
-                } else if position < 0 {
-                    // This is not as accurate as directly computing the phase, but it's simpler and... probably fine?
-                    // Especially since we don't really hear sine waves for very negative positions.
-                    let out = self.generate(waveform, position, 1);
-                    previous_phases.0.clear();
-                    previous_phases.0.push(out[0] as f64);
-                    previous_phases.1 = position;
-                    phase = previous_phases.0[0];
-                } else {
-                    let out = self.generate(waveform, position, 1);
-                    println!(
-                        "Warning: no previous phase for Sin at position {}, resetting to computed value {}",
-                        position, out[0] as f64
-                    );
-                    previous_phases.0.clear();
-                    previous_phases.0.push(out[0] as f64);
-                    previous_phases.1 = position;
-                    phase = previous_phases.0[0];
-                }
-                // Figure out which phases we need to save for future calls to generate
+                // If we are taking sine of a linear function of time then `incs` holds the slope of that
+                // function at each position -- that is, the phase increment per second.
+                let incs;
+                // The output samples
+                let mut out: Vec<f32>;
+                // The first position where we need to start saving phases for future calls to generate
                 let previous_phase_start_position;
-                if desired >= MAX_FILTER_LENGTH + 1 {
-                    previous_phase_start_position =
-                        position + desired as i64 - (MAX_FILTER_LENGTH as i64 + 1);
-                    previous_phases.0.clear();
-                    // We'll starting computing phases at previous_phase_start_position, when we'll add the phase at
-                    // the end of the loop to the set; this corresponds to the phase used at the beginning of computing
-                    //`previous_phase_start_position + 1.
-                    previous_phases.1 = previous_phase_start_position + 1;
+
+                if position < 0 {
+                    // Don't even try to use direct synthesis for negative positions.
+                    // This is not as accurate, but it's simpler and... probably fine?
+                    // Especially since we don't really hear sine waves for very negative positions.
+                    // ... TODO unless it's not fine when Sin is used as a trigger for Res?
+                    /*
+                    println!(
+                        "Skipping direct synthesis for Sin at negative position {}, desired {}",
+                        position, desired
+                    );
+                    */
+                    out = self
+                        .generate(waveform, position, desired.min(-position as usize))
+                        .iter()
+                        .map(|x| x.sin())
+                        .collect();
+                    if out.len() == desired {
+                        return out;
+                    }
+                    position += out.len() as i64;
+                    desired -= out.len();
                 } else {
-                    // Note that this means we will add a phase to the set starting at the end of computing `previous_phases.1 + previous_phases.0.len() - 1`,
-                    // which is the phase used at the beginning of `previous_phases.1 + previous_phases.0.len()`.
-                    previous_phase_start_position =
-                        previous_phases.1 + previous_phases.0.len() as i64 - 1;
-                    // Trim any old phases
-                    if position + desired as i64 - previous_phases.1 > MAX_FILTER_LENGTH as i64 {
-                        let len = (position + desired as i64
-                            - previous_phases.1
-                            - MAX_FILTER_LENGTH as i64) as usize;
-                        previous_phases.0.drain(0..len);
-                        previous_phases.1 += len as i64;
+                    out = vec![];
+                }
+
+                match time_dependence(waveform) {
+                    TimeDependence::QuasiLinear((slope, intercept)) => {
+                        let slope = optimizer::simplify(remove_state(slope));
+                        let intercept = optimizer::simplify(remove_state(intercept));
+                        if position == 0 {
+                            match intercept {
+                                Waveform::Const(v) => {
+                                    /*
+                                    println!(
+                                        "Using direct synthesis for sine at position: {}, desired: {}, slope: {:?}, intercept: {:?}",
+                                        position, desired, slope, intercept
+                                    );
+                                    */
+                                    phase = v as f64;
+                                    incs =
+                                        self.generate(&initialize_state(slope), position, desired);
+                                    previous_phases.0.clear();
+                                    previous_phases.0.push(incs[0] as f64);
+                                    previous_phases.1 = 0;
+                                }
+                                _ => {
+                                    println!(
+                                        "Generating sine indirectly: linear time but dynamic phase: {:?}",
+                                        remove_state(waveform.as_ref().clone())
+                                    );
+                                    out.extend(
+                                        self.generate(waveform, position, desired)
+                                            .iter()
+                                            .map(|&x| x.sin()),
+                                    );
+                                    return out;
+                                }
+                            }
+                        } else if position >= previous_phases.1
+                            && position < previous_phases.1 + previous_phases.0.len() as i64
+                        {
+                            phase = previous_phases.0[(position - previous_phases.1) as usize];
+                            incs = self.generate(&initialize_state(slope), position, desired);
+                            /*
+                            println!(
+                                "Phase for Sin at position {} found in previous_phases: {:?}",
+                                position, phase
+                            );
+                            */
+                        } else {
+                            // TODO if the waveform is really linear, we could figure out what the phase is at an arbitrary position
+                            println!(
+                                "Warning: no previous phase for Sin at position {}, can't synthesize directly (consider intercept: {})",
+                                position, intercept,
+                            );
+                            out.extend(
+                                self.generate(waveform, position, desired)
+                                    .iter()
+                                    .map(|x| x.sin()),
+                            );
+                            return out;
+                        }
+
+                        // Figure out which phases we need to save for future calls to generate
+                        if desired >= MAX_FILTER_LENGTH + 1 {
+                            previous_phase_start_position =
+                                position + desired as i64 - (MAX_FILTER_LENGTH as i64 + 1);
+                            previous_phases.0.clear();
+                            // We'll starting computing phases at previous_phase_start_position, when we'll add the
+                            // phase at the end of the loop to the set; this corresponds to the phase used at the
+                            // beginning of computing `previous_phase_start_position + 1`.
+                            previous_phases.1 = previous_phase_start_position + 1;
+                        } else {
+                            // Note that this means we will add a phase to the set starting at the end of computing
+                            // `previous_phases.1 + previous_phases.0.len() - 1`, which is the phase used at the
+                            // beginning of `previous_phases.1 + previous_phases.0.len()`.
+                            previous_phase_start_position =
+                                previous_phases.1 + previous_phases.0.len() as i64 - 1;
+                            // Trim any old phases
+                            if position + desired as i64 - previous_phases.1
+                                > MAX_FILTER_LENGTH as i64
+                            {
+                                let len = (position + desired as i64
+                                    - previous_phases.1
+                                    - MAX_FILTER_LENGTH as i64)
+                                    as usize;
+                                previous_phases.0.drain(0..len);
+                                previous_phases.1 += len as i64;
+                            }
+                        }
+                    }
+                    dep @ _ => {
+                        if position == 0
+                            && let TimeDependence::Nonlinear = dep
+                        {
+                            println!(
+                                "Warning: unable to generate using direct synthesis for {:?}",
+                                remove_state(*waveform.clone())
+                            );
+                        }
+                        out.extend(
+                            self.generate(waveform, position, desired)
+                                .iter()
+                                .map(|x| x.sin()),
+                        );
+                        return out;
                     }
                 }
 
-                let mut out;
-                match &**waveform {
-                    Time => {
-                        let mut out = vec![0.0; desired];
-                        let phase_inc = 1.0 / self.sample_frequency as f64;
-                        for (i, x) in out.iter_mut().enumerate() {
-                            *x = phase.sin() as f32;
-                            phase = (phase + phase_inc).rem_euclid(f64::consts::TAU);
-                            if position + i as i64 >= previous_phase_start_position {
-                                previous_phases.0.push(phase);
-                            }
-                        }
-                        return out;
+                // Direct synthesis
+                let negative_length = out.len();
+                out.extend(vec![0.0; incs.len()]);
+                for (i, x) in incs.iter().enumerate() {
+                    let phase_inc = *x as f64 / self.sample_frequency as f64;
+                    out[negative_length + i] = phase.sin() as f32;
+                    phase = (phase + phase_inc).rem_euclid(f64::consts::TAU);
+                    if position + i as i64 >= previous_phase_start_position {
+                        previous_phases.0.push(phase);
                     }
-                    BinaryPointOp(Operator::Multiply, a, b) => match (&**a, &**b) {
-                        (Const(v), Time) | (Time, Const(v)) => {
-                            let mut out = vec![0.0; desired];
-                            let phase_inc = *v as f64 / self.sample_frequency as f64;
-                            for (i, x) in out.iter_mut().enumerate() {
-                                *x = phase.sin() as f32;
-                                phase = (phase + phase_inc).rem_euclid(f64::consts::TAU);
-                                if position + i as i64 >= previous_phase_start_position {
-                                    previous_phases.0.push(phase);
-                                }
-                            }
-                            return out;
-                        }
-                        (inner, Time) | (Time, inner) => {
-                            let mut out = self.generate(inner, position, desired);
-                            for (i, x) in out.iter_mut().enumerate() {
-                                let phase_inc = *x as f64 / self.sample_frequency as f64;
-                                *x = phase.sin() as f32;
-                                phase = (phase + phase_inc).rem_euclid(f64::consts::TAU);
-                                if position + i as i64 >= previous_phase_start_position {
-                                    previous_phases.0.push(phase);
-                                }
-                            }
-                            return out;
-                        }
-                        _ => {
-                            println!(
-                                "Warning: unable to determine frequency of Sin; numerical errors may distort output"
-                            );
-                            out = self.generate(waveform, position, desired);
-                        }
-                    },
-                    _ => {
-                        // XXX Need to handle phase offsets
-                        println!(
-                            "Warning: unable to determine frequency of Sin; numerical errors may distort output"
-                        );
-                        out = self.generate(waveform, position, desired);
-                    }
-                }
-                for f in out.iter_mut() {
-                    *f = (*f).sin();
                 }
                 return out;
             }
@@ -1113,7 +1160,7 @@ impl<'a> Generator<'a> {
                 if self.offset(a, max) != 0 {
                     return MaybeOption::Maybe;
                 }
-                match (op, &**a, &**b) {
+                match (op, a.as_ref(), b.as_ref()) {
                     // TODO need to consider Sliders and constant functions of Sliders as const
                     (Add, Const(va), Const(vb)) if va + vb >= value => MaybeOption::Some(0),
                     (Add, Const(_), Const(_)) => MaybeOption::None,
@@ -1167,6 +1214,118 @@ impl<'a> Generator<'a> {
             Waveform::Marked { waveform, .. } | Waveform::Captured { waveform, .. } => {
                 self.offset(waveform, max)
             }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum TimeDependence<F, S, R>
+where
+    F: Clone + Debug,
+    R: Clone + Debug,
+    S: Clone + Debug,
+{
+    // The waveform is a function of the form: slope * Time + offset where both slope and offset may also depend on
+    // Time.
+    QuasiLinear((Waveform<F, S, R>, Waveform<F, S, R>)),
+    // The waveform depends on Time, but not in a quasi-linear way
+    Nonlinear,
+    // The waveform does not depend on Time
+    NotTimeDependent,
+}
+
+// Given a waveform, determine its time dependence.
+fn time_dependence<F, S, R>(waveform: &Waveform<F, S, R>) -> TimeDependence<F, S, R>
+where
+    F: Clone + Debug,
+    R: Clone + Debug,
+    S: Clone + Debug,
+{
+    use TimeDependence::*;
+    use Waveform::*;
+    match waveform {
+        Time => {
+            return QuasiLinear((Const(1.0), Const(0.0)));
+        }
+        BinaryPointOp(op @ (Operator::Add | Operator::Subtract), a, b) => {
+            match (time_dependence(a), time_dependence(b)) {
+                (QuasiLinear((a_slope, a_offset)), NotTimeDependent) => {
+                    return QuasiLinear((
+                        a_slope,
+                        BinaryPointOp(op.clone(), Box::new(a_offset), b.clone()),
+                    ));
+                }
+                (NotTimeDependent, QuasiLinear((b_slope, b_offset))) => {
+                    return QuasiLinear((
+                        b_slope,
+                        BinaryPointOp(op.clone(), a.clone(), Box::new(b_offset)),
+                    ));
+                }
+                (QuasiLinear((a_slope, a_offset)), QuasiLinear((b_slope, b_offset))) => {
+                    return QuasiLinear((
+                        BinaryPointOp(op.clone(), Box::new(a_slope), Box::new(b_slope)),
+                        BinaryPointOp(op.clone(), Box::new(a_offset), Box::new(b_offset)),
+                    ));
+                }
+                (NotTimeDependent, NotTimeDependent) => {
+                    return NotTimeDependent;
+                }
+                (Nonlinear, _) | (_, Nonlinear) => {
+                    return Nonlinear;
+                }
+            }
+        }
+        BinaryPointOp(op @ (Operator::Multiply | Operator::Divide), a, b) => {
+            match (time_dependence(a), time_dependence(b)) {
+                (QuasiLinear((a_slope, a_offset)), NotTimeDependent) => {
+                    return QuasiLinear((
+                        BinaryPointOp(op.clone(), Box::new(a_slope), b.clone()),
+                        a_offset,
+                    ));
+                }
+                (NotTimeDependent, QuasiLinear((b_slope, b_offset))) => {
+                    return QuasiLinear((
+                        BinaryPointOp(op.clone(), a.clone(), Box::new(b_slope)),
+                        b_offset,
+                    ));
+                }
+                (QuasiLinear(_), QuasiLinear((b_slope, Const(0.0)))) => {
+                    return QuasiLinear((
+                        BinaryPointOp(op.clone(), a.clone(), Box::new(b_slope)),
+                        Const(0.0),
+                    ));
+                }
+                (QuasiLinear((a_slope, Const(0.0))), QuasiLinear(_)) => {
+                    return QuasiLinear((
+                        BinaryPointOp(op.clone(), Box::new(a_slope), b.clone()),
+                        Const(0.0),
+                    ));
+                }
+                (QuasiLinear((_, _)), QuasiLinear((_, _))) => {
+                    return Nonlinear;
+                }
+                (NotTimeDependent, NotTimeDependent) => {
+                    return NotTimeDependent;
+                }
+                (Nonlinear, _) | (_, Nonlinear) => {
+                    return Nonlinear;
+                }
+            }
+        }
+        Sin(w, _) => match time_dependence(w.as_ref()) {
+            QuasiLinear(_) => {
+                return Nonlinear;
+            }
+            NotTimeDependent => {
+                return NotTimeDependent;
+            }
+            Nonlinear => {
+                return Nonlinear;
+            }
+        },
+        // XXX think harder about other cases
+        _ => {
+            return NotTimeDependent;
         }
     }
 }
@@ -1266,7 +1425,7 @@ pub fn initialize_state(waveform: Waveform) -> Waveform<FilterState, SinState, R
         Sin(waveform, _) => Sin(
             Box::new(initialize_state(*waveform)),
             SinState {
-                previous_phases: RefCell::new((vec![0.0], 0)),
+                previous_phases: RefCell::new((vec![], 0)),
             },
         ),
         // For Filter, we need to set the state to an empty FilterState
@@ -1317,6 +1476,73 @@ pub fn initialize_state(waveform: Waveform) -> Waveform<FilterState, SinState, R
         } => Captured {
             file_stem,
             waveform: Box::new(initialize_state(*waveform)),
+        },
+    }
+}
+
+fn remove_state<F, S, R>(w: Waveform<F, S, R>) -> Waveform
+where
+    F: Clone + Debug,
+    R: Clone + Debug,
+    S: Clone + Debug,
+{
+    use Waveform::*;
+    match w {
+        Const(value) => Const(value),
+        Time => Time,
+        Noise => Noise,
+        Fixed(samples) => Fixed(samples),
+        Fin { length, waveform } => Fin {
+            length: Box::new(remove_state(*length)),
+            waveform: Box::new(remove_state(*waveform)),
+        },
+        Seq { offset, waveform } => Seq {
+            offset: Box::new(remove_state(*offset)),
+            waveform: Box::new(remove_state(*waveform)),
+        },
+        Append(a, b) => Append(Box::new(remove_state(*a)), Box::new(remove_state(*b))),
+        Sin(waveform, _) => Sin(Box::new(remove_state(*waveform)), ()),
+        Filter {
+            waveform,
+            feed_forward,
+            feedback,
+            ..
+        } => Filter {
+            waveform: Box::new(remove_state(*waveform)),
+            feed_forward: Box::new(remove_state(*feed_forward)),
+            feedback: Box::new(remove_state(*feedback)),
+            state: (),
+        },
+        BinaryPointOp(op, a, b) => {
+            BinaryPointOp(op, Box::new(remove_state(*a)), Box::new(remove_state(*b)))
+        }
+        Res {
+            trigger, waveform, ..
+        } => Res {
+            trigger: Box::new(remove_state(*trigger)),
+            waveform: Box::new(remove_state(*waveform)),
+            state: (),
+        },
+        Alt {
+            trigger,
+            positive_waveform,
+            negative_waveform,
+        } => Alt {
+            trigger: Box::new(remove_state(*trigger)),
+            positive_waveform: Box::new(remove_state(*positive_waveform)),
+            negative_waveform: Box::new(remove_state(*negative_waveform)),
+        },
+        Slider(slider) => Slider(slider),
+        Marked { id, waveform } => Marked {
+            id,
+            waveform: Box::new(remove_state(*waveform)),
+        },
+        Captured {
+            file_stem,
+            waveform,
+        } => Captured {
+            file_stem,
+            waveform: Box::new(remove_state(*waveform)),
         },
     }
 }
@@ -1779,7 +2005,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::optimizer;
     use Waveform::{Append, BinaryPointOp, Const, Filter, Fin, Fixed, Res, Seq, Sin, Time};
     use std::f32;
 

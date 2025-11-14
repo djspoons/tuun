@@ -306,6 +306,7 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                 (Noise, Const(0.0)) => Noise,
                 (Time, Const(0.0)) => Time,
                 (Const(a), Const(b)) => Const(a + b),
+                (Slider(s), Const(0.0)) => Slider(s),
                 // Commute (moving constants to the right)
                 (Const(a), b) => simplify(BinaryPointOp(
                     Operator::Add,
@@ -382,9 +383,6 @@ pub fn simplify(waveform: Waveform) -> Waveform {
             match (simplify(*a), simplify(*b)) {
                 (Fixed(a), _) if a.len() == 0 => Fixed(vec![]),
                 (_, Fixed(b)) if b.len() == 0 => Fixed(vec![]),
-                // TODO double check that this makes sense: should we shorten a waveform when multiplying by Const(0.0)?
-                (Const(0.0), _) => Fixed(vec![]),
-                (_, Const(0.0)) => Fixed(vec![]),
                 (Const(1.0), b) => b,
                 (a, Const(1.0)) => a,
                 (Const(a), Const(b)) => Const(a * b),
