@@ -529,13 +529,7 @@ fn process_event<I>(
                 (
                     Mode::Select { program_index, .. },
                     Some(Scancode::LAlt) | Some(Scancode::RAlt),
-                ) => (
-                    context,
-                    Mode::MoveSliders {
-                        program_index,
-                        message: String::new(),
-                    },
-                ),
+                ) => (context, Mode::MoveSliders { program_index }),
                 (
                     Mode::Edit {
                         program_index,
@@ -888,13 +882,7 @@ fn process_event<I>(
                             })
                             .unwrap();
                     }
-                    return (
-                        context,
-                        Mode::MoveSliders {
-                            program_index,
-                            message: String::new(),
-                        },
-                    );
+                    return (context, Mode::MoveSliders { program_index });
                 }
                 _ => {
                     return (context, mode);

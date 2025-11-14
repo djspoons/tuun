@@ -38,7 +38,6 @@ pub enum Mode {
     },
     MoveSliders {
         program_index: usize, // Don't forget this
-        message: String,
     },
     Exit,
 }
@@ -531,7 +530,18 @@ impl Renderer {
         let mut message = match mode {
             Mode::Edit { message, .. } => message,
             Mode::Select { message, .. } => message,
-            Mode::MoveSliders { message, .. } => message,
+            Mode::MoveSliders { .. } => &format!(
+                "X = {:.3}, Y = {:.3}",
+                status
+                    .slider_values
+                    .get(&tracker::Slider::X)
+                    .unwrap_or(&0.5),
+                status
+                    .slider_values
+                    .get(&tracker::Slider::Y)
+                    .unwrap_or(&0.5)
+            )
+            .to_string(),
             Mode::Exit => "",
         };
 
