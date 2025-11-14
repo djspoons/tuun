@@ -248,15 +248,32 @@ pub fn unfold(arguments: Vec<Expr>) -> Expr {
     }
 }
 
+// Appends two or more lists or waveforms together
 pub fn append(arguments: Vec<Expr>) -> Expr {
     match &arguments[..] {
-        [List(a), List(b)] => {
+        [List(a), rest @ ..] => {
             let mut result = a.clone();
-            result.extend(b.clone());
+            for b in rest {
+                if let List(exprs) = b {
+                    result.extend(exprs.clone());
+                } else {
+                    return Expr::Error("Expected more lists as arguments for append".to_string());
+                }
+            }
             Expr::List(result)
         }
-        [Expr::Waveform(a), Expr::Waveform(b)] => {
-            Expr::Waveform(Waveform::Append(Box::new(a.clone()), Box::new(b.clone())))
+        [Expr::Waveform(a), rest @ ..] => {
+            let mut result = a.clone();
+            for b in rest {
+                if let Expr::Waveform(b) = b {
+                    result = Waveform::Append(Box::new(result), Box::new(b.clone()));
+                } else {
+                    return Expr::Error(
+                        "Expected more waveforms as arguments for append".to_string(),
+                    );
+                }
+            }
+            Expr::Waveform(result)
         }
         _ => Expr::Error("Invalid arguments for append".to_string()),
     }

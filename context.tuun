@@ -4,7 +4,7 @@ max = fn(x, y) => if x < y then y else x,
 
 // WAVES
 pi = 3.14159265,
-// Computes a sine wave at the given frequency (which must be a float or waveform)
+// Computes a sine wave at the given frequency in hertz (which must be a float or waveform).
 $ = fn(freq) => sin(2 * pi * freq * time),
 sawtooth = fn(freq) => (res($freq, freq * time) - 0.5) * 2,
 square = fn(freq) => alt($freq, 1, -1),
@@ -14,16 +14,22 @@ triangle = fn(freq) => let
     a = time * slope - 1,
     b = time * -slope + 3
   in alt(t, res(t, a), res(t, b)),
-// width should be a number between 0.0 and 1.0, where 0.0 is a square wave
-pwm = fn(width, freq) =>
+// Computes a pulse wave with the given width. width should be a number (or waveform) between
+// 0.0 and 1.0, where 0.0 is a square wave (i.e., 50% duty cycle). If width isn't constant,
+// then this is a PWM.
+pulse = fn(width, freq) =>
   let
-    // We want the "high" amplitude to come at the beginning of the waveform, so 
+    // We want the "high" amplitude to come at the beginning of the waveform, so offset the
+    // phase.
     s = sin(2 * pi * freq * time + pi * 0.5 + width * pi * 0.5),
     slope = 4 * freq,
-    a = time * slope - 1,
-    b = time * -slope + 3
+    // The shift above is not quite perfect, however, so we shift by one additional sample here.
+    a = (time + 1/sampling_frequency) * slope - 1,
+    b = (time + 1/sampling_frequency) * -slope + 3,
+    // Use a triangle wave (which is lowered by `width`) as the driver for the pulse.
+    tri = alt(s, res(s, a), res(s, b))
   in
-    alt(alt(s, res(s, a), res(s, b)) + (-1 * width), 1, -1),
+    alt(tri - width, 1, -1),
 
 
 // HELPERS
@@ -81,28 +87,30 @@ lpf = fn(Q, fc) =>
     a0 =  1 + alpha,
     a1 = -2*cos(w0),
     a2 =  1 - alpha,
+    // Take the first element of w. If w is not a waveform then this will promote it to a constant
+    // one before multiplying it, yielding the same result as `fixed([w])`.
     fst = fn(w) => w * fixed([1.0])
   in
-      filter(append(append(fst(b0/a0), fst(b1/a0)), fst(b2/a0)), append(fst(a1/a0), fst(a2/a0))),
-//    filter(fixed([b0/a0, b1/a0, b2/a0]), fixed([a1/a0, a2/a0])),
+    filter(append(fst(b0/a0), fst(b1/a0), fst(b2/a0)), append(fst(a1/a0), fst(a2/a0))),
 
 
 // INSTRUMENTS
 
 // From Welsh's Synthesizer Cookbook
 harmonica = fn(dur, freq) =>
-  let a = 0.13,
-      d = 0.33,
-      r = 0.33,
-      s = max(dur - (a + d + r), 0),
-      osc1 = pwm(0.93 + $(1.6) * 0.05, freq),
-      osc2 = res(osc1, pwm(0.7, add_cents(add_semitones(freq, 8), 7))),
-      osc = osc1 * 0.375 + osc2 * 0.5
-    in
-  osc
+  let
+    osc1 = pulse(0.93 + $(1.6) * 0.05, freq),
+    osc2 = res(osc1, pulse(0.7, add_cents(add_semitones(freq, 8), 7))),
+    osc = osc1 * 0.375 + osc2 * 0.5,
+    a = 0.13,
+    d = 0.33,
+    r = 0.33,
+    s = max(dur - (a + d + r), 0)
+  in
+    osc
     | lpf(0.5, 1900)
     | ADSR(a, d, 0.5, s, r)
-    | fin(time - dur)
+    | fin(time - dur) // redundant with the ADSR
     | seq(time - dur),
 
 
