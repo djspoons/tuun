@@ -892,7 +892,7 @@ impl<'a> Generator<'a> {
         // Also note that if we assume that offset(a) == 0 this is all much simpler, but I'm keeping this
         // code around as a test of waveform optimizations (including removing Seq's).
 
-        // Calculate the maximum offset of a that is relevant for position and desired. This as the sum
+        // Calculate the maximum offset of `a` that is relevant for position and desired. This is the sum
         // of positive portion of position (if any) and the positive portion of desired (again, if any).
         let positive_position = if position < 0 { 0 } else { position as usize };
         let positive_desired = if position < 0 {
@@ -1659,9 +1659,9 @@ where
         }
     }
 
-    fn process_captured(
+    fn process_captured<F, S, R>(
         &self,
-        waveform: &Waveform,
+        waveform: &Waveform<F, S, R>,
         out: &mut HashMap<String, hound::WavWriter<BufWriter<std::fs::File>>>,
     ) {
         use Waveform::*;
@@ -1864,46 +1864,67 @@ where
             // Check to see if any pending waveform starts at or before segment_start. If so, promote
             // them active waveforms.
             while !self.pending_waveforms.is_empty() {
-                // TODO This is wrong in the case where a long time has passed.
-                // For example, it's ok to adjust the start to segment_start if the difference is small,
-                // but if it's greater than repeat_every, then we can end up aligning the two Beats
-                // waveforms with each other (instead of interleaving them).
                 if self.pending_waveforms[0].start <= segment_start {
                     let mut pending = self.pending_waveforms.remove(0);
                     /*
                     println!(
-                        "Activating waveform {:?} at time {:?}",
-                        pending.id, segment_start
+                        "Activating waveform {:?} with start {:?} at time {:?}",
+                        pending.id, pending.start, segment_start
                     );
                     */
-                    let mut marks = pending.marks;
+                    let waveform = initialize_state(pending.waveform.clone());
+                    let mut position = 0;
                     if pending.start < segment_start {
                         // If the pending waveform starts before the segment start, then we need to
-                        // adjust the marks to account for the segment start.
-                        for mark in &mut marks {
-                            mark.start += segment_start - pending.start;
+                        // adjust the position.
+                        let delta_samples = ((segment_start - pending.start).as_secs_f32()
+                            * self.sample_frequency as f32)
+                            .round() as usize;
+                        if delta_samples > 0 {
+                            if delta_samples > 1 {
+                                println!(
+                                    "Adjusting waveform {:?} position by {} samples",
+                                    pending.id, delta_samples
+                                );
+                            }
+                            // We need to actually generate and discard these samples to make sure that any stateful
+                            // waveforms are properly initialized.
+                            let mut generator = Generator::new(self.sample_frequency);
+                            // TODO this is a little weird since we don't really care about sliders... but :shrug:
+                            self.slider_state.buffer_position = 0;
+                            generator.slider_state = Some(&self.slider_state);
+                            let mut map = HashMap::new();
+                            // TODO do we want to capture here?
+                            let capture_state = RefCell::new(&mut map);
+                            generator.capture_state = Some(capture_state);
+                            let out = generator.generate(&waveform, position as i64, delta_samples);
+                            position += out.len();
                         }
                     }
                     let mut capture_state = HashMap::new();
-                    self.process_captured(&pending.waveform, &mut capture_state);
+                    self.process_captured(&waveform, &mut capture_state);
                     self.active_waveforms.push(ActiveWaveform {
                         id: pending.id.clone(),
-                        waveform: initialize_state(pending.waveform.clone()),
-                        marks,
-                        position: 0,
+                        waveform,
+                        marks: pending.marks,
+                        position,
                         capture_state,
                     });
-                    // Check to see if this waveform should repeat
-                    if let Some(duration) = pending.repeat_every {
+
+                    if let Some(repeat_every) = pending.repeat_every {
+                        // If it's repeating, find the next start time that's after segment_start
+                        pending.start = pending.start + repeat_every;
+                        // Check to see if we've missed one or more repetitions.
+                        while pending.start <= segment_start {
+                            pending.start += repeat_every;
+                            println!("Missed repetition of waveform {:?}...", pending.id);
+                        }
                         /*
                         println!(
-                            "Scheduling waveform {:?} to repeat after {:?} (at {:?})",
-                            pending.id,
-                            duration,
-                            segment_start + duration
+                            "Scheduling waveform {:?} to repeat at {:?}",
+                            pending.id, pending.start,
                         );
                         */
-                        pending.start = segment_start + duration;
                         pending.marks = Vec::new();
                         self.process_marked(
                             &pending.id,
