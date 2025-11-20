@@ -52,6 +52,12 @@ struct Args {
         action = clap::ArgAction::Set,
         default_value = "true", // Default if the flag is not present
         default_missing_value = "true")]
+    precompute: bool,
+    #[arg(long,
+        num_args(0..=1), // Allows --flag or --flag=value
+        action = clap::ArgAction::Set,
+        default_value = "false", // Default if the flag is not present
+        default_missing_value = "false")]
     ui: bool, // When set to value, just runs each of the programs once then exits
     #[arg(short = 'O', long, default_value = ".")]
     output_dir: String, // Captures waveforms to the specified directory
@@ -813,7 +819,7 @@ fn process_event<I>(
                             program_index,
                             programs[program_index - 1].len(),
                             programs[program_index - 1].as_str(),
-                            args.optimize,
+                            args,
                         ) {
                             WaveformOrMode::Waveform(waveform) => {
                                 println!("Waveform definition for program {}:", program_index);
@@ -924,13 +930,7 @@ fn play_waveform(
     keymod: sdl2::keyboard::Mod,
 ) -> (Vec<(String, parser::Expr)>, Mode) {
     use sdl2::keyboard::Mod;
-    match play_waveform_helper(
-        &context,
-        program_index,
-        cursor_position,
-        program,
-        args.optimize,
-    ) {
+    match play_waveform_helper(&context, program_index, cursor_position, program, args) {
         WaveformOrMode::Waveform(waveform) => {
             let message;
             let repeat_every;
@@ -984,7 +984,7 @@ fn play_waveform_helper(
     program_index: usize,
     cursor_position: usize,
     program: &str,
-    optimize: bool,
+    args: &Args,
 ) -> WaveformOrMode {
     match parser::parse_program(program) {
         Ok(expr) => {
@@ -995,9 +995,17 @@ fn play_waveform_helper(
                     if let parser::Expr::Waveform(waveform) = expr {
                         let (_, mut waveform) = optimizer::replace_seq(waveform);
                         println!("replace_seq returned: {:?}", &waveform);
-                        if optimize {
+                        if args.optimize {
                             waveform = optimizer::simplify(waveform);
                             println!("optimizer::simplify returned: {:?}", &waveform);
+                        }
+                        if args.precompute {
+                            let generator = tracker::Generator::new(args.sample_frequency);
+                            waveform = tracker::remove_state(optimizer::precompute(
+                                &generator,
+                                tracker::initialize_state(waveform),
+                            ));
+                            println!("optimizer::precompute returned: {:?}", &waveform);
                         }
                         return WaveformOrMode::Waveform(waveform);
                     } else {

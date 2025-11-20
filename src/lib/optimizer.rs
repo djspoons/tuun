@@ -1,3 +1,4 @@
+use crate::tracker::Generator;
 use crate::tracker::Operator;
 use crate::tracker::Waveform;
 
@@ -35,34 +36,34 @@ fn first_root(waveform: &Waveform) -> Option<Waveform> {
     }
 }
 
-// Assume offset waveforms are of the form `Time ~+ w` or `Const(x)`.
-fn add_offsets(a: Waveform, b: Waveform) -> Waveform {
-    use Waveform::*;
-    match (first_root(&a), first_root(&b)) {
-        (Some(a_root), Some(b_root)) => {
-            let b = simplify(BinaryPointOp(
-                Operator::Multiply,
-                Box::new(BinaryPointOp(
-                    Operator::Add,
-                    Box::new(a_root),
-                    Box::new(b_root),
-                )),
-                Box::new(Const(-1.0)),
-            ));
-            BinaryPointOp(Operator::Add, Box::new(Time), Box::new(b))
-        }
-        (a_root, b_root) => {
-            panic!(
-                "Cannot add offsets that are not linear functions of Time, got {:?} and {:?} for {:?} and {:?}",
-                a_root, b_root, a, b
-            );
-        }
-    }
-}
-
 // Replaces all Seq's with Appends and returns the overall offset of the waveform.
 pub fn replace_seq(waveform: Waveform) -> (Waveform, Waveform) {
     use Waveform::*;
+
+    // Assume offset waveforms are of the form `Time ~+ w` or `Const(x)`.
+    fn add_offsets(a: Waveform, b: Waveform) -> Waveform {
+        match (first_root(&a), first_root(&b)) {
+            (Some(a_root), Some(b_root)) => {
+                let b = simplify(BinaryPointOp(
+                    Operator::Multiply,
+                    Box::new(BinaryPointOp(
+                        Operator::Add,
+                        Box::new(a_root),
+                        Box::new(b_root),
+                    )),
+                    Box::new(Const(-1.0)),
+                ));
+                BinaryPointOp(Operator::Add, Box::new(Time), Box::new(b))
+            }
+            (a_root, b_root) => {
+                panic!(
+                    "Cannot add offsets that are not linear functions of Time, got {:?} and {:?} for {:?} and {:?}",
+                    a_root, b_root, a, b
+                );
+            }
+        }
+    }
+
     match waveform {
         w @ (Const(_) | Time | Noise | Fixed(_)) => (Const(0.0), w),
         Fin { length, waveform } => {
@@ -274,7 +275,7 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                 (a, b) => Append(Box::new(a), Box::new(b)),
             }
         }
-        // Check to see if we can precompute the sine function:
+        // Check to see if we can compute the sine function:
         Sin(waveform, state) => {
             let waveform = simplify(*waveform);
             match waveform {
@@ -527,6 +528,275 @@ pub fn simplify(waveform: Waveform) -> Waveform {
             waveform: Box::new(simplify(*waveform)),
         },
     }
+}
+
+use crate::tracker::{FilterState, ResState, SinState};
+
+// Replaces parts of `waveform` that can be precomputed with their precomputed Fixed versions. Notably,
+// infinite waveforms and waveforms that depend on or have dynamic behavior (Slider, Marked, Captured)
+// cannot be precomputed. This should be called after remove_seq.
+//
+// N.B. This isn't currently safe as values at negative positions aren't considered; for example, time is
+// negative before zero, but a fixed waveform is always zero before its start.
+pub fn precompute(
+    generator: &Generator,
+    waveform: Waveform<FilterState, SinState, ResState>,
+) -> Waveform<FilterState, SinState, ResState> {
+    // TODO maybe move this whole thing into Generator?
+
+    enum Result {
+        Precomputed(Vec<f32>),
+        Infinite(Waveform<FilterState, SinState, ResState>),
+        Dynamic(Waveform<FilterState, SinState, ResState>),
+    }
+
+    impl Into<Waveform<FilterState, SinState, ResState>> for Result {
+        fn into(self) -> Waveform<FilterState, SinState, ResState> {
+            match self {
+                Result::Precomputed(v) => Waveform::Fixed(v),
+                Result::Infinite(w) => w,
+                Result::Dynamic(w) => w,
+            }
+        }
+    }
+
+    fn precompute_internal(
+        generator: &Generator,
+        waveform: Waveform<FilterState, SinState, ResState>,
+    ) -> Result {
+        use Result::*;
+        use Waveform::*;
+
+        // TODO how do we feel about all of the usize::MAX here?
+        // TODO there's slightly more repetition than I'd like... for example, lots of "if the child is Dynamic,
+        // then parent is Dynamic"
+        // Maybe Precomputed should also be a waveform?
+
+        match waveform {
+            Const(_) | Time | Noise => Infinite(waveform),
+            Fixed(v) => Precomputed(v),
+            Fin { length, waveform } => match precompute_internal(generator, *waveform) {
+                Precomputed(v) => Precomputed(generator.generate(
+                    &Fin {
+                        length,
+                        waveform: Box::new(Fixed(v)),
+                    },
+                    0,
+                    usize::MAX,
+                )),
+                Infinite(waveform) => Precomputed(generator.generate(
+                    &Fin {
+                        length,
+                        waveform: Box::new(waveform),
+                    },
+                    0,
+                    usize::MAX,
+                )),
+                Dynamic(waveform) => {
+                    println!(
+                        "Cannot precompute Fin because inner waveform is dynamic: {:?}",
+                        &waveform
+                    );
+                    Dynamic(Fin {
+                        length,
+                        waveform: Box::new(waveform),
+                    })
+                }
+            },
+            Seq { .. } => {
+                panic!("Seq should have been replaced by replace_seq before precompute is called");
+            }
+            Append(a, b) => match (
+                precompute_internal(generator, *a),
+                precompute_internal(generator, *b),
+            ) {
+                (Precomputed(a), Precomputed(b)) => {
+                    let v = [a, b].concat();
+                    Precomputed(v)
+                }
+                (Infinite(a), Infinite(b)) => Infinite(Append(Box::new(a), Box::new(b))),
+                (Infinite(a), Precomputed(v)) => Infinite(Append(Box::new(a), Box::new(Fixed(v)))),
+                (Precomputed(v), Infinite(b)) => Infinite(Append(Box::new(Fixed(v)), Box::new(b))),
+                // At least one is Dynamic
+                (a, b) => Dynamic(Append(Box::new(a.into()), Box::new(b.into()))),
+            },
+            Sin(waveform, state) => match precompute_internal(generator, *waveform) {
+                Precomputed(v) => {
+                    let v = v.into_iter().map(|x| x.sin()).collect();
+                    Precomputed(v)
+                }
+                Infinite(waveform) => Infinite(Sin(Box::new(waveform), state)),
+                Dynamic(waveform) => Dynamic(Sin(Box::new(waveform), state)),
+            },
+            BinaryPointOp(op, a, b) => match (
+                precompute_internal(generator, *a),
+                precompute_internal(generator, *b),
+            ) {
+                (Precomputed(a), Precomputed(b)) => Precomputed(generator.generate(
+                    &BinaryPointOp(op, Box::new(Fixed(a)), Box::new(Fixed(b))),
+                    0,
+                    usize::MAX,
+                )),
+                (Infinite(a), Infinite(b)) => Infinite(BinaryPointOp(op, Box::new(a), Box::new(b))),
+                (Infinite(a), Precomputed(v)) => match op {
+                    Operator::Add | Operator::Subtract => {
+                        Infinite(BinaryPointOp(op, Box::new(a), Box::new(Fixed(v))))
+                    }
+                    Operator::Multiply | Operator::Divide => Precomputed(generator.generate(
+                        &BinaryPointOp(op, Box::new(a), Box::new(Fixed(v))),
+                        0,
+                        usize::MAX,
+                    )),
+                },
+                (Precomputed(v), Infinite(b)) => match op {
+                    Operator::Add | Operator::Subtract => {
+                        Infinite(BinaryPointOp(op, Box::new(Fixed(v)), Box::new(b)))
+                    }
+                    Operator::Multiply | Operator::Divide => Precomputed(generator.generate(
+                        &BinaryPointOp(op, Box::new(Fixed(v)), Box::new(b)),
+                        0,
+                        usize::MAX,
+                    )),
+                },
+                // At least one is Dynamic
+                (a, b) => Dynamic(BinaryPointOp(op, Box::new(a.into()), Box::new(b.into()))),
+            },
+            Filter {
+                waveform,
+                feed_forward,
+                feedback,
+                state,
+            } => {
+                match (
+                    precompute_internal(generator, *waveform),
+                    precompute_internal(generator, *feed_forward),
+                    precompute_internal(generator, *feedback),
+                ) {
+                    (Precomputed(w), Precomputed(ff), Precomputed(fb)) => {
+                        let ff_len = ff.len();
+                        Precomputed(generator.generate(
+                            &Filter {
+                                waveform: Box::new(Fixed(w)),
+                                feed_forward: Box::new(Fixed(ff)),
+                                feedback: Box::new(Fixed(fb)),
+                                state,
+                            },
+                            0,
+                            usize::MAX - (ff_len - 1), // because Filter will add to desired
+                        ))
+                    }
+                    (Dynamic(waveform), feed_forward, feedback) => Dynamic(Filter {
+                        waveform: Box::new(waveform),
+                        feed_forward: Box::new(feed_forward.into()),
+                        feedback: Box::new(feedback.into()),
+                        state,
+                    }),
+                    (waveform, Dynamic(feed_forward), feedback) => Dynamic(Filter {
+                        waveform: Box::new(waveform.into()),
+                        feed_forward: Box::new(feed_forward),
+                        feedback: Box::new(feedback.into()),
+                        state,
+                    }),
+                    (waveform, feed_forward, Dynamic(feedback)) => Dynamic(Filter {
+                        waveform: Box::new(waveform.into()),
+                        feed_forward: Box::new(feed_forward.into()),
+                        feedback: Box::new(feedback),
+                        state,
+                    }),
+                    // None are Dynamic, at least one is Infinite
+                    (waveform, feed_forward, feedback) => Infinite(Filter {
+                        waveform: Box::new(waveform.into()),
+                        feed_forward: Box::new(feed_forward.into()),
+                        feedback: Box::new(feedback.into()),
+                        state,
+                    }),
+                }
+            }
+            Res {
+                trigger,
+                waveform,
+                state,
+            } => {
+                match (
+                    precompute_internal(generator, *trigger),
+                    precompute_internal(generator, *waveform),
+                ) {
+                    (Precomputed(t), Precomputed(w)) => Precomputed(generator.generate(
+                        &Res {
+                            trigger: Box::new(Fixed(t)),
+                            waveform: Box::new(Fixed(w)),
+                            state,
+                        },
+                        0,
+                        usize::MAX,
+                    )),
+                    (Dynamic(trigger), waveform) => Dynamic(Res {
+                        trigger: Box::new(trigger),
+                        waveform: Box::new(waveform.into()),
+                        state,
+                    }),
+                    (trigger, Dynamic(waveform)) => Dynamic(Res {
+                        trigger: Box::new(trigger.into()),
+                        waveform: Box::new(waveform),
+                        state,
+                    }),
+                    // Neither is Dynamic, at least one is Infinite
+                    (trigger, waveform) => Infinite(Res {
+                        trigger: Box::new(trigger.into()),
+                        waveform: Box::new(waveform.into()),
+                        state,
+                    }),
+                }
+            }
+            Alt {
+                trigger,
+                positive_waveform,
+                negative_waveform,
+            } => {
+                match (
+                    precompute_internal(generator, *trigger),
+                    precompute_internal(generator, *positive_waveform),
+                    precompute_internal(generator, *negative_waveform),
+                ) {
+                    (Precomputed(t), Precomputed(p), Precomputed(n)) => {
+                        Precomputed(generator.generate(
+                            &Alt {
+                                trigger: Box::new(Fixed(t)),
+                                positive_waveform: Box::new(Fixed(p)),
+                                negative_waveform: Box::new(Fixed(n)),
+                            },
+                            0,
+                            usize::MAX,
+                        ))
+                    }
+                    (Dynamic(waveform), positive_waveform, negative_waveform) => Dynamic(Alt {
+                        trigger: Box::new(waveform),
+                        positive_waveform: Box::new(positive_waveform.into()),
+                        negative_waveform: Box::new(negative_waveform.into()),
+                    }),
+                    (waveform, Dynamic(positive_waveform), negative_waveform) => Dynamic(Alt {
+                        trigger: Box::new(waveform.into()),
+                        positive_waveform: Box::new(positive_waveform),
+                        negative_waveform: Box::new(negative_waveform.into()),
+                    }),
+                    (waveform, positive_waveform, Dynamic(negative_waveform)) => Dynamic(Alt {
+                        trigger: Box::new(waveform.into()),
+                        positive_waveform: Box::new(positive_waveform.into()),
+                        negative_waveform: Box::new(negative_waveform),
+                    }),
+                    // None are Dynamic, at least one is Infinite
+                    (waveform, positive_waveform, negative_waveform) => Infinite(Alt {
+                        trigger: Box::new(waveform.into()),
+                        positive_waveform: Box::new(positive_waveform.into()),
+                        negative_waveform: Box::new(negative_waveform.into()),
+                    }),
+                }
+            }
+            Slider(_) | Marked { .. } | Captured { .. } => Dynamic(waveform),
+        }
+    }
+
+    return precompute_internal(generator, waveform).into();
 }
 
 #[cfg(test)]

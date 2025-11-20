@@ -155,7 +155,22 @@ impl fmt::Display for Waveform<()> {
             Const(value) => write!(f, "Const({})", value),
             Time => write!(f, "Time"),
             Noise => write!(f, "Noise"),
-            Fixed(samples) => write!(f, "Fixed({:?})", samples),
+            Fixed(samples) => {
+                if samples.len() < 10 {
+                    write!(f, "Fixed({:?})", samples)
+                } else {
+                    write!(
+                        f,
+                        "Fixed([{}, ...], len={})",
+                        samples[..9]
+                            .iter()
+                            .map(|x| format!("{}", x))
+                            .collect::<Vec<String>>()
+                            .join(", "),
+                        samples.len()
+                    )
+                }
+            }
             Fin { length, waveform } => {
                 write!(f, "Fin({}, {})", length, waveform)
             }
@@ -997,7 +1012,7 @@ impl<'a> Generator<'a> {
 
     // Returns the number of samples that `waveform` will generate starting from `position` or `max`, whichever is
     // smaller. When `position` is zero, this is the length of the waveform (or, again, `max`).
-    fn remaining(
+    pub fn remaining(
         &self,
         waveform: &Waveform<FilterState, SinState, ResState>,
         position: i64,
@@ -1480,7 +1495,7 @@ pub fn initialize_state(waveform: Waveform) -> Waveform<FilterState, SinState, R
     }
 }
 
-fn remove_state<F, S, R>(w: Waveform<F, S, R>) -> Waveform
+pub fn remove_state<F, S, R>(w: Waveform<F, S, R>) -> Waveform
 where
     F: Clone + Debug,
     R: Clone + Debug,
@@ -2131,6 +2146,32 @@ mod tests {
                 size, waveform, optimized_waveform
             );
         }
+
+        /*
+        for size in [1, 2, 4, 8] {
+            let generator = new_test_generator(1);
+            let (_, no_seq_waveform) = optimizer::replace_seq(waveform.clone());
+            let optimized_waveform = optimizer::simplify(no_seq_waveform.clone());
+            let w = optimizer::precompute(&generator, initialize_state(optimized_waveform.clone()));
+            assert_eq!(
+                length,
+                generator.remaining(&w, 0, desired.len()),
+                "Failed length on waveform\n{:#?}\nprecomputed to\n{:#?}",
+                waveform,
+                remove_state(w.clone()),
+            );
+            let mut out = vec![0.0; desired.len()];
+            for n in 0..out.len() / size {
+                let tmp = generator.generate(&w, (n * size) as i64, size);
+                (&mut out[n * size..(n * size + tmp.len())]).copy_from_slice(&tmp);
+            }
+            assert_eq!(
+                out, desired,
+                "Failed output for size {} on waveform\n{:#?}\nprecomputed to\n{:#?}",
+                size, waveform, remove_state(w)
+            );
+        }
+        */
     }
 
     #[test]
