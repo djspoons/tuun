@@ -14,6 +14,7 @@ use crate::builtins;
 use crate::metric::Metric;
 use crate::parser;
 use crate::tracker;
+use crate::waveform;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum WaveformId {
@@ -376,7 +377,7 @@ impl Renderer {
                 (self.width as f32
                     * *status
                         .slider_values
-                        .get(&tracker::Slider::X)
+                        .get(&waveform::Slider::X)
                         .unwrap_or(&0.5)) as i32
                     - 3,
                 0,
@@ -391,7 +392,7 @@ impl Renderer {
                     - (self.height as f32
                         * *status
                             .slider_values
-                            .get(&tracker::Slider::Y)
+                            .get(&waveform::Slider::Y)
                             .unwrap_or(&0.5)) as i32
                     - 3,
                 16,
@@ -534,11 +535,11 @@ impl Renderer {
                 "X = {:.3}, Y = {:.3}",
                 status
                     .slider_values
-                    .get(&tracker::Slider::X)
+                    .get(&waveform::Slider::X)
                     .unwrap_or(&0.5),
                 status
                     .slider_values
-                    .get(&tracker::Slider::Y)
+                    .get(&waveform::Slider::Y)
                     .unwrap_or(&0.5)
             )
             .to_string(),
@@ -694,8 +695,8 @@ pub fn duration_from_beats(beats_per_minute: u32, beats: u64) -> Duration {
     Duration::from_secs_f32(beats as f32 * 60.0 / beats_per_minute as f32)
 }
 
-pub fn beats_waveform(beats_per_minute: u32, beats_per_measure: u32) -> tracker::Waveform {
-    use tracker::{Operator, Waveform};
+pub fn beats_waveform(beats_per_minute: u32, beats_per_measure: u32) -> waveform::Waveform {
+    use waveform::{Operator, Waveform};
     let seconds_per_beat = duration_from_beats(beats_per_minute, 1);
     let mut ws = Vec::new();
     for i in 0..beats_per_measure {
@@ -720,7 +721,7 @@ pub fn beats_waveform(beats_per_minute: u32, beats_per_measure: u32) -> tracker:
         }));
     }
     match builtins::sequence(vec![parser::Expr::List(ws)]) {
-        parser::Expr::Waveform(waveform) => tracker::Waveform::Marked {
+        parser::Expr::Waveform(waveform) => waveform::Waveform::Marked {
             id: 0,
             waveform: Box::new(waveform),
         },

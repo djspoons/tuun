@@ -14,7 +14,7 @@ use nom::{
     sequence::{delimited, preceded, terminated},
 };
 
-use crate::tracker;
+use crate::waveform;
 
 type LocatedSpan<'a> = nom_locate::LocatedSpan<&'a str, ParseState<'a>>;
 type IResult<'a, T> = nom::IResult<LocatedSpan<'a>, T>;
@@ -152,7 +152,7 @@ pub enum Expr {
     Bool(bool),
     Float(f32),
     String(String),
-    Waveform(tracker::Waveform),
+    Waveform(waveform::Waveform),
     Function {
         pattern: Pattern,
         body: Box<Expr>,

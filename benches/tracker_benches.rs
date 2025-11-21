@@ -3,20 +3,21 @@ use std::hint::black_box;
 use tuun::builtins;
 use tuun::parser;
 
+use tuun::generator;
 use tuun::renderer;
-use tuun::tracker;
+use tuun::waveform;
 
 fn bench_filter(c: &mut Criterion) {
-    use tracker::Waveform::{Filter, Fixed, Time};
+    use waveform::Waveform::{Filter, Fixed, Time};
 
-    let generator = tracker::Generator::new(44100);
+    let generator = generator::Generator::new(44100);
     let w1 = Filter {
         waveform: Box::new(Time),
         feed_forward: Box::new(Fixed(vec![0.5])),
         feedback: Box::new(Fixed(vec![-0.5])),
         state: (),
     };
-    let w1 = tracker::initialize_state(w1);
+    let w1 = generator::initialize_state(w1);
     c.bench_function("filter_1_1", |b| {
         b.iter(|| {
             for i in 0..43 {
@@ -31,7 +32,7 @@ fn bench_filter(c: &mut Criterion) {
         feedback: Box::new(Fixed(vec![-2.56103158, 2.2132402, -0.64357271])),
         state: (),
     };
-    let w2 = tracker::initialize_state(w2);
+    let w2 = generator::initialize_state(w2);
     c.bench_function("filter_4_3", |b| {
         b.iter(|| {
             for i in 0..43 {
@@ -42,7 +43,7 @@ fn bench_filter(c: &mut Criterion) {
 }
 
 fn bench_marks(c: &mut Criterion) {
-    let generator = tracker::Generator::new(44100);
+    let generator = generator::Generator::new(44100);
     let mut ws = Vec::new();
     for _ in 0..40 {
         ws.push(parser::Expr::Waveform(renderer::beats_waveform(120, 4)));
@@ -51,7 +52,7 @@ fn bench_marks(c: &mut Criterion) {
         parser::Expr::Waveform(w) => w,
         _ => panic!("Expected waveform"),
     };
-    let w = tracker::initialize_state(w);
+    let w = generator::initialize_state(w);
     c.bench_function("marks_4_40", |b| {
         b.iter(|| {
             for i in 0..3438 {
@@ -100,8 +101,8 @@ fn bench_large(c: &mut Criterion) {
                 Ok(expr) => {
                     println!("Simplify returned: {:}", &expr);
                     if let parser::Expr::Waveform(waveform) = expr {
-                        let generator = tracker::Generator::new(44100);
-                        let w = tracker::initialize_state(waveform);
+                        let generator = generator::Generator::new(44100);
+                        let w = generator::initialize_state(waveform);
                         c.bench_function("large_440", |b| {
                             b.iter(|| {
                                 for i in 0..43 {

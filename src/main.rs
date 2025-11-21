@@ -14,11 +14,13 @@ use metric::Metric;
 use renderer::{Mode, Renderer, WaveformId};
 use tracker::Command;
 use tuun::builtins;
+use tuun::generator;
 use tuun::metric;
 use tuun::optimizer;
 use tuun::parser;
 use tuun::renderer;
 use tuun::tracker;
+use tuun::waveform;
 
 #[derive(ClapParser, Debug)]
 #[command(version, about, long_about = None)]
@@ -869,7 +871,7 @@ fn process_event<I>(
             }
         }
         Event::MouseMotion { xrel, yrel, .. } => {
-            use tracker::Slider;
+            use waveform::Slider;
             match mode {
                 Mode::MoveSliders { program_index, .. } => {
                     if xrel != 0 {
@@ -915,7 +917,7 @@ fn next_measure_start(status: &tracker::Status<WaveformId>) -> Instant {
 }
 
 enum WaveformOrMode {
-    Waveform(tracker::Waveform),
+    Waveform(waveform::Waveform),
     Mode(Mode),
 }
 
@@ -957,7 +959,7 @@ fn play_waveform(
                 .send(Command::Play {
                     // TODO maybe extend the mark to the full measure?
                     id: WaveformId::Program(program_index),
-                    waveform: tracker::Waveform::Marked {
+                    waveform: waveform::Waveform::Marked {
                         id: 0,
                         waveform: Box::new(waveform),
                     },
@@ -1000,10 +1002,10 @@ fn play_waveform_helper(
                             println!("optimizer::simplify returned: {:?}", &waveform);
                         }
                         if args.precompute {
-                            let generator = tracker::Generator::new(args.sample_frequency);
-                            waveform = tracker::remove_state(optimizer::precompute(
+                            let generator = generator::Generator::new(args.sample_frequency);
+                            waveform = generator::remove_state(generator::precompute(
                                 &generator,
-                                tracker::initialize_state(waveform),
+                                generator::initialize_state(waveform),
                             ));
                             println!("optimizer::precompute returned: {:?}", &waveform);
                         }

@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use crate::parser::{BuiltInFn, Expr, simplify};
-use crate::tracker::{Operator, Slider, Waveform};
+use crate::waveform::{Operator, Slider, Waveform};
 use Expr::{Application, Bool, BuiltIn, Error, Float, List, Tuple};
 
 fn unary_op(
