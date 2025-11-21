@@ -6,8 +6,8 @@ use std::io::BufWriter;
 
 use fastrand;
 
-use crate::optimizer;
-use crate::waveform::{Operator, Slider, Waveform}; // TODO this is only for time_dependence
+use crate::optimizer; // TODO this is only for time_dependence
+use crate::waveform;
 
 #[derive(Debug, Clone)]
 pub struct FilterState {
@@ -30,9 +30,9 @@ pub struct ResState {
 
 pub struct SliderState {
     // The final values of sliders at the end of the last generate call
-    pub last_values: HashMap<Slider, f32>,
+    pub last_values: HashMap<waveform::Slider, f32>,
     // Any changes to the sliders since the last generate call
-    pub changes: HashMap<Slider, f32>,
+    pub changes: HashMap<waveform::Slider, f32>,
     // The length of the current buffer being generated
     pub buffer_length: usize,
     // The position in the buffer where the next sample will be written
@@ -48,6 +48,8 @@ pub struct Generator<'a> {
     pub capture_state:
         Option<RefCell<&'a mut HashMap<String, hound::WavWriter<BufWriter<std::fs::File>>>>>,
 }
+
+pub type Waveform = waveform::Waveform<FilterState, SinState, ResState>;
 
 // TODO add metrics for waveform expr depth and total ops
 
@@ -79,13 +81,8 @@ impl<'a> Generator<'a> {
     // function is pure). Note that position can be negative and that in that case, this
     // will always return at least desired.min(-position) samples (that is, waveforms are not
     // allowed to end before position 0).
-    pub fn generate(
-        &self,
-        waveform: &Waveform<FilterState, SinState, ResState>,
-        position: i64,
-        desired: usize,
-    ) -> Vec<f32> {
-        use Waveform::*;
+    pub fn generate(&self, waveform: &Waveform, position: i64, desired: usize) -> Vec<f32> {
+        use waveform::Waveform::*;
         if desired == 0 {
             return vec![];
         }
@@ -201,7 +198,7 @@ impl<'a> Generator<'a> {
                         let intercept = optimizer::simplify(remove_state(intercept));
                         if position == 0 {
                             match intercept {
-                                Waveform::Const(v) => {
+                                waveform::Waveform::Const(v) => {
                                     /*
                                     println!(
                                         "Using direct synthesis for sine at position: {}, desired: {}, slope: {:?}, intercept: {:?}",
@@ -398,6 +395,7 @@ impl<'a> Generator<'a> {
                 return out;
             }
             BinaryPointOp(op, a, b) => {
+                use waveform::Operator;
                 let desired = match op {
                     Operator::Multiply | Operator::Divide => {
                         // We need to make sure we generate a length based on the shorter waveform.
@@ -686,8 +684,8 @@ impl<'a> Generator<'a> {
     fn generate_binary_op(
         &self,
         op: fn(f32, f32) -> f32,
-        a: &Waveform<FilterState, SinState, ResState>,
-        b: &Waveform<FilterState, SinState, ResState>,
+        a: &Waveform,
+        b: &Waveform,
         position: i64,
         desired: usize,
     ) -> Vec<f32> {
@@ -805,13 +803,9 @@ impl<'a> Generator<'a> {
 
     // Returns the number of samples that `waveform` will generate starting from `position` or `max`, whichever is
     // smaller. When `position` is zero, this is the length of the waveform (or, again, `max`).
-    pub fn remaining(
-        &self,
-        waveform: &Waveform<FilterState, SinState, ResState>,
-        position: i64,
-        max: usize,
-    ) -> usize {
-        use Waveform::*;
+    pub fn remaining(&self, waveform: &Waveform, position: i64, max: usize) -> usize {
+        use waveform::Operator;
+        use waveform::Waveform::*;
         match waveform {
             Const { .. } => max,
             Time => max,
@@ -914,12 +908,13 @@ impl<'a> Generator<'a> {
     // than or equal in that range, or Maybe if that can't be determined cheaply.
     fn greater_or_equals_at(
         &self,
-        waveform: &Waveform<FilterState, SinState, ResState>,
+        waveform: &Waveform,
         value: f32,
         position: i64,
         max: usize,
     ) -> MaybeOption<usize> {
-        use Waveform::{Append, BinaryPointOp, Const, Time};
+        use waveform::Operator;
+        use waveform::Waveform::{Append, BinaryPointOp, Const, Time};
         match waveform {
             Const(v) if *v >= value => MaybeOption::Some(0),
             Const(_) => MaybeOption::None,
@@ -961,7 +956,7 @@ impl<'a> Generator<'a> {
                 }
             }
             BinaryPointOp(op @ (Operator::Add | Operator::Subtract), a, b) => {
-                use Operator::{Add, Subtract};
+                use waveform::Operator::{Add, Subtract};
                 // If a has an offset, we'd need to handle the overlapping and non-overlapping parts
                 // separately, and since we don't expect this to be called on non-optimized waveforms (except
                 // in tests), just give up.
@@ -990,15 +985,12 @@ impl<'a> Generator<'a> {
 
     // Returns the offset at which the next waveform should start (in samples). This is determined entirely by
     // `waveform` (this function is pure).
-    pub fn offset(
-        &self,
-        waveform: &Waveform<FilterState, SinState, ResState>,
-        max: usize,
-    ) -> usize {
+    pub fn offset(&self, waveform: &Waveform, max: usize) -> usize {
+        use waveform::Waveform::*;
         match waveform {
-            Waveform::Const { .. } | Waveform::Time | Waveform::Noise | Waveform::Fixed(_) => 0,
-            Waveform::Fin { waveform, .. } => self.offset(waveform, max),
-            Waveform::Seq { offset, .. } => match self.greater_or_equals_at(&offset, 0.0, 0, max) {
+            Const { .. } | Time | Noise | Fixed(_) => 0,
+            Fin { waveform, .. } => self.offset(waveform, max),
+            Seq { offset, .. } => match self.greater_or_equals_at(&offset, 0.0, 0, max) {
                 MaybeOption::Some(new_position) => new_position,
                 MaybeOption::None => max,
                 MaybeOption::Maybe => {
@@ -1008,10 +1000,10 @@ impl<'a> Generator<'a> {
                     );
                 }
             },
-            Waveform::Append(a, b) => (self.offset(a, max) + self.offset(b, max)).min(max),
-            Waveform::Sin(waveform, ..) => self.offset(waveform, max),
-            Waveform::Filter { waveform, .. } => self.offset(waveform, max),
-            Waveform::BinaryPointOp(_, a, b) => {
+            Append(a, b) => (self.offset(a, max) + self.offset(b, max)).min(max),
+            Sin(waveform, ..) => self.offset(waveform, max),
+            Filter { waveform, .. } => self.offset(waveform, max),
+            BinaryPointOp(_, a, b) => {
                 let a_offset = self.offset(a, max);
                 if a_offset == max {
                     return max;
@@ -1019,13 +1011,9 @@ impl<'a> Generator<'a> {
                 let b_offset = self.offset(b, max - a_offset);
                 return a_offset + b_offset;
             }
-            Waveform::Res { trigger, .. } | Waveform::Alt { trigger, .. } => {
-                self.offset(trigger, max)
-            }
-            Waveform::Slider { .. } => 0,
-            Waveform::Marked { waveform, .. } | Waveform::Captured { waveform, .. } => {
-                self.offset(waveform, max)
-            }
+            Res { trigger, .. } | Alt { trigger, .. } => self.offset(trigger, max),
+            Slider { .. } => 0,
+            Marked { waveform, .. } | Captured { waveform, .. } => self.offset(waveform, max),
         }
     }
 }
@@ -1039,7 +1027,7 @@ where
 {
     // The waveform is a function of the form: slope * Time + offset where both slope and offset may also depend on
     // Time.
-    QuasiLinear((Waveform<F, S, R>, Waveform<F, S, R>)),
+    QuasiLinear((waveform::Waveform<F, S, R>, waveform::Waveform<F, S, R>)),
     // The waveform depends on Time, but not in a quasi-linear way
     Nonlinear,
     // The waveform does not depend on Time
@@ -1047,14 +1035,15 @@ where
 }
 
 // Given a waveform, determine its time dependence.
-fn time_dependence<F, S, R>(waveform: &Waveform<F, S, R>) -> TimeDependence<F, S, R>
+fn time_dependence<F, S, R>(waveform: &waveform::Waveform<F, S, R>) -> TimeDependence<F, S, R>
 where
     F: Clone + Debug,
     R: Clone + Debug,
     S: Clone + Debug,
 {
     use TimeDependence::*;
-    use Waveform::*;
+    use waveform::Operator;
+    use waveform::Waveform::*;
     match waveform {
         Time => {
             return QuasiLinear((Const(1.0), Const(0.0)));
@@ -1142,8 +1131,8 @@ where
     }
 }
 
-pub fn initialize_state(waveform: Waveform) -> Waveform<FilterState, SinState, ResState> {
-    use Waveform::*;
+pub fn initialize_state(waveform: waveform::Waveform) -> Waveform {
+    use waveform::Waveform::*;
     match waveform {
         Const(value) => Const(value),
         Time => Time,
@@ -1219,13 +1208,13 @@ pub fn initialize_state(waveform: Waveform) -> Waveform<FilterState, SinState, R
     }
 }
 
-pub fn remove_state<F, S, R>(w: Waveform<F, S, R>) -> Waveform
+pub fn remove_state<F, S, R>(w: waveform::Waveform<F, S, R>) -> waveform::Waveform
 where
     F: Clone + Debug,
     R: Clone + Debug,
     S: Clone + Debug,
 {
-    use Waveform::*;
+    use waveform::Waveform::*;
     match w {
         Const(value) => Const(value),
         Time => Time,
@@ -1292,20 +1281,17 @@ where
 //
 // N.B. This isn't currently safe as values at negative positions aren't considered; for example, time is
 // negative before zero, but a fixed waveform is always zero before its start.
-pub fn precompute(
-    generator: &Generator,
-    waveform: Waveform<FilterState, SinState, ResState>,
-) -> Waveform<FilterState, SinState, ResState> {
+pub fn precompute(generator: &Generator, waveform: Waveform) -> Waveform {
     // TODO maybe move this whole thing into Generator?
 
     enum Result {
         Precomputed(Vec<f32>),
-        Infinite(Waveform<FilterState, SinState, ResState>),
-        Dynamic(Waveform<FilterState, SinState, ResState>),
+        Infinite(Waveform),
+        Dynamic(Waveform),
     }
 
-    impl Into<Waveform<FilterState, SinState, ResState>> for Result {
-        fn into(self) -> Waveform<FilterState, SinState, ResState> {
+    impl Into<Waveform> for Result {
+        fn into(self) -> Waveform {
             match self {
                 Result::Precomputed(v) => Waveform::Fixed(v),
                 Result::Infinite(w) => w,
@@ -1314,12 +1300,10 @@ pub fn precompute(
         }
     }
 
-    fn precompute_internal(
-        generator: &Generator,
-        waveform: Waveform<FilterState, SinState, ResState>,
-    ) -> Result {
+    fn precompute_internal(generator: &Generator, waveform: Waveform) -> Result {
         use Result::*;
-        use Waveform::*;
+        use waveform::Operator;
+        use waveform::Waveform::*;
 
         // TODO how do we feel about all of the usize::MAX here?
         // TODO there's slightly more repetition than I'd like... for example, lots of "if the child is Dynamic,
@@ -1556,8 +1540,12 @@ pub fn precompute(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use Waveform::{Append, BinaryPointOp, Const, Filter, Fin, Fixed, Res, Seq, Sin, Time};
     use std::f32;
+    use waveform::Operator;
+    use waveform::Waveform;
+    use waveform::Waveform::{
+        Append, BinaryPointOp, Const, Filter, Fin, Fixed, Res, Seq, Sin, Time,
+    };
 
     const MAX_LENGTH: usize = 1000;
 
@@ -1596,7 +1584,7 @@ mod tests {
         };
     }
 
-    fn run_tests(waveform: &Waveform, desired: Vec<f32>) {
+    fn run_tests(waveform: &waveform::Waveform, desired: Vec<f32>) {
         let length =
             new_test_generator(1).remaining(&initialize_state(waveform.clone()), 0, desired.len());
         for size in [1, 2, 4, 8] {

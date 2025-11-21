@@ -69,7 +69,7 @@ where
     I: Clone,
 {
     id: I,
-    waveform: waveform::Waveform<generator::FilterState, generator::SinState, generator::ResState>,
+    waveform: generator::Waveform,
     marks: Vec<Mark<I>>,
     position: usize,
     // Open files used by Captured waveforms
