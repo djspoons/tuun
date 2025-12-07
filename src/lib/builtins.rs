@@ -107,23 +107,53 @@ pub fn exp(arguments: Vec<Expr>) -> Expr {
 }
 
 pub fn sin(arguments: Vec<Expr>) -> Expr {
-    unary_op(arguments, "sin".to_string(), f32::sin, |waveform| {
-        Waveform::Sin(waveform, ())
-    })
+    // If there is only a single argument, assume that it's the phase in radians, that is, that this
+    // expression doesn't depend on time. With two arguments, assume the first is frequency in radians
+    // per second, and the second is phase in radians.
+    match &arguments[..] {
+        [Float(value)] => Float(value.sin()),
+        [Expr::Waveform(w)] => Expr::Waveform(Waveform::Sin {
+            frequency: Box::new(Waveform::Const(0.0)),
+            phase: Box::new(w.clone()),
+            state: (),
+        }),
+        [Float(freq), Float(phase)] => Expr::Waveform(Waveform::Sin {
+            frequency: Box::new(Waveform::Const(*freq)),
+            phase: Box::new(Waveform::Const(*phase)),
+            state: (),
+        }),
+        [Expr::Waveform(freq), Float(phase)] => Expr::Waveform(Waveform::Sin {
+            frequency: Box::new(freq.clone()),
+            phase: Box::new(Waveform::Const(*phase)),
+            state: (),
+        }),
+        [Float(freq), Expr::Waveform(phase)] => Expr::Waveform(Waveform::Sin {
+            frequency: Box::new(Waveform::Const(*freq)),
+            phase: Box::new(phase.clone()),
+            state: (),
+        }),
+        [Expr::Waveform(freq), Expr::Waveform(phase)] => Expr::Waveform(Waveform::Sin {
+            frequency: Box::new(freq.clone()),
+            phase: Box::new(phase.clone()),
+            state: (),
+        }),
+        _ => Expr::Error("Invalid argument for sin".to_string()),
+    }
 }
 
 pub fn cos(arguments: Vec<Expr>) -> Expr {
-    // TODO use unary_op
     match &arguments[..] {
         [Float(value)] => Expr::Float(value.cos()),
-        [Expr::Waveform(a)] => Expr::Waveform(Waveform::Sin(
-            Box::new(Waveform::BinaryPointOp(
+        [Expr::Waveform(a)] => Expr::Waveform(Waveform::Sin {
+            frequency: Box::new(Waveform::Const(0.0)),
+            phase: Box::new(Waveform::BinaryPointOp(
                 Operator::Add,
                 Box::new(a.clone()),
                 Box::new(Waveform::Const(std::f32::consts::FRAC_PI_2)),
             )),
-            (),
-        )),
+            state: (),
+        }),
+        // TODO handle other cases?
         _ => Expr::Error("Invalid argument for cos".to_string()),
     }
 }

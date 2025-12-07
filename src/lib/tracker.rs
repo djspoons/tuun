@@ -153,7 +153,6 @@ where
             // TODO Fin seems not quite right here, since its length might truncate any marks inside it
             Fin { waveform, .. }
             | Seq { waveform, .. }
-            | Sin(waveform, _)
             | Filter { waveform, .. }
             | Res {
                 trigger: waveform, ..
@@ -163,6 +162,13 @@ where
             }
             | Captured { waveform, .. } => {
                 self.process_marked(waveform_id, start, &*waveform, out);
+            }
+            Sin {
+                frequency, phase, ..
+            } => {
+                // TODO this is a little strange... but maybe correct?
+                self.process_marked(waveform_id, start, &*frequency, out);
+                self.process_marked(waveform_id, start, &*phase, out);
             }
             Append(a, b) => {
                 self.process_marked(waveform_id, start, &*a, out);
@@ -213,7 +219,6 @@ where
             }
             Fin { waveform, .. }
             | Seq { waveform, .. }
-            | Sin(waveform, _)
             | Filter { waveform, .. }
             | Res {
                 trigger: waveform, ..
@@ -224,7 +229,13 @@ where
             | Marked { waveform, .. } => {
                 self.process_captured(&*waveform, out);
             }
-            Append(a, b) | BinaryPointOp(_, a, b) => {
+            Sin {
+                frequency: a,
+                phase: b,
+                ..
+            }
+            | Append(a, b)
+            | BinaryPointOp(_, a, b) => {
                 self.process_captured(&*a, out);
                 self.process_captured(&*b, out);
             }
@@ -440,10 +451,8 @@ where
                             // TODO this is a little weird since we don't really care about sliders... but :shrug:
                             self.slider_state.buffer_position = 0;
                             generator.slider_state = Some(&self.slider_state);
-                            let mut map = HashMap::new();
                             // TODO do we want to capture here?
-                            let capture_state = RefCell::new(&mut map);
-                            generator.capture_state = Some(capture_state);
+                            generator.capture_state = None;
                             let out = generator.generate(&waveform, position as i64, delta_samples);
                             position += out.len();
                         }

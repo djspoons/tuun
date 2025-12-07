@@ -52,14 +52,14 @@ struct Args {
     #[arg(long,
         num_args(0..=1), // Allows --flag or --flag=value
         action = clap::ArgAction::Set,
-        default_value = "true", // Default if the flag is not present
-        default_missing_value = "true")]
+        default_value = "false", // Default if the flag is not present
+        default_missing_value = "false")]
     precompute: bool,
     #[arg(long,
         num_args(0..=1), // Allows --flag or --flag=value
         action = clap::ArgAction::Set,
-        default_value = "false", // Default if the flag is not present
-        default_missing_value = "false")]
+        default_value = "true", // Default if the flag is not present
+        default_missing_value = "true")]
     ui: bool, // When set to value, just runs each of the programs once then exits
     #[arg(short = 'O', long, default_value = ".")]
     output_dir: String, // Captures waveforms to the specified directory

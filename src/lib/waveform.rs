@@ -69,11 +69,15 @@ pub enum Waveform<FilterState = (), SinState = (), ResState = ()> {
         Box<Waveform<FilterState, SinState, ResState>>,
     ),
     /*
-     * Sin computes the sine of each sample in the given waveform. Note that Sin is used both as the basis for periodic
-     * waveforms (in which case its argument will depend on Time) and as a general-purpose sine function, for example,
-     * as a parameter of a Filter (in which it will not depend on Time).
+     * Sin computes the sine with the given frequency and phase (both in radians). Note that Sin is used both as the
+     * basis for periodic waveforms and also in cases when it does not depend on Time (in which case its frequency
+     * will be 0), for example, as a parameter of a Filter.
      */
-    Sin(Box<Waveform<FilterState, SinState, ResState>>, SinState),
+    Sin {
+        frequency: Box<Waveform<FilterState, SinState, ResState>>,
+        phase: Box<Waveform<FilterState, SinState, ResState>>,
+        state: SinState,
+    },
     /*
      * Filter implements an impulse response filter with feed-forward and feedback coefficients. Assumes that the first
      * feedback coefficient (a_0) is 1.0. If the filter has no feedback coefficients, then the filter has a finite
@@ -132,7 +136,7 @@ pub enum Waveform<FilterState = (), SinState = (), ResState = ()> {
     },
 }
 
-impl fmt::Display for Waveform<()> {
+impl<F, S, R> fmt::Display for Waveform<F, S, R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use Waveform::*;
         match self {
@@ -162,7 +166,9 @@ impl fmt::Display for Waveform<()> {
                 write!(f, "Seq({}, {})", offset, waveform)
             }
             Append(a, b) => write!(f, "Append({}, {})", a, b),
-            Sin(waveform, _) => write!(f, "Sin({})", waveform),
+            Sin {
+                frequency, phase, ..
+            } => write!(f, "Sin({} * Time + {})", frequency, phase),
             Filter {
                 waveform,
                 feed_forward,
