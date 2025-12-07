@@ -445,12 +445,20 @@ impl Renderer {
             // Draw the spectrum
             if !self.spectrum.is_empty() {
                 let spectrum_height = self.height - waveform_height;
-                let y_scale = -(self.samples.len() as f32).sqrt();
+                fn as_scalar(c: &Complex<f32>) -> f32 {
+                    c.abs().log10()
+                }
+                let y_scale_max = -self
+                    .spectrum
+                    .iter()
+                    .map(as_scalar)
+                    .reduce(f32::max)
+                    .unwrap();
                 self.canvas.set_draw_color(Color::RGB(0xFF, 0x00, 0x00));
-                let mut last_y = (waveform_height + 300) as i32;
-                for (i, f) in self.spectrum.iter().enumerate() {
+                let mut last_y = (waveform_height + 300) as i32; // i.e., 0
+                for (i, c) in self.spectrum.iter().enumerate() {
                     let x = ((i * 10) as f32 * x_scale) as i32;
-                    let y = (f.abs() / y_scale * (spectrum_height as f32 / 10.0)
+                    let y = (as_scalar(c) / y_scale_max * spectrum_height as f32
                         + (waveform_height + 300) as f32) as i32;
                     self.canvas.draw_line((x, last_y), (x + 9, y)).unwrap();
                     last_y = y;
