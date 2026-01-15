@@ -14,7 +14,7 @@ use metric::Metric;
 use renderer::{Mode, Renderer, WaveformId};
 use tracker::Command;
 use tuun::builtins;
-use tuun::generator;
+//use tuun::generator;
 use tuun::metric;
 use tuun::optimizer;
 use tuun::parser;
@@ -1002,12 +1002,16 @@ fn play_waveform_helper(
                             println!("optimizer::simplify returned: {:?}", &waveform);
                         }
                         if args.precompute {
+                            /* XXX
                             let generator = generator::Generator::new(args.sample_frequency);
                             waveform = generator::remove_state(generator::precompute(
                                 &generator,
                                 generator::initialize_state(waveform),
                             ));
-                            println!("optimizer::precompute returned: {:?}", &waveform);
+                            */
+                            println!(
+                                "optimizer::precompute disabled" /* returned: {:?}", &waveform */
+                            );
                         }
                         return WaveformOrMode::Waveform(waveform);
                     } else {

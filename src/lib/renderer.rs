@@ -714,13 +714,13 @@ pub fn beats_waveform(beats_per_minute: u32, beats_per_measure: u32) -> waveform
                 // TODO don't really need to such a long length here... could be just Fixed
                 length: Box::new(Waveform::BinaryPointOp(
                     Operator::Add,
-                    Box::new(Waveform::Time),
+                    Box::new(Waveform::Time(())),
                     Box::new(Waveform::Const(-seconds_per_beat.as_secs_f32())),
                 )),
                 waveform: Box::new(Waveform::Seq {
                     offset: Box::new(Waveform::BinaryPointOp(
                         Operator::Add,
-                        Box::new(Waveform::Time),
+                        Box::new(Waveform::Time(())),
                         Box::new(Waveform::Const(-seconds_per_beat.as_secs_f32())),
                     )),
                     waveform: Box::new(Waveform::Const(0.0)),

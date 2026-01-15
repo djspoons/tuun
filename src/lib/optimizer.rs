@@ -6,15 +6,15 @@ fn first_root(waveform: &Waveform) -> Option<Waveform> {
     match waveform {
         Const(0.0) => Some(Const(0.0)),
         Const(_) => None,
-        Time => Some(Const(0.0)),
+        Time(_) => Some(Const(0.0)),
         BinaryPointOp(Operator::Add, a, b) => match (&**a, &**b) {
             // TODO should really check that Time doesn't appear on the other side too
-            (Time, w) => Some(simplify(BinaryPointOp(
+            (Time(_), w) => Some(simplify(BinaryPointOp(
                 Operator::Multiply,
                 Box::new(w.clone()),
                 Box::new(Const(-1.0)),
             ))),
-            (w, Time) => Some(simplify(BinaryPointOp(
+            (w, Time(_)) => Some(simplify(BinaryPointOp(
                 Operator::Multiply,
                 Box::new(w.clone()),
                 Box::new(Const(-1.0)),
@@ -51,7 +51,7 @@ pub fn replace_seq(waveform: Waveform) -> (Waveform, Waveform) {
                     )),
                     Box::new(Const(-1.0)),
                 ));
-                BinaryPointOp(Operator::Add, Box::new(Time), Box::new(b))
+                BinaryPointOp(Operator::Add, Box::new(Time(())), Box::new(b))
             }
             (a_root, b_root) => {
                 panic!(
@@ -63,7 +63,7 @@ pub fn replace_seq(waveform: Waveform) -> (Waveform, Waveform) {
     }
 
     match waveform {
-        w @ (Const(_) | Time | Noise | Fixed(_)) => (Const(0.0), w),
+        w @ (Const(_) | Time(_) | Noise | Fixed(_, _)) => (Const(0.0), w),
         Fin { length, waveform } => {
             // Offset of the length waveform doesn't matter
             let (_, length) = replace_seq(*length);
@@ -83,12 +83,12 @@ pub fn replace_seq(waveform: Waveform) -> (Waveform, Waveform) {
             let (_, waveform) = replace_seq(*waveform);
             (offset, waveform)
         }
-        Append(a, b) => {
+        Append(a, b, state) => {
             let (a_offset, a) = replace_seq(*a);
             let (b_offset, b) = replace_seq(*b);
             (
                 add_offsets(a_offset, b_offset),
-                Append(Box::new(a), Box::new(b)),
+                Append(Box::new(a), Box::new(b), state),
             )
         }
         Sin {
@@ -142,6 +142,7 @@ pub fn replace_seq(waveform: Waveform) -> (Waveform, Waveform) {
                             waveform: Box::new(Const(0.0)),
                         }),
                         Box::new(b),
+                        (),
                     )),
                 ),
             )
@@ -163,6 +164,7 @@ pub fn replace_seq(waveform: Waveform) -> (Waveform, Waveform) {
                             waveform: Box::new(Const(1.0)),
                         }),
                         Box::new(b),
+                        (),
                     )),
                 ),
             )
@@ -235,15 +237,15 @@ pub fn simplify(waveform: Waveform) -> Waveform {
     use Waveform::*;
     match waveform {
         // No changes for these:
-        w @ (Const(_) | Time | Noise | Fixed(_)) => w,
+        w @ (Const(_) | Time(_) | Noise | Fixed(_, _)) => w,
         Fin { length, waveform } => {
             let length = simplify(*length);
             match length {
                 // Zero length
-                Const(a) if a >= 0.0 => Fixed(vec![]),
-                Fixed(v) if v.len() >= 1 && v[0] >= 0.0 => Fixed(vec![]),
+                Const(a) if a >= 0.0 => Fixed(vec![], ()),
+                Fixed(v, _) if v.len() >= 1 && v[0] >= 0.0 => Fixed(vec![], ()),
                 // TODO for longer Fixed, replace with * Fixed(vec![1.0; v.len()])?
-                Time => Fixed(vec![]),
+                Time(_) => Fixed(vec![], ()),
                 length => match simplify(*waveform) {
                     // Nested Fin's
                     Fin {
@@ -253,7 +255,7 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                         (Some(Const(a)), Some(Const(b))) => Fin {
                             length: Box::new(simplify(BinaryPointOp(
                                 Operator::Subtract,
-                                Box::new(Time),
+                                Box::new(Time(())),
                                 Box::new(Const(a.min(b))),
                             ))),
                             waveform,
@@ -276,14 +278,14 @@ pub fn simplify(waveform: Waveform) -> Waveform {
         Seq { .. } => {
             panic!("Seq should have been replaced by replace_seq before simplify is called");
         }
-        Append(a, b) => {
+        Append(a, b, _) => {
             let a = simplify(*a);
             let b = simplify(*b);
             match (a, b) {
-                (Fixed(a), b) if a.len() == 0 => b,
-                (a, Fixed(b)) if b.len() == 0 => a,
-                (Fixed(a), Fixed(b)) => Fixed([a, b].concat()),
-                (a, b) => Append(Box::new(a), Box::new(b)),
+                (Fixed(a, _), b) if a.len() == 0 => b,
+                (a, Fixed(b, _)) if b.len() == 0 => a,
+                (Fixed(a, _), Fixed(b, _)) => Fixed([a, b].concat(), ()),
+                (a, b) => Append(Box::new(a), Box::new(b), ()),
             }
         }
         // Check to see if we can compute the sine function:
@@ -296,9 +298,9 @@ pub fn simplify(waveform: Waveform) -> Waveform {
             let phase = simplify(*phase);
             match (frequency, phase) {
                 (Const(0.0), Const(p)) => Const(p.sin()),
-                (Const(0.0), Fixed(v)) => {
+                (Const(0.0), Fixed(v, _)) => {
                     let v = v.into_iter().map(|x| x.sin()).collect();
-                    Fixed(v)
+                    Fixed(v, ())
                 }
                 (frequency, phase) => Sin {
                     frequency: Box::new(frequency),
@@ -320,12 +322,12 @@ pub fn simplify(waveform: Waveform) -> Waveform {
         },
         BinaryPointOp(Operator::Add, a, b) => {
             match (simplify(*a), simplify(*b)) {
-                (Fixed(a), b) if a.len() == 0 => b,
-                (a, Fixed(b)) if b.len() == 0 => a,
+                (Fixed(a, _), b) if a.len() == 0 => b,
+                (a, Fixed(b, _)) if b.len() == 0 => a,
                 // NB. Can't collapse sums of Const(0.0) with finite waveforms as that would
                 // change the length of the output.
                 (Noise, Const(0.0)) => Noise,
-                (Time, Const(0.0)) => Time,
+                (Time(_), Const(0.0)) => Time(()),
                 (Const(a), Const(b)) => Const(a + b),
                 (Slider(s), Const(0.0)) => Slider(s),
                 // Commute (moving constants to the right)
@@ -354,7 +356,7 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                         length: a_length,
                         waveform: a,
                     },
-                    Append(b, c),
+                    Append(b, c, ()),
                 ) => match *b {
                     Fin {
                         length: b_length,
@@ -365,6 +367,7 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                             waveform: Box::new(BinaryPointOp(Operator::Add, a, b)),
                         }),
                         c,
+                        (),
                     )),
                     _ => BinaryPointOp(
                         Operator::Add,
@@ -372,7 +375,7 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                             length: a_length,
                             waveform: a,
                         }),
-                        Box::new(Append(b, c)),
+                        Box::new(Append(b, c, ())),
                     ),
                 },
                 (
@@ -402,12 +405,12 @@ pub fn simplify(waveform: Waveform) -> Waveform {
         )),
         BinaryPointOp(Operator::Multiply, a, b) => {
             match (simplify(*a), simplify(*b)) {
-                (Fixed(a), _) if a.len() == 0 => Fixed(vec![]),
-                (_, Fixed(b)) if b.len() == 0 => Fixed(vec![]),
+                (Fixed(a, _), _) if a.len() == 0 => Fixed(vec![], ()),
+                (_, Fixed(b, _)) if b.len() == 0 => Fixed(vec![], ()),
                 (Const(1.0), b) => b,
                 (a, Const(1.0)) => a,
                 (Const(a), Const(b)) => Const(a * b),
-                (Fixed(a), Const(b)) => Fixed(a.into_iter().map(|x| x * b).collect()),
+                (Fixed(a, _), Const(b)) => Fixed(a.into_iter().map(|x| x * b).collect(), ()),
                 // Commute (moving constants to the right)
                 (Const(a), b) => simplify(BinaryPointOp(
                     Operator::Multiply,
@@ -474,7 +477,7 @@ pub fn simplify(waveform: Waveform) -> Waveform {
         }
         BinaryPointOp(Operator::Divide, a, b) => {
             match (simplify(*a), simplify(*b)) {
-                (_, Fixed(b)) if b.len() == 0 => Fixed(vec![]),
+                (_, Fixed(b, _)) if b.len() == 0 => Fixed(vec![], ()),
                 // Prefer multiplication
                 (a, Const(b)) => simplify(BinaryPointOp(
                     Operator::Multiply,
@@ -671,7 +674,7 @@ mod tests {
             Box::new(Fin {
                 length: Box::new(BinaryPointOp(
                     Operator::Add,
-                    Box::new(Time),
+                    Box::new(Time(())),
                     Box::new(Const(-2.0)),
                 )),
                 waveform: Box::new(Const(3.0)),
@@ -679,7 +682,7 @@ mod tests {
             Box::new(Fin {
                 length: Box::new(BinaryPointOp(
                     Operator::Add,
-                    Box::new(Time),
+                    Box::new(Time(())),
                     Box::new(Const(-1.5)),
                 )),
                 waveform: Box::new(Const(5.0)),
@@ -690,7 +693,7 @@ mod tests {
             Fin {
                 length: Box::new(BinaryPointOp(
                     Operator::Add,
-                    Box::new(Time),
+                    Box::new(Time(())),
                     Box::new(Const(-1.5))
                 )),
                 waveform: Box::new(Const(15.0)),

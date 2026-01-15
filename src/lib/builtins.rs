@@ -296,7 +296,7 @@ pub fn append(arguments: Vec<Expr>) -> Expr {
             let mut result = a.clone();
             for b in rest {
                 if let Expr::Waveform(b) = b {
-                    result = Waveform::Append(Box::new(result), Box::new(b.clone()));
+                    result = Waveform::Append(Box::new(result), Box::new(b.clone()), ());
                 } else {
                     return Expr::Error(
                         "Expected more waveforms as arguments for append".to_string(),
@@ -319,7 +319,7 @@ pub fn fixed(arguments: Vec<Expr>) -> Expr {
                     _ => return Expr::Error("Invalid sample in fixed waveform".to_string()),
                 }
             }
-            Expr::Waveform(Waveform::Fixed(fixed_samples))
+            Expr::Waveform(Waveform::Fixed(fixed_samples, ()))
         }
         _ => Expr::Error("Invalid argument for fixed waveform".to_string()),
     }
@@ -411,7 +411,7 @@ pub fn waveform_convolution(mut arguments: Vec<Expr>) -> Expr {
                 (Expr::Waveform(a), Expr::Waveform(b)) => Waveform::Filter {
                     waveform: Box::new(a),
                     feed_forward: Box::new(b),
-                    feedback: Box::new(Waveform::Fixed(vec![])),
+                    feedback: Box::new(Waveform::Fixed(vec![], ())),
                     state: (),
                 },
                 _ => return Expr::Error("Invalid arguments for ~*".to_string()),
@@ -577,7 +577,7 @@ pub fn sequence(arguments: Vec<Expr>) -> Expr {
 pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
     context.push(("true".to_string(), Expr::Bool(true)));
     context.push(("false".to_string(), Expr::Bool(false)));
-    context.push(("time".to_string(), Expr::Waveform(Waveform::Time)));
+    context.push(("time".to_string(), Expr::Waveform(Waveform::Time(()))));
     context.push(("noise".to_string(), Expr::Waveform(Waveform::Noise)));
     context.push(("X".to_string(), Expr::Waveform(Waveform::Slider(Slider::X))));
     context.push(("Y".to_string(), Expr::Waveform(Waveform::Slider(Slider::Y))));

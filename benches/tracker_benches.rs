@@ -1,5 +1,4 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use std::hint::black_box;
 use tuun::builtins;
 use tuun::parser;
 
@@ -10,54 +9,61 @@ use tuun::waveform;
 fn bench_filter(c: &mut Criterion) {
     use waveform::Waveform::{Filter, Fixed, Time};
 
-    let generator = generator::Generator::new(44100);
-    let w1 = Filter {
-        waveform: Box::new(Time),
-        feed_forward: Box::new(Fixed(vec![0.5])),
-        feedback: Box::new(Fixed(vec![-0.5])),
-        state: (),
-    };
-    let w1 = generator::initialize_state(w1);
     c.bench_function("filter_1_1", |b| {
         b.iter(|| {
-            for i in 0..43 {
-                generator.generate(&w1, black_box(i * 1024), 1024);
+            let generator = generator::Generator::new(44100);
+            let w1 = Filter {
+                waveform: Box::new(Time(())),
+                feed_forward: Box::new(Fixed(vec![0.5], ())),
+                feedback: Box::new(Fixed(vec![-0.5], ())),
+                state: (),
+            };
+            let mut w1 = generator.initialize_state(w1, generator::INITIAL_STATE);
+            for _ in 0..43 {
+                let (tmp, _) = generator.generate(w1, 1024);
+                w1 = tmp;
             }
         });
     });
 
-    let w2 = Filter {
-        waveform: Box::new(Time),
-        feed_forward: Box::new(Fixed(vec![0.00107949, 0.00323847, 0.00323847, 0.00107949])),
-        feedback: Box::new(Fixed(vec![-2.56103158, 2.2132402, -0.64357271])),
-        state: (),
-    };
-    let w2 = generator::initialize_state(w2);
     c.bench_function("filter_4_3", |b| {
         b.iter(|| {
-            for i in 0..43 {
-                generator.generate(&w2, black_box(i * 1024), 1024);
+            let generator = generator::Generator::new(44100);
+            let w2 = Filter {
+                waveform: Box::new(Time(())),
+                feed_forward: Box::new(Fixed(
+                    vec![0.00107949, 0.00323847, 0.00323847, 0.00107949],
+                    (),
+                )),
+                feedback: Box::new(Fixed(vec![-2.56103158, 2.2132402, -0.64357271], ())),
+                state: (),
+            };
+            let mut w2 = generator.initialize_state(w2, generator::INITIAL_STATE);
+            for _ in 0..43 {
+                let (tmp, _) = generator.generate(w2, 1024);
+                w2 = tmp;
             }
         });
     });
 }
 
 fn bench_marks(c: &mut Criterion) {
-    let generator = generator::Generator::new(44100);
-    let mut ws = Vec::new();
-    for _ in 0..40 {
-        ws.push(parser::Expr::Waveform(renderer::beats_waveform(120, 4)));
-    }
-    let w = match builtins::sequence(vec![parser::Expr::List(ws)]) {
-        parser::Expr::Waveform(w) => w,
-        _ => panic!("Expected waveform"),
-    };
-    let w = generator::initialize_state(w);
     c.bench_function("marks_4_40", |b| {
         b.iter(|| {
-            for i in 0..3438 {
+            let generator = generator::Generator::new(44100);
+            let mut ws = Vec::new();
+            for _ in 0..40 {
+                ws.push(parser::Expr::Waveform(renderer::beats_waveform(120, 4)));
+            }
+            let w = match builtins::sequence(vec![parser::Expr::List(ws)]) {
+                parser::Expr::Waveform(w) => w,
+                _ => panic!("Expected waveform"),
+            };
+            let mut w = generator.initialize_state(w, generator::INITIAL_STATE);
+            for _ in 0..3438 {
                 // Approx. the length of the waveform
-                generator.generate(&w, black_box(i * 1024), 1024);
+                let (tmp, _) = generator.generate(w, 1024);
+                w = tmp;
             }
         });
     });
@@ -93,32 +99,35 @@ fn bench_large(c: &mut Criterion) {
         Err(e) => panic!("Failed to parse context: {:?}", e),
     }
 
-    let program = "triangle(55) ~+ (noise ~. 0.2) | R(1.0, 1.0) | seq(1) | mark(2)";
-    match parser::parse_program(program) {
-        Ok(expr) => {
-            println!("Parser returned: {:}", &expr);
-            match parser::simplify(&context, expr) {
+    c.bench_function("large_440", |b| {
+        b.iter(|| {
+            let program = "triangle(55) ~+ (noise ~. 0.2) | R(1.0, 1.0) | seq(1) | mark(2)";
+            match parser::parse_program(program) {
                 Ok(expr) => {
-                    println!("Simplify returned: {:}", &expr);
-                    if let parser::Expr::Waveform(waveform) = expr {
-                        let generator = generator::Generator::new(44100);
-                        let w = generator::initialize_state(waveform);
-                        c.bench_function("large_440", |b| {
-                            b.iter(|| {
-                                for i in 0..43 {
-                                    generator.generate(&w, black_box(i * 1024), 1024);
+                    println!("Parser returned: {:}", &expr);
+                    match parser::simplify(&context, expr) {
+                        Ok(expr) => {
+                            println!("Simplify returned: {:}", &expr);
+                            if let parser::Expr::Waveform(waveform) = expr {
+                                let generator = generator::Generator::new(44100);
+                                let mut w =
+                                    generator.initialize_state(waveform, generator::INITIAL_STATE);
+
+                                for _ in 0..43 {
+                                    let (tmp, _) = generator.generate(w, 1024);
+                                    w = tmp;
                                 }
-                            });
-                        });
-                    } else {
-                        panic!("Expected waveform");
+                            } else {
+                                panic!("Expected waveform");
+                            }
+                        }
+                        Err(e) => panic!("Simplify failed: {:?}", e),
                     }
                 }
-                Err(e) => panic!("Simplify failed: {:?}", e),
+                _ => panic!("Parse failed"),
             }
-        }
-        _ => panic!("Parse failed"),
-    }
+        });
+    });
 }
 
 criterion_group!(benches, bench_filter, bench_marks, bench_large);

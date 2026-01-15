@@ -11,6 +11,10 @@ bench = false
 path = "src/lib/mod.rs"
 bench = false
 
+[[bin]]
+name = "sweep"
+path = "src/misc/sweep.rs"
+
 [dependencies]
 chrono = "0.4.41"
 clap = { version = "4.5.39", features = ["derive"] }
@@ -32,3 +36,6 @@ criterion = { version = "0.5", features = ["html_reports"] }
 [[bench]]
 name = "tracker_benches"
 harness = false
+
+[profile.release]
+debug = true
