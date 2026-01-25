@@ -42,7 +42,7 @@ pub enum Waveform<State = ()> {
     /*
      * Fixed generates the same, finite, sequence of samples.
      */
-    Fixed(Vec<f32>, State), // XXXXX need state (position) or to keep a slice of what's left
+    Fixed(Vec<f32>, State),
     /*
      * Fin generates a finite waveform, truncating the underlying waveform. The length is determined
      * by the first point at which the `length` waveform is >= 0.0. For example, `Fin(Const(0.0), _)`
@@ -67,9 +67,11 @@ pub enum Waveform<State = ()> {
      */
     Append(Box<Waveform<State>>, Box<Waveform<State>>, State),
     /*
-     * Sin computes the sine with the given frequency and phase (both in radians). Note that Sin is used both as the
-     * basis for periodic waveforms and also in cases when it does not depend on Time (in which case its frequency
-     * will be 0), for example, as a parameter of a Filter.
+     * Sin computes the sine with the given frequency and phase (both in radians). Or put another way,
+     * it computes the sine of angle that changes according to the rate of the first parameter and the
+     * value of the second. Note that Sin is used both as the basis for periodic waveforms and also in
+     * cases when it does not depend on Time (in which case its frequency will be 0), for example, as
+     * a parameter of a Filter.
      */
     Sin {
         frequency: Box<Waveform<State>>,
@@ -200,10 +202,7 @@ impl<State> fmt::Display for Waveform<State> {
     }
 }
 
-pub fn remove_state<State>(w: Waveform<State>) -> Waveform<()>
-where
-    State: Clone + Debug, //XXXXX
-{
+pub fn remove_state<State>(w: Waveform<State>) -> Waveform<()> {
     use Waveform::*;
     match w {
         Const(value) => Const(value),

@@ -360,7 +360,11 @@ fn start_beats(
     command_sender
         .send(Command::Play {
             id: WaveformId::Beats(false),
-            waveform: renderer::beats_waveform(args.beats_per_minute, args.beats_per_measure),
+            waveform: optimizer::replace_seq(renderer::beats_waveform(
+                args.beats_per_minute,
+                args.beats_per_measure,
+            ))
+            .1,
             start: Instant::now(),
             repeat_every: Some(
                 renderer::duration_from_beats(args.beats_per_minute, args.beats_per_measure as u64)
@@ -377,10 +381,11 @@ fn start_beats(
                         command_sender
                             .send(Command::Play {
                                 id: WaveformId::Beats(true),
-                                waveform: renderer::beats_waveform(
+                                waveform: optimizer::replace_seq(renderer::beats_waveform(
                                     args.beats_per_minute,
                                     args.beats_per_measure,
-                                ),
+                                ))
+                                .1,
                                 start: mark.start + mark.duration,
                                 repeat_every: Some(
                                     renderer::duration_from_beats(

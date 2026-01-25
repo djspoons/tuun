@@ -28,7 +28,7 @@ The way that you use the Tuun language is up to you! There's nothing baked in ab
 
 ## Tuun Waveform Language
 
-Tuun has several primitive waveforms and waveform combinators. The first, `Const`, isn't exactly a "wave" but is used to create waves: `Const` generates a stream where every sample is the same value. This can be used with the `Sin` combinator to produce a sine wave. `Sin` takes two arguments: one for the angular frequency (in radians per second) and one for the phase. For example, the following will generate a tone at 440 Hz.
+Tuun has several primitive waveforms and waveform combinators. The first, `Const`, isn't exactly a "wave" but is used to create waves: `Const` generates a stream where every sample is the same value. This can be used with the `Sin` combinator to produce a sine wave. `Sin` takes two arguments: one for the angular frequency (in radians per second) and one for the phase offset. For example, the following will generate a tone at 440 Hz.
 
 ```
 Sin(Const(2 * PI * 440), Const(0))
@@ -38,7 +38,7 @@ This should be reminiscent of the definition from trigonometry class:
 $$
 \sin(t) = 2πft + \phi
 $$
-where $f$ is the desired frequency (in Hertz) and $\phi$ is the desired phase. Here, time is an implicit parameter to `Sin`.
+where $f$ is the desired frequency (in Hertz) and $\phi$ is the desired phase offset.
 
 Every waveform has an intrinsic property called its _length_, which may be finite or infinite. The lengths of `Const` is infinite, and the length of `Sin` is determined by its inputs: `Sin` generates one sample of output for each sample of inputs. This means that the expression above will generate a tone that goes on forever.
 
@@ -145,7 +145,7 @@ There are the arithmetic combinators that combine the samples themselves.
 
 There are three combinators for describing periodic waveforms:
 
- * `Sin(a, b)` - generates a sine wave with frequency `a` and phase `b`
+ * `Sin(a, b)` - generates a sine wave with frequency `a` and phase offset `b`
  * `Alt(trigger, a, b)` - generates samples from `a` when `trigger` is positive and from `b` otherwise
  * `Res(trigger, a)` - restarts the second waveform each time the `trigger` switches from negative to positive
 
@@ -216,7 +216,7 @@ Tuun supports special syntax for chords and sequences – by "chords", we really
 
 All waveforms are values, and Tuun provides built-in functions to create them. When a floating point value appears in the context of a waveform, it's implicitly coerced into a constant waveform. Functions like `sin` are overloaded so that they can take either floating point values or waveforms. Note that, by convention, the specification language built-ins for waveforms (like `fin`, `seq`, and `time`) are written in lowercase.
 
-We can now give a slightly more extensive version of the harmonics example, in part by defining a helper function that creates overtones.
+We can now give a slightly more extensive version of the harmonics example, in part by defining a helper function that creates overtones. The dollar sign is used a shorthand for a sine wave with the given frequency in hertz and no phase offset.
 
 ```
 $ = fn(freq) => sin(2 * pi * freq, 0),
@@ -230,7 +230,7 @@ The `overtone` function creates a waveform by multiplying `freq` by `x` and then
 | `3 * 440`            | `1320`                                                 |
 | `overtone(440)(3)`   | `Sin(Const(2 * PI * 1320), Const(0)) ~. Const(.3333)`  |
 
-Notice that, since `*` is overloaded in the specification language, the function `$` (which creates a sine wave) can take the frequency a single floating point value or as a waveform.
+Notice that, since `*` is overloaded in the specification language, the function `$` can take the frequency a single floating point value or as a waveform. (In the second case, the frequency will vary with time.)
 
 We can also revisit our envelope example from above. This example makes use of the `|` operator, which denotes reverse application (enabling you to write the argument before the function you are passing it to). It's conventional in Tuun to write filters like ADSR in a curried-form, as shown below, so that they can be chained together.
 

@@ -167,15 +167,21 @@ where
                 self.process_marked(waveform_id, start, &*frequency, out);
                 self.process_marked(waveform_id, start, &*phase, out);
             }
-            Append(a, b, _) => {
+            Append(a, b, state) => {
                 self.process_marked(waveform_id, start, &*a, out);
                 let (_, a_len) = self.generator.remaining(
-                    *a.clone(),
+                    self.generator.initialize_state(*a.clone(), state.clone()),
                     10 * self.sample_frequency as usize, // XXX
                 );
                 let start =
                     start + Duration::from_secs_f32(a_len as f32 / self.sample_frequency as f32);
-                self.process_marked(waveform_id, start, &*b, out);
+                // XXXXX state.clone()? Or INITIAL_POSITION... or something else?
+                self.process_marked(
+                    waveform_id,
+                    start,
+                    &self.generator.initialize_state(*b.clone(), state.clone()),
+                    out,
+                );
             }
             BinaryPointOp(_, a, b) => {
                 self.process_marked(waveform_id, start, &*a, out);
