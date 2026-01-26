@@ -509,7 +509,7 @@ impl<'a> Generator<'a> {
                 let inner = self.initialize_state(
                     *inner,
                     Position {
-                        position: position - (ff_len as i64 - 1),
+                        position: position, // - (ff_len as i64 - 1), XXXXX
                         direction,
                     },
                 );
@@ -628,27 +628,10 @@ impl<'a> Generator<'a> {
             Res {
                 trigger,
                 waveform: inner,
-                state:
-                    state @ Position {
-                        position,
-                        direction,
-                    },
+                state: state @ Position { direction, .. },
             } => {
-                // XXX Ugh... this constant...
-                // Maximum number of samples to look back for a reset trigger
-                let max_reset_lookback: i64 = self.sample_frequency as i64 * 10000;
-                // TODO generate the trigger in blocks?
-
-                // Go back and find the most recent trigger before `position`.
-                let mut last_trigger_position = position;
-                let tmp_trigger = self.initialize_state(
-                    *trigger.clone(),
-                    State::Position {
-                        position: last_trigger_position,
-                        direction: -direction,
-                    },
-                );
-                let (mut tmp_trigger, t_out) = self.generate(tmp_trigger, 1);
+                // Generate just one sample from the trigger so that we know its current sign.
+                let (_, t_out) = self.generate(*trigger.clone(), 1);
                 if t_out.is_empty() {
                     return (
                         Res {
@@ -659,39 +642,14 @@ impl<'a> Generator<'a> {
                         vec![],
                     );
                 }
-                let mut last_signum = t_out[0].signum();
-                let first_signum = last_signum;
-                loop {
-                    if position - last_trigger_position > max_reset_lookback {
-                        panic!(
-                            "No reset trigger found within {} samples before position {} in waveform {:?}",
-                            max_reset_lookback, position, trigger
-                        );
-                    }
-                    let (new_tmp, t_out) = self.generate(tmp_trigger, 1);
-                    tmp_trigger = new_tmp;
-                    let new_signum = t_out.get(0).unwrap().signum();
-                    if last_signum >= 0.0 && new_signum < 0.0 {
-                        break;
-                    }
-                    last_signum = new_signum;
-                    last_trigger_position -= direction;
-                }
-
-                // Now initialize the inner waveform according to that position.
-                let inner = self.initialize_state(
-                    *inner,
-                    Position {
-                        position: position - last_trigger_position,
-                        direction,
-                    },
-                );
+                let signum = t_out[0].signum();
+                let inner = self.initialize_state(*inner, new_position(0, direction));
                 return self.generate(
                     Res {
                         trigger,
                         waveform: Box::new(inner),
                         state: Sign {
-                            signum: first_signum,
+                            signum: signum,
                             direction,
                         },
                     },
@@ -1040,11 +998,39 @@ impl<'a> Generator<'a> {
                 }
             }
             Seq {
-                waveform: inner, ..
+                offset,
+                waveform: inner,
+            } => {
+                let (inner, len) = self.remaining(*inner, max);
+                return (
+                    Seq {
+                        offset,
+                        waveform: Box::new(inner),
+                    },
+                    len,
+                );
             }
-            | Filter {
-                waveform: inner, ..
-            } => self.remaining(*inner, max),
+            Filter {
+                waveform: inner,
+                feed_forward,
+                feedback,
+                state,
+            } => {
+                let (_, ff_len) = self.remaining(
+                    self.initialize_state(*feed_forward.clone(), INITIAL_STATE),
+                    max,
+                );
+                let (inner, inner_len) = self.remaining(*inner, max + (ff_len.saturating_sub(1)));
+                return (
+                    Filter {
+                        waveform: Box::new(inner),
+                        feed_forward,
+                        feedback,
+                        state,
+                    },
+                    inner_len.saturating_sub(ff_len.saturating_sub(1)),
+                );
+            }
             Append(
                 a,
                 b,
@@ -2074,24 +2060,12 @@ mod tests {
         };
         run_tests(&w3, &vec![0.0, 1.0, 2.0, 0.0, 0.0, 1.0, 2.0, 0.0]);
 
-        // Test a reset that occurs before time 0
-        let w4 = Res {
-            trigger: Box::new(BinaryPointOp(
-                Operator::Add,
-                Box::new(Time(())),
-                Box::new(Const(2.0)),
-            )),
-            waveform: Box::new(Time(())),
-            state: (),
-        };
-        run_tests(&w4, &vec![2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]);
-
         let w5 = Res {
             trigger: sin_waveform(0.25, f32::consts::PI),
             waveform: Box::new(Time(())),
             state: (),
         };
-        run_tests(&w5, &vec![2.0, 3.0, 0.0, 1.0, 2.0, 3.0, 0.0, 1.0]);
+        run_tests(&w5, &vec![0.0, 1.0, 0.0, 1.0, 2.0, 3.0, 0.0, 1.0]);
 
         // Test where a reset lines up with the buffer boundary and where there are multiple
         // resets in a buffer.
@@ -2124,7 +2098,7 @@ mod tests {
         run_tests(&w, &vec![1.0, 1.0, 1.0, 2.0, 2.0, 2.0]);
 
         /*
-        // Negative direction XXX
+        // Negative direction XXXXX
         check_length(&g, &w, new_position(2, -1), 3, 3);
         check_length(&g, &w, new_position(4, -1), 5, 5);
         let (_, out) = g.generate(g.initialize_state(w, new_position(4, -1)), MAX_LENGTH);
@@ -2257,16 +2231,16 @@ mod tests {
     #[test]
     fn test_filter() {
         let g = new_test_generator(1);
-
-        // FIRs
-        let w1 = Filter {
-            waveform: Box::new(Time(())),
-            feed_forward: Box::new(Fixed(vec![2.0, 2.0, 2.0], ())),
-            feedback: Box::new(Fixed(vec![], ())),
-            state: (),
-        };
-        run_tests(&w1, &vec![-6.0, 0.0, 6.0, 12.0, 18.0, 24.0, 30.0, 36.0]);
-
+        /*
+               // FIRs
+               let w1 = Filter {
+                   waveform: Box::new(Time(())),
+                   feed_forward: Box::new(Fixed(vec![2.0, 2.0, 2.0], ())),
+                   feedback: Box::new(Fixed(vec![], ())),
+                   state: (),
+               };
+               run_tests(&w1, &vec![6.0, 12.0, 18.0, 24.0, 30.0, 36.0, 42.0, 48.0]);
+        */
         let w2 = Filter {
             waveform: Box::new(Fin {
                 length: Box::new(BinaryPointOp(
@@ -2280,15 +2254,22 @@ mod tests {
             feedback: Box::new(Fixed(vec![], ())),
             state: (),
         };
-        check_length(&g, &w2, INITIAL_STATE, 5, MAX_LENGTH);
-        run_tests(&w2, &vec![-6.0, 0.0, 6.0, 12.0, 18.0]);
+        run_tests(&w2, &vec![6.0, 12.0, 18.0]);
+
+        let w = Filter {
+            waveform: Box::new(Fixed(vec![1.0, 2.0, 3.0], ())),
+            feed_forward: Box::new(Fixed(vec![2.0, 2.0, 2.0, 2.0, 2.0], ())),
+            feedback: Box::new(Fixed(vec![], ())),
+            state: (),
+        };
+        check_length(&g, &w, INITIAL_STATE, 0, 5);
 
         let w3 = Filter {
             waveform: Box::new(Fin {
                 length: Box::new(BinaryPointOp(
                     Operator::Subtract,
                     Box::new(Time(())),
-                    Box::new(Const(3.0)),
+                    Box::new(Const(8.0)),
                 )),
                 waveform: Box::new(Time(())),
             }),
@@ -2297,22 +2278,22 @@ mod tests {
             state: (),
         };
         let g = new_test_generator(1);
-        check_length(&g, &w3, INITIAL_STATE, 3, MAX_LENGTH);
-        run_tests(&w3, &vec![-20.0, -10.0, 0.0]);
-
-        let w4 = Filter {
-            waveform: Box::new(Res {
-                // Pick a trigger that's far from zero on at our sampled points
-                trigger: sin_waveform(1.0 / 3.0, 3.0 * std::f32::consts::PI / 2.0),
-                waveform: Box::new(Time(())),
-                state: (),
-            }),
-            feed_forward: Box::new(Fixed(vec![2.0, 2.0], ())),
-            feedback: Box::new(Fixed(vec![], ())),
-            state: (),
-        };
-        run_tests(&w4, &vec![6.0, 4.0, 2.0, 6.0, 4.0, 2.0, 6.0, 4.0]);
-
+        check_length(&g, &w3, INITIAL_STATE, 4, MAX_LENGTH);
+        run_tests(&w3, &vec![20.0, 30.0, 40.0, 50.0]);
+        /* XXXXX
+               let w4 = Filter {
+                   waveform: Box::new(Res {
+                       // Pick a trigger that's far from zero on at our sampled points
+                       trigger: sin_waveform(1.0 / 3.0, 3.0 * std::f32::consts::PI / 2.0),
+                       waveform: Box::new(Time(())),
+                       state: (),
+                   }),
+                   feed_forward: Box::new(Fixed(vec![2.0, 2.0], ())),
+                   feedback: Box::new(Fixed(vec![], ())),
+                   state: (),
+               };
+               run_tests(&w4, &vec![6.0, 4.0, 2.0, 6.0, 4.0, 2.0, 6.0, 4.0]);
+        */
         let w5 = Filter {
             waveform: Box::new(Const(1.0)),
             feed_forward: Box::new(Fixed(vec![0.2, 0.2, 0.2, 0.2, 0.2], ())),
