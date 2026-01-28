@@ -2,9 +2,9 @@
 
 Tuun is an interactive sound and music generation system based inspired by programming language design.
 
-Tuun serves two primary purposes:
+Tuun serves several purposes, roughly in this order:
 
- 1. As a vehicle to help me (@djspoons) learn about sound and music and learn Rust.
+ 1. As a vehicle to help me (@djspoons) learn about sound and music and Rust.
  2. As a system for interactively exploring how sounds and music are created.
  3. As a system for performing and recording music.
 
@@ -25,19 +25,19 @@ export LIBRARY_PATH="$LIBRARY_PATH:$(brew --prefix)/lib"
 
 For help running Tuun:
 ```
-cargo run -- --help
+cargo run --bin tuun -- --help
 ```
 
 Tuun reads specifications both from files and in the user interface. Files supplied with the `--context_file` (or `-C`) flag should be bindings of the form `var = expr` separated by commas. Files supplied with the `--program_file` (or `-P`) flag should be expressions (one per line) that evaluate to waveforms. Specifications supplied the `--program` (or `-p`) should also be expressions that evaluate to waveforms. All of these flags can be supplied multiple times. 
 
 ```
-cargo run -- -C context.tuun -p '$440 * Qw'
+cargo run --bin tuun -- -C context.tuun -p '$440 * Qw'
 ```
 
 Or for a slightly more complex example:
 
 ```
-cargo run -- -C context.tuun -p 'let h = harmonica(Q, 440) in <[h, h, h, h]>' -p 'pwm((X + 1) * 0.5, 440)'
+cargo run --bin tuun -- -C context.tuun -p 'let h = harmonica(Q, 440) in <[h, h, h, h]>' -p 'pulse((X + 1) * 0.5, Y * 440) * 0.1'
 ```
 Try playing the second program, holding the option key, and moving your mouse to the left and right.
 
