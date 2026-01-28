@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 extern crate sdl2;
 use sdl2::audio;
 
-use crate::generator::{self, INITIAL_STATE};
+use crate::generator;
 use crate::waveform;
 
 pub enum Command<I> {
@@ -158,30 +158,24 @@ where
                 trigger: waveform, ..
             }
             | Captured { waveform, .. } => {
-                self.process_marked(waveform_id, start, &*waveform, out);
+                self.process_marked(waveform_id, start, waveform.as_ref(), out);
             }
             Sin {
                 frequency, phase, ..
             } => {
                 // TODO this is a little strange... but maybe correct?
-                self.process_marked(waveform_id, start, &*frequency, out);
-                self.process_marked(waveform_id, start, &*phase, out);
+                self.process_marked(waveform_id, start, frequency.as_ref(), out);
+                self.process_marked(waveform_id, start, phase.as_ref(), out);
             }
-            Append(a, b, state) => {
+            Append(a, b) => {
                 self.process_marked(waveform_id, start, &*a, out);
                 let (_, a_len) = self.generator.remaining(
-                    self.generator.initialize_state(*a.clone(), state.clone()),
+                    *a.clone(),
                     10 * self.sample_frequency as usize, // XXX
                 );
                 let start =
                     start + Duration::from_secs_f32(a_len as f32 / self.sample_frequency as f32);
-                // XXXXX state.clone()? Or INITIAL_POSITION... or something else?
-                self.process_marked(
-                    waveform_id,
-                    start,
-                    &self.generator.initialize_state(*b.clone(), state.clone()),
-                    out,
-                );
+                self.process_marked(waveform_id, start, b.as_ref(), out);
             }
             BinaryPointOp(_, a, b) => {
                 self.process_marked(waveform_id, start, &*a, out);
@@ -236,7 +230,7 @@ where
                 phase: b,
                 ..
             }
-            | Append(a, b, _)
+            | Append(a, b)
             | BinaryPointOp(_, a, b) => {
                 self.process_captured(&*a, out);
                 self.process_captured(&*b, out);
@@ -358,9 +352,7 @@ where
                     );
                 }
                 let mut marks = Vec::new();
-                let waveform = self
-                    .generator
-                    .initialize_state(waveform, generator::INITIAL_STATE);
+                let waveform = generator::initialize_state(waveform);
                 self.process_marked(&id, start, &waveform, &mut marks);
                 self.pending_waveforms.push(PendingWaveform {
                     id,
@@ -430,9 +422,7 @@ where
                         pending.id, pending.start, segment_start
                     );
                     */
-                    let mut waveform = self
-                        .generator
-                        .initialize_state(pending.waveform.clone(), generator::INITIAL_STATE);
+                    let mut waveform = generator::initialize_state(pending.waveform.clone());
                     if pending.start < segment_start {
                         // If the pending waveform starts before the segment start, then we need to
                         // adjust the position.
@@ -484,9 +474,7 @@ where
                         self.process_marked(
                             &pending.id,
                             pending.start,
-                            &self
-                                .generator
-                                .initialize_state(pending.waveform.clone(), INITIAL_STATE),
+                            &generator::initialize_state(pending.waveform.clone()),
                             &mut pending.marks,
                         );
                         self.pending_waveforms.push(pending);

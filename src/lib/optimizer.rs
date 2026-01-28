@@ -83,12 +83,12 @@ pub fn replace_seq(waveform: Waveform) -> (Waveform, Waveform) {
             let (_, waveform) = replace_seq(*waveform);
             (offset, waveform)
         }
-        Append(a, b, state) => {
+        Append(a, b) => {
             let (a_offset, a) = replace_seq(*a);
             let (b_offset, b) = replace_seq(*b);
             (
                 add_offsets(a_offset, b_offset),
-                Append(Box::new(a), Box::new(b), state),
+                Append(Box::new(a), Box::new(b)),
             )
         }
         Sin {
@@ -142,7 +142,6 @@ pub fn replace_seq(waveform: Waveform) -> (Waveform, Waveform) {
                             waveform: Box::new(Const(0.0)),
                         }),
                         Box::new(b),
-                        (),
                     )),
                 ),
             )
@@ -164,7 +163,6 @@ pub fn replace_seq(waveform: Waveform) -> (Waveform, Waveform) {
                             waveform: Box::new(Const(1.0)),
                         }),
                         Box::new(b),
-                        (),
                     )),
                 ),
             )
@@ -278,14 +276,14 @@ pub fn simplify(waveform: Waveform) -> Waveform {
         Seq { .. } => {
             panic!("Seq should have been replaced by replace_seq before simplify is called");
         }
-        Append(a, b, _) => {
+        Append(a, b) => {
             let a = simplify(*a);
             let b = simplify(*b);
             match (a, b) {
                 (Fixed(a, _), b) if a.len() == 0 => b,
                 (a, Fixed(b, _)) if b.len() == 0 => a,
                 (Fixed(a, _), Fixed(b, _)) => Fixed([a, b].concat(), ()),
-                (a, b) => Append(Box::new(a), Box::new(b), ()),
+                (a, b) => Append(Box::new(a), Box::new(b)),
             }
         }
         // Check to see if we can compute the sine function:
@@ -356,7 +354,7 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                         length: a_length,
                         waveform: a,
                     },
-                    Append(b, c, ()),
+                    Append(b, c),
                 ) => match *b {
                     Fin {
                         length: b_length,
@@ -367,7 +365,6 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                             waveform: Box::new(BinaryPointOp(Operator::Add, a, b)),
                         }),
                         c,
-                        (),
                     )),
                     _ => BinaryPointOp(
                         Operator::Add,
@@ -375,7 +372,7 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                             length: a_length,
                             waveform: a,
                         }),
-                        Box::new(Append(b, c, ())),
+                        Box::new(Append(b, c)),
                     ),
                 },
                 (

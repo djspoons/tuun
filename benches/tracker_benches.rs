@@ -18,7 +18,7 @@ fn bench_filter(c: &mut Criterion) {
                 feedback: Box::new(Fixed(vec![-0.5], ())),
                 state: (),
             };
-            let mut w1 = generator.initialize_state(w1, generator::INITIAL_STATE);
+            let mut w1 = generator::initialize_state(w1);
             for _ in 0..43 {
                 let (tmp, _) = generator.generate(w1, 1024);
                 w1 = tmp;
@@ -38,7 +38,7 @@ fn bench_filter(c: &mut Criterion) {
                 feedback: Box::new(Fixed(vec![-2.56103158, 2.2132402, -0.64357271], ())),
                 state: (),
             };
-            let mut w2 = generator.initialize_state(w2, generator::INITIAL_STATE);
+            let mut w2 = generator::initialize_state(w2);
             for _ in 0..43 {
                 let (tmp, _) = generator.generate(w2, 1024);
                 w2 = tmp;
@@ -59,7 +59,7 @@ fn bench_marks(c: &mut Criterion) {
                 parser::Expr::Waveform(w) => w,
                 _ => panic!("Expected waveform"),
             };
-            let mut w = generator.initialize_state(w, generator::INITIAL_STATE);
+            let mut w = generator::initialize_state(w);
             for _ in 0..3438 {
                 // Approx. the length of the waveform
                 let (tmp, _) = generator.generate(w, 1024);
@@ -110,8 +110,7 @@ fn bench_large(c: &mut Criterion) {
                             println!("Simplify returned: {:}", &expr);
                             if let parser::Expr::Waveform(waveform) = expr {
                                 let generator = generator::Generator::new(44100);
-                                let mut w =
-                                    generator.initialize_state(waveform, generator::INITIAL_STATE);
+                                let mut w = generator::initialize_state(waveform);
 
                                 for _ in 0..43 {
                                     let (tmp, _) = generator.generate(w, 1024);

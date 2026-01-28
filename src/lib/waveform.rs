@@ -65,7 +65,7 @@ pub enum Waveform<State = ()> {
      * Append concatenates two waveforms, generating all samples from the first waveform and
      * then all samples from the second (regardless of the offset of the first).
      */
-    Append(Box<Waveform<State>>, Box<Waveform<State>>, State),
+    Append(Box<Waveform<State>>, Box<Waveform<State>>),
     /*
      * Sin computes the sine with the given frequency and phase (both in radians). Or put another way,
      * it computes the sine of angle that changes according to the rate of the first parameter and the
@@ -161,7 +161,7 @@ impl<State> fmt::Display for Waveform<State> {
             Seq { offset, waveform } => {
                 write!(f, "Seq({}, {})", offset, waveform)
             }
-            Append(a, b, _) => write!(f, "Append({}, {})", a, b),
+            Append(a, b) => write!(f, "Append({}, {})", a, b),
             Sin {
                 frequency, phase, ..
             } => write!(f, "Sin({} * Time + {})", frequency, phase),
@@ -202,6 +202,83 @@ impl<State> fmt::Display for Waveform<State> {
     }
 }
 
+pub fn initialize_state<S, T>(waveform: Waveform<S>, state: T) -> Waveform<T>
+where
+    T: Clone,
+{
+    use Waveform::*;
+    match waveform {
+        Const(value) => Const(value),
+        Time(_) => Time(state),
+        Noise => Noise,
+        Fixed(samples, _) => Fixed(samples, state),
+        Fin { length, waveform } => Fin {
+            length: Box::new(initialize_state(*length, state.clone())),
+            waveform: Box::new(initialize_state(*waveform, state)),
+        },
+        Seq { offset, waveform } => Seq {
+            offset: Box::new(initialize_state(*offset, state.clone())),
+            waveform: Box::new(initialize_state(*waveform, state)),
+        },
+        Append(a, b) => Append(
+            Box::new(initialize_state(*a, state.clone())),
+            Box::new(initialize_state(*b, state)),
+        ),
+        Sin {
+            frequency, phase, ..
+        } => Sin {
+            frequency: Box::new(initialize_state(*frequency, state.clone())),
+            phase: Box::new(initialize_state(*phase, state.clone())),
+            state: state,
+        },
+        Filter {
+            waveform,
+            feed_forward,
+            feedback,
+            ..
+        } => Filter {
+            // Don't initialize the inner waveform until we can determine the length of feed_forward
+            waveform: Box::new(initialize_state(*waveform, state.clone())),
+            feed_forward: Box::new(initialize_state(*feed_forward, state.clone())),
+            feedback: Box::new(initialize_state(*feedback, state.clone())),
+            state: state,
+        },
+        BinaryPointOp(op, a, b) => BinaryPointOp(
+            op,
+            Box::new(initialize_state(*a, state.clone())),
+            Box::new(initialize_state(*b, state)),
+        ),
+        Res {
+            trigger, waveform, ..
+        } => Res {
+            trigger: Box::new(initialize_state(*trigger, state.clone())),
+            waveform: Box::new(initialize_state(*waveform, state.clone())),
+            state: state,
+        },
+        Alt {
+            trigger,
+            positive_waveform,
+            negative_waveform,
+        } => Alt {
+            trigger: Box::new(initialize_state(*trigger, state.clone())),
+            positive_waveform: Box::new(initialize_state(*positive_waveform, state.clone())),
+            negative_waveform: Box::new(initialize_state(*negative_waveform, state)),
+        },
+        Slider(slider) => Slider(slider),
+        Marked { id, waveform } => Marked {
+            id,
+            waveform: Box::new(initialize_state(*waveform, state)),
+        },
+        Captured {
+            file_stem,
+            waveform,
+        } => Captured {
+            file_stem,
+            waveform: Box::new(initialize_state(*waveform, state)),
+        },
+    }
+}
+
 pub fn remove_state<State>(w: Waveform<State>) -> Waveform<()> {
     use Waveform::*;
     match w {
@@ -217,7 +294,7 @@ pub fn remove_state<State>(w: Waveform<State>) -> Waveform<()> {
             offset: Box::new(remove_state(*offset)),
             waveform: Box::new(remove_state(*waveform)),
         },
-        Append(a, b, _) => Append(Box::new(remove_state(*a)), Box::new(remove_state(*b)), ()),
+        Append(a, b) => Append(Box::new(remove_state(*a)), Box::new(remove_state(*b))),
         Sin {
             frequency, phase, ..
         } => Sin {

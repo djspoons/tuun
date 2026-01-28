@@ -296,7 +296,7 @@ pub fn append(arguments: Vec<Expr>) -> Expr {
             let mut result = a.clone();
             for b in rest {
                 if let Expr::Waveform(b) = b {
-                    result = Waveform::Append(Box::new(result), Box::new(b.clone()), ());
+                    result = Waveform::Append(Box::new(result), Box::new(b.clone()));
                 } else {
                     return Expr::Error(
                         "Expected more waveforms as arguments for append".to_string(),
