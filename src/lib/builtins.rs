@@ -107,23 +107,53 @@ pub fn exp(arguments: Vec<Expr>) -> Expr {
 }
 
 pub fn sin(arguments: Vec<Expr>) -> Expr {
-    unary_op(arguments, "sin".to_string(), f32::sin, |waveform| {
-        Waveform::Sin(waveform, ())
-    })
+    // If there is only a single argument, assume that it's the phase in radians, that is, that this
+    // expression doesn't depend on time. With two arguments, assume the first is frequency in radians
+    // per second, and the second is phase in radians.
+    match &arguments[..] {
+        [Float(value)] => Float(value.sin()),
+        [Expr::Waveform(w)] => Expr::Waveform(Waveform::Sin {
+            frequency: Box::new(Waveform::Const(0.0)),
+            phase: Box::new(w.clone()),
+            state: (),
+        }),
+        [Float(freq), Float(phase)] => Expr::Waveform(Waveform::Sin {
+            frequency: Box::new(Waveform::Const(*freq)),
+            phase: Box::new(Waveform::Const(*phase)),
+            state: (),
+        }),
+        [Expr::Waveform(freq), Float(phase)] => Expr::Waveform(Waveform::Sin {
+            frequency: Box::new(freq.clone()),
+            phase: Box::new(Waveform::Const(*phase)),
+            state: (),
+        }),
+        [Float(freq), Expr::Waveform(phase)] => Expr::Waveform(Waveform::Sin {
+            frequency: Box::new(Waveform::Const(*freq)),
+            phase: Box::new(phase.clone()),
+            state: (),
+        }),
+        [Expr::Waveform(freq), Expr::Waveform(phase)] => Expr::Waveform(Waveform::Sin {
+            frequency: Box::new(freq.clone()),
+            phase: Box::new(phase.clone()),
+            state: (),
+        }),
+        _ => Expr::Error("Invalid argument for sin".to_string()),
+    }
 }
 
 pub fn cos(arguments: Vec<Expr>) -> Expr {
-    // TODO use unary_op
     match &arguments[..] {
         [Float(value)] => Expr::Float(value.cos()),
-        [Expr::Waveform(a)] => Expr::Waveform(Waveform::Sin(
-            Box::new(Waveform::BinaryPointOp(
+        [Expr::Waveform(a)] => Expr::Waveform(Waveform::Sin {
+            frequency: Box::new(Waveform::Const(0.0)),
+            phase: Box::new(Waveform::BinaryPointOp(
                 Operator::Add,
                 Box::new(a.clone()),
                 Box::new(Waveform::Const(std::f32::consts::FRAC_PI_2)),
             )),
-            (),
-        )),
+            state: (),
+        }),
+        // TODO handle other cases?
         _ => Expr::Error("Invalid argument for cos".to_string()),
     }
 }
@@ -289,7 +319,7 @@ pub fn fixed(arguments: Vec<Expr>) -> Expr {
                     _ => return Expr::Error("Invalid sample in fixed waveform".to_string()),
                 }
             }
-            Expr::Waveform(Waveform::Fixed(fixed_samples))
+            Expr::Waveform(Waveform::Fixed(fixed_samples, ()))
         }
         _ => Expr::Error("Invalid argument for fixed waveform".to_string()),
     }
@@ -381,7 +411,7 @@ pub fn waveform_convolution(mut arguments: Vec<Expr>) -> Expr {
                 (Expr::Waveform(a), Expr::Waveform(b)) => Waveform::Filter {
                     waveform: Box::new(a),
                     feed_forward: Box::new(b),
-                    feedback: Box::new(Waveform::Fixed(vec![])),
+                    feedback: Box::new(Waveform::Fixed(vec![], ())),
                     state: (),
                 },
                 _ => return Expr::Error("Invalid arguments for ~*".to_string()),
@@ -547,7 +577,7 @@ pub fn sequence(arguments: Vec<Expr>) -> Expr {
 pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
     context.push(("true".to_string(), Expr::Bool(true)));
     context.push(("false".to_string(), Expr::Bool(false)));
-    context.push(("time".to_string(), Expr::Waveform(Waveform::Time)));
+    context.push(("time".to_string(), Expr::Waveform(Waveform::Time(()))));
     context.push(("noise".to_string(), Expr::Waveform(Waveform::Noise)));
     context.push(("X".to_string(), Expr::Waveform(Waveform::Slider(Slider::X))));
     context.push(("Y".to_string(), Expr::Waveform(Waveform::Slider(Slider::Y))));

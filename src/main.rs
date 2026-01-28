@@ -14,7 +14,7 @@ use metric::Metric;
 use renderer::{Mode, Renderer, WaveformId};
 use tracker::Command;
 use tuun::builtins;
-use tuun::generator;
+//use tuun::generator;
 use tuun::metric;
 use tuun::optimizer;
 use tuun::parser;
@@ -58,8 +58,8 @@ struct Args {
     #[arg(long,
         num_args(0..=1), // Allows --flag or --flag=value
         action = clap::ArgAction::Set,
-        default_value = "false", // Default if the flag is not present
-        default_missing_value = "false")]
+        default_value = "true", // Default if the flag is not present
+        default_missing_value = "true")]
     ui: bool, // When set to value, just runs each of the programs once then exits
     #[arg(short = 'O', long, default_value = ".")]
     output_dir: String, // Captures waveforms to the specified directory
@@ -360,7 +360,11 @@ fn start_beats(
     command_sender
         .send(Command::Play {
             id: WaveformId::Beats(false),
-            waveform: renderer::beats_waveform(args.beats_per_minute, args.beats_per_measure),
+            waveform: optimizer::replace_seq(renderer::beats_waveform(
+                args.beats_per_minute,
+                args.beats_per_measure,
+            ))
+            .1,
             start: Instant::now(),
             repeat_every: Some(
                 renderer::duration_from_beats(args.beats_per_minute, args.beats_per_measure as u64)
@@ -377,10 +381,11 @@ fn start_beats(
                         command_sender
                             .send(Command::Play {
                                 id: WaveformId::Beats(true),
-                                waveform: renderer::beats_waveform(
+                                waveform: optimizer::replace_seq(renderer::beats_waveform(
                                     args.beats_per_minute,
                                     args.beats_per_measure,
-                                ),
+                                ))
+                                .1,
                                 start: mark.start + mark.duration,
                                 repeat_every: Some(
                                     renderer::duration_from_beats(
@@ -1002,12 +1007,16 @@ fn play_waveform_helper(
                             println!("optimizer::simplify returned: {:?}", &waveform);
                         }
                         if args.precompute {
+                            /* XXX
                             let generator = generator::Generator::new(args.sample_frequency);
                             waveform = generator::remove_state(generator::precompute(
                                 &generator,
                                 generator::initialize_state(waveform),
                             ));
-                            println!("optimizer::precompute returned: {:?}", &waveform);
+                            */
+                            println!(
+                                "optimizer::precompute disabled" /* returned: {:?}", &waveform */
+                            );
                         }
                         return WaveformOrMode::Waveform(waveform);
                     } else {

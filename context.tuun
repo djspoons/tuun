@@ -5,7 +5,7 @@ max = fn(x, y) => if x < y then y else x,
 // WAVES
 pi = 3.14159265,
 // Computes a sine wave at the given frequency in hertz (which must be a float or waveform).
-$ = fn(freq) => sin(2 * pi * freq * time),
+$ = fn(freq) => sin(2 * pi * freq, 0),
 sawtooth = fn(freq) => (res($freq, freq * time) - 0.5) * 2,
 square = fn(freq) => alt($freq, 1, -1),
 triangle = fn(freq) => let
@@ -21,7 +21,7 @@ pulse = fn(width, freq) =>
   let
     // We want the "high" amplitude to come at the beginning of the waveform, so offset the
     // phase.
-    s = sin(2 * pi * freq * time + pi * 0.5 + width * pi * 0.5),
+    s = sin(2 * pi * freq, pi * 0.5 + width * pi * 0.5),
     slope = 4 * freq,
     // The shift above is not quite perfect, however, so we shift by one additional sample here.
     a = (time + 1/sampling_frequency) * slope - 1,

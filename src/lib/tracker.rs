@@ -71,7 +71,6 @@ where
     id: I,
     waveform: generator::Waveform,
     marks: Vec<Mark<I>>,
-    position: usize,
     // Open files used by Captured waveforms
     capture_state: HashMap<String, hound::WavWriter<BufWriter<std::fs::File>>>,
 }
@@ -79,16 +78,17 @@ where
 #[derive(Debug, Clone)]
 struct PendingWaveform<I> {
     id: I,
-    waveform: waveform::Waveform,
+    waveform: generator::Waveform,
     start: Instant,
     repeat_every: Option<Duration>,
     marks: Vec<Mark<I>>,
 }
 
-pub struct Tracker<I>
+pub struct Tracker<'a, I>
 where
     I: Clone + Send,
 {
+    generator: generator::Generator<'a>,
     sample_frequency: i32,
     captured_output_dir: path::PathBuf,
     captured_date_format: String,
@@ -103,7 +103,7 @@ where
     slider_state: generator::SliderState,
 }
 
-impl<I> Tracker<I>
+impl<'a, I> Tracker<'a, I>
 where
     I: Clone + Send,
 {
@@ -113,8 +113,9 @@ where
         captured_date_format: String,
         command_receiver: mpsc::Receiver<Command<I>>,
         status_sender: mpsc::Sender<Status<I>>,
-    ) -> Tracker<I> {
+    ) -> Tracker<'a, I> {
         return Tracker {
+            generator: generator::Generator::new(sample_frequency),
             sample_frequency,
             captured_output_dir,
             captured_date_format,
@@ -138,22 +139,17 @@ where
         &self,
         waveform_id: &I,
         start: Instant,
-        waveform: &waveform::Waveform<
-            generator::FilterState,
-            generator::SinState,
-            generator::ResState,
-        >,
+        waveform: &generator::Waveform,
         out: &mut Vec<Mark<I>>,
     ) {
         use waveform::Waveform::*;
         match waveform {
-            Const(_) | Time | Noise | Fixed(_) | Slider { .. } => {
+            Const(_) | Time(_) | Noise | Fixed(_, _) | Slider { .. } => {
                 return;
             }
             // TODO Fin seems not quite right here, since its length might truncate any marks inside it
             Fin { waveform, .. }
             | Seq { waveform, .. }
-            | Sin(waveform, _)
             | Filter { waveform, .. }
             | Res {
                 trigger: waveform, ..
@@ -162,58 +158,63 @@ where
                 trigger: waveform, ..
             }
             | Captured { waveform, .. } => {
-                self.process_marked(waveform_id, start, &*waveform, out);
+                self.process_marked(waveform_id, start, waveform.as_ref(), out);
+            }
+            Sin {
+                frequency, phase, ..
+            } => {
+                // TODO this is a little strange... but maybe correct?
+                self.process_marked(waveform_id, start, frequency.as_ref(), out);
+                self.process_marked(waveform_id, start, phase.as_ref(), out);
             }
             Append(a, b) => {
                 self.process_marked(waveform_id, start, &*a, out);
-                let remaining = generator::Generator::new(self.sample_frequency).remaining(
-                    &*a,
-                    0,
+                let (_, a_len) = self.generator.remaining(
+                    *a.clone(),
                     10 * self.sample_frequency as usize, // XXX
                 );
-                let start = start
-                    + Duration::from_secs_f32(remaining as f32 / self.sample_frequency as f32);
-                self.process_marked(waveform_id, start, &*b, out);
+                let start =
+                    start + Duration::from_secs_f32(a_len as f32 / self.sample_frequency as f32);
+                self.process_marked(waveform_id, start, b.as_ref(), out);
             }
             BinaryPointOp(_, a, b) => {
                 self.process_marked(waveform_id, start, &*a, out);
                 // TODO do something about this constant for max
-                let offset = generator::Generator::new(self.sample_frequency)
+                let offset = self
+                    .generator
                     .offset(&*a, 10 * self.sample_frequency as usize);
                 let start =
                     start + Duration::from_secs_f32(offset as f32 / self.sample_frequency as f32);
                 self.process_marked(waveform_id, start, &*b, out);
             }
             Marked { waveform, id } => {
-                let length = generator::Generator::new(self.sample_frequency).remaining(
-                    &*waveform.clone(),
-                    0,
+                let (_, len) = self.generator.remaining(
+                    *waveform.clone(),
                     10 * self.sample_frequency as usize, // XXX
                 );
                 out.push(Mark {
                     waveform_id: waveform_id.clone(),
                     mark_id: *id,
                     start,
-                    duration: Duration::from_secs_f32(length as f32 / self.sample_frequency as f32),
+                    duration: Duration::from_secs_f32(len as f32 / self.sample_frequency as f32),
                 });
                 self.process_marked(waveform_id, start, &*waveform, out);
             }
         }
     }
 
-    fn process_captured<F, S, R>(
+    fn process_captured<State>(
         &self,
-        waveform: &waveform::Waveform<F, S, R>,
+        waveform: &waveform::Waveform<State>,
         out: &mut HashMap<String, hound::WavWriter<BufWriter<std::fs::File>>>,
     ) {
         use waveform::Waveform::*;
         match waveform {
-            Const(_) | Time | Noise | Fixed(_) | Slider { .. } => {
+            Const(_) | Time(_) | Noise | Fixed(_, _) | Slider { .. } => {
                 return;
             }
             Fin { waveform, .. }
             | Seq { waveform, .. }
-            | Sin(waveform, _)
             | Filter { waveform, .. }
             | Res {
                 trigger: waveform, ..
@@ -224,7 +225,13 @@ where
             | Marked { waveform, .. } => {
                 self.process_captured(&*waveform, out);
             }
-            Append(a, b) | BinaryPointOp(_, a, b) => {
+            Sin {
+                frequency: a,
+                phase: b,
+                ..
+            }
+            | Append(a, b)
+            | BinaryPointOp(_, a, b) => {
                 self.process_captured(&*a, out);
                 self.process_captured(&*b, out);
             }
@@ -256,7 +263,7 @@ where
     }
 }
 
-impl<'a, I> audio::AudioCallback for Tracker<I>
+impl<'a, I> audio::AudioCallback for Tracker<'a, I>
 where
     I: Clone + PartialEq + Send + Debug,
 {
@@ -320,7 +327,7 @@ where
     }
 }
 
-impl<I> Tracker<I>
+impl<'a, I> Tracker<'a, I>
 where
     I: Clone + PartialEq + Debug + Send,
 {
@@ -345,12 +352,8 @@ where
                     );
                 }
                 let mut marks = Vec::new();
-                self.process_marked(
-                    &id,
-                    start,
-                    &generator::initialize_state(waveform.clone()),
-                    &mut marks,
-                );
+                let waveform = generator::initialize_state(waveform);
+                self.process_marked(&id, start, &waveform, &mut marks);
                 self.pending_waveforms.push(PendingWaveform {
                     id,
                     waveform,
@@ -419,8 +422,7 @@ where
                         pending.id, pending.start, segment_start
                     );
                     */
-                    let waveform = generator::initialize_state(pending.waveform.clone());
-                    let mut position = 0;
+                    let mut waveform = generator::initialize_state(pending.waveform.clone());
                     if pending.start < segment_start {
                         // If the pending waveform starts before the segment start, then we need to
                         // adjust the position.
@@ -440,12 +442,9 @@ where
                             // TODO this is a little weird since we don't really care about sliders... but :shrug:
                             self.slider_state.buffer_position = 0;
                             generator.slider_state = Some(&self.slider_state);
-                            let mut map = HashMap::new();
                             // TODO do we want to capture here?
-                            let capture_state = RefCell::new(&mut map);
-                            generator.capture_state = Some(capture_state);
-                            let out = generator.generate(&waveform, position as i64, delta_samples);
-                            position += out.len();
+                            generator.capture_state = None;
+                            (waveform, _) = generator.generate(waveform, delta_samples);
                         }
                     }
                     let mut capture_state = HashMap::new();
@@ -454,7 +453,6 @@ where
                         id: pending.id.clone(),
                         waveform,
                         marks: pending.marks,
-                        position,
                         capture_state,
                     });
 
@@ -516,24 +514,24 @@ where
                     generator.slider_state = Some(&self.slider_state);
                     let capture_state = RefCell::new(&mut active.capture_state);
                     generator.capture_state = Some(capture_state);
-                    tmp = generator.generate(
-                        &active.waveform,
-                        active.position as i64,
+                    let (waveform, out) = generator.generate(
+                        active.waveform.clone(), // XXX avoid this clone?
                         segment_length,
                     );
+                    active.waveform = waveform;
+                    tmp = out;
                 }
                 if tmp.len() > segment_length {
                     panic!(
-                        "Generated more samples than desired: {} > {} for waveform id {:?} at position {}: {:?}",
+                        "Generated more samples than desired: {} > {} for waveform id {:?}: {:?}",
                         tmp.len(),
                         segment_length,
                         active.id,
-                        active.position,
                         active.waveform
                     );
                 }
                 if i == 0 {
-                    // If this is the first, just overwrite the out buffer
+                    // If this is the first, just overwrite the buffer
                     (out[filled..filled + tmp.len()]).copy_from_slice(&tmp);
                 } else {
                     // If this is not the first waveform, then we need to add the samples to the out buffer
@@ -557,7 +555,6 @@ where
                     let active = self.active_waveforms.remove(i);
                     finished.push(active);
                 } else {
-                    active.position += segment_length;
                     i += 1;
                 }
             }
