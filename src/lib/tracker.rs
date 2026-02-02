@@ -423,6 +423,8 @@ where
                     );
                     */
                     let mut waveform = generator::initialize_state(pending.waveform.clone());
+                    let mut capture_state = HashMap::new();
+                    self.process_captured(&waveform, &mut capture_state);
                     if pending.start < segment_start {
                         // If the pending waveform starts before the segment start, then we need to
                         // adjust the position.
@@ -442,13 +444,11 @@ where
                             // TODO this is a little weird since we don't really care about sliders... but :shrug:
                             self.slider_state.buffer_position = 0;
                             generator.slider_state = Some(&self.slider_state);
-                            // TODO do we want to capture here?
-                            generator.capture_state = None;
+                            let capture_state = RefCell::new(&mut capture_state);
+                            generator.capture_state = Some(capture_state);
                             (waveform, _) = generator.generate(waveform, delta_samples);
                         }
                     }
-                    let mut capture_state = HashMap::new();
-                    self.process_captured(&waveform, &mut capture_state);
                     self.active_waveforms.push(ActiveWaveform {
                         id: pending.id.clone(),
                         waveform,

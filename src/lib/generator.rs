@@ -525,9 +525,8 @@ impl<'a> Generator<'a> {
                 //  - that means Sin wouldn't set previous_phases at position 0
                 let (inner, out) = self.generate(*inner, desired);
                 if self.capture_state.is_none() {
-                    // This occurs, for example, in cases where we need to advance the position of a waveform
-                    // XXX do we still need this now that remaining advances?
-                    return (inner, out);
+                    // This occurs, for example, when precomputing parts of a waveform.
+                    return (Captured { file_stem, waveform: Box::new(inner) }, out);
                 }
                 match self
                     .capture_state

@@ -14,7 +14,6 @@ use metric::Metric;
 use renderer::{Mode, Renderer, WaveformId};
 use tracker::Command;
 use tuun::builtins;
-//use tuun::generator;
 use tuun::metric;
 use tuun::optimizer;
 use tuun::parser;
