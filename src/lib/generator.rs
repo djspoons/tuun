@@ -526,7 +526,13 @@ impl<'a> Generator<'a> {
                 let (inner, out) = self.generate(*inner, desired);
                 if self.capture_state.is_none() {
                     // This occurs, for example, when precomputing parts of a waveform.
-                    return (Captured { file_stem, waveform: Box::new(inner) }, out);
+                    return (
+                        Captured {
+                            file_stem,
+                            waveform: Box::new(inner),
+                        },
+                        out,
+                    );
                 }
                 match self
                     .capture_state

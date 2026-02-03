@@ -5,7 +5,7 @@ max = fn(x, y) => if x < y then y else x,
 // WAVES
 pi = 3.14159265,
 // Computes a sine wave at the given frequency in hertz (which must be a float or waveform).
-$ = fn(freq) => sin(2 * pi * freq, 0),
+$ = fn(freq) => sin(2*pi * freq, 0),
 sawtooth = fn(freq) => (res($freq, freq * time) - 0.5) * 2,
 square = fn(freq) => alt($freq, 1, -1),
 triangle = fn(freq) => let
@@ -16,18 +16,11 @@ triangle = fn(freq) => let
   in alt(t, res(t, a), res(t, b)),
 // Computes a pulse wave with the given width. width should be a number (or waveform) between
 // 0.0 and 1.0, where 0.0 is a square wave (i.e., 50% duty cycle). If width isn't constant,
-// then this is a PWM.
+// then this is a PWM oscillator.
 pulse = fn(width, freq) =>
   let
-    // We want the "high" amplitude to come at the beginning of the waveform, so offset the
-    // phase.
-    s = sin(2 * pi * freq, pi * 0.5 + width * pi * 0.5),
-    slope = 4 * freq,
-    // The shift above is not quite perfect, however, so we shift by one additional sample here.
-    a = (time + 1/sampling_frequency) * slope - 1,
-    b = (time + 1/sampling_frequency) * -slope + 3,
     // Use a triangle wave (which is lowered by `width`) as the driver for the pulse.
-    tri = alt(s, res(s, a), res(s, b))
+    tri = triangle(freq)
   in
     alt(tri - width, 1, -1),
 

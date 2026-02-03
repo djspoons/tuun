@@ -3,5 +3,6 @@ $220
 square(220)
 sawtooth(220)
 triangle(220)
-pwm(0.2, 220)
-pwm(0.7, 220)
+pulse(0.8, 220)
+pulse($50, 220) // PWM
+let fc = 220, I = 6, D = 2, fm = D/2 * fc in $(fc + (I * fc * sin(2*pi*fm, pi/2)))
