@@ -1,28 +1,34 @@
 
 // math
 max = fn(x, y) => if x < y then y else x,
+pi = 3.14159265,
 
 // WAVES
-pi = 3.14159265,
-// Computes a sine wave at the given frequency in hertz (which must be a float or waveform).
+// By convention, waveforms should start with the positive portion (or at least they should when
+// no offset is applied).
+
+// `$` computes a sine wave at the given frequency in hertz (which must be a float or waveform).
 $ = fn(freq) => sin(2*pi * freq, 0),
-sawtooth = fn(freq) => (res($freq, freq * time) - 0.5) * 2,
+// `sawtooth` computes a sawtooth wave at the given frequency in hertz.
+sawtooth = fn(freq) => (res($freq, -freq * time) + 0.5) * 2,
+// `square` computes a square wave at the given frequency in hertz.
 square = fn(freq) => alt($freq, 1, -1),
+// `triangle` computes a triangle wave at the given frequency in hertz.
 triangle = fn(freq) => let
     t = $freq,
     slope = 4 * freq,
     a = time * slope - 1,
     b = time * -slope + 3
   in alt(t, res(t, a), res(t, b)),
-// Computes a pulse wave with the given width. width should be a number (or waveform) between
-// 0.0 and 1.0, where 0.0 is a square wave (i.e., 50% duty cycle). If width isn't constant,
+// Pulse computes a pulse wave with the given width. `width` should be a number (or waveform)
+// between 0.0 and 1.0, where 0.0 is a square wave (i.e., 50% duty cycle). If width isn't constant,
 // then this is a PWM oscillator.
 pulse = fn(width, freq) =>
   let
-    // Use a triangle wave (which is lowered by `width`) as the driver for the pulse.
-    tri = triangle(freq)
+    // Use a sawtooth wave (which is "lowered" by `width`) as the driver for the pulse.
+    s = sawtooth(freq)
   in
-    alt(tri - width, 1, -1),
+    alt(s - width, 1, -1),
 
 
 // HELPERS
@@ -92,6 +98,7 @@ lpf = fn(Q, fc) =>
 // From Welsh's Synthesizer Cookbook
 harmonica = fn(dur, freq) =>
   let
+    // These are approximately Welsh's values but not exactly
     osc1 = pulse(0.93 + $(1.6) * 0.05, freq),
     osc2 = res(osc1, pulse(0.7, add_cents(add_semitones(freq, 8), 7))),
     osc = osc1 * 0.375 + osc2 * 0.5,
