@@ -342,12 +342,12 @@ where
             } => {
                 if let Some(duration) = repeat_every {
                     println!(
-                        "Received command to play waveform {:?} at {:?} and every {:?}: {:?}",
+                        "Received command to play waveform {:?} at {:?} and every {:?}: {}",
                         id, start, duration, waveform
                     );
                 } else {
                     println!(
-                        "Received command to play waveform {:?} at {:?}: {:?}",
+                        "Received command to play waveform {:?} at {:?}: {}",
                         id, start, waveform
                     );
                 }

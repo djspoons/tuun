@@ -140,13 +140,13 @@ impl<State> fmt::Display for Waveform<State> {
             Time(_) => write!(f, "Time"),
             Noise => write!(f, "Noise"),
             Fixed(samples, _) => {
-                if samples.len() < 10 {
+                if samples.len() <= 10 {
                     write!(f, "Fixed({:?})", samples)
                 } else {
                     write!(
                         f,
                         "Fixed([{}, ...], len={})",
-                        samples[..9]
+                        samples[..10]
                             .iter()
                             .map(|x| format!("{}", x))
                             .collect::<Vec<String>>()
@@ -164,7 +164,7 @@ impl<State> fmt::Display for Waveform<State> {
             Append(a, b) => write!(f, "Append({}, {})", a, b),
             Sin {
                 frequency, phase, ..
-            } => write!(f, "Sin({} * Time + {})", frequency, phase),
+            } => write!(f, "Sin({}, {})", frequency, phase),
             Filter {
                 waveform,
                 feed_forward,

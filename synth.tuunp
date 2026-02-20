@@ -4,5 +4,7 @@ square(220)
 sawtooth(220)
 triangle(220)
 pulse(0.8, 220)
-pulse($50, 220) // PWM
-let fc = 220, I = 6, D = 2, fm = D/2 * fc in $(fc + (I * fc * sin(2*pi*fm, pi/2)))
+// PWM
+pulse($44, 220)
+// PM
+let fc = 220, I = linear(0,0.2), D = 3, fm = D/2 * fc in sin(2*pi*fc, I * sin(2*pi*fm, 0))

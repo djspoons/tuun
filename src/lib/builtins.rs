@@ -141,6 +141,7 @@ pub fn sin(arguments: Vec<Expr>) -> Expr {
     }
 }
 
+// TODO: can this be moved to context?
 pub fn cos(arguments: Vec<Expr>) -> Expr {
     match &arguments[..] {
         [Float(value)] => Expr::Float(value.cos()),

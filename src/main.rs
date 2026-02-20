@@ -14,6 +14,7 @@ use metric::Metric;
 use renderer::{Mode, Renderer, WaveformId};
 use tracker::Command;
 use tuun::builtins;
+use tuun::generator;
 use tuun::metric;
 use tuun::optimizer;
 use tuun::parser;
@@ -826,6 +827,7 @@ fn process_event<I>(
                             programs[program_index - 1].len(),
                             programs[program_index - 1].as_str(),
                             args,
+                            false,
                         ) {
                             WaveformOrMode::Waveform(waveform) => {
                                 println!("Waveform definition for program {}:", program_index);
@@ -936,7 +938,14 @@ fn play_waveform(
     keymod: sdl2::keyboard::Mod,
 ) -> (Vec<(String, parser::Expr)>, Mode) {
     use sdl2::keyboard::Mod;
-    match play_waveform_helper(&context, program_index, cursor_position, program, args) {
+    match play_waveform_helper(
+        &context,
+        program_index,
+        cursor_position,
+        program,
+        args,
+        true,
+    ) {
         WaveformOrMode::Waveform(waveform) => {
             let message;
             let repeat_every;
@@ -991,31 +1000,27 @@ fn play_waveform_helper(
     cursor_position: usize,
     program: &str,
     args: &Args,
+    should_precompute: bool,
 ) -> WaveformOrMode {
     match parser::parse_program(program) {
         Ok(expr) => {
-            println!("Parser returned: {:}", &expr);
+            println!("Parser returned: {}", &expr);
             match parser::simplify(context, expr) {
                 Ok(expr) => {
-                    println!("parser::simplify returned: {:}", &expr);
+                    println!("parser::simplify returned: {}", &expr);
                     if let parser::Expr::Waveform(waveform) = expr {
                         let (_, mut waveform) = optimizer::replace_seq(waveform);
-                        println!("replace_seq returned: {:?}", &waveform);
+                        println!("replace_seq returned: {}", &waveform);
                         if args.optimize {
                             waveform = optimizer::simplify(waveform);
-                            println!("optimizer::simplify returned: {:?}", &waveform);
+                            println!("optimizer::simplify returned: {}", &waveform);
                         }
-                        if args.precompute {
-                            /* XXX
+                        if should_precompute && args.precompute {
                             let generator = generator::Generator::new(args.sample_frequency);
-                            waveform = generator::remove_state(generator::precompute(
-                                &generator,
-                                generator::initialize_state(waveform),
-                            ));
-                            */
-                            println!(
-                                "optimizer::precompute disabled" /* returned: {:?}", &waveform */
+                            waveform = waveform::remove_state(
+                                generator.precompute(generator::initialize_state(waveform)),
                             );
+                            println!("precompute returned: {}", &waveform);
                         }
                         return WaveformOrMode::Waveform(waveform);
                     } else {
@@ -1026,7 +1031,7 @@ fn play_waveform_helper(
                             errors: vec![parser::Error::new(
                                 "Expression is not a waveform".to_string(),
                             )],
-                            message: format!("Not a waveform: {}", expr.to_string()),
+                            message: format!("Not a waveform: {}", expr),
                         });
                     }
                 }

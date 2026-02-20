@@ -38,4 +38,4 @@ name = "tracker_benches"
 harness = false
 
 [profile.release]
-debug = true
+#debug = true

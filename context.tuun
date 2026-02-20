@@ -32,7 +32,7 @@ pulse = fn(width, freq) =>
 
 
 // HELPERS
-amp = fn(level) => fn(w) => w * level,
+amp = fn(level) => fn(w) => level * w,
 // slope is in terms of level-change per second
 linear = fn(initial, slope) => initial + (time * slope),
 // Convert from MIDI note numbers to frequency
@@ -144,11 +144,10 @@ major_triad = fn(root) => fn(fw) => [fw(@root), fw(@(root + 4)), fw(@(root + 7))
 // major_triad = fn(root, dur, inst) => [inst(dur, @root), inst(dur, @(root + 4)), inst(dur, @(root + 7))],
 minor_triad = fn(root) => fn(fw) => [fw(@root), fw(@(root + 3)), fw(@(root + 7))],
 // These get a little distorted... may need to scale a bit
-I = fn(key) => fn(inst) => fn(dur) => {major_triad(key)(fn(freq) => inst(dur, freq))} | seq(time - dur),
-// I = fn(key) => fn(inst) => fn(dur) => {major_triad(key, dur, inst)} | seq(time - dur),
-II = fn(key) => fn(inst) => fn(dur) => {major_triad(key + 2)(fn(freq) => inst(dur, freq))} | seq(time - dur),
-III = fn(key) => fn(inst) => fn(dur) => {major_triad(key + 4)(fn(freq) => inst(dur, freq))} | seq(time - dur),
-i = fn(key) => fn(inst) => fn(dur) => {minor_triad(key)(fn(freq) => inst(dur, freq))} | seq(time - dur),
+I = fn(key) => fn(inst) => fn(dur) => {map(amp(0.4), major_triad(key)(fn(freq) => inst(dur, freq)))} | seq(time - dur),
+II = fn(key) => fn(inst) => fn(dur) => {map(amp(0.4), major_triad(key + 2)(fn(freq) => inst(dur, freq)))} | seq(time - dur),
+III = fn(key) => fn(inst) => fn(dur) => {map(amp(0.4), major_triad(key + 4)(fn(freq) => inst(dur, freq)))} | seq(time - dur),
+i = fn(key) => fn(inst) => fn(dur) => {map(amp(0.4), minor_triad(key)(fn(freq) => inst(dur, freq)))} | seq(time - dur),
 
 // In the key of C
 I = I(60),
