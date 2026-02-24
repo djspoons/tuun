@@ -111,11 +111,6 @@ $$
 s[t] = \sin \left( \left(\sum_{\tau=0}^t w[\tau] \Delta t\right) + p[t]\right) = \sin \left( \left(\sum_{\tau=0}^t \frac{w[\tau]}{f_s}\right) + p[t]\right)
 $$
 
-Tuun uses a slightly better approximation using the average of the last two frequency values (also known as a trapezoid approximation):
-$$
-s[t] = \sin \left( \left(\sum_{\tau=1}^t \frac{w[\tau] + w[\tau-1]}{2f_s}\right) + p[t]\right)
-$$
-
 To see how Tuun computes that efficiently, let's introduce an intermediate term: the accumulated phase $a$, sometimes just called "the accumulator."
 
 $$
@@ -127,13 +122,13 @@ Notice how both operands to $+$ are phases and are measured in radians. We can t
 $$
 a[0] = 0
 \\[1em]
-a[t] = a[t-1] + \frac{w[t] + w[t-1]}{2f_s} \enspace \text{ (for t > 0)}
+a[t] = a[t-1] + \frac{w[t]}{2f_s} \enspace \text{ (for t > 0)}
 $$
 
 That is, at each step, we compute a new phase based on:
 
 - The previous accumulated phase
-- The average angular frequency at that time divided by $f_s$, aka change in phase per sample
+- The angular frequency at that time divided by $f_s$, aka change in phase per sample
 
 We use the accumulated phase together with the phase offset at that time as the argument to $\sin$.
 
@@ -142,8 +137,7 @@ Those equations translate more or less directly to the Rust code that implements
     let mut accumulator = 0.0;
     for i in (1..n) {
         out[i] = (accumulator + phase_offset[i-1]).sin();
-        let average_frequency = (frequency[i] + frequency[i-1]) / 2.0;
-        let phase_inc = average_frequency / sample_frequency;
+        let phase_inc = frequency[i] / sample_frequency;
         accumulator = (accumulator + phase_inc).rem_euclid(consts::TAU);
     }
 

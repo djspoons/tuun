@@ -16,20 +16,12 @@ pub enum State {
     Position(usize),
     // TODO consider a shared vec plus a slice for Fixed? how to represent a negative position? and direction?
     // Shared(Rc<Vec<f32>>, &[f32]),
-    // Previously generated samples as input and/or output to the waveform. (for example, for Filter)
-    Samples {
-        input: Vec<f32>,
-        output: Vec<f32>,
-    },
-    // The current accumulated phase as well the previous value of the frequency waveform (for example, for Sin).
-    Phase {
-        accumulator: f64,
-        previous_frequency: f64,
-    },
+    // Previously generated samples as input and/or output to the waveform (for example, for Filter)
+    Samples { input: Vec<f32>, output: Vec<f32> },
+    // The current accumulated phase (for example, for Sin).
+    Phase { accumulator: f64 },
     // The sign of the last generated value along with the direction of generation (for example, for Res).
-    Sign {
-        signum: f32,
-    },
+    Sign { signum: f32 },
 }
 
 pub fn initialize_state<S>(waveform: waveform::Waveform<S>) -> Waveform {
@@ -191,27 +183,11 @@ impl<'a> Generator<'a> {
                 phase,
                 state: Initial,
             } => {
-                // Frequency is going to always be one position "ahead" of `waveform` so we generate one
-                // value at the origin now.
-                let (frequency, f_out) = self.generate(*frequency, 1);
-                if f_out.is_empty() {
-                    return (
-                        Sin {
-                            frequency: Box::new(frequency),
-                            phase: Box::new(*phase),
-                            state: Initial,
-                        },
-                        vec![],
-                    );
-                }
                 return self.generate(
                     Sin {
-                        frequency: Box::new(frequency),
+                        frequency: Box::new(*frequency),
                         phase: Box::new(*phase),
-                        state: Phase {
-                            accumulator: 0.0,
-                            previous_frequency: f_out[0] as f64,
-                        },
+                        state: Phase { accumulator: 0.0 },
                     },
                     desired,
                 );
@@ -219,13 +195,9 @@ impl<'a> Generator<'a> {
             Sin {
                 frequency,
                 phase,
-                state:
-                    Phase {
-                        mut accumulator,
-                        mut previous_frequency,
-                    },
+                state: Phase { mut accumulator },
             } => {
-                // Instantaneous frequency (note that this is one position ahead of `waveform`).
+                // Instantaneous frequency.
                 let (frequency, f_out) = self.generate(*frequency, desired);
                 // Instantaneous phase offset.
                 let (phase, ph_out) = self.generate(*phase, f_out.len());
@@ -233,23 +205,17 @@ impl<'a> Generator<'a> {
                 for (i, &phase_offset) in ph_out.iter().enumerate() {
                     out[i] = (accumulator + phase_offset as f64).sin() as f32;
 
-                    // Take the average of the last two frequency values (i.e., the trapezoidal
-                    // approximation to the integral).
-                    let f = (previous_frequency + f_out[i] as f64) / 2.0;
+                    let f = f_out[i] as f64;
                     let phase_inc = f / self.sample_frequency as f64;
 
                     // Move the accumulator according to the frequency and change in phase offset.
                     accumulator = (accumulator + phase_inc).rem_euclid(f64::consts::TAU);
-                    previous_frequency = f_out[i] as f64;
                 }
                 return (
                     Sin {
                         frequency: Box::new(frequency),
                         phase: Box::new(phase),
-                        state: Phase {
-                            accumulator,
-                            previous_frequency,
-                        },
+                        state: Phase { accumulator },
                     },
                     out,
                 );
@@ -1436,7 +1402,7 @@ mod tests {
 
     #[test]
     fn test_sin() {
-        let sample_frequency = 100.0;
+        let sample_frequency = 44100.0;
         let g = new_test_generator(sample_frequency as i32);
 
         // As simple as possible
