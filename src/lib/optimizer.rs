@@ -449,6 +449,8 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                     ))),
                     b,
                 ),
+                // TODO could check the inside of Marked/Capture.
+
                 // TODO could distribute constants over, Append, Res, and Alt
                 // ... though currently Alt generates both branches, so better not to do too much work
 
