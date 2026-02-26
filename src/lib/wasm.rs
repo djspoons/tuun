@@ -4,35 +4,35 @@
 //!
 //! # Example (JavaScript)
 //! ```javascript
-//! import init, { WasmGenerator } from './pkg/tuun.js';
+//! import init, { Tuun } from './pkg/tuun.js';
 //!
 //! await init();
-//! const generator = new WasmGenerator(44100);
-//! const waveform = generator.parse("sin(440, 0)");
-//! const samples = generator.generate(waveform, 4096);
+//! const tuun = new Tuun(44100);
+//! const waveform = tuun.parse("sin(440, 0)");
+//! const samples = tuun.generate(waveform, 4096);
 //! ```
 
 use wasm_bindgen::prelude::*;
 
 use crate::{builtins, generator, optimizer, parser};
 
-/// WebAssembly wrapper around the Tuun Generator.
+/// WebAssembly interface for the Tuun synthesizer.
 ///
-/// Provides a simplified interface for parsing expressions and generating audio samples.
-#[wasm_bindgen]
-pub struct WasmGenerator {
+/// Provides parsing, optimization, and audio generation from Tuun expressions.
+#[wasm_bindgen(js_name = "Tuun")]
+pub struct Wasm {
     sample_rate: i32,
     context: Vec<(String, parser::Expr)>,
 }
 
-#[wasm_bindgen]
-impl WasmGenerator {
-    /// Creates a new generator with the specified sample rate.
+#[wasm_bindgen(js_class = "Tuun")]
+impl Wasm {
+    /// Creates a new Tuun instance with the specified sample rate.
     ///
     /// # Arguments
     /// * `sample_rate` - The audio sample rate in Hz (e.g., 44100)
     #[wasm_bindgen(constructor)]
-    pub fn new(sample_rate: i32) -> Result<WasmGenerator, String> {
+    pub fn new(sample_rate: i32) -> Result<Wasm, String> {
         use parser::Expr;
         // Set up better panic messages in the browser console
         console_error_panic_hook::set_once();
@@ -89,7 +89,7 @@ impl WasmGenerator {
             Err(e) => eprintln!("Warning: Failed to parse context file: {:?}", e),
         }
 
-        Ok(WasmGenerator {
+        Ok(Wasm {
             sample_rate,
             context,
         })
@@ -105,7 +105,7 @@ impl WasmGenerator {
     ///
     /// # Example
     /// ```javascript
-    /// const waveform = generator.parse("sin(440, 0)");
+    /// const waveform = tuun.parse("sin(440, 0)");
     /// ```
     pub fn parse(&self, expression: &str) -> Result<WasmWaveform, String> {
         // Parse the program
@@ -144,7 +144,7 @@ impl WasmGenerator {
     ///
     /// # Example
     /// ```javascript
-    /// const samples = generator.generate(waveform, 4096);
+    /// const samples = tuun.generate(waveform, 4096);
     /// // samples is a Float32Array that can be used with Web Audio API
     /// ```
     pub fn generate(&self, waveform: &mut WasmWaveform, num_samples: usize) -> Vec<f32> {
@@ -199,7 +199,7 @@ mod tests {
     /// Test all examples from the web UI to ensure they parse and generate samples
     #[test]
     fn test_web_ui_examples() {
-        let generator = WasmGenerator::new(44100).expect("Failed to create generator");
+        let tuun = Wasm::new(44100).expect("Failed to create Tuun instance");
 
         let examples = vec![
             ("sin(2764, 0)", "Sine wave (440 Hz)"),
@@ -210,20 +210,19 @@ mod tests {
             println!("Testing: {} - {}", description, expr);
 
             // Test parsing
-            let mut waveform = generator
+            let mut waveform = tuun
                 .parse(expr)
                 .unwrap_or_else(|e| panic!("Failed to parse '{}': {}", expr, e));
 
             // Test generation (small sample to verify it doesn't crash)
-            let samples = generator.generate(&mut waveform, 100);
+            let samples = tuun.generate(&mut waveform, 100);
 
             assert_eq!(samples.len(), 100, "Expected 100 samples for '{}'", expr);
 
-            // Verify samples are in valid range (roughly -1.0 to 1.0, with some tolerance)
             for (i, &sample) in samples.iter().enumerate() {
                 assert!(
-                    sample.is_finite(),
-                    "Sample {} is not finite for '{}': {}",
+                    sample >= -1.0 && sample <= 1.0,
+                    "Sample {} out of range for '{}': {}",
                     i,
                     expr,
                     sample
@@ -237,7 +236,7 @@ mod tests {
     /// Test that invalid expressions produce appropriate errors
     #[test]
     fn test_invalid_expressions() {
-        let generator = WasmGenerator::new(44100).expect("Failed to create generator");
+        let tuun = Wasm::new(44100).expect("Failed to create Tuun instance");
 
         let invalid_examples = vec![
             "undefined_function()",
@@ -248,7 +247,7 @@ mod tests {
         for expr in invalid_examples {
             println!("Testing invalid expression: {}", expr);
 
-            let result = generator.parse(expr);
+            let result = tuun.parse(expr);
             assert!(
                 result.is_err(),
                 "Expected error for invalid expression '{}', but got success",
@@ -262,7 +261,7 @@ mod tests {
     /// Test context functions that require special definitions
     #[test]
     fn test_context_functions() {
-        let generator = WasmGenerator::new(44100).expect("Failed to create generator");
+        let tuun = Wasm::new(44100).expect("Failed to create Tuun instance");
 
         // Test lpf with various expressions
         let lpf_examples = vec![
@@ -277,11 +276,11 @@ mod tests {
         for (expr, description) in lpf_examples {
             println!("Testing lpf: {} - {}", description, expr);
 
-            let mut waveform = generator
+            let mut waveform = tuun
                 .parse(expr)
                 .unwrap_or_else(|e| panic!("Failed to parse '{}': {}", expr, e));
 
-            let samples = generator.generate(&mut waveform, 100);
+            let samples = tuun.generate(&mut waveform, 100);
             assert_eq!(samples.len(), 100, "Expected 100 samples for '{}'", expr);
 
             // Verify samples are in valid range [-1.0, 1.0]
