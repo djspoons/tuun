@@ -23,19 +23,19 @@ The WASM module exposes a JavaScript API for integrating Tuun into web applicati
 ### Basic Usage
 
 ```javascript
-import init, { WasmGenerator } from './pkg/tuun.js';
+import init, { Tuun } from './pkg/tuun.js';
 
 // Initialize the WASM module
 await init();
 
-// Create a generator with a sample rate
-const generator = new WasmGenerator(44100);
+// Create a Tuun instance with a sample rate
+const tuun = new Tuun(44100);
 
 // Parse an expression into a waveform
-const waveform = generator.parse("sin(440, 0)");
+const waveform = tuun.parse("sin(440, 0)");
 
 // Generate audio samples
-const samples = generator.generate(waveform, 4096);
+const samples = tuun.generate(waveform, 4096);
 // samples is a Float32Array that can be used with Web Audio API
 ```
 

@@ -1,4 +1,4 @@
-import { initSync, WasmGenerator } from './pkg/tuun.js';
+import { initSync, Tuun } from './pkg/tuun.js';
 
 class TuunProcessor extends AudioWorkletProcessor {
     constructor(options) {
@@ -13,7 +13,7 @@ class TuunProcessor extends AudioWorkletProcessor {
 
         // Initialize WASM synchronously from the pre-compiled module
         initSync({module: wasmModule});
-        this.generator = new WasmGenerator(sampleRate || 44100);
+        this.tuun = new Tuun(sampleRate || 44100);
         this.port.postMessage({ type: 'ready' });
 
         this.port.onmessage = (event) => {
@@ -31,7 +31,7 @@ class TuunProcessor extends AudioWorkletProcessor {
     _play(expression) {
         this._stop();
         try {
-            this.waveform = this.generator.parse(expression);
+            this.waveform = this.tuun.parse(expression);
             this.playing = true;
             this.finished = false;
             this.buffer = null;
@@ -72,7 +72,7 @@ class TuunProcessor extends AudioWorkletProcessor {
                         return true;
                     }
 
-                    this.buffer = this.generator.generate(this.waveform, this.bufferSize);
+                    this.buffer = this.tuun.generate(this.waveform, this.bufferSize);
                     this.bufferOffset = 0;
 
                     if (this.buffer.length < this.bufferSize) {
