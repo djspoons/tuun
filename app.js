@@ -77,7 +77,8 @@ const DEFAULT_SAMPLE_RATE = 44100;
 const DEFAULT_BUFFER_SIZE = 1024;
 
 let synth = null;
-let expressionInput, playToggle, sampleRateSelect, errorDiv;
+let expressionInput, playToggle, resetButton, sampleRateSelect, errorDiv;
+let originalExpression = '';
 
 function getSampleRate() {
     return sampleRateSelect ? parseInt(sampleRateSelect.value) || DEFAULT_SAMPLE_RATE : DEFAULT_SAMPLE_RATE;
@@ -145,6 +146,7 @@ async function initApp() {
     try {
         expressionInput = document.getElementById('expression');
         playToggle = document.getElementById('play-toggle');
+        resetButton = document.getElementById('reset-button');
         errorDiv = document.getElementById('error');
 
         if (!expressionInput || !playToggle || !errorDiv) {
@@ -152,6 +154,7 @@ async function initApp() {
             return;
         }
 
+        originalExpression = expressionInput.value;
         sampleRateSelect = document.getElementById('sample-rate');
 
         const container = document.querySelector('.editor-section');
@@ -163,12 +166,22 @@ async function initApp() {
         await synth.initialize(getSampleRate());
 
         playToggle.addEventListener('click', handlePlayToggle);
+        if (resetButton) {
+            resetButton.addEventListener('click', () => {
+                expressionInput.value = originalExpression;
+                hideError();
+            });
+        }
         if (sampleRateSelect) {
             sampleRateSelect.addEventListener('change', handleSampleRateChange);
         }
 
         expressionInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+            if (e.key === 'Enter' && e.altKey) {
+                e.preventDefault();
+                handlePlayToggle();
+                playToggle.focus();
+            } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
                 e.preventDefault();
                 handlePlayToggle();
             }

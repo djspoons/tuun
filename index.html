@@ -9,12 +9,13 @@
 <body>
     <div class="container">
         <div class="editor-section" data-hide-controls>
-            <label for="expression">Expression:</label>
-            <textarea id="expression" rows="3" placeholder="Tuun expression">harmonica(H, 440)</textarea>
+            <div class="editor-row">
+                <button id="play-toggle" class="play-button">&#x25B6;</button>
+                <textarea id="expression" rows="1" placeholder="Tuun expression">harmonica(H, 440)</textarea>
+                <button id="reset-button" class="reset-button" title="Reset expression">&#x21BA;</button>
+            </div>
 
             <div class="controls">
-                <button id="play-toggle" class="play-button">▶</button>
-
                 <div class="control-group">
                     <label for="sample-rate">Sample Rate:</label>
                     <select id="sample-rate">
