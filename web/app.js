@@ -1,7 +1,10 @@
+import { initSync, Tuun } from './pkg/tuun.js';
+
 class TuunSynth {
     constructor(bufferSize = 1024) {
         this.audioContext = null;
         this.workletNode = null;
+        this.tuun = null;
         this.isPlaying = false;
         this.bufferSize = bufferSize;
     }
@@ -14,6 +17,10 @@ class TuunSynth {
         const wasmResponse = await fetch('./pkg/tuun_bg.wasm');
         const wasmBytes = await wasmResponse.arrayBuffer();
         const wasmModule = await WebAssembly.compile(wasmBytes);
+
+        // Initialize main-thread WASM instance for expression validation
+        initSync({ module: wasmModule });
+        this.tuun = new Tuun(sampleRate);
 
         await this.audioContext.audioWorklet.addModule('tuun-processor.js');
 
@@ -47,7 +54,13 @@ class TuunSynth {
         this.workletNode.connect(this.audioContext.destination);
     }
 
+    parse(expression) {
+        const waveform = this.tuun.parse(expression);
+        waveform.free();
+    }
+
     async play(expression) {
+        this.parse(expression);
         if (this.audioContext.state === 'suspended') {
             await this.audioContext.resume();
         }
@@ -128,7 +141,7 @@ async function handlePlayToggle() {
             await synth.play(expression);
             updatePlayButton();
         } catch (error) {
-            showError(error.message || 'Error playing audio');
+            showError(error.message || String(error) || 'Error playing audio');
             updatePlayButton();
         }
     }
