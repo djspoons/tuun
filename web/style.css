@@ -46,24 +46,36 @@ textarea:focus {
     border-color: #667eea;
 }
 
-.controls {
+.editor-row {
     display: flex;
-    gap: 12px;
+    gap: 8px;
+    align-items: stretch;
+}
+
+.editor-row textarea {
+    flex: 1;
+}
+
+.play-button,
+.reset-button {
+    width: 40px;
+    padding: 0;
+    border: none;
+    border-radius: 4px;
+    font-size: 18px;
+    font-weight: 600;
+    line-height: 1;
+    cursor: pointer;
+    transition: background 0.2s;
+    display: flex;
     align-items: center;
-    margin-top: 12px;
-    flex-wrap: wrap;
+    justify-content: center;
+    flex-shrink: 0;
 }
 
 .play-button {
-    padding: 10px 20px;
     background: #667eea;
     color: white;
-    border: none;
-    border-radius: 4px;
-    font-size: 14px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background 0.2s;
 }
 
 .play-button:hover {
@@ -76,6 +88,24 @@ textarea:focus {
 
 .play-button.playing:hover {
     background: #c82333;
+}
+
+.reset-button {
+    background: #e9ecef;
+    color: #495057;
+    font-size: 1.8em;
+}
+
+.reset-button:hover {
+    background: #dee2e6;
+}
+
+.controls {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    margin-top: 12px;
+    flex-wrap: wrap;
 }
 
 .control-group {
@@ -132,10 +162,6 @@ select:focus {
     .controls {
         flex-direction: column;
         align-items: stretch;
-    }
-
-    .play-button {
-        width: 100%;
     }
 
     .control-group {
