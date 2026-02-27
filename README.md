@@ -8,7 +8,11 @@ Tuun serves several purposes, roughly in this order:
  2. As a system for interactively exploring how sounds and music are created.
  3. As a system for performing and recording music.
 
-## Installation
+Tuun can be built as both a native app and for the web using WebAssembly.
+
+## Native App
+
+### Installation
 
  * Install Rust
  * Install sdl2 and sdl2_ttf
@@ -21,38 +25,7 @@ brew install sdl2 sdl2_ttf
 export LIBRARY_PATH="$LIBRARY_PATH:$(brew --prefix)/lib"
 ```
 
-## WebAssembly Build
-
-Tuun can run in web browsers via WebAssembly! This allows you to experiment with the synthesizer without installing native dependencies.
-
-### Building for Web
-
-```bash
-# Install wasm-pack (only needed once)
-curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-
-# Build the WASM package
-./build-wasm.sh
-
-# Serve locally
-cd web && python3 -m http.server 8080
-```
-
-Then open http://localhost:8080 in your browser.
-
-### Web Features
-
-The web version provides:
-- Real-time audio synthesis using the Web Audio API
-- Interactive expression editor with syntax examples
-- Adjustable sample rate and duration
-- Expression parser and optimizer
-
-**Note:** The web version focuses on the core synthesis engine. The native version provides additional features like the interactive UI with sliders, file I/O, and real-time waveform visualization.
-
-See [web/README.md](web/README.md) for more details about the JavaScript API.
-
-## Getting started
+### Getting started
 
 For help running the native Tuun application:
 ```
@@ -102,3 +75,44 @@ In "slider" mode (slider marks at top and left turn green):
 * move mouse (or track-pad) left and right - adjust "X" slider
 * move mouse (or track-pad) up and down - adjust "Y" slider
 * (release) option - return to "select" mode
+
+## WebAssembly
+
+Tuun can run in web browsers via WebAssembly! This allows you to experiment with the synthesizer without installing native dependencies.
+
+### Building for Web
+
+```bash
+# Install wasm-pack (only needed once)
+curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+# Build the WASM package
+./build-wasm.sh
+
+# Serve locally
+cd web && python3 -m http.server 8080
+```
+
+Then open http://localhost:8080 in your browser.
+
+### Web Features
+
+The web version provides:
+- Real-time audio synthesis using the Web Audio API
+- Interactive expression editor
+- Adjustable sample rate and duration
+- Expression parser and optimizer
+
+**Note:** The web version focuses on the core synthesis engine. The native version provides additional features like the interactive UI with sliders, file I/O, and real-time waveform visualization.
+
+### Browser Compatibility
+
+The web version requires:
+- Chrome 66+ or Edge 79+
+- Firefox 60+
+- Safari 11.1+
+
+All browsers must support:
+- WebAssembly
+- Web Audio API
+- ES6 modules
