@@ -91,7 +91,7 @@ pub fn replace_seq(waveform: Waveform) -> (Waveform, Waveform) {
                 Append(Box::new(a), Box::new(b)),
             )
         }
-        Sin {
+        Sine {
             frequency,
             phase,
             state,
@@ -101,7 +101,7 @@ pub fn replace_seq(waveform: Waveform) -> (Waveform, Waveform) {
             let offset = add_offsets(a_offset, b_offset);
             (
                 offset,
-                Sin {
+                Sine {
                     frequency: Box::new(a),
                     phase: Box::new(b),
                     state,
@@ -225,7 +225,7 @@ pub fn replace_seq(waveform: Waveform) -> (Waveform, Waveform) {
 }
 
 // Simplify waveform expressions by...
-//   * eliminating constants in binary operators and Sin
+//   * eliminating constants in binary operators and Sine
 //   * re-associates binary operations so that Consts are on the right
 //   * pulling Fin's up and combining nested Fin's
 //   * replacing zero-length waveforms with the canonical `Fixed(vec![])`
@@ -287,7 +287,7 @@ pub fn simplify(waveform: Waveform) -> Waveform {
             }
         }
         // Check to see if we can compute the sine function:
-        Sin {
+        Sine {
             frequency,
             phase,
             state,
@@ -300,7 +300,7 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                     let v = v.into_iter().map(|x| x.sin()).collect();
                     Fixed(v, ())
                 }
-                (frequency, phase) => Sin {
+                (frequency, phase) => Sine {
                     frequency: Box::new(frequency),
                     phase: Box::new(phase),
                     state,
@@ -582,7 +582,7 @@ mod tests {
                 Box::new(BinaryPointOp(
                     Operator::Add,
                     Box::new(Const(3.0)),
-                    Box::new(Sin {
+                    Box::new(Sine {
                         frequency: Box::new(Const(1.0)),
                         phase: Box::new(Const(0.0)),
                         state: (),
@@ -595,7 +595,7 @@ mod tests {
             simplify(w2),
             BinaryPointOp(
                 Operator::Add,
-                Box::new(Sin {
+                Box::new(Sine {
                     frequency: Box::new(Const(1.0)),
                     phase: Box::new(Const(0.0)),
                     state: ()
@@ -612,7 +612,7 @@ mod tests {
                 Box::new(BinaryPointOp(
                     Operator::Multiply,
                     Box::new(Const(3.0)),
-                    Box::new(Sin {
+                    Box::new(Sine {
                         frequency: Box::new(Const(1.0)),
                         phase: Box::new(Const(0.0)),
                         state: (),
@@ -625,7 +625,7 @@ mod tests {
             simplify(w3),
             BinaryPointOp(
                 Operator::Multiply,
-                Box::new(Sin {
+                Box::new(Sine {
                     frequency: Box::new(Const(1.0)),
                     phase: Box::new(Const(0.0)),
                     state: ()
@@ -642,7 +642,7 @@ mod tests {
                 Box::new(BinaryPointOp(
                     Operator::Multiply,
                     Box::new(Const(3.0)),
-                    Box::new(Sin {
+                    Box::new(Sine {
                         frequency: Box::new(Const(1.0)),
                         phase: Box::new(Const(0.0)),
                         state: (),
@@ -657,7 +657,7 @@ mod tests {
                 Operator::Add,
                 Box::new(BinaryPointOp(
                     Operator::Multiply,
-                    Box::new(Sin {
+                    Box::new(Sine {
                         frequency: Box::new(Const(1.0)),
                         phase: Box::new(Const(0.0)),
                         state: ()

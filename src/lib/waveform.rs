@@ -67,13 +67,13 @@ pub enum Waveform<State = ()> {
      */
     Append(Box<Waveform<State>>, Box<Waveform<State>>),
     /*
-     * Sin computes the sine with the given frequency and phase (both in radians). Or put another way,
+     * Sine computes the sine with the given frequency and phase (both in radians). Or put another way,
      * it computes the sine of angle that changes according to the rate of the first parameter and the
-     * value of the second. Note that Sin is used both as the basis for periodic waveforms and also in
+     * value of the second. Note that Sine is used both as the basis for periodic waveforms and also in
      * cases when it does not depend on Time (in which case its frequency will be 0), for example, as
      * a parameter of a Filter.
      */
-    Sin {
+    Sine {
         frequency: Box<Waveform<State>>,
         phase: Box<Waveform<State>>,
         state: State,
@@ -162,9 +162,9 @@ impl<State> fmt::Display for Waveform<State> {
                 write!(f, "Seq({}, {})", offset, waveform)
             }
             Append(a, b) => write!(f, "Append({}, {})", a, b),
-            Sin {
+            Sine {
                 frequency, phase, ..
-            } => write!(f, "Sin({}, {})", frequency, phase),
+            } => write!(f, "Sine({}, {})", frequency, phase),
             Filter {
                 waveform,
                 feed_forward,
@@ -224,9 +224,9 @@ where
             Box::new(initialize_state(*a, state.clone())),
             Box::new(initialize_state(*b, state)),
         ),
-        Sin {
+        Sine {
             frequency, phase, ..
-        } => Sin {
+        } => Sine {
             frequency: Box::new(initialize_state(*frequency, state.clone())),
             phase: Box::new(initialize_state(*phase, state.clone())),
             state: state,
@@ -295,9 +295,9 @@ pub fn remove_state<State>(w: Waveform<State>) -> Waveform<()> {
             waveform: Box::new(remove_state(*waveform)),
         },
         Append(a, b) => Append(Box::new(remove_state(*a)), Box::new(remove_state(*b))),
-        Sin {
+        Sine {
             frequency, phase, ..
-        } => Sin {
+        } => Sine {
             frequency: Box::new(remove_state(*frequency)),
             phase: Box::new(remove_state(*phase)),
             state: (),

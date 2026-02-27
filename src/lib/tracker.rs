@@ -160,7 +160,7 @@ where
             | Captured { waveform, .. } => {
                 self.process_marked(waveform_id, start, waveform.as_ref(), out);
             }
-            Sin {
+            Sine {
                 frequency, phase, ..
             } => {
                 // TODO this is a little strange... but maybe correct?
@@ -225,7 +225,7 @@ where
             | Marked { waveform, .. } => {
                 self.process_captured(&*waveform, out);
             }
-            Sin {
+            Sine {
                 frequency: a,
                 phase: b,
                 ..

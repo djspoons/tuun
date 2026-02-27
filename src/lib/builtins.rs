@@ -112,27 +112,27 @@ pub fn sin(arguments: Vec<Expr>) -> Expr {
     // per second, and the second is phase in radians.
     match &arguments[..] {
         [Float(value)] => Float(value.sin()),
-        [Expr::Waveform(w)] => Expr::Waveform(Waveform::Sin {
+        [Expr::Waveform(w)] => Expr::Waveform(Waveform::Sine {
             frequency: Box::new(Waveform::Const(0.0)),
             phase: Box::new(w.clone()),
             state: (),
         }),
-        [Float(freq), Float(phase)] => Expr::Waveform(Waveform::Sin {
+        [Float(freq), Float(phase)] => Expr::Waveform(Waveform::Sine {
             frequency: Box::new(Waveform::Const(*freq)),
             phase: Box::new(Waveform::Const(*phase)),
             state: (),
         }),
-        [Expr::Waveform(freq), Float(phase)] => Expr::Waveform(Waveform::Sin {
+        [Expr::Waveform(freq), Float(phase)] => Expr::Waveform(Waveform::Sine {
             frequency: Box::new(freq.clone()),
             phase: Box::new(Waveform::Const(*phase)),
             state: (),
         }),
-        [Float(freq), Expr::Waveform(phase)] => Expr::Waveform(Waveform::Sin {
+        [Float(freq), Expr::Waveform(phase)] => Expr::Waveform(Waveform::Sine {
             frequency: Box::new(Waveform::Const(*freq)),
             phase: Box::new(phase.clone()),
             state: (),
         }),
-        [Expr::Waveform(freq), Expr::Waveform(phase)] => Expr::Waveform(Waveform::Sin {
+        [Expr::Waveform(freq), Expr::Waveform(phase)] => Expr::Waveform(Waveform::Sine {
             frequency: Box::new(freq.clone()),
             phase: Box::new(phase.clone()),
             state: (),
@@ -145,7 +145,7 @@ pub fn sin(arguments: Vec<Expr>) -> Expr {
 pub fn cos(arguments: Vec<Expr>) -> Expr {
     match &arguments[..] {
         [Float(value)] => Expr::Float(value.cos()),
-        [Expr::Waveform(a)] => Expr::Waveform(Waveform::Sin {
+        [Expr::Waveform(a)] => Expr::Waveform(Waveform::Sine {
             frequency: Box::new(Waveform::Const(0.0)),
             phase: Box::new(Waveform::BinaryPointOp(
                 Operator::Add,

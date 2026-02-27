@@ -18,7 +18,7 @@ pub enum State {
     // Shared(Rc<Vec<f32>>, &[f32]),
     // Previously generated samples as input and/or output to the waveform (for example, for Filter)
     Samples { input: Vec<f32>, output: Vec<f32> },
-    // The current accumulated phase (for example, for Sin).
+    // The current accumulated phase (for example, for Sine).
     Phase { accumulator: f64 },
     // The sign of the last generated value along with the direction of generation (for example, for Res).
     Sign { signum: f32 },
@@ -178,13 +178,13 @@ impl<'a> Generator<'a> {
                     return (Append(Box::new(a), Box::new(b)), a_out);
                 }
             }
-            Sin {
+            Sine {
                 frequency,
                 phase,
                 state: Initial,
             } => {
                 return self.generate(
-                    Sin {
+                    Sine {
                         frequency: Box::new(*frequency),
                         phase: Box::new(*phase),
                         state: Phase { accumulator: 0.0 },
@@ -192,7 +192,7 @@ impl<'a> Generator<'a> {
                     desired,
                 );
             }
-            Sin {
+            Sine {
                 frequency,
                 phase,
                 state: Phase { mut accumulator },
@@ -212,7 +212,7 @@ impl<'a> Generator<'a> {
                     accumulator = (accumulator + phase_inc).rem_euclid(f64::consts::TAU);
                 }
                 return (
-                    Sin {
+                    Sine {
                         frequency: Box::new(frequency),
                         phase: Box::new(phase),
                         state: Phase { accumulator },
@@ -220,7 +220,7 @@ impl<'a> Generator<'a> {
                     out,
                 );
             }
-            Sin { .. } => unreachable!("Sin waveform has non-Initial, non-Phase state"),
+            Sine { .. } => unreachable!("Sine waveform has non-Initial, non-Phase state"),
             Filter {
                 waveform: inner,
                 feed_forward,
@@ -689,7 +689,7 @@ impl<'a> Generator<'a> {
                 let (b, b_len) = self.remaining(*b, max - a_len);
                 (Append(Box::new(a), Box::new(b)), a_len + b_len)
             }
-            Sin {
+            Sine {
                 frequency,
                 phase,
                 state,
@@ -697,7 +697,7 @@ impl<'a> Generator<'a> {
                 let (frequency, f_len) = self.remaining(*frequency, max);
                 let (phase, ph_len) = self.remaining(*phase, max);
                 (
-                    Sin {
+                    Sine {
                         frequency: Box::new(frequency),
                         phase: Box::new(phase),
                         state,
@@ -865,7 +865,7 @@ impl<'a> Generator<'a> {
                 }
             },
             Append(a, b) => (self.offset(a, max) + self.offset(b, max)).min(max),
-            Sin {
+            Sine {
                 frequency, phase, ..
             } => self.offset(frequency, max) + self.offset(phase, max),
             Filter { waveform, .. } => self.offset(waveform, max),
@@ -1063,11 +1063,11 @@ impl<'a> Generator<'a> {
                     );
                 }
                 Append(a, b) => do_two(g, *a, *b, |a, b| Append(Box::new(a), Box::new(b))),
-                Sin {
+                Sine {
                     frequency,
                     phase,
                     state,
-                } => do_two(g, *frequency, *phase, |frequency, phase| Sin {
+                } => do_two(g, *frequency, *phase, |frequency, phase| Sine {
                     frequency: Box::new(frequency),
                     phase: Box::new(phase),
                     state,
@@ -1178,7 +1178,7 @@ mod tests {
     use waveform::Operator;
     use waveform::Waveform;
     use waveform::Waveform::{
-        Append, BinaryPointOp, Const, Filter, Fin, Fixed, Res, Seq, Sin, Time,
+        Append, BinaryPointOp, Const, Filter, Fin, Fixed, Res, Seq, Sine, Time,
     };
 
     const MAX_LENGTH: usize = 1000;
@@ -1375,7 +1375,7 @@ mod tests {
 
     // frequency in Hz, phase in radians
     fn sin_waveform(frequency: f32, phase: f32) -> Box<Waveform> {
-        return Box::new(Sin {
+        return Box::new(Sine {
             frequency: Box::new(BinaryPointOp(
                 Operator::Multiply,
                 Box::new(Const(f32::consts::TAU)),
@@ -1413,7 +1413,7 @@ mod tests {
         run_sin_test(&g, &w, expected);
 
         // Non-constant frequency: f = time + 10 Hz
-        let w3 = initialize_state(Waveform::Sin {
+        let w3 = initialize_state(Waveform::Sine {
             frequency: Box::new(BinaryPointOp(
                 Operator::Multiply,
                 Box::new(BinaryPointOp(
