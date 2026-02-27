@@ -368,7 +368,7 @@ pub fn main() {
     let end_freq_hz = 10000.0;
 
     let sampling_rate = 44100.0; // Hz
-    let duration = Duration::from_secs(10);
+    let duration = Duration::from_secs(20);
 
     let spec = hound::WavSpec {
         channels: 1,
