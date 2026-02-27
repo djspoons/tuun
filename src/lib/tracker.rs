@@ -151,7 +151,7 @@ where
             Fin { waveform, .. }
             | Seq { waveform, .. }
             | Filter { waveform, .. }
-            | Res {
+            | Reset {
                 trigger: waveform, ..
             }
             | Alt {
@@ -216,7 +216,7 @@ where
             Fin { waveform, .. }
             | Seq { waveform, .. }
             | Filter { waveform, .. }
-            | Res {
+            | Reset {
                 trigger: waveform, ..
             }
             | Alt {

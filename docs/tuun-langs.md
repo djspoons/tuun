@@ -147,7 +147,7 @@ There are three combinators for describing periodic waveforms:
 
  * [`Sine(a, b)`](sine.md) - generates a sine wave with angular frequency `a` and phase offset `b`
  * `Alt(trigger, a, b)` - generates samples from `a` when `trigger` is positive and from `b` otherwise
- * `Res(trigger, a)` - restarts the second waveform each time the `trigger` switches from negative to positive
+ * `Reset(trigger, a)` - restarts the second waveform each time the `trigger` switches from negative to positive
 
 And finally, there are these two waveforms that provide ways of dynamically interacting with waveforms through a user interface.
 
@@ -172,7 +172,7 @@ For comparison, here are the lengths and offsets of each waveform:
 | `a ~+ b`             | max(a.length, a.offset + b.length) | a.offset + b.offset         |
 | `a ~. b`             | min(a.length, a.offset + b.length) | a.offset + b.offset         |
 | `Sine(a, b)`         | min(a.length, b.length)            | a.offset + b.offset         |
-| `Res(trigger, a)`    | trigger.length                     | trigger.offset              |
+| `Reset(trigger, a)`  | trigger.length                     | trigger.offset              |
 | `Alt(trigger, a, b)` | trigger.length                     | trigger.offset              |
 
 This small set of combinators is enough to create synthesizers, filters, and even musical compositions with the help of the Tuun expressions.

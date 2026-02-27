@@ -167,7 +167,7 @@ pub fn replace_seq(waveform: Waveform) -> (Waveform, Waveform) {
                 ),
             )
         }
-        Res {
+        Reset {
             trigger,
             waveform,
             state,
@@ -175,7 +175,7 @@ pub fn replace_seq(waveform: Waveform) -> (Waveform, Waveform) {
             let (offset, trigger) = replace_seq(*trigger);
             (
                 offset,
-                Res {
+                Reset {
                     trigger: Box::new(trigger),
                     waveform: Box::new(replace_seq(*waveform).1),
                     state,
@@ -344,7 +344,7 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                         Box::new(Const(c)),
                     ))),
                 ),
-                // TODO could distribute constants over Append(Fin, _), Res, and Alt
+                // TODO could distribute constants over Append(Fin, _), Reset, and Alt
                 // ... though currently Alt generates both branches, so better not to do too much work
 
                 // Combine sum of Fin and an Append who first argument is Fin -- this occurs for expressions of
@@ -451,7 +451,7 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                 ),
                 // TODO could check the inside of Marked/Capture.
 
-                // TODO could distribute constants over, Append, Res, and Alt
+                // TODO could distribute constants over, Append, Reset, and Alt
                 // ... though currently Alt generates both branches, so better not to do too much work
 
                 // Pull Fin out
@@ -516,11 +516,11 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                 (a, b) => BinaryPointOp(Operator::Divide, Box::new(a), Box::new(b)),
             }
         }
-        Res {
+        Reset {
             trigger,
             waveform,
             state,
-        } => Res {
+        } => Reset {
             trigger: Box::new(simplify(*trigger)),
             waveform: Box::new(simplify(*waveform)),
             state,

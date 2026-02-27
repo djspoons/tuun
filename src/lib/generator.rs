@@ -20,7 +20,7 @@ pub enum State {
     Samples { input: Vec<f32>, output: Vec<f32> },
     // The current accumulated phase (for example, for Sine).
     Phase { accumulator: f64 },
-    // The sign of the last generated value along with the direction of generation (for example, for Res).
+    // The sign of the last generated value along with the direction of generation (for example, for Reset).
     Sign { signum: f32 },
 }
 
@@ -332,14 +332,14 @@ impl<'a> Generator<'a> {
                 };
                 return self.generate_binary_op(op, op_fn, *a, *b, desired);
             }
-            Res {
+            Reset {
                 trigger,
                 waveform,
                 state: Initial,
             } => {
                 // Start assuming that the trigger was previously negative.
                 return self.generate(
-                    Res {
+                    Reset {
                         trigger,
                         waveform,
                         state: Sign { signum: -1.0 },
@@ -347,7 +347,7 @@ impl<'a> Generator<'a> {
                     desired,
                 );
             }
-            Res {
+            Reset {
                 trigger,
                 waveform: inner,
                 state: Sign { mut signum },
@@ -386,7 +386,7 @@ impl<'a> Generator<'a> {
                     generated += inner_desired;
                 }
                 return (
-                    Res {
+                    Reset {
                         trigger: Box::new(trigger),
                         waveform: Box::new(inner),
                         state: Sign { signum },
@@ -394,7 +394,7 @@ impl<'a> Generator<'a> {
                     out,
                 );
             }
-            Res { .. } => unreachable!("Res waveform has non-Initial, non-Sign state"),
+            Reset { .. } => unreachable!("Reset waveform has non-Initial, non-Sign state"),
             Alt {
                 trigger,
                 positive_waveform,
@@ -717,14 +717,14 @@ impl<'a> Generator<'a> {
                     },
                 )
             }
-            Res {
+            Reset {
                 trigger,
                 waveform,
                 state,
             } => {
                 let (trigger, len) = self.remaining(*trigger, max);
                 (
-                    Res {
+                    Reset {
                         trigger: Box::new(trigger),
                         waveform,
                         state,
@@ -877,7 +877,7 @@ impl<'a> Generator<'a> {
                 let b_offset = self.offset(b, max - a_offset);
                 return a_offset + b_offset;
             }
-            Res { trigger, .. } | Alt { trigger, .. } => self.offset(trigger, max),
+            Reset { trigger, .. } | Alt { trigger, .. } => self.offset(trigger, max),
             Slider { .. } => 0,
             Marked { waveform, .. } | Captured { waveform, .. } => self.offset(waveform, max),
         }
@@ -1114,11 +1114,11 @@ impl<'a> Generator<'a> {
                         state,
                     },
                 ),
-                Res {
+                Reset {
                     trigger,
                     waveform,
                     state,
-                } => do_two(g, *trigger, *waveform, |trigger, waveform| Res {
+                } => do_two(g, *trigger, *waveform, |trigger, waveform| Reset {
                     trigger: Box::new(trigger),
                     waveform: Box::new(waveform),
                     state,
@@ -1178,7 +1178,7 @@ mod tests {
     use waveform::Operator;
     use waveform::Waveform;
     use waveform::Waveform::{
-        Append, BinaryPointOp, Const, Filter, Fin, Fixed, Res, Seq, Sine, Time,
+        Append, BinaryPointOp, Const, Filter, Fin, Fixed, Reset, Seq, Sine, Time,
     };
 
     const MAX_LENGTH: usize = 1000;
@@ -1446,15 +1446,15 @@ mod tests {
     }
 
     #[test]
-    fn test_res() {
-        let w1 = Res {
+    fn test_reset() {
+        let w1 = Reset {
             trigger: sin_waveform(0.25, 0.0),
             waveform: Box::new(Time(())),
             state: (),
         };
         run_tests(&w1, &vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0, 3.0]);
 
-        let w2 = Res {
+        let w2 = Reset {
             trigger: Box::new(Fin {
                 length: Box::new(BinaryPointOp(
                     Operator::Subtract,
@@ -1468,7 +1468,7 @@ mod tests {
         };
         run_tests(&w2, &vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0]);
 
-        let w3 = Res {
+        let w3 = Reset {
             trigger: sin_waveform(0.25, 0.0),
             waveform: Box::new(Waveform::Fin {
                 length: Box::new(BinaryPointOp(
@@ -1482,7 +1482,7 @@ mod tests {
         };
         run_tests(&w3, &vec![0.0, 1.0, 2.0, 0.0, 0.0, 1.0, 2.0, 0.0]);
 
-        let w5 = Res {
+        let w5 = Reset {
             trigger: sin_waveform(0.25, f32::consts::PI),
             waveform: Box::new(Time(())),
             state: (),
@@ -1491,7 +1491,7 @@ mod tests {
 
         // Test where a reset lines up with the buffer boundary and where there are multiple
         // resets in a buffer.
-        let w6 = Res {
+        let w6 = Reset {
             trigger: sin_waveform(0.25, 0.0),
             waveform: Box::new(Time(())),
             state: (),
@@ -1716,7 +1716,7 @@ mod tests {
         run_tests(&w3, &vec![20.0, 30.0, 40.0, 50.0]);
 
         let w4 = Filter {
-            waveform: Box::new(Res {
+            waveform: Box::new(Reset {
                 // Pick a trigger that's far from zero on at our sampled points
                 trigger: sin_waveform(1.0 / 3.0, 3.0 * std::f32::consts::PI / 2.0),
                 waveform: Box::new(Time(())),

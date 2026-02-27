@@ -448,7 +448,7 @@ pub fn waveform_filter(mut arguments: Vec<Expr>) -> Expr {
     }
 }
 
-pub fn res(mut arguments: Vec<Expr>) -> Expr {
+pub fn reset(mut arguments: Vec<Expr>) -> Expr {
     // TODO make it work in curried form?
     if arguments.len() != 2 {
         return Expr::Error("Expected two waveforms".to_string());
@@ -462,7 +462,7 @@ pub fn res(mut arguments: Vec<Expr>) -> Expr {
         Float(value) => Waveform::Const(value),
         _ => return Expr::Error("Second argument must be a waveform or a float".to_string()),
     };
-    Expr::Waveform(Waveform::Res {
+    Expr::Waveform(Waveform::Reset {
         trigger: Box::new(trigger),
         waveform: Box::new(waveform),
         state: (),
@@ -608,7 +608,7 @@ pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
         ("seq", seq),
         ("filter", waveform_filter),
         ("~*", waveform_convolution),
-        ("res", res),
+        ("reset", reset),
         ("alt", alt),
         ("mark", mark),
         ("capture", capture),

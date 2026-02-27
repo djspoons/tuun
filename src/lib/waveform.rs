@@ -92,11 +92,11 @@ pub enum Waveform<State = ()> {
     },
     BinaryPointOp(Operator, Box<Waveform<State>>, Box<Waveform<State>>),
     /*
-     * Res generates a repeating waveform that restarts the given waveform whenever the trigger
+     * Reset generates a repeating waveform that restarts the given waveform whenever the trigger
      * waveform flips from negative values to positive values. Its length and offset are determined
      * by the trigger waveform.
      */
-    Res {
+    Reset {
         trigger: Box<Waveform<State>>,
         waveform: Box<Waveform<State>>,
         state: State,
@@ -174,10 +174,10 @@ impl<State> fmt::Display for Waveform<State> {
             BinaryPointOp(op, a, b) => {
                 write!(f, "{:?}({}, {})", op, a, b)
             }
-            Res {
+            Reset {
                 trigger, waveform, ..
             } => {
-                write!(f, "Res({}, {})", trigger, waveform)
+                write!(f, "Reset({}, {})", trigger, waveform)
             }
             Alt {
                 trigger,
@@ -248,9 +248,9 @@ where
             Box::new(initialize_state(*a, state.clone())),
             Box::new(initialize_state(*b, state)),
         ),
-        Res {
+        Reset {
             trigger, waveform, ..
-        } => Res {
+        } => Reset {
             trigger: Box::new(initialize_state(*trigger, state.clone())),
             waveform: Box::new(initialize_state(*waveform, state.clone())),
             state: state,
@@ -316,9 +316,9 @@ pub fn remove_state<State>(w: Waveform<State>) -> Waveform<()> {
         BinaryPointOp(op, a, b) => {
             BinaryPointOp(op, Box::new(remove_state(*a)), Box::new(remove_state(*b)))
         }
-        Res {
+        Reset {
             trigger, waveform, ..
-        } => Res {
+        } => Reset {
             trigger: Box::new(remove_state(*trigger)),
             waveform: Box::new(remove_state(*waveform)),
             state: (),
