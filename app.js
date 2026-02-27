@@ -117,6 +117,12 @@ function hideError() {
     errorDiv.classList.add('hidden');
 }
 
+function updateResetButton() {
+    if (resetButton) {
+        resetButton.disabled = expressionInput.value === originalExpression;
+    }
+}
+
 function updatePlayButton() {
     if (synth && synth.isPlaying) {
         playToggle.textContent = '\u23F9';
@@ -172,7 +178,7 @@ async function initApp() {
 
         const container = document.querySelector('.editor-section');
         if (container && container.hasAttribute('data-hide-controls')) {
-            document.querySelectorAll('.control-group').forEach(el => el.style.display = 'none');
+            document.querySelectorAll('.controls').forEach(el => el.style.display = 'none');
         }
 
         synth = new TuunSynth(getBufferSize());
@@ -183,8 +189,10 @@ async function initApp() {
             resetButton.addEventListener('click', () => {
                 expressionInput.value = originalExpression;
                 hideError();
+                updateResetButton();
             });
         }
+        expressionInput.addEventListener('input', updateResetButton);
         if (sampleRateSelect) {
             sampleRateSelect.addEventListener('change', handleSampleRateChange);
         }
@@ -201,6 +209,7 @@ async function initApp() {
         });
 
         updatePlayButton();
+        updateResetButton();
     } catch (error) {
         console.error('Failed to initialize:', error);
         if (errorDiv) { showError('Failed to initialize: ' + error.message); }

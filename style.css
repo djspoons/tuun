@@ -96,8 +96,13 @@ textarea:focus {
     font-size: 1.8em;
 }
 
-.reset-button:hover {
+.reset-button:hover:not(:disabled) {
     background: #dee2e6;
+}
+
+.reset-button:disabled {
+    opacity: 0.35;
+    cursor: default;
 }
 
 .controls {
