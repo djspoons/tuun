@@ -10,25 +10,46 @@ bench = false
 [lib]
 path = "src/lib/mod.rs"
 bench = false
+# cdylib for WASM, rlib for native Rust code
+crate-type = ["cdylib", "rlib"]
 
 [[bin]]
 name = "sweep"
 path = "src/misc/sweep.rs"
 
+[features]
+default = ["native"]
+native = ["sdl2", "clap"]
+wasm = ["wasm-bindgen", "js-sys", "web-sys", "console_error_panic_hook"]
+
 [dependencies]
 chrono = "0.4.41"
-clap = { version = "4.5.39", features = ["derive"] }
+clap = { version = "4.5.39", features = ["derive"], optional = true }
 fastrand = "2.3.0"
 hound = "3.5.1"
 mock_instant = "0.6.0"
 nom = "8.0"
 nom_locate = "5.0.0"
 realfft = "3.5.0"
+wasm-bindgen = { version = "0.2", optional = true }
+js-sys = { version = "0.3", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
 
 [dependencies.sdl2]
 version = "0.37.0"
 default-features = false
 features = ["ttf"]
+optional = true
+
+[dependencies.web-sys]
+version = "0.3"
+optional = true
+features = [
+    "AudioContext",
+    "AudioDestinationNode",
+    "AudioBuffer",
+    "AudioBufferSourceNode",
+]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
