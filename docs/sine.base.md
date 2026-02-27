@@ -101,6 +101,7 @@ Of course, Tuun is not computing that integral exactly; it's approximating it as
 ## Accumulation
 
 Since Tuun is generating discrete samples, you can think of the implementation of `Sine` as an approximation using a sum of the instantaneous frequencies and phase offsets. For example, here's a simple translation of the above equation into discrete time using a rectangular approximation:
+
 $$
 s[t_n] = \sin \left( \left(\sum_{i=0}^n w[t_i] \Delta t\right) + p[t_n]\right) = \sin \left( \left(\sum_{i=0}^n \frac{w[t_i]}{f_s}\right) + p[t_n]\right)
 $$
@@ -115,7 +116,9 @@ Notice how both operands to $+$ are phases and are measured in radians. We can t
 
 $$
 a[t_0] = 0
-\\[1em]
+$$
+
+$$
 a[t_n] = a[t_{n-1}] + \frac{w[t_n]}{2f_s} \enspace \text{ (for n = 1, 2, 3, ...)}
 $$
 
@@ -157,15 +160,19 @@ We conclude with two more sophisticated examples using `Sine`.
 ### FM synthesis
 
 Frequency modulation (FM) synthesis is a technique for producing rich tones by varying the frequency $w_c$ of carrier oscillator using a second oscillator (the "modulator") whose frequency $w_m$ is also in the audible range. This results in a tone with frequency components $w_c + i w_m$ for $i >= 0$. The formula for FM synthesis is usually presented as follows:
+
 $$
 s_\text{FM}(t) = \sin(w_c t + I \sin(w_m t) )
 $$
+
 Where $I$ is the index of modulation. Confusingly, this "index" is not an integer, but instead more of a continuous "dial" that controls the strength of the sideband frequency components. When $I = 0$ there is no modulation, and as $I$ increases, the number and strength of side bands generally increases.
 
 The frequency of an FM tone is given as:
+
 $$
 w_\text{FM}(t) = w_c + I w_m \cos(w_m t)
 $$
+
 You can double check that this is indeed the integral of the argument to $\sin$ above. In some presentations, $I w_m$ is written as $d$, the maximum deviation from the carrier signal.
 
 We can implement this directly in Tuun, again remembering that $\cos(\theta) = \sin(\theta + \pi/2)$.
