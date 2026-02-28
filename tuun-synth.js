@@ -443,6 +443,7 @@ class TuunSynthElement extends HTMLElement {
     }
 
     async _play(expression) {
+        expression = this._stripComments(expression);
         const sampleRate = this._getSampleRate();
         await runtime.ensureInitialized(sampleRate);
         runtime.parse(expression);
@@ -554,6 +555,10 @@ class TuunSynthElement extends HTMLElement {
     _hideError() {
         const el = this.shadowRoot.querySelector('.error');
         if (el) el.classList.add('hidden');
+    }
+
+    _stripComments(text) {
+        return text.replace(/\/\/.*$/gm, '');
     }
 
     _dedent(text) {
