@@ -1,6 +1,6 @@
 # Tuun
 
-Tuun is an interactive sound and music generation system based inspired by programming language design.
+Tuun is an interactive sound and music generation system.
 
 Tuun serves several purposes, roughly in this order:
 
