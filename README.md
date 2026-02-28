@@ -10,6 +10,12 @@ Tuun serves several purposes, roughly in this order:
 
 Tuun can be built as both a native app and for the web using WebAssembly.
 
+## Documentation
+
+Visit the [Tuun Documentation](https://djspoons.github.io/tuun/) for more information about Tuun waveforms and expressions. It includes many interactive examples and an online playground.
+
+If you're looking for more examples, some of [my writing](https://djspoons.github.io/essays/) also makes use of Tuun.
+
 ## Native App
 
 ### Installation

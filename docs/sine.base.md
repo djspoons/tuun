@@ -1,6 +1,9 @@
 # Sine Waves
 
 Tuun supports a single primitive periodic waveform, a sine wave, written as `Sine`. It is the only primitive waveform which repeats in a non-trivial way and does so without depending on another periodic waveform. Like other waveform combinators, `Sine` transforms a pair of input waveforms into an output waveform. While the shape of `Sine` cannot be changed, it can be used with `Alt` and `Reset` to make many other kinds of periodic waveforms (for example, square and sawtooth waves). `Sine` is implemented through a form of direct digital synthesis (more on that below). 
+<!--
+TODO need to do the math mode thing that I did for essays
+-->
 
 ## Basic Usage
 
@@ -16,9 +19,9 @@ Sine(Const(2 * PI * 440), Const(0))
 
 That waveform generates the following audio:
 
-```tuun -C context.tuun
-$440 | fin(time - 3) | capture("01-sin-440hz")
-```
+<div class="container">
+  <tuun-synth description="440 Hz sine wave" expression="$440" />
+</div>
 
 To generate a waveform based on cosine instead of sine, use the phase offset parameter and the fact that $\cos(\theta) = \sin(\theta + \pi/2)$.
 
@@ -218,6 +221,4 @@ let fc = 440, I = 6, D = 1, fm = D/2 * fc in {[$fc | fin(time - 5), sin(2*pi*fc,
 
 (Here `pulse(width, freq)` is shorthand for a pulse wave with the given width and frequency. A width of 1.0 yields a square wave, while a width of 0.5 yields a pulse with 25% duty cycle.)
 
-
-
-
+<script type="module" src="tuun/tuun-synth.js"></script>

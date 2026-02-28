@@ -13,4 +13,4 @@ Many of the pages below include embedded synthesizer elements, but if you'd like
 * [Overview](tuun-langs.md)
 * [Sine](sine.md)
 
-<script type="module" src="../web/tuun-synth.js"></script>
+<script type="module" src="tuun/tuun-synth.js"></script>
