@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tuun Synthesizer</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #f5f5f5;
+            padding: 20px;
+        }
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        h1 { color: #333; }
+        h2 { color: #555; font-size: 1.1em; margin-top: 1.5em; }
+        p { color: #666; font-size: 14px; line-height: 1.5; margin: 0.5em 0 0.75em; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Tuun Synthesizer Examples</h1>
+
+        <h2>Complete</h2>
+        <tuun-synth
+            description="Harmonica"
+            expression="harmonica(H, 440)"
+            controls
+            expanded>
+        </tuun-synth>
+
+        <h2>Not expanded</h2>
+        <tuun-synth
+            description="Pure tone (440 Hz)"
+            expression="$440"
+            controls>
+        </tuun-synth>
+
+        <h2>No description (expanded by default)</h2>
+        <tuun-synth
+            expression="$440">
+        </tuun-synth>
+
+        <h2>No controls</h2>
+        <tuun-synth
+            description="Another pure tone (550 Hz)"
+            expression="$550">
+        </tuun-synth>
+
+        <h2>Expression as element body (see code)</h2>
+        <p>This allows for newlines in the expression. However, be aware of other text processors, which may interpret some Tuun special characters like <code>$</code>. Use <code>&lt;script type="text/tuun"&gt;</code> to protect the expression in those cases.</p>
+        <tuun-synth>
+            <script type="text/tuun">
+                ($440 + $550) * 0.5
+            </script>
+        </tuun-synth>
+    </div>
+    <script type="module" src="tuun-synth.js"></script>
+</body>
+</html>

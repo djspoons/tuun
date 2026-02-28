@@ -1,0 +1,15 @@
+{
+  "name": "tuun",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "tuun_bg.wasm",
+    "tuun.js",
+    "tuun.d.ts"
+  ],
+  "main": "tuun.js",
+  "types": "tuun.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
