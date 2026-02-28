@@ -97,13 +97,14 @@ const STYLES = `
     background: white;
     border-radius: 8px;
     padding: 12px;
+    margin: 0.8em;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
 }
 
 .main-row {
     display: flex;
     gap: 8px;
-    align-items: stretch;
+    align-items: baseline;
 }
 
 .description {
@@ -117,7 +118,7 @@ const STYLES = `
 .editor-row {
     display: flex;
     gap: 8px;
-    align-items: stretch;
+    align-items: start;
     margin-top: 8px;
     padding-left: 40px;
 }
@@ -128,6 +129,7 @@ textarea {
     border: 1px solid #ddd;
     border-radius: 4px;
     font-family: 'Monaco', 'Menlo', monospace;
+    field-sizing: content;
     font-size: 14px;
     resize: vertical;
     transition: border-color 0.2s;
@@ -146,7 +148,7 @@ textarea:focus {
 .reset-button,
 .code-toggle {
     width: 32px;
-    min-height: 32px;
+    min-height: 37px;
     padding: 0;
     border: none;
     border-radius: 4px;
@@ -278,7 +280,9 @@ class TuunSynthElement extends HTMLElement {
     }
 
     connectedCallback() {
-        this._originalExpression = this.getAttribute('expression') || '';
+        const script = this.querySelector('script[type="text/tuun"]');
+        const bodyText = script ? script.textContent : this.textContent;
+        this._originalExpression = this._dedent(bodyText) || this.getAttribute('expression') || '';
         this._expanded = !this.getAttribute('description') || this.hasAttribute('expanded');
         this._render();
         this._bindEvents();
@@ -312,7 +316,7 @@ class TuunSynthElement extends HTMLElement {
     }
 
     _render() {
-        const expression = this._escapeHtml(this.getAttribute('expression') || '');
+        const expression = this._escapeHtml(this._originalExpression);
         const description = this.getAttribute('description') || '';
         const hasDescription = !!description;
         const hasControls = this.hasAttribute('controls');
@@ -550,6 +554,18 @@ class TuunSynthElement extends HTMLElement {
     _hideError() {
         const el = this.shadowRoot.querySelector('.error');
         if (el) el.classList.add('hidden');
+    }
+
+    _dedent(text) {
+        const lines = text.split('\n');
+        // Drop empty leading/trailing lines
+        while (lines.length && !lines[0].trim()) lines.shift();
+        while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+        if (!lines.length) return '';
+        // Strip the first line's leading whitespace from all lines
+        const indent = lines[0].match(/^(\s*)/)[1];
+        if (!indent) return lines.join('\n');
+        return lines.map(l => l.startsWith(indent) ? l.slice(indent.length) : l).join('\n');
     }
 
     _escapeHtml(text) {
