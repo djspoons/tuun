@@ -95,13 +95,13 @@ lpf = fn(Q, fc) =>
 
 // INSTRUMENTS
 
-// From Welsh's Synthesizer Cookbook
+// An example of subtractive synthesis from Welsh's Synthesizer Cookbook
 harmonica = fn(dur, freq) =>
   let
     // These are approximately Welsh's values but not exactly
-    osc1 = pulse(0.93 + $(1.6) * 0.05, freq),
+    osc1 = pulse(0.93 + 0.05 * $(1.6), freq),
     osc2 = reset(osc1, pulse(0.7, add_cents(add_semitones(freq, 8), 7))),
-    osc = osc1 * 0.375 + osc2 * 0.5,
+    osc = 0.375 * osc1 + 0.5 * osc2,
     a = 0.13,
     d = 0.33,
     r = 0.33,
