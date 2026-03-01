@@ -2,4 +2,5 @@ title: Tuun Documentation
 description: Documentation for the Tuun interactive sound and music generation system.
 remote_theme: pages-themes/primer@v0.6.0
 plugins:
+- jekyll-feed
 - jekyll-remote-theme

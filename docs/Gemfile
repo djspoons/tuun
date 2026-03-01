@@ -1,7 +1,6 @@
 source "https://rubygems.org"
 gem "openssl" # remove after upgrading to ruby 3.4.8+
 gem "github-pages", group: :jekyll_plugins
-
 group :jekyll_plugins do
   gem "jekyll-feed", "~> 0.12"
   gem "jekyll-remote-theme"
