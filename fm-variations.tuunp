@@ -1,0 +1,24 @@
+// true FM
+let fc = 440, I = 6, D = 1, fm = D/2 * fc in sine(2*pi*(fc + (I * fm * sine(2*pi*fm, pi/2))), 0) | capture("true-fm")
+// PM
+let fc = 440, I = 6, D = 1, fm = D/2 * fc in sine(2*pi*fc, I * sine(2*pi*fm, 0)) | capture("pm")
+// Sweep the modulator phase offset
+let fc = 440, I = 6, D = 1, fm = D/2 * fc in sine(2*pi*(fc + (I * fm * sine(2*pi*fm, pi/2 + linear(0,0.25)*pi/2))), 0) | capture("true-fm-mod-sweep")
+let fc = 440, I = 6, D = 1, fm = D/2 * fc in sine(2*pi*fc, I * sine(2*pi*fm, linear(0,0.25)*pi/2)) | capture("pm-mod-sweep")
+
+let fc = 440, I = 6, D = 1, fm = D/2 * fc in 2*pi*(fc + (I * fm * sine(2*pi*fm, pi/2)))| capture("true-fm-freq")
+let fc = 440, I = 6, D = 1, fm = D/2 * fc in 2*pi*((I * fm * sine(2*pi*fm, pi/2)))| capture("true-fm-mod-only")
+let fc = 440, I = 6, D = 1, fm = D/2 * fc in sine(2*pi*(fc + (I * fm * square(2*pi*fm))), 0)
+let fc = 440, I = 6, D = 1, fm = D/2 * fc in sine(2*pi*fc, I * square(2*pi*fm))
+
+// FM but a cosine modulator
+let fc = 440, I = 6, D = 1, fm = D/2 * fc in sine(2*pi*(fc + (I * fm * sine(2*pi*fm, 0))), 0) | capture("cos-fm")
+// FM but a cosine modulator, but just the phase (don't actually take the sine)
+//let fc = 440, I = 6, D = 1, fm = D/2 * fc in 2*pi*(fc + (I * fm * sine(2*pi*fm, 0))) | capture("cos-fm-phase")
+// PM but a cosine modulator
+let fc = 440, I = 6, D = 1, fm = D/2 * fc in sine(2*pi*fc, I * sine(2*pi*fm, pi/2)) | capture("cos-pm")
+
+// FM but 25% duty cycle pulse
+let fc = 440, I = 6, D = 1, fm = D/2 * fc in sine(2*pi*(fc + (I * fm * pulse(0.5, fm))), 0) | capture("pulse-fm")
+// PM but 25% duty cycle pulse
+let fc = 440, I = 6, D = 1, fm = D/2 * fc in sine(2*pi*fc, I * pulse(0.5, fm)) | capture("pulse-pm")

@@ -106,17 +106,11 @@ pub fn exp(arguments: Vec<Expr>) -> Expr {
     }
 }
 
-pub fn sin(arguments: Vec<Expr>) -> Expr {
-    // If there is only a single argument, assume that it's the phase in radians, that is, that this
-    // expression doesn't depend on time. With two arguments, assume the first is frequency in radians
-    // per second, and the second is phase in radians.
+pub fn sine(arguments: Vec<Expr>) -> Expr {
+    // Like the waveform, Sine, the first argument is frequency in radians per
+    // second, and the second is phase in radians.
     match &arguments[..] {
-        [Float(value)] => Float(value.sin()),
-        [Expr::Waveform(w)] => Expr::Waveform(Waveform::Sine {
-            frequency: Box::new(Waveform::Const(0.0)),
-            phase: Box::new(w.clone()),
-            state: (),
-        }),
+        [Float(frequency), Float(value)] if *frequency == 0.0 => Float(value.sin()),
         [Float(freq), Float(phase)] => Expr::Waveform(Waveform::Sine {
             frequency: Box::new(Waveform::Const(*freq)),
             phase: Box::new(Waveform::Const(*phase)),
@@ -137,7 +131,8 @@ pub fn sin(arguments: Vec<Expr>) -> Expr {
             phase: Box::new(phase.clone()),
             state: (),
         }),
-        _ => Expr::Error("Invalid argument for sin".to_string()),
+        [_] => Expr::Error("Expected two arguments for sine".to_string()),
+        _ => Expr::Error("Invalid arguments for sine".to_string()),
     }
 }
 
@@ -597,7 +592,7 @@ pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
         ("pow", power),
         ("sqrt", sqrt),
         ("exp", exp),
-        ("sin", sin),
+        ("sine", sine),
         ("cos", cos),
         ("map", map),
         ("reduce", reduce),

@@ -8,7 +8,7 @@
 //!
 //! await init();
 //! const tuun = new Tuun(44100);
-//! const waveform = tuun.parse("sin(440, 0)");
+//! const waveform = tuun.parse("sine(2764, 0)");
 //! const samples = tuun.generate(waveform, 4096);
 //! ```
 
@@ -105,7 +105,7 @@ impl Wasm {
     ///
     /// # Example
     /// ```javascript
-    /// const waveform = tuun.parse("sin(440, 0)");
+    /// const waveform = tuun.parse("sine(2764, 0)");
     /// ```
     pub fn parse(&self, expression: &str) -> Result<WasmWaveform, String> {
         // Parse the program
@@ -202,7 +202,7 @@ mod tests {
         let tuun = Wasm::new(44100).expect("Failed to create Tuun instance");
 
         let examples = vec![
-            ("sin(2764, 0)", "Sine wave (440 Hz)"),
+            ("sine(2764, 0)", "Sine wave (440 Hz)"),
             ("noise * 0.1", "Noise"),
         ];
 
@@ -240,8 +240,8 @@ mod tests {
 
         let invalid_examples = vec![
             "undefined_function()",
-            "sin()", // Wrong number of args
-            "1 + ",  // Incomplete expression
+            "sine(2764)", // Wrong number of args
+            "1 + ",       // Incomplete expression
         ];
 
         for expr in invalid_examples {

@@ -7,26 +7,28 @@ pi = 3.14159265,
 // By convention, waveforms should start with the positive portion (or at least they should when
 // no offset is applied).
 
+// `sin` is shorthand for sine with no angular frequency.
+sin = fn(phase) => sine(0, phase),
 // `$` computes a sine wave at the given frequency in hertz (which must be a float or waveform).
-$ = fn(freq) => sin(2*pi * freq, 0),
+$ = fn(freq_hz) => sine(2*pi * freq_hz, 0),
 // `sawtooth` computes a sawtooth wave at the given frequency in hertz.
-sawtooth = fn(freq) => (reset($freq, -freq * time) + 0.5) * 2,
+sawtooth = fn(freq_hz) => (reset($freq_hz, -freq_hz * time) + 0.5) * 2,
 // `square` computes a square wave at the given frequency in hertz.
-square = fn(freq) => alt($freq, 1, -1),
+square = fn(freq_hz) => alt($freq_hz, 1, -1),
 // `triangle` computes a triangle wave at the given frequency in hertz.
-triangle = fn(freq) => let
-    t = $freq,
-    slope = 4 * freq,
+triangle = fn(freq_hz) => let
+    t = $freq_hz,
+    slope = 4 * freq_hz,
     a = time * slope - 1,
     b = time * -slope + 3
   in alt(t, reset(t, a), reset(t, b)),
 // Pulse computes a pulse wave with the given width. `width` should be a number (or waveform)
 // between 0.0 and 1.0, where 0.0 is a square wave (i.e., 50% duty cycle). If width isn't constant,
 // then this is a PWM oscillator.
-pulse = fn(width, freq) =>
+pulse = fn(width, freq_hz) =>
   let
     // Use a sawtooth wave (which is "lowered" by `width`) as the driver for the pulse.
-    s = sawtooth(freq)
+    s = sawtooth(freq_hz)
   in
     alt(s - width, 1, -1),
 
@@ -60,13 +62,13 @@ S = fn(dur, level) => fn(w) => w * (Sw(dur, level) + 1),
 R = fn(dur, level) => fn(w) => w * Rw(dur, level),
 
 over = fn(freq) => fn (x) => $(freq*x) * (1/x),
-hrm = fn(freq) => {map(over(freq), [1, 3, 5, 7, 9, 11])},
 
 add_semitones = fn(freq, n) => freq * pow(2, n/12),
 add_cents = fn(freq, n) => freq * pow(2, n/1200),
 
-just_third = fn(freq) => {[hrm(freq), hrm(freq * 5/4)]},
-equal_third = fn(freq) => {[hrm(freq), hrm(step(freq, 4))]},
+odd_hrm = fn(freq) => {map(over(freq), [1, 3, 5, 7, 9, 11])},
+just_third = fn(freq) => {[odd_hrm(freq), odd_hrm(freq * 5/4)]},
+equal_third = fn(freq) => {[odd_hrm(freq), odd_hrm(step(freq, 4))]},
 
 
 // FILTERS

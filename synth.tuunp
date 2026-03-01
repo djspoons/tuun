@@ -7,4 +7,4 @@ pulse(0.8, 220)
 // PWM
 pulse($44, 220)
 // PM
-let fc = 220, I = linear(0,0.2), D = 3, fm = D/2 * fc in sin(2*pi*fc, I * sin(2*pi*fm, 0))
+let fc = 220, I = linear(0,0.2), D = 3, fm = D/2 * fc in sine(2*pi*fc, I * sine(2*pi*fm, 0))
