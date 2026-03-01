@@ -30,7 +30,7 @@ export class Tuun {
    *
    * # Example
    * ```javascript
-   * const waveform = tuun.parse("sin(440, 0)");
+   * const waveform = tuun.parse("sine(2764, 0)");
    * ```
    */
   parse(expression: string): WasmWaveform;

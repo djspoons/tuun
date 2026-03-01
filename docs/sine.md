@@ -1,9 +1,6 @@
 # Sine Waves
 
-Tuun supports a single primitive periodic waveform, a sine wave, written as `Sine`. It is the only primitive waveform which repeats in a non-trivial way and does so without depending on another periodic waveform. Like other waveform combinators, `Sine` transforms a pair of input waveforms into an output waveform. While the shape of `Sine` cannot be changed, it can be used with `Alt` and `Reset` to make many other kinds of periodic waveforms (for example, square and sawtooth waves). `Sine` is implemented through a form of direct digital synthesis (more on that below). 
-<!--
-TODO need to do the math mode thing that I did for essays
--->
+Tuun supports a single primitive periodic waveform, a sine wave, written as `Sine`. It is the only primitive waveform which repeats in a non-trivial way and does so without depending on another periodic waveform. Like other waveform combinators, `Sine` transforms a pair of input waveforms into an output waveform. While the shape of `Sine` cannot be changed, it can be used with `Alt` and `Reset` to make many other kinds of periodic waveforms (for example, square and sawtooth waves). `Sine` is implemented through a form of direct digital synthesis (more on that below). We'll focus on `Sine` the waveform first and briefly touch on the related functions that appear in the Tuun expression language below.
 
 ## Basic Usage
 
@@ -20,7 +17,7 @@ Sine(Const(2 * PI * 440), Const(0))
 That waveform generates the following audio:
 
 <div class="container">
-  <tuun-synth description="440 Hz sine wave" expression="sin(2*pi * 440, 0)" />
+  <tuun-synth description="440 Hz sine wave" expression="sine(2*pi * 440, 0)" />
 </div>
 
 To generate a waveform based on cosine instead of sine, use the phase offset parameter and the fact that $\cos(\theta) = \sin(\theta + \pi/2)$.
@@ -64,7 +61,7 @@ Sine(Const(2 * PI * 500) * Time, Const(0))
 Which you can listen to here:
 <div class="container">
   <tuun-synth description="Frequency sweep"
-    expression="sin(2*pi * 500 * time, 0) | fin(time - 20)"
+    expression="sine(2*pi * 500 * time, 0) | fin(time - 20)"
   />
 </div>
 
@@ -87,10 +84,10 @@ You might imagine that this is *also* equivalent to the following Tuun waveform,
 Sine(Const(0), Const(500 * PI) * Time * Time)
 ```
 
-And it *is* equivalent... but only up to the point of numeric accuracy, which is this case is not very good: that waveform will have audible artifacts after a few seconds. This is because the $500 \pi t^2$ term will become quite large, and Tuun's 32-bit representation of samples is not accurate enough to represent these numbers without introducing significant errors. (Listen for the side bands that become audible after about 11 seconds.)
+And it *is* equivalent... but only up to the point of numeric accuracy, which is this case is not very good: that waveform will have audible artifacts after a few seconds. This is because the $500 \pi t^2$ term will become quite large, and Tuun's 32-bit representation of samples is not accurate enough to represent these numbers without introducing significant errors. (Listen for the sidebands that become audible after about 11 seconds.)
 <div class="container">
   <tuun-synth description="Frequency sweep using phase offset"
-    expression="sin(0, 500 * pi * time * time) | fin(time - 20)"
+    expression="sine(0, 500 * pi * time * time) | fin(time - 20)"
   />
 </div>
 
@@ -151,12 +148,12 @@ This is often called (software) *direct digital synthesis* (DDS) or more specifi
 
 ## Expression Syntax
 
-Tuun expressions make use of several built-in and pre-defined functions for common uses of $\sin$.
+Because $\sin$ is used in several different ways in sound and music synthesis, it appears in several forms in Tuun expressions. The first row in the table below shows the built-in function that directly maps to the Tuun waveform. The second and third rows show pre-defined functions for common but more specific uses.
 
 | Expression      | Waveform                 | Description    
 |---------------- |--------------------------|--------------  
-| `sin(w, p)`     | `Sine(|w|, |p|)`     | General form, angular frequency (periodic case)
-| `sin(p)`        | `Sine(Const(0), |p|)`  | Zero frequency ($\sin$ of an angle or other non-periodic case)
+| `sine(w, p)`    | `Sine(|w|, |p|)`     | General form, angular frequency (periodic case)
+| `sin(p)`        | `Sine(Const(0), |p|)`  | Zero frequency (as in $\sin$ of an angle or other non-periodic case)
 | `$e`            | `Sine(Const(2 * PI) * |e|, Const(0))` | Frequency measured in hertz (zero phase offset)
 
 where `|e|` is the waveform translation of `e`.
@@ -173,7 +170,7 @@ $$
 s_\text{FM}(t) = \sin(w_c t + I \sin(w_m t) )
 $$
 
-Where $I$ is the index of modulation. Confusingly, this "index" is not an integer, but instead a continuous "dial" that controls the strength of the sideband frequency components. When $I = 0$ there is no modulation, and as $I$ increases, the number and strength of side bands generally increases.
+Where $I$ is the index of modulation. Confusingly, this "index" is not an integer, but instead a continuous "dial" that controls the strength of the sideband frequency components. When $I = 0$ there is no modulation, and as $I$ increases, the number and strength of sidebands generally increases.
 
 The frequency of an FM tone is given as:
 
@@ -198,7 +195,7 @@ The following is an example of an FM tone where the index of modulation `I` star
       D = 1,
       fm = D/2 * fc
     in
-      sin(2*pi * (fc + (I * fm * sin(2*pi * fm, pi/2))), 0)
+      sine(2*pi * (fc + (I * fm * sine(2*pi * fm, pi/2))), 0)
         | fin(time - 20)
   </tuun-synth>
 </div>
@@ -213,7 +210,7 @@ Though phase offset is difficult to perceive audibly in general, the choice of t
       D = 1,
       fm = D/2 * fc
     in
-      sin(2*pi * (fc + (I * fm * sin(2*pi * fm, linear(pi/2,pi/8)))), 0)
+      sine(2*pi * (fc + (I * fm * sine(2*pi * fm, linear(pi/2,pi/8)))), 0)
         | fin(time - 10)
   </tuun-synth>
 </div>
@@ -241,7 +238,7 @@ First, FM with pulse modulator: `Sine(w_c + I * w_m * pulse(0.5, w_m), 0)`
         D = 1,
         fm = D/2 * fc
       in
-        <[sin(2*pi * (fc + (I * fm * pulse(0.5, fm))), 0) | seq(time - 3),
+        <[sine(2*pi * (fc + (I * fm * pulse(0.5, fm))), 0) | seq(time - 3),
          $fc]>
          | fin(time - 6)
     </script>
@@ -259,7 +256,7 @@ Second, PM with pulse modulator `Sine(w_c, I * pulse(0.5, w_m))`
         D = 1,
         fm = D/2 * fc
       in
-        <[sin(2*pi * fc, I * pulse(0.5, fm)) | seq(time - 3),
+        <[sine(2*pi * fc, I * pulse(0.5, fm)) | seq(time - 3),
          $fc]>
          | fin(time - 6)
     </script>

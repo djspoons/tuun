@@ -216,14 +216,14 @@ expr ::= ...
 
 Tuun supports special syntax for chords and sequences – by "chords", we really just mean combining waveforms so that they are played simultaneously. Curly brackets (`{` and `}`) take a tuple of waveforms and turn that tuple into a single waveform representing a chord. Angle brackets (`<` and `>`) take a tuple of waveforms and sequence them. (As you might guess from above, those waveforms must include proper offsets to create a true sequence!)
 
-All waveforms are values, and Tuun provides built-in functions to create them. When a floating point value appears in the context of a waveform, it's implicitly coerced into a constant waveform. Functions like `sin` are overloaded so that they can take either floating point values or waveforms. Note that, by convention, the expression language built-ins for waveforms (like `fin`, `seq`, and `time`) are written in lowercase.
+All waveforms are values, and Tuun provides built-in functions to create them. When a floating point value appears in the context of a waveform, it's implicitly coerced into a constant waveform. Functions like `sine` are overloaded so that they can take either floating point values or waveforms. Note that, by convention, the expression language built-ins for waveforms (like `fin`, `seq`, and `time`) are written in lowercase.
 
 We can now give a slightly more extensive version of the harmonics example, in part by defining a helper function that creates overtones. The dollar sign is used a shorthand for a sine wave with the given frequency in hertz and no phase offset. The `over` function creates an overtone whose amplitude in inversely proportional to the distance between that overtone and the fundamental. (`$` and `over` are in the standard context.)
 
 ```
 // `$` computes a sine wave at the given frequency in hertz (which must be a float or waveform).
-$ = fn(freq) => sin(2*pi * freq, 0),
-over = fn(freq) => fn (x) =>  (1/x) * $(freq*x),
+$ = fn(freq_hz) => sine(2*pi * freq_hz, 0),
+over = fn(freq) => fn (x) => (1/x) * $(freq*x),
 ```
 <div class="container">
   <tuun-synth>
@@ -237,10 +237,10 @@ over = fn(freq) => fn (x) =>  (1/x) * $(freq*x),
 
 Notice that there are _two_ types of multiplication here: multiplication in the expression language and multiplication of waveforms (written as `~.` here for clarity).
 
-| Expression           | Evaluates to...                                        |
-| ----------           | ---------------                                        |
-| `3 * 440`            | `1320`                                                 |
-| `over(440)(3)`   | `Const(.3333) ~. Sine(Const(2 * PI * 1320), Const(0))`  |
+| Expression       | Evaluates to...                                        |
+| ----------       | ---------------                                        |
+| `3 * 440`        | `1320`                                                 |
+| `over(440)(3)`   | `Const(.3333) ~. Sine(Const(2 * PI * 1320), Const(0))` |
 
 However, since `*` is overloaded in the expression language, the function `$` can take the frequency a single floating point value or as a waveform. (In the second case, the frequency may vary with time.)
 
