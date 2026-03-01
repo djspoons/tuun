@@ -14,21 +14,21 @@ We'll start with a brief introduction to the second one before we dive into the 
 
 Tuun's interactive expression language is a simple, functional language like OCaml or Standard ML. It supports floating point numbers, arithmetic, functions, and tuples. In addition, it has some built-in syntax and semantics that make it easy to express complicated waveforms. For example, the `$` operator takes a frequency and returns a waveform that will generate a tone at that frequency.
 
-```
-$440
-```
+<div class="container">
+  <tuun-synth expression="$440" />
+</div>
 
-Tuun lets you define abstractions so that you can easily convert from MIDI note numbers to frequencies (`@`), create notes of different lengths (`Q` and `H`) and combine notes in a sequence:
+Tuun lets you define abstractions so that you can easily convert from MIDI note numbers to frequencies (`@`), create notes of different lengths (`Qw` and `Hw`) and combine notes in a sequence:
 
-```
-<[$(@60)(Q), $(@64)(Q), $(@67)(H)]>
-```
+<div class="container">
+  <tuun-synth expression="<[$(@60) * Qw, $(@64) * Qw, $(@67) * Hw]>" />
+</div>
 
 The way that you use the Tuun language is up to you! There's nothing baked in about western music or MIDI. Instead, it's all built from the following waveforms and waveform combinators.
 
 ## Tuun Waveforms
 
-Tuun has several primitive waveforms and waveform combinators. The first, `Const`, isn't exactly a "wave" but is used to create waves: `Const` generates a stream where every sample is the same value. This can be used with the [`Sine` combinator](sine.md) to produce a sine wave. `Sine` takes two arguments: one for the angular frequency (in radians per second) and one for the phase offset. For example, the following will generate a tone at 440 Hz.
+Tuun has several primitive waveforms and waveform combinators. These are the "assembly language" of Tuun. The first primitive, `Const`, isn't exactly a "wave" but is used to create waves: `Const` generates a stream where every sample is the same value. This can be used with the [`Sine` combinator](sine.md) to produce a sine wave. `Sine` takes two arguments: one for the angular frequency (in radians per second) and one for the phase offset. For example, the following will generate a tone at 440 Hz.
 
 ```
 Sine(Const(2 * PI * 440), Const(0))
@@ -53,7 +53,7 @@ The length of `Fin` is given by its first parameter: `Fin` generates samples fro
 The `~*` we can use `~*` to modify outputs as well. This combinator multiplies each sample in the first waveform by the corresponding sample in the second waveform. Below it's used to control the amplitude of a waveform. For example, we can change the amplitude of the Sine wave by multiplying by a constant waveform.
 
 ```
-Fin(Time ~- Const(2), Sine(Const(2 * PI * 440), Const(0)) ~. Const(0.5))
+Fin(Time ~- Const(2), Const(0.5) ~. Sine(Const(2 * PI * 440), Const(0)))
 ```
 
 > The length of a waveform like `a ~+ b` or `a ~- b` is the _maximum_ of the length of `a` and the length of `b` (since the sum can continue generating samples as long as one of the components is), and the length of a waveform `a ~. b` or `a ~/ b` is the _minimum_ of the length of `a` and the length of `b` (since once the length of one waveform has been exceeded, it's as if it will generate only zeros forever).
@@ -61,7 +61,10 @@ Fin(Time ~- Const(2), Sine(Const(2 * PI * 440), Const(0)) ~. Const(0.5))
 Putting these combinators together enables us to create more interesting sounds. For example, we can generate harmonics by applying progressively smaller constants to higher frequencies like the following.
 
 ```
-Fin(Time ~- Const(4), Sine(Const(2 * PI * 440), Const(0)) ~+ Sine(Const(2 * PI * 1320), Const(0)) ~. Const(0.33) ~+ Sine(Const(2 * PI * 2200), Const(0)) ~. Const(0.2))
+Fin(Time ~- Const(4), 
+  Sine(Const(2 * PI * 440), Const(0))
+  ~+ Const(0.33) ~. Sine(Const(2 * PI * 1320), Const(0))
+  ~+ Const(0.2) ~. Sine(Const(2 * PI * 2200), Const(0)))
 ```
 
 Writing this out is starting to get a little tedious, though, and we'll see how to use Tuun expressions below to build a library of functions for easily generating harmonics and other complex waveforms.
@@ -135,7 +138,7 @@ These combinators that change how a waveform behaves in time and in relation to 
  * `Seq(offset, a)` - sets the offset of `a` (and the start of subsequent waveforms) when `offset` >= 0.0
  * `Append(a, b)` - generates samples from `a` and then from `b`
 
-There are the arithmetic combinators that combine the samples themselves.
+There are the combinators that combine the samples themselves.
 
  * `a ~+ b` - adds sample points together
  * `a ~- b` - subtracts sample points
@@ -179,7 +182,7 @@ This small set of combinators is enough to create synthesizers, filters, and eve
 
 ## Tuun Expressions
 
-Tuun waveforms are designed to be simple, and they are more like an assembly language then a programming language. On the other hand, the Tuun expressions form a higher-order functional language that can be used to build abstractions and easily create complex sounds and even music!
+While Tuun waveforms are designed to be simple, Tuun expressions form a higher-order functional language that can be used to build abstractions and easily create complex sounds and even music!
 
 ```
 expr ::= float
@@ -215,21 +218,31 @@ Tuun supports special syntax for chords and sequences – by "chords", we really
 
 All waveforms are values, and Tuun provides built-in functions to create them. When a floating point value appears in the context of a waveform, it's implicitly coerced into a constant waveform. Functions like `sin` are overloaded so that they can take either floating point values or waveforms. Note that, by convention, the expression language built-ins for waveforms (like `fin`, `seq`, and `time`) are written in lowercase.
 
-We can now give a slightly more extensive version of the harmonics example, in part by defining a helper function that creates overtones. The dollar sign is used a shorthand for a sine wave with the given frequency in hertz and no phase offset.
+We can now give a slightly more extensive version of the harmonics example, in part by defining a helper function that creates overtones. The dollar sign is used a shorthand for a sine wave with the given frequency in hertz and no phase offset. The `over` function creates an overtone whose amplitude in inversely proportional to the distance between that overtone and the fundamental. (`$` and `over` are in the standard context.)
 
 ```
-$ = fn(freq) => sin(2 * pi * freq, 0),
-overtone = fn(freq) => fn (x) => $(freq*x) * (1/x),
-harmonics = fn(freq) => {map(overtone(freq), [1, 3, 5, 7, 9, 11])},
+// `$` computes a sine wave at the given frequency in hertz (which must be a float or waveform).
+$ = fn(freq) => sin(2*pi * freq, 0),
+over = fn(freq) => fn (x) =>  (1/x) * $(freq*x),
 ```
-The `overtone` function creates a waveform by multiplying `freq` by `x` and then multiplying that waveform by a constant waveform to scale it down. Notice that there are _two_ types of multiplication here: multiplication in the expression language and multiplication in the waveform language (written as `~.` for clarity).
+<div class="container">
+  <tuun-synth>
+    let
+      odd_harmonics = 
+        fn(freq) => {map(over(freq), [1, 3, 5, 7, 9, 11])},
+    in
+      odd_harmonics(220)
+  </tuun-synth>
+</div>
+
+Notice that there are _two_ types of multiplication here: multiplication in the expression language and multiplication of waveforms (written as `~.` here for clarity).
 
 | Expression           | Evaluates to...                                        |
 | ----------           | ---------------                                        |
 | `3 * 440`            | `1320`                                                 |
-| `overtone(440)(3)`   | `Sine(Const(2 * PI * 1320), Const(0)) ~. Const(.3333)`  |
+| `over(440)(3)`   | `Const(.3333) ~. Sine(Const(2 * PI * 1320), Const(0))`  |
 
-Notice that, since `*` is overloaded in the expression language, the function `$` can take the frequency a single floating point value or as a waveform. (In the second case, the frequency may vary with time.)
+However, since `*` is overloaded in the expression language, the function `$` can take the frequency a single floating point value or as a waveform. (In the second case, the frequency may vary with time.)
 
 We can also revisit our envelope example from above. This example makes use of the `|` operator, which denotes reverse application (enabling you to write the argument before the function you are passing it to). It's conventional in Tuun to write filters like ADSR in a curried-form, as shown below, so that they can be chained together.
 
@@ -251,3 +264,5 @@ ADSR = fn(attack_dur, decay_dur, sustain_level, sustain_dur, release_dur) =>
                             Rw(release_dur, sustain_level)]>,
 ```
 (If you want to use quartic instead of linear ramps, you'll just need to replace `linear` with a different waveform!)
+
+<script type="module" src="tuun/tuun-synth.js"></script>

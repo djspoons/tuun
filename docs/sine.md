@@ -1,33 +1,34 @@
 # Sine Waves
 
-Tuun supports a single primitive periodic waveform, a sine wave, written as `Sine`. It is the only primitive waveform which repeats in a non-trivial way and does so without depending on another periodic waveform. Like other waveform combinators, `Sine` transforms a pair of input waveforms into an output waveform. While the shape of `Sine` cannot be changed, it can be used with `Alt` and `Reset` to make many other kinds of periodic waveforms (for example, square and sawtooth waves). `Sine` is implemented through a form of direct digital synthesis (more on that below).
+Tuun supports a single primitive periodic waveform, a sine wave, written as `Sine`. It is the only primitive waveform which repeats in a non-trivial way and does so without depending on another periodic waveform. Like other waveform combinators, `Sine` transforms a pair of input waveforms into an output waveform. While the shape of `Sine` cannot be changed, it can be used with `Alt` and `Reset` to make many other kinds of periodic waveforms (for example, square and sawtooth waves). `Sine` is implemented through a form of direct digital synthesis (more on that below). 
+<!--
+TODO need to do the math mode thing that I did for essays
+-->
 
 ## Basic Usage
 
-`Sine` takes two parameters: the first is a waveform that determines the angular frequency of the output waveform, measured in radians/second; the second is a waveform that determines the angular phase offset of the output waveform, also measured in radians. These waveforms represent the *instantaneous* frequency and phase offset.
-
-    Sine(angular_frequency, angular_phase_offset)
+`Sine` takes two parameters: the first is a waveform that determines the angular frequency of the output waveform, measured in radians/second; the second is a waveform that determines the angular phase offset of the output waveform, measured in radians. These waveforms represent the *instantaneous* frequency and phase offset. That is, they determine the frequency and offset at each point in time. 
+```
+Sine(angular_frequency, angular_phase_offset)
+```
 
 As a simple example, a sine wave with a frequency of 440 Hz can be written as follows (since hertz can be converted into radians by multiplying by $2\pi$).
-
-    Sine(Const(2 * PI * 440), Const(0))
+```
+Sine(Const(2 * PI * 440), Const(0))
+```
 
 That waveform generates the following audio:
 
-<!--
-tuun "--ui=false" "--date-format=" "--buffer-size=16384" "-C" "context.tuun" "-p" "$440 | fin(time - 3) | capture(\"01-sin-440hz\")"
--->
-
-- <audio controls>
-  <source src="01-sin-440hz.wav" type="audio/wav">
-  Your browser does not support the audio element.
-  </audio>
+<div class="container">
+  <tuun-synth description="440 Hz sine wave" expression="sin(2*pi * 440, 0)" />
+</div>
 
 To generate a waveform based on cosine instead of sine, use the phase offset parameter and the fact that $\cos(\theta) = \sin(\theta + \pi/2)$.
 
 | Tuun waveform                      | Mathematical equivalent
 |---                                 |---
 | `Sine(Const(w), Const(PI / 2))`    | $s(t) = \cos(w t)$
+
 
 In general, in the case where both parameters are constant waveforms, `Sine` produces a waveform defined by the following equation:
 
@@ -41,7 +42,9 @@ Time is implicit in the output of Tuun waveforms, so `Sine` and other Tuun wavef
 
 Another common use of `Sine` is to generate parameters to other waveforms, like `Filter`. In this case, you may see waveforms like the following.
 
-    Sine(Const(0), Fixed([2 * PI * 0.1]))
+```
+Sine(Const(0), Fixed([2 * PI * 0.1]))
+```
 
 Since the length of `Sine` is determined by the shorter of its two parameters, this waveform will generate exactly one sample.
 
@@ -51,62 +54,61 @@ If you need to use `Sine` to compute the sine of a single angle measured in radi
 |---                             |---
 | `Sine(Const(0), Fixed[c]))`     | $s(0) = \sin(c)$ and $s(t)$ is undefined for $t > 0$
 
+
 ## Dynamic Frequency and Phase
 
-Passing a non-constant waveform as the first parameter to `Sine` will result in a waveform whose frequency changes over time. That is, each sample of the frequency waveform represents the instantaneous frequency at that time. For example, the following waveform generates a sine wave whose frequency starts at 0 Hz and then increases by 500 Hz every second:
-
-    Sine(Const(2 * PI * 500) * Time, Const(0))
-
+Passing a non-constant waveform as the first parameter to `Sine` will result in a waveform whose frequency changes over time. That is, each sample of the frequency waveform represents the instantaneous frequency at that time. For example, the following waveform generates a sine wave whose frequency starts at 0 Hz and then increases by 500 Hz every second (a frequency "sweep").
+```
+Sine(Const(2 * PI * 500) * Time, Const(0))
+```
 Which you can listen to here:
+<div class="container">
+  <tuun-synth description="Frequency sweep"
+    expression="sin(2*pi * 500 * time, 0) | fin(time - 20)"
+  />
+</div>
 
-<!--
-tuun "--ui=false" "--date-format=" "--buffer-size=16384" "-C" "context.tuun" "-p" "sin(2*pi*500*time, 0) | fin(time - 20) | capture(\"02-sweep-as-frequency\")"
--->
-
-- <audio controls>
-  <source src="02-sweep-as-frequency.wav" type="audio/wav">
-  Your browser does not support the audio element.
-  </audio>
-
-Recall that when we write the mathematical function $\sin$, its argument is a phase (or angle). Phase is determined by integrating frequency, so Tuun must integrate the first parameter of `Sine` to determine the phase at each point in time. In the case above, we can determine the phase at each time $t$ by computing the value of the following the integral:
-
-$$
-\int_0^t 2\pi 1000 \tau  d\tau = \frac{2\pi 1000 t^2}{2} = 1000 \pi t^2
-$$
+Recall that when we write the mathematical function $\sin$, its argument is a phase (or angle). Phase is determined by integrating frequency, so Tuun must integrate the first parameter of `Sine` to determine the phase at each point in time. In the case above, we can determine the phase at each time $t$ by computing the value of the following definite integral:
+ 
+ $$
+ \int_0^t 2\pi 500 \tau  d\tau = \frac{2\pi 500 t^2}{2} = 500 \pi t^2
+ $$
 
 Which leads to the following equivalence:
-| Tuun waveform                                              | Mathematical equivalent
-|---                                                         |---
-| `Sine(Const(2 * PI * 1000) * Time, Const(0))`           | $s(t) = \sin(1000 \pi t^2)$
+
+| Tuun waveform                                  | Mathematical equivalent
+|---                                             |---
+| `Sine(Const(2 * PI * 500) * Time, Const(0))`  | $s(t) = \sin(500 \pi t^2)$
+
 
 You might imagine that this is *also* equivalent to the following Tuun waveform, which uses a phase offset that depends on time instead of the frequency parameter.
 
-    Sine(Const(0), Const(1000 * PI) * Time * Time)
+```
+Sine(Const(0), Const(500 * PI) * Time * Time)
+```
 
-And it *is* equivalent... but only up to the point of numeric accuracy, which is this case is not very good: that waveform will have audible artifacts after a few seconds. This is because the $1000 \pi t^2$ term will become quite large, and Tuun's 32-bit representation of samples is not accurate enough to represent these numbers without introducing significant errors. (Listen for the side bands that become audible after about 11 seconds.)
+And it *is* equivalent... but only up to the point of numeric accuracy, which is this case is not very good: that waveform will have audible artifacts after a few seconds. This is because the $500 \pi t^2$ term will become quite large, and Tuun's 32-bit representation of samples is not accurate enough to represent these numbers without introducing significant errors. (Listen for the side bands that become audible after about 11 seconds.)
+<div class="container">
+  <tuun-synth description="Frequency sweep using phase offset"
+    expression="sin(0, 500 * pi * time * time) | fin(time - 20)"
+  />
+</div>
 
-<!--
-tuun "--ui=false" "--date-format=" "--buffer-size=16384" "-C" "context.tuun" "-p" "sin(0, pi*500*time*time) | fin(time - 20) | capture(\"03-sweep-as-phase\")"
--->
-
-- <audio controls>
-  <source src="03-sweep-as-phase.wav" type="audio/wav">
-  Your browser does not support the audio element.
-  </audio>
-
-You should avoid using Tuun waveforms (especially intermediate waveforms that are passed to `Sine`) whose values exceed about 10,000 whenever possible. In this case, that means using the version of the waveform with fewer uses of the `Time` primitive. This will often save you the trouble of determining the integral and produce better sounding results as well.
+You should avoid using Tuun waveforms (especially intermediate waveforms that are passed to `Sine`) whose values exceed about 10,000 whenever possible. This will save you the trouble of determining the integral and often produce better sounding results as well. In the case above, that means using the version of the waveform with fewer occurrences of the `Time` primitive.
 
 In general, for a frequency waveform `w` and a phase offset waveform `p` (both of which may vary with time), `Sine` produces something like the following equation.
 
+
 | Tuun waveform                          | Mathematical "equivalent"
 |---                                     |---
-| `Sine(w, p)`                        | $s(t) = \sin \left( \left(\int_0^t w(\tau) d\tau\right) + p(t)\right)$
+| ```Sine(w, p)```                        | $s(t) = \sin \left( \left(\int_0^t w(\tau) d\tau\right) + p(t)\right)$
+
 
 Of course, Tuun is not computing that integral exactly; it's approximating it as described below.
 
 ## Accumulation
 
-Since Tuun is generating discrete samples, you can think of the implementation of `Sine` as an approximation using a sum of the instantaneous frequencies and phase offsets. For example, here's a simple translation of the above equation into discrete time using a rectangular approximation:
+Since Tuun is generating discrete samples, you can think of the implementation of `Sine` as an approximation using a sum of the previous instantaneous frequencies and phase offsets. For example, here's a translation of the above equation into discrete time using a rectangular approximation:
 
 $$
 s[t_n] = \sin \left( \left(\sum_{i=0}^n w[t_i] \Delta t\right) + p[t_n]\right) = \sin \left( \left(\sum_{i=0}^n \frac{w[t_i]}{f_s}\right) + p[t_n]\right)
@@ -128,21 +130,22 @@ $$
 a[t_n] = a[t_{n-1}] + \frac{w[t_n]}{2f_s} \enspace \text{ (for n = 1, 2, 3, ...)}
 $$
 
-That is, at each step, we compute a new phase based on:
+In other words, at each step, we compute a new phase based on:
 
-- The previous accumulated phase
-- The angular frequency at that time divided by $f_s$, aka change in phase per sample
+ * The previous accumulated phase
+ * The angular frequency at that time divided by $f_s$, aka change in phase per sample
 
-We use the accumulated phase together with the phase offset at that time as the argument to $\sin$.
+ We use the accumulated phase together with the phase offset at that time as the argument to $\sin$.
 
 Those equations translate more or less directly to the Rust code that implements `Sine`:
-
-    let mut accumulator = 0.0;
-    for i in (1..n) {
-        out[i] = (accumulator + phase_offset[i-1]).sin();
-        let phase_inc = frequency[i] / sample_frequency;
-        accumulator = (accumulator + phase_inc).rem_euclid(consts::TAU);
-    }
+```
+let mut accumulator = 0.0;
+for i in (1..n) {
+    out[i] = (accumulator + phase_offset[i-1]).sin();
+    let phase_inc = frequency[i] / sample_frequency;
+    accumulator = (accumulator + phase_inc).rem_euclid(consts::TAU);
+}
+```
 
 This is often called (software) *direct digital synthesis* (DDS) or more specifically the *numerically controlled oscillator* (NCO) portion of DDS.
 
@@ -150,11 +153,11 @@ This is often called (software) *direct digital synthesis* (DDS) or more specifi
 
 Tuun expressions make use of several built-in and pre-defined functions for common uses of $\sin$.
 
-| Expression      | Waveform                 | Description\
-|---------------- |--------------------------|--------------\
-| `sin(w, p)`     | `Sine(\|w\|, \|p\|)`     | General form, angular frequency (periodic case)
-| `sin(p)`        | `Sine(Const(0), \|p\|)`  | Zero frequency ($\sin$ of an angle or other non-periodic case)
-| `$e`            | `Sine(Const(2 * PI) * \|e\|, Const(0))` | Frequency measured in hertz (zero phase offset)
+| Expression      | Waveform                 | Description    
+|---------------- |--------------------------|--------------  
+| `sin(w, p)`     | `Sine(|w|, |p|)`     | General form, angular frequency (periodic case)
+| `sin(p)`        | `Sine(Const(0), |p|)`  | Zero frequency ($\sin$ of an angle or other non-periodic case)
+| `$e`            | `Sine(Const(2 * PI) * |e|, Const(0))` | Frequency measured in hertz (zero phase offset)
 
 where `|e|` is the waveform translation of `e`.
 
@@ -170,7 +173,7 @@ $$
 s_\text{FM}(t) = \sin(w_c t + I \sin(w_m t) )
 $$
 
-Where $I$ is the index of modulation. Confusingly, this "index" is not an integer, but instead more of a continuous "dial" that controls the strength of the sideband frequency components. When $I = 0$ there is no modulation, and as $I$ increases, the number and strength of side bands generally increases.
+Where $I$ is the index of modulation. Confusingly, this "index" is not an integer, but instead a continuous "dial" that controls the strength of the sideband frequency components. When $I = 0$ there is no modulation, and as $I$ increases, the number and strength of side bands generally increases.
 
 The frequency of an FM tone is given as:
 
@@ -181,75 +184,88 @@ $$
 You can double check that this is indeed the integral of the argument to $\sin$ above. In some presentations, $I w_m$ is written as $d$, the maximum deviation from the carrier signal.
 
 We can implement this directly in Tuun, again remembering that $\cos(\theta) = \sin(\theta + \pi/2)$.
-
-    Sine(w_c + I * w_m * Sine(w_m, PI / 2), 0)
-
+```
+Sine(w_c + I * w_m * Sine(w_m, PI / 2), 0)
+```
 (Eliding the `Const` primitive here and below for clarity.)
 
-Here is an example of an FM tone where the index of modulation `I` starts at 0 and increases by 1 every two seconds. Notice how the number of harmonics generally increases, and some harmonics fade in and out over time.
+The following is an example of an FM tone where the index of modulation `I` starts at 0 and increases by 1 every two seconds. Notice how the number of harmonics generally increases, and some harmonics fade in and out over time.
+<div class="container">
+  <tuun-synth description="FM synthesis tone (increasing index of modulation)">
+    let
+      fc = 440,
+      I = linear(0, 0.5),
+      D = 1,
+      fm = D/2 * fc
+    in
+      sin(2*pi * (fc + (I * fm * sin(2*pi * fm, pi/2))), 0)
+        | fin(time - 20)
+  </tuun-synth>
+</div>
 
-<!--
-tuun "--ui=false" "--date-format=" "--buffer-size=16384" "-C" "context.tuun" "-p" "let fc = 440, I = linear(0, 0.5), D = 1, fm = D/2 * fc in sin(2*pi*(fc + (I * fm * sin(2*pi*fm, pi/2))), 0) | fin(time - 20) | capture(\"04-linear-index-fm\")"
--->
+Though phase offset is difficult to perceive audibly in general, the choice of the phase offset *in the modulator* can have significant effects on the relative strength of the sideband frequencies. (See "The Effect of Modulator Phase on Timbres in FM Synthesis." John A. Bate, in _Computer Music Journal_, Vol. 14 (1990) for a discussion of this and other variations of FM synthesis.) In the following, the index of modulation `I` is held constant while the modular phase varies over time.
 
-- <audio controls>
-  <source src="04-linear-index-fm.wav" type="audio/wav">
-  Your browser does not support the audio element.
-  </audio>
-
-Though in general phase offset is difficult to perceive audibly, the choice of the phase offset *in the modulator* can have significant effects on the relative strength of the sideband frequencies. (See "The Effect of Modulator Phase on Timbres in FM Synthesis." John A. Bate, in *Computer Music Journal*, Vol. 14 (1990) for a discussion of this and other variations of FM synthesis.) In this case, the index of modulation `I` is held constant.
-
-<!--
-tuun "--ui=false" "--date-format=" "--buffer-size=16384" "-C" "context.tuun" "-p" "let fc = 440, I = 6, D = 1, fm = D/2 * fc in sin(2*pi*(fc + (I * fm * sin(2*pi*fm, linear(pi/2,pi/8)))), 0) | fin(time - 10) | capture(\"05-linear-phase-fm\")"
--->
-
-- <audio controls>
-  <source src="05-linear-phase-fm.wav" type="audio/wav">
-  Your browser does not support the audio element.
-  </audio>
+<div class="container">
+  <tuun-synth description="FM synthesis tone (increasing modulator phase)">
+    let
+      fc = 440,
+      I = 6,
+      D = 1,
+      fm = D/2 * fc
+    in
+      sin(2*pi * (fc + (I * fm * sin(2*pi * fm, linear(pi/2,pi/8)))), 0)
+        | fin(time - 10)
+  </tuun-synth>
+</div>
 
 ### PM Synthesis
 
-The phase offset parameter to `Sine` can also vary with time, and so Tuun offers another way of writing the original FM formula. Since that formula of the form $\sin(w t + p(t))$, we can treat the modulator as a change in the phase rather than a change in the frequency. That leads to the following implementation:
-
-    Sine(w_c, I * Sine(w_m, 0))
-
+Since phase offset parameter to `Sine` can also vary with time, Tuun offers another way of writing the original FM formula. Since that formula of the form $\sin(w t + p(t))$, we can treat the modulator as a change in the phase rather than a change in the frequency. That leads to the following implementation:
+```
+Sine(w_c, I * Sine(w_m, 0))
+```
 Technically is *phase* modulation (PM) synthesis rather than frequency modulation, but in cases where the modulator is a sinusoid, they produce the same results. Many implementations of FM synthesis are actually phase modulation as it produces better results in some cases.
 
-One case where they are *not* equivalent is where the modulator has a non-zero DC offset (that is, where its average value over time is not zero). An example of a modulator with a non-zero DC offset is a pulse wave. FM will accumulate this offset over time, leading to a shift in pitch. (The examples below are played first without and then with a pure tone at the carrier frequency to demonstrate this shift: notice the beats in the second FM example.) PM, on the other hand, handles this case without changes in pitch. Note, however, that FM and PM have very different timbres with this modulator.
+One case where they are *not* equivalent is where the modulator has a non-zero DC offset (that is, where its average value over time is not zero). In general, the DC offset of the first parameter of `Sine` determines the frequency that we perceive; if the modulator has a non-zero DC offset, it will cause this frequency to shift.
 
-First, FM with pulse modulator:
+An example of a modulator with a non-zero DC offset is a pulse wave. FM will accumulate this offset over time, leading to a shift in pitch. (The examples below are played first without and then with a pure tone at the carrier frequency to demonstrate this shift: notice the beats in the FM example after 3 seconds.) PM, on the other hand, handles this case without changes in pitch. Note, however, that FM and PM have very different timbres with this modulator.
 
-- `Sine(w_c + I * w_m * pulse(0.5, w_m), 0)`
+First, FM with pulse modulator: `Sine(w_c + I * w_m * pulse(0.5, w_m), 0)`
 
-<!--
-tuun "--ui=false" "--date-format=" "--buffer-size=16384" "-C" "context.tuun" "-p" "let fc = 440, I = 6, D = 1, fm = D/2 * fc in {[$fc | fin(time - 5), sin(2*pi*(fc + (I * fm * pulse(0.5, fm))), 0) | fin(time - 5) | capture(\"06-fm-pulse-modulator\")]} | capture(\"07-fm-pulse-modulator-with-pure\")"
--->
+<div class="container">
+  <tuun-synth description="FM synthesis tone with pulse modulator (+ pure tone after 3 seconds)">
+    <script type="text/tuun">
+      let
+        fc = 440,
+        I = 6,
+        D = 1,
+        fm = D/2 * fc
+      in
+        <[sin(2*pi * (fc + (I * fm * pulse(0.5, fm))), 0) | seq(time - 3),
+         $fc]>
+         | fin(time - 6)
+    </script>
+  </tuun-synth>
+</div>
 
-- <audio controls>
-  <source src="06-fm-pulse-modulator.wav" type="audio/wav">
-  Your browser does not support the audio element.
-  </audio>
-- <audio controls>
-  <source src="07-fm-pulse-modulator-with-pure.wav" type="audio/wav">
-  Your browser does not support the audio element.
-  </audio>
+Second, PM with pulse modulator `Sine(w_c, I * pulse(0.5, w_m))`
 
-Second, PM with pulse modulator:
+<div class="container">
+  <tuun-synth description="PM synthesis tone with pulse modulator (+ pure tone after 3 seconds)">
+    <script type="text/tuun">
+      let
+        fc = 440,
+        I = 6,
+        D = 1,
+        fm = D/2 * fc
+      in
+        <[sin(2*pi * fc, I * pulse(0.5, fm)) | seq(time - 3),
+         $fc]>
+         | fin(time - 6)
+    </script>
+  </tuun-synth>
+</div>
 
-- `Sine(w_c, I * pulse(0.5, w_m))`
+(Here `pulse(width, freq)` is shorthand for a pulse wave with the given width and frequency and is defined in the standard context. A width of 1.0 yields a square wave, while a width of 0.5 yields a pulse with 25% duty cycle.)
 
-<!--
-tuun "--ui=false" "--date-format=" "--buffer-size=16384" "-C" "context.tuun" "-p" "let fc = 440, I = 6, D = 1, fm = D/2 * fc in {[$fc | fin(time - 5), sin(2*pi*fc, I * pulse(0.5, fm)) | fin(time - 5) | capture(\"08-pm-pulse-modulator\")]} | capture(\"09-pm-pulse-modulator-with-pure\")"
--->
-
-- <audio controls>
-  <source src="08-pm-pulse-modulator.wav" type="audio/wav">
-  Your browser does not support the audio element.
-  </audio>
-- <audio controls>
-  <source src="09-pm-pulse-modulator-with-pure.wav" type="audio/wav">
-  Your browser does not support the audio element.
-  </audio>
-
-(Here `pulse(width, freq)` is shorthand for a pulse wave with the given width and frequency. A width of 1.0 yields a square wave, while a width of 0.5 yields a pulse with 25% duty cycle.)
+<script type="module" src="tuun/tuun-synth.js"></script>
