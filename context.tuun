@@ -61,7 +61,7 @@ D = fn(dur, level) => fn(w) => w * (Dw(dur, level) + 1),
 S = fn(dur, level) => fn(w) => w * (Sw(dur, level) + 1),
 R = fn(dur, level) => fn(w) => w * Rw(dur, level),
 
-over = fn(freq) => fn (x) => $(freq*x) * (1/x),
+over = fn(freq) => fn(x) => $(freq*x) * (1/x),
 
 add_semitones = fn(freq, n) => freq * pow(2, n/12),
 add_cents = fn(freq, n) => freq * pow(2, n/1200),
