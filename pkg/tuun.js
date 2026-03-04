@@ -138,14 +138,16 @@ export class Tuun {
         wasm.__wbg_tuun_free(ptr, 0);
     }
     /**
-     * Creates a new Tuun instance with the specified sample rate.
+     * Creates a new Tuun instance with the specified sample rate and tempo.
      *
      * # Arguments
      * * `sample_rate` - The audio sample rate in Hz (e.g., 44100)
+     * * `tempo` - The tempo in beats per minute (e.g., 120)
      * @param {number} sample_rate
+     * @param {number} tempo
      */
-    constructor(sample_rate) {
-        const ret = wasm.tuun_new(sample_rate);
+    constructor(sample_rate, tempo) {
+        const ret = wasm.tuun_new(sample_rate, tempo);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }

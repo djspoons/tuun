@@ -10,21 +10,27 @@ class TuunRuntime {
         this.activeInstance = null;
         this._initPromise = null;
         this._sampleRate = null;
+        this._tempo = null;
     }
 
-    async ensureInitialized(sampleRate = 44100) {
-        if (this._sampleRate === sampleRate && this._initPromise) {
-            return this._initPromise;
+    async ensureInitialized(sampleRate = 44100, tempo = 120) {
+        const needsInit = this._sampleRate !== sampleRate
+            || this._tempo !== tempo
+            || !this._initPromise;
+
+        if (needsInit) {
+            this._sampleRate = sampleRate;
+            this._tempo = tempo;
+            this._initPromise = this._doInit(sampleRate, tempo).catch(err => {
+                this._initPromise = null;
+                throw err;
+            });
         }
-        this._sampleRate = sampleRate;
-        this._initPromise = this._doInit(sampleRate).catch(err => {
-            this._initPromise = null;
-            throw err;
-        });
+
         return this._initPromise;
     }
 
-    async _doInit(sampleRate) {
+    async _doInit(sampleRate, tempo) {
         if (!this.wasmModule) {
             const wasmUrl = new URL('./pkg/tuun_bg.wasm', import.meta.url);
             const resp = await fetch(wasmUrl);
@@ -41,7 +47,7 @@ class TuunRuntime {
         this.audioContext = new (window.AudioContext || window.webkitAudioContext)({
             sampleRate
         });
-        this.tuun = new Tuun(sampleRate);
+        this.tuun = new Tuun(sampleRate, tempo);
 
         const processorUrl = new URL('./tuun-processor.js', import.meta.url);
         await this.audioContext.audioWorklet.addModule(processorUrl);
@@ -56,8 +62,8 @@ class TuunRuntime {
         return new AudioWorkletNode(this.audioContext, 'tuun-processor', {
             processorOptions: {
                 wasmModule: this.wasmModule,
-                bufferSize: 1024,
-                sampleRate: this._sampleRate
+                sampleRate: this._sampleRate,
+                tempo: this._tempo
             }
         });
     }
@@ -249,6 +255,19 @@ select:focus {
     border-color: #667eea;
 }
 
+input[type="number"] {
+    width: 70px;
+    padding: 4px 6px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 14px;
+}
+
+input[type="number"]:focus {
+    outline: none;
+    border-color: #667eea;
+}
+
 .error {
     margin-top: 8px;
     padding: 8px 10px;
@@ -268,7 +287,7 @@ select:focus {
 // ─── <tuun-synth> Custom Element ─────────────────────────────────
 
 class TuunSynthElement extends HTMLElement {
-    static observedAttributes = ['expression', 'description', 'controls', 'expanded'];
+    static observedAttributes = ['expression', 'description', 'controls', 'expanded', 'tempo'];
 
     constructor() {
         super();
@@ -335,6 +354,9 @@ class TuunSynthElement extends HTMLElement {
                         <button class="reset-button" title="Reset expression" disabled>&#x21BA;</button>
                     </div>
                     <div class="controls ${hasControls ? '' : 'hidden'}">
+                        <label>Tempo:
+                            <input type="number" class="tempo" value="${this._getTempo()}" min="1" max="999" step="1">
+                        </label>
                         <label>Sample Rate:
                             <select class="sample-rate">
                                 <option value="22050">22050 Hz</option>
@@ -361,6 +383,9 @@ class TuunSynthElement extends HTMLElement {
                                 <option value="44100" selected>44100 Hz</option>
                                 <option value="48000">48000 Hz</option>
                             </select>
+                        </label>
+                        <label>Tempo:
+                            <input type="number" class="tempo" value="${this._getTempo()}" min="1" max="999" step="1">
                         </label>
                     </div>
                     <div class="error hidden"></div>
@@ -406,6 +431,11 @@ class TuunSynthElement extends HTMLElement {
             sampleRate.addEventListener('change', () => this._handleSampleRateChange());
         }
 
+        const tempo = this.shadowRoot.querySelector('.tempo');
+        if (tempo) {
+            tempo.addEventListener('change', () => this._handleTempoChange());
+        }
+
         this._updateResetButton();
     }
 
@@ -444,8 +474,7 @@ class TuunSynthElement extends HTMLElement {
 
     async _play(expression) {
         expression = this._stripComments(expression);
-        const sampleRate = this._getSampleRate();
-        await runtime.ensureInitialized(sampleRate);
+        await runtime.ensureInitialized(this._getSampleRate(), this._getTempo());
         runtime.parse(expression);
         runtime.setPlaying(this);
 
@@ -518,9 +547,29 @@ class TuunSynthElement extends HTMLElement {
             this._workletNode = null;
         }
         try {
-            await runtime.ensureInitialized(this._getSampleRate());
+            await runtime.ensureInitialized(this._getSampleRate(), this._getTempo());
         } catch (error) {
             this._showError('Failed to change sample rate');
+        }
+    }
+
+    _getTempo() {
+        const input = this.shadowRoot.querySelector('.tempo');
+        if (input) return parseFloat(input.value) || 120;
+        const attr = this.getAttribute('tempo');
+        return attr ? parseFloat(attr) || 120 : 120;
+    }
+
+    async _handleTempoChange() {
+        this.stop();
+        if (this._workletNode) {
+            this._workletNode.disconnect();
+            this._workletNode = null;
+        }
+        try {
+            await runtime.ensureInitialized(this._getSampleRate(), this._getTempo());
+        } catch (error) {
+            this._showError('Failed to change tempo');
         }
     }
 
