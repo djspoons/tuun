@@ -89,7 +89,7 @@ where
     I: Clone + Send,
 {
     generator: generator::Generator<'a>,
-    sample_frequency: i32,
+    sample_rate: i32,
     captured_output_dir: path::PathBuf,
     captured_date_format: String,
     command_receiver: mpsc::Receiver<Command<I>>,
@@ -108,15 +108,15 @@ where
     I: Clone + Send,
 {
     pub fn new(
-        sample_frequency: i32,
+        sample_rate: i32,
         captured_output_dir: path::PathBuf,
         captured_date_format: String,
         command_receiver: mpsc::Receiver<Command<I>>,
         status_sender: mpsc::Sender<Status<I>>,
     ) -> Tracker<'a, I> {
         return Tracker {
-            generator: generator::Generator::new(sample_frequency),
-            sample_frequency,
+            generator: generator::Generator::new(sample_rate),
+            sample_rate,
             captured_output_dir,
             captured_date_format,
             command_receiver,
@@ -171,32 +171,29 @@ where
                 self.process_marked(waveform_id, start, &*a, out);
                 let (_, a_len) = self.generator.remaining(
                     *a.clone(),
-                    10 * self.sample_frequency as usize, // XXX
+                    10 * self.sample_rate as usize, // XXX
                 );
-                let start =
-                    start + Duration::from_secs_f32(a_len as f32 / self.sample_frequency as f32);
+                let start = start + Duration::from_secs_f32(a_len as f32 / self.sample_rate as f32);
                 self.process_marked(waveform_id, start, b.as_ref(), out);
             }
             BinaryPointOp(_, a, b) => {
                 self.process_marked(waveform_id, start, &*a, out);
                 // TODO do something about this constant for max
-                let offset = self
-                    .generator
-                    .offset(&*a, 10 * self.sample_frequency as usize);
+                let offset = self.generator.offset(&*a, 10 * self.sample_rate as usize);
                 let start =
-                    start + Duration::from_secs_f32(offset as f32 / self.sample_frequency as f32);
+                    start + Duration::from_secs_f32(offset as f32 / self.sample_rate as f32);
                 self.process_marked(waveform_id, start, &*b, out);
             }
             Marked { waveform, id } => {
                 let (_, len) = self.generator.remaining(
                     *waveform.clone(),
-                    10 * self.sample_frequency as usize, // XXX
+                    10 * self.sample_rate as usize, // XXX
                 );
                 out.push(Mark {
                     waveform_id: waveform_id.clone(),
                     mark_id: *id,
                     start,
-                    duration: Duration::from_secs_f32(len as f32 / self.sample_frequency as f32),
+                    duration: Duration::from_secs_f32(len as f32 / self.sample_rate as f32),
                 });
                 self.process_marked(waveform_id, start, &*waveform, out);
             }
@@ -251,7 +248,7 @@ where
                 let file = std::fs::File::create(path).expect("Failed to create file");
                 let spec = WavSpec {
                     channels: 1,
-                    sample_rate: self.sample_frequency as u32,
+                    sample_rate: self.sample_rate as u32,
                     bits_per_sample: 32,
                     sample_format: SampleFormat::Float,
                 };
@@ -277,8 +274,8 @@ where
         // needed that we can use time equal to the length of the buffer. If that's true, then
         // the moment corresponding to the start of the buffer is the current time plus the length
         // of the buffer.
-        let buffer_start = Instant::now()
-            + Duration::from_secs_f32(out.len() as f32 / self.sample_frequency as f32);
+        let buffer_start =
+            Instant::now() + Duration::from_secs_f32(out.len() as f32 / self.sample_rate as f32);
         let mut status_to_send = Status {
             buffer_start,
             marks: Vec::new(),
@@ -291,8 +288,7 @@ where
         let generate_start = Instant::now();
         let finished = self.generate(buffer_start, out);
         status_to_send.tracker_load = Some(
-            self.sample_frequency as f32
-                / (out.len() as f32 / generate_start.elapsed().as_secs_f32()),
+            self.sample_rate as f32 / (out.len() as f32 / generate_start.elapsed().as_secs_f32()),
         );
 
         // Update the slider values based on the changes
@@ -429,7 +425,7 @@ where
                         // If the pending waveform starts before the segment start, then we need to
                         // adjust the position.
                         let delta_samples = ((segment_start - pending.start).as_secs_f32()
-                            * self.sample_frequency as f32)
+                            * self.sample_rate as f32)
                             .round() as usize;
                         if delta_samples > 0 {
                             if delta_samples > 1 {
@@ -440,7 +436,7 @@ where
                             }
                             // We need to actually generate and discard these samples to make sure that any stateful
                             // waveforms are properly initialized.
-                            let mut generator = generator::Generator::new(self.sample_frequency);
+                            let mut generator = generator::Generator::new(self.sample_rate);
                             // TODO this is a little weird since we don't really care about sliders... but :shrug:
                             self.slider_state.buffer_position = 0;
                             generator.slider_state = Some(&self.slider_state);
@@ -486,7 +482,7 @@ where
                     // than the duration of a single sample.
                     segment_length = segment_length.min(
                         ((self.pending_waveforms[0].start - segment_start).as_secs_f32()
-                            * self.sample_frequency as f32)
+                            * self.sample_rate as f32)
                             .ceil() as usize,
                     );
                     break;
@@ -498,7 +494,7 @@ where
             if self.active_waveforms.len() == 0 {
                 filled += segment_length;
                 segment_start +=
-                    Duration::from_secs_f32(segment_length as f32 / self.sample_frequency as f32);
+                    Duration::from_secs_f32(segment_length as f32 / self.sample_rate as f32);
                 segment_length = out.len() - filled;
                 // Don't change high_water_mark
                 continue;
@@ -509,7 +505,7 @@ where
                 let active = &mut self.active_waveforms[i];
                 let tmp: Vec<f32>;
                 {
-                    let mut generator = generator::Generator::new(self.sample_frequency);
+                    let mut generator = generator::Generator::new(self.sample_rate);
                     self.slider_state.buffer_position = filled;
                     generator.slider_state = Some(&self.slider_state);
                     let capture_state = RefCell::new(&mut active.capture_state);
@@ -548,7 +544,7 @@ where
                         active.position,
                         segment_start
                             + Duration::from_secs_f32(
-                                tmp.len() as f32 / self.sample_frequency as f32
+                                tmp.len() as f32 / self.sample_rate as f32
                             )
                     );
                     */
@@ -560,7 +556,7 @@ where
             }
             filled += segment_length;
             segment_start +=
-                Duration::from_secs_f32(segment_length as f32 / self.sample_frequency as f32);
+                Duration::from_secs_f32(segment_length as f32 / self.sample_rate as f32);
             segment_length = out.len() - filled;
         }
         return finished;

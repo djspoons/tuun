@@ -27,12 +27,13 @@ pub struct Wasm {
 
 #[wasm_bindgen(js_class = "Tuun")]
 impl Wasm {
-    /// Creates a new Tuun instance with the specified sample rate.
+    /// Creates a new Tuun instance with the specified sample rate and tempo.
     ///
     /// # Arguments
     /// * `sample_rate` - The audio sample rate in Hz (e.g., 44100)
+    /// * `tempo` - The tempo in beats per minute (e.g., 120)
     #[wasm_bindgen(constructor)]
-    pub fn new(sample_rate: i32) -> Result<Wasm, String> {
+    pub fn new(sample_rate: i32, tempo: f32) -> Result<Wasm, String> {
         use parser::Expr;
         // Set up better panic messages in the browser console
         console_error_panic_hook::set_once();
@@ -48,8 +49,6 @@ impl Wasm {
         ));
         builtins::add_prelude(&mut context);
 
-        // TODO make this configurable
-        let tempo = 120.0;
         context.push(("tempo".to_string(), Expr::Float(tempo)));
 
         // Load context from embedded .tuun file
@@ -199,7 +198,7 @@ mod tests {
     /// Test all examples from the web UI to ensure they parse and generate samples
     #[test]
     fn test_web_ui_examples() {
-        let tuun = Wasm::new(44100).expect("Failed to create Tuun instance");
+        let tuun = Wasm::new(44100, 120.0).expect("Failed to create Tuun instance");
 
         let examples = vec![
             ("sine(2764, 0)", "Sine wave (440 Hz)"),
@@ -236,7 +235,7 @@ mod tests {
     /// Test that invalid expressions produce appropriate errors
     #[test]
     fn test_invalid_expressions() {
-        let tuun = Wasm::new(44100).expect("Failed to create Tuun instance");
+        let tuun = Wasm::new(44100, 120.0).expect("Failed to create Tuun instance");
 
         let invalid_examples = vec![
             "undefined_function()",
@@ -261,7 +260,7 @@ mod tests {
     /// Test context functions that require special definitions
     #[test]
     fn test_context_functions() {
-        let tuun = Wasm::new(44100).expect("Failed to create Tuun instance");
+        let tuun = Wasm::new(44100, 120.0).expect("Failed to create Tuun instance");
 
         // Test lpf with various expressions
         let lpf_examples = vec![

@@ -13,12 +13,13 @@ export function main(): void;
 export class Tuun {
   free(): void;
   /**
-   * Creates a new Tuun instance with the specified sample rate.
+   * Creates a new Tuun instance with the specified sample rate and tempo.
    *
    * # Arguments
    * * `sample_rate` - The audio sample rate in Hz (e.g., 44100)
+   * * `tempo` - The tempo in beats per minute (e.g., 120)
    */
-  constructor(sample_rate: number);
+  constructor(sample_rate: number, tempo: number);
   /**
    * Parses a Tuun expression and returns a WasmWaveform.
    *
@@ -76,7 +77,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
   readonly memory: WebAssembly.Memory;
   readonly __wbg_tuun_free: (a: number, b: number) => void;
-  readonly tuun_new: (a: number) => [number, number, number];
+  readonly tuun_new: (a: number, b: number) => [number, number, number];
   readonly tuun_parse: (a: number, b: number, c: number) => [number, number, number];
   readonly tuun_generate: (a: number, b: number, c: number) => [number, number];
   readonly tuun_sample_rate: (a: number) => number;

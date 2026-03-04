@@ -70,7 +70,7 @@ pub struct Renderer {
     pub video_subsystem: sdl2::VideoSubsystem,
     canvas: sdl2::render::Canvas<sdl2::video::Window>,
 
-    beats_per_minute: u32,
+    tempo: u32,
     beats_per_measure: u32,
 
     pub width: u32,
@@ -94,7 +94,7 @@ impl Renderer {
     pub fn new(
         sdl_context: &Sdl,
         ttf_context: &Sdl2TtfContext,
-        beats_per_minute: u32,
+        tempo: u32,
         beats_per_measure: u32,
     ) -> Renderer {
         let video_subsystem = sdl_context.video().unwrap();
@@ -135,7 +135,7 @@ impl Renderer {
         Renderer {
             video_subsystem,
             canvas,
-            beats_per_minute,
+            tempo,
             beats_per_measure,
             width,
             height,
@@ -590,7 +590,7 @@ impl Renderer {
             &texture_creator,
             format!(
                 "{} / {} ({} bpm)",
-                current_beat, self.beats_per_measure, self.beats_per_minute
+                current_beat, self.beats_per_measure, self.tempo
             )
             .as_str(),
         );
@@ -699,13 +699,13 @@ impl Renderer {
     }
 }
 
-pub fn duration_from_beats(beats_per_minute: u32, beats: u64) -> Duration {
-    Duration::from_secs_f32(beats as f32 * 60.0 / beats_per_minute as f32)
+pub fn duration_from_beats(tempo: u32, beats: u64) -> Duration {
+    Duration::from_secs_f32(beats as f32 * 60.0 / tempo as f32)
 }
 
-pub fn beats_waveform(beats_per_minute: u32, beats_per_measure: u32) -> waveform::Waveform {
+pub fn beats_waveform(tempo: u32, beats_per_measure: u32) -> waveform::Waveform {
     use waveform::{Operator, Waveform};
-    let seconds_per_beat = duration_from_beats(beats_per_minute, 1);
+    let seconds_per_beat = duration_from_beats(tempo, 1);
     let mut ws = Vec::new();
     for i in 0..beats_per_measure {
         ws.push(parser::Expr::Waveform(Waveform::Marked {

@@ -25,12 +25,12 @@ use tuun::waveform;
 #[derive(ClapParser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    #[arg(long = "tempo", default_value_t = 90)]
-    beats_per_minute: u32,
+    #[arg(default_value_t = 90)]
+    tempo: u32,
     #[arg(long = "beats_per_measure", default_value_t = 4)]
     beats_per_measure: u32,
     #[arg(long, default_value_t = 44100)]
-    sample_frequency: i32,
+    sample_rate: i32,
     #[arg(long, default_value_t = 2048)]
     buffer_size: u16,
     #[arg(short = 'C', long = "context_file", number_of_values = 1)]
@@ -67,13 +67,10 @@ struct Args {
 
 fn load_context(program_index: usize, args: &Args) -> (Vec<(String, parser::Expr)>, Mode) {
     let mut context: Vec<(String, parser::Expr)> = Vec::new();
-    context.push((
-        "tempo".to_string(),
-        parser::Expr::Float(args.beats_per_minute as f32),
-    ));
+    context.push(("tempo".to_string(), parser::Expr::Float(args.tempo as f32)));
     context.push((
         "sampling_frequency".to_string(),
-        parser::Expr::Float(args.sample_frequency as f32),
+        parser::Expr::Float(args.sample_rate as f32),
     ));
     builtins::add_prelude(&mut context);
     let mut bindings = 0;
@@ -182,7 +179,7 @@ pub fn main() {
         // Filter out any empty programs
         programs = programs.iter().filter(|p| !p.is_empty()).cloned().collect();
         let mut tracker = tracker::Tracker::<WaveformId>::new(
-            args.sample_frequency,
+            args.sample_rate,
             args.output_dir.clone().into(),
             args.date_format.clone(),
             command_receiver,
@@ -246,7 +243,7 @@ pub fn main() {
     let sdl_context = sdl2::init().unwrap();
     let audio_subsystem = sdl_context.audio().unwrap();
     let desired_spec = AudioSpecDesired {
-        freq: Some(args.sample_frequency),
+        freq: Some(args.sample_rate),
         channels: Some(1), // mono
         samples: Some(args.buffer_size),
     };
@@ -254,7 +251,7 @@ pub fn main() {
         .open_playback(None, &desired_spec, |spec| {
             println!("Spec: {:?}", spec);
             tracker::Tracker::<WaveformId>::new(
-                args.sample_frequency,
+                args.sample_rate,
                 args.output_dir.clone().into(),
                 args.date_format.clone(),
                 command_receiver,
@@ -268,7 +265,7 @@ pub fn main() {
     let mut renderer = Renderer::new(
         &sdl_context,
         &ttf_context,
-        args.beats_per_minute,
+        args.tempo,
         args.beats_per_measure,
     );
     renderer.video_subsystem.text_input().start();
@@ -361,14 +358,13 @@ fn start_beats(
         .send(Command::Play {
             id: WaveformId::Beats(false),
             waveform: optimizer::replace_seq(renderer::beats_waveform(
-                args.beats_per_minute,
+                args.tempo,
                 args.beats_per_measure,
             ))
             .1,
             start: Instant::now(),
             repeat_every: Some(
-                renderer::duration_from_beats(args.beats_per_minute, args.beats_per_measure as u64)
-                    * 2,
+                renderer::duration_from_beats(args.tempo, args.beats_per_measure as u64) * 2,
             ),
         })
         .unwrap();
@@ -382,14 +378,14 @@ fn start_beats(
                             .send(Command::Play {
                                 id: WaveformId::Beats(true),
                                 waveform: optimizer::replace_seq(renderer::beats_waveform(
-                                    args.beats_per_minute,
+                                    args.tempo,
                                     args.beats_per_measure,
                                 ))
                                 .1,
                                 start: mark.start + mark.duration,
                                 repeat_every: Some(
                                     renderer::duration_from_beats(
-                                        args.beats_per_minute,
+                                        args.tempo,
                                         args.beats_per_measure as u64,
                                     ) * 2,
                                 ),
@@ -960,7 +956,7 @@ fn play_waveform(
                     program_index, repeat_every_beats
                 );
                 repeat_every = Some(renderer::duration_from_beats(
-                    args.beats_per_minute,
+                    args.tempo,
                     repeat_every_beats,
                 ));
             } else {
@@ -1016,7 +1012,7 @@ fn play_waveform_helper(
                             println!("optimizer::simplify returned: {}", &waveform);
                         }
                         if should_precompute && args.precompute {
-                            let generator = generator::Generator::new(args.sample_frequency);
+                            let generator = generator::Generator::new(args.sample_rate);
                             waveform = waveform::remove_state(
                                 generator.precompute(generator::initialize_state(waveform)),
                             );

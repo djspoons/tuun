@@ -43,7 +43,7 @@ pub struct SliderState {
  * Generator converts waveforms into sequences of samples.
  */
 pub struct Generator<'a> {
-    sample_frequency: i32,
+    sample_rate: i32,
     pub slider_state: Option<&'a SliderState>,
     pub capture_state:
         Option<RefCell<&'a mut HashMap<String, hound::WavWriter<BufWriter<std::fs::File>>>>>,
@@ -81,9 +81,9 @@ where
 impl<'a> Generator<'a> {
     // Create a new generator with the given sample frequency. Note that slider_state and capture_state must be set
     // before `generate` is called.
-    pub fn new(sample_frequency: i32) -> Self {
+    pub fn new(sample_rate: i32) -> Self {
         Generator {
-            sample_frequency,
+            sample_rate,
             slider_state: None,
             capture_state: None,
         }
@@ -108,7 +108,7 @@ impl<'a> Generator<'a> {
             Time(Position(position)) => {
                 let mut out = vec![0.0; desired];
                 for (i, x) in out.iter_mut().enumerate() {
-                    *x = (position + i) as f32 / self.sample_frequency as f32;
+                    *x = (position + i) as f32 / self.sample_rate as f32;
                 }
                 return (Time(Position(position + desired)), out);
             }
@@ -206,7 +206,7 @@ impl<'a> Generator<'a> {
                     out[i] = (accumulator + phase_offset as f64).sin() as f32;
 
                     let f = f_out[i] as f64;
-                    let phase_inc = f / self.sample_frequency as f64;
+                    let phase_inc = f / self.sample_rate as f64;
 
                     // Move the accumulator according to the frequency and change in phase offset.
                     accumulator = (accumulator + phase_inc).rem_euclid(f64::consts::TAU);
@@ -791,12 +791,12 @@ impl<'a> Generator<'a> {
             Const(_) => MaybeOption::None,
             Time(Initial) => self.greater_or_equals_at(&Time(Position(0)), value, max),
             Time(Position(position)) => {
-                let current_value = *position as f32 / self.sample_frequency as f32;
+                let current_value = *position as f32 / self.sample_rate as f32;
                 if current_value >= value {
                     MaybeOption::Some(0)
                 } else {
                     // current_value < value and current_value >= 0 so value > 0 (so usize is ok)
-                    let target_position = (value * self.sample_frequency as f32).ceil() as usize;
+                    let target_position = (value * self.sample_rate as f32).ceil() as usize;
                     // Also, target_position must be > position
                     MaybeOption::Some(max.min((target_position - position) as usize))
                 }
