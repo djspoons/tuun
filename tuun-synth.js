@@ -697,8 +697,10 @@ class TuunSynthElement extends HTMLElement {
     }
 
     _parseSliders() {
-        // TODO might consider a more compact non-JSON format so
-        // that we can use it in other places (e.g., native app)
+        // Format: JSON array of "label:min:max:value" strings
+        // min, max, value are optional (defaults: 0, 1, (min+max)/2)
+        // e.g. '["fader"]' or '["Q:0.1:1:0.707","cutoff:200:10000:2000"]'
+        // The label must be a valid Tuun identifier.
         const attr = this.getAttribute('sliders');
         if (!attr) return [];
         let arr;
@@ -706,13 +708,11 @@ class TuunSynthElement extends HTMLElement {
         if (!Array.isArray(arr)) return [];
 
         return arr.map((s, i) => {
-            const raw = s.label || `slider${i+1}`;
-            // Sanitize to valid Tuun identifier: starts with letter, then [a-zA-Z0-9_#]
-            const label = raw.replace(/^[^a-zA-Z]+/, '').replace(/[^a-zA-Z0-9_#]/g, '') || `slider${i+1}`;
-            const min = typeof s.min === 'number' ? s.min : 0;
-            const max = typeof s.max === 'number' ? s.max : 1;
-            const value = typeof s.value === 'number' ? s.value : (min + max) / 2;
-            // Fixed total digits: at least 3, using decimal places to fill
+            const parts = String(s).split(':');
+            const label = parts[0].replace(/^[^a-zA-Z]+/, '').replace(/[^a-zA-Z0-9_#]/g, '') || `slider${i+1}`;
+            const min = parts.length > 1 ? Number(parts[1]) : 0;
+            const max = parts.length > 2 ? Number(parts[2]) : 1;
+            const value = parts.length > 3 ? Number(parts[3]) : (min + max) / 2;
             const intDigits = Math.max(1, String(Math.floor(Math.abs(max))).length);
             const decimals = Math.max(0, 3 - intDigits);
             return { label, min, max, value, decimals };
