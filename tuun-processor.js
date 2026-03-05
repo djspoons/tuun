@@ -20,6 +20,9 @@ class TuunProcessor extends AudioWorkletProcessor {
                 case 'stop':
                     this._stop();
                     break;
+                case 'slider':
+                    this.tuun.set_slider_value(event.data.name, event.data.value);
+                    break;
             }
         };
     }

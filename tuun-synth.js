@@ -54,8 +54,8 @@ class TuunRuntime {
     }
 
     parse(expression) {
-        const wf = this.tuun.parse(expression);
-        wf.free();
+        const w = this.tuun.parse(expression);
+        w.free();
     }
 
     createWorkletNode() {
@@ -279,6 +279,40 @@ input[type="number"]:focus {
     font-family: monospace;
 }
 
+.sliders {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 8px;
+    padding-left: 40px;
+}
+
+.slider-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+}
+
+.slider-row label {
+    min-width: 60px;
+    font-weight: 500;
+    color: #666;
+}
+
+.slider-row input[type="range"] {
+    flex: 1;
+    accent-color: #667eea;
+}
+
+.slider-row .slider-value {
+    min-width: 50px;
+    text-align: right;
+    font-family: 'Monaco', 'Menlo', monospace;
+    font-size: 13px;
+    color: #555;
+}
+
 .hidden {
     display: none !important;
 }
@@ -287,7 +321,7 @@ input[type="number"]:focus {
 // ─── <tuun-synth> Custom Element ─────────────────────────────────
 
 class TuunSynthElement extends HTMLElement {
-    static observedAttributes = ['expression', 'description', 'controls', 'expanded', 'tempo'];
+    static observedAttributes = ['expression', 'description', 'controls', 'expanded', 'tempo', 'sliders'];
 
     constructor() {
         super();
@@ -296,6 +330,8 @@ class TuunSynthElement extends HTMLElement {
         this._expanded = false;
         this._originalExpression = '';
         this._workletNode = null;
+        this._sliders = [];
+        this._sliderValues = new Map();
     }
 
     connectedCallback() {
@@ -303,6 +339,8 @@ class TuunSynthElement extends HTMLElement {
         const bodyText = script ? script.textContent : this.textContent;
         this._originalExpression = this._dedent(bodyText) || this.getAttribute('expression') || '';
         this._expanded = !this.getAttribute('description') || this.hasAttribute('expanded');
+        this._sliders = this._parseSliders();
+        this._sliderValues = new Map(this._sliders.map(s => [s.label, s.value]));
         this._render();
         this._bindEvents();
     }
@@ -331,6 +369,11 @@ class TuunSynthElement extends HTMLElement {
         } else if (name === 'controls') {
             const ctrl = this.shadowRoot.querySelector('.controls');
             if (ctrl) ctrl.classList.toggle('hidden', !this.hasAttribute('controls'));
+        } else if (name === 'sliders') {
+            this._sliders = this._parseSliders();
+            this._sliderValues = new Map(this._sliders.map(s => [s.label, s.value]));
+            this._render();
+            this._bindEvents();
         }
     }
 
@@ -353,6 +396,7 @@ class TuunSynthElement extends HTMLElement {
                         <textarea rows="1">${expression}</textarea>
                         <button class="reset-button" title="Reset expression" disabled>&#x21BA;</button>
                     </div>
+                    ${this._renderSliders()}
                     <div class="controls ${hasControls ? '' : 'hidden'}">
                         <label>Tempo:
                             <input type="number" class="tempo" value="${this._getTempo()}" min="1" max="999" step="1">
@@ -376,6 +420,7 @@ class TuunSynthElement extends HTMLElement {
                         <textarea rows="1">${expression}</textarea>
                         <button class="reset-button" title="Reset expression" disabled>&#x21BA;</button>
                     </div>
+                    ${this._renderSliders()}
                     <div class="controls ${hasControls ? '' : 'hidden'}">
                         <label>Sample Rate:
                             <select class="sample-rate">
@@ -436,6 +481,20 @@ class TuunSynthElement extends HTMLElement {
             tempo.addEventListener('change', () => this._handleTempoChange());
         }
 
+        this.shadowRoot.querySelectorAll('input[type="range"]').forEach(input => {
+            input.addEventListener('input', () => {
+                const label = input.dataset.label;
+                const val = parseFloat(input.value);
+                const decimals = parseInt(input.dataset.decimals);
+                this._sliderValues.set(label, val);
+                if (this._isPlaying && this._workletNode) {
+                    this._workletNode.port.postMessage({ type: 'slider', name: label, value: val });
+                }
+                const span = input.nextElementSibling;
+                if (span) span.textContent = val.toFixed(decimals);
+            });
+        });
+
         this._updateResetButton();
     }
 
@@ -474,6 +533,7 @@ class TuunSynthElement extends HTMLElement {
 
     async _play(expression) {
         expression = this._stripComments(expression);
+        expression = this._prependSliderBindings(expression);
         await runtime.ensureInitialized(this._getSampleRate(), this._getTempo());
         runtime.parse(expression);
         runtime.setPlaying(this);
@@ -485,6 +545,9 @@ class TuunSynthElement extends HTMLElement {
         }
 
         this._workletNode.port.postMessage({ type: 'play', expression });
+        for (const [label, value] of this._sliderValues) {
+            this._workletNode.port.postMessage({ type: 'slider', name: label, value });
+        }
         this._isPlaying = true;
         this._updatePlayButton();
     }
@@ -620,6 +683,52 @@ class TuunSynthElement extends HTMLElement {
         const indent = lines[0].match(/^(\s*)/)[1];
         if (!indent) return lines.join('\n');
         return lines.map(l => l.startsWith(indent) ? l.slice(indent.length) : l).join('\n');
+    }
+
+    _renderSliders() {
+        if (!this._sliders.length) return '';
+        const rows = this._sliders.map(s => `
+            <div class="slider-row">
+                <label>${this._escapeHtml(s.label)}</label>
+                <input type="range" min="${s.min}" max="${s.max}" step="any" value="${s.value}" data-label="${this._escapeHtml(s.label)}" data-decimals="${s.decimals}">
+                <span class="slider-value">${Number(s.value).toFixed(s.decimals)}</span>
+            </div>`).join('');
+        return `<div class="sliders">${rows}</div>`;
+    }
+
+    _parseSliders() {
+        // TODO might consider a more compact non-JSON format so
+        // that we can use it in other places (e.g., native app)
+        const attr = this.getAttribute('sliders');
+        if (!attr) return [];
+        let arr;
+        try { arr = JSON.parse(attr); } catch { return []; }
+        if (!Array.isArray(arr)) return [];
+
+        return arr.map((s, i) => {
+            const raw = s.label || `slider${i+1}`;
+            // Sanitize to valid Tuun identifier: starts with letter, then [a-zA-Z0-9_#]
+            const label = raw.replace(/^[^a-zA-Z]+/, '').replace(/[^a-zA-Z0-9_#]/g, '') || `slider${i+1}`;
+            const min = typeof s.min === 'number' ? s.min : 0;
+            const max = typeof s.max === 'number' ? s.max : 1;
+            const value = typeof s.value === 'number' ? s.value : (min + max) / 2;
+            // Fixed total digits: at least 3, using decimal places to fill
+            const intDigits = Math.max(1, String(Math.floor(Math.abs(max))).length);
+            const decimals = Math.max(0, 3 - intDigits);
+            return { label, min, max, value, decimals };
+        });
+    }
+
+    _prependSliderBindings(expression) {
+        if (!this._sliderValues.size) return expression;
+        const bindings = [...this._sliderValues.entries()]
+            .map(([label, value]) => `${label} = slider("${label}")`)
+            .join(', ');
+        return `let ${bindings} in ${expression}`;
+    }
+
+    _getSliderValues() {
+        return this._sliderValues;
     }
 
     _escapeHtml(text) {
