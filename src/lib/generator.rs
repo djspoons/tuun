@@ -29,10 +29,10 @@ pub fn initialize_state<S>(waveform: waveform::Waveform<S>) -> Waveform {
 }
 
 pub struct SliderState {
-    // The final values of sliders at the end of the last generate call
-    pub last_values: HashMap<waveform::Slider, f32>,
-    // Any changes to the sliders since the last generate call
-    pub changes: HashMap<waveform::Slider, f32>,
+    // The values of sliders at the end of the last generate call
+    pub last_values: HashMap<String, f32>,
+    // The current target values for each slider
+    pub values: HashMap<String, f32>,
     // The length of the current buffer being generated
     pub buffer_length: usize,
     // The position in the buffer where the next sample will be written
@@ -433,31 +433,24 @@ impl<'a> Generator<'a> {
                     .last_values
                     .get(&slider)
                     .cloned()
-                    .unwrap_or(0.5);
-                let change = slider_state.changes.get(&slider).cloned().unwrap_or(0.0);
-                // Use a linear interpolation between the last value and the change. This is almost right, but if
+                    .unwrap_or(0.0);
+                let target = slider_state.values.get(&slider);
+                let change = match target {
+                    None => {
+                        println!("Warning: no slider value for \"{}", slider);
+                        0.0
+                    }
+                    Some(target) => target - last_value,
+                };
+                // Use a linear interpolation between the last value and the target. This is almost right, but if
                 // a slider waveform is used in a binary op, then buffer_position + position might not be large
                 // enough.
                 let mut out = vec![0.0; desired];
+                let buffer_progress =
+                    slider_state.buffer_position as f32 / slider_state.buffer_length as f32;
                 for (i, x) in out.iter_mut().enumerate() {
-                    *x = last_value
-                        + change
-                            * ((slider_state.buffer_position as f32
-                                / slider_state.buffer_length as f32)
-                                + i as f32 / desired as f32)
-                                .min(1.0)
-                                .max(0.0);
+                    *x = last_value + change * (buffer_progress + (i + 1) as f32 / desired as f32);
                 }
-                /*
-                println!(
-                    "Slider {:?}, last_value: {}, change: {}, average value: {}",
-                    slider,
-                    last_value,
-                    change,
-                    (out[0] + out[out.len() - 1]) / 2.0
-                );
-                println!("Slider {:?} values: {:?}", slider, out);
-                */
                 return (Slider(slider), out);
             }
             Marked {

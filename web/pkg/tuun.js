@@ -181,11 +181,20 @@ export class Tuun {
         return WasmWaveform.__wrap(ret[0]);
     }
     /**
+     * @param {string} name
+     * @param {number} value
+     */
+    set_slider_value(name, value) {
+        const ptr0 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.tuun_set_slider_value(this.__wbg_ptr, ptr0, len0, value);
+    }
+    /**
      * Generates audio samples from a waveform.
      *
      * # Arguments
      * * `waveform` - The WasmWaveform to generate from
-     * * `num_samples` - The number of samples to generate
+     * * `desired` - The number of samples to generate
      *
      * # Returns
      * A Float32Array of audio samples in the range [-1.0, 1.0]
@@ -196,12 +205,12 @@ export class Tuun {
      * // samples is a Float32Array that can be used with Web Audio API
      * ```
      * @param {WasmWaveform} waveform
-     * @param {number} num_samples
+     * @param {number} desired
      * @returns {Float32Array}
      */
-    generate(waveform, num_samples) {
+    generate(waveform, desired) {
         _assertClass(waveform, WasmWaveform);
-        const ret = wasm.tuun_generate(this.__wbg_ptr, waveform.__wbg_ptr, num_samples);
+        const ret = wasm.tuun_generate(this.__wbg_ptr, waveform.__wbg_ptr, desired);
         var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
         wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
         return v1;
@@ -223,7 +232,7 @@ const WasmWaveformFinalization = (typeof FinalizationRegistry === 'undefined')
  * A waveform that can be used to generate audio samples.
  *
  * This wraps the internal Waveform type and maintains state between
- * generation calls for time-dependent waveforms.
+ * calls to generate().
  */
 export class WasmWaveform {
 

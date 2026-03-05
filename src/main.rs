@@ -73,6 +73,15 @@ fn load_context(program_index: usize, args: &Args) -> (Vec<(String, parser::Expr
         parser::Expr::Float(args.sample_rate as f32),
     ));
     builtins::add_prelude(&mut context);
+    context.push((
+        "X".to_string(),
+        parser::Expr::Waveform(waveform::Waveform::Slider("X".to_string())),
+    ));
+    context.push((
+        "Y".to_string(),
+        parser::Expr::Waveform(waveform::Waveform::Slider("Y".to_string())),
+    ));
+
     let mut bindings = 0;
     let mut errors = Vec::new();
     for file in args.context_files.iter() {
@@ -273,6 +282,26 @@ pub fn main() {
 
     start_beats(&command_sender, &status_receiver, &args);
 
+    // I don't totally love all of this state around sliders... but I don't see
+    // a better way at the moment and plan to redo a lot of it to make it more
+    // configurable anyway.
+    let mut slider_values: std::collections::HashMap<String, f32> =
+        std::collections::HashMap::new();
+    slider_values.insert("X".to_string(), 0.5);
+    command_sender
+        .send(Command::MoveSlider {
+            slider: "X".to_string(),
+            value: 0.5,
+        })
+        .unwrap();
+    slider_values.insert("Y".to_string(), 0.5);
+    command_sender
+        .send(Command::MoveSlider {
+            slider: "Y".to_string(),
+            value: 0.5,
+        })
+        .unwrap();
+
     let mut status = tracker::Status {
         buffer_start: Instant::now(),
         marks: Vec::new(),
@@ -299,6 +328,7 @@ pub fn main() {
                 &status,
                 &mut programs,
                 &command_sender,
+                &mut slider_values,
             );
             if let Mode::Exit = mode {
                 return;
@@ -425,6 +455,7 @@ fn process_event<I>(
     status: &tracker::Status<WaveformId>,
     programs: &mut Vec<String>,
     command_sender: &std::sync::mpsc::Sender<Command<WaveformId>>,
+    slider_values: &mut std::collections::HashMap<String, f32>,
 ) -> (Vec<(String, parser::Expr)>, Mode) {
     use sdl2::keyboard::Mod;
     use sdl2::keyboard::Scancode;
@@ -872,33 +903,37 @@ fn process_event<I>(
                 }
             }
         }
-        Event::MouseMotion { xrel, yrel, .. } => {
-            use waveform::Slider;
-            match mode {
-                Mode::MoveSliders { program_index, .. } => {
-                    if xrel != 0 {
-                        command_sender
-                            .send(Command::MoveSlider {
-                                slider: Slider::X,
-                                delta: xrel as f32 / (renderer.width as f32 / 2.0),
-                            })
-                            .unwrap();
-                    }
-                    if yrel != 0 {
-                        command_sender
-                            .send(Command::MoveSlider {
-                                slider: Slider::Y,
-                                delta: -yrel as f32 / (renderer.height as f32 / 2.0),
-                            })
-                            .unwrap();
-                    }
-                    return (context, Mode::MoveSliders { program_index });
+        Event::MouseMotion { xrel, yrel, .. } => match mode {
+            Mode::MoveSliders { program_index, .. } => {
+                if xrel != 0 {
+                    let current = slider_values.get("X").copied().unwrap();
+                    let new_value = (current + xrel as f32 / renderer.width as f32).clamp(0.0, 1.0);
+                    slider_values.insert("X".to_string(), new_value);
+                    command_sender
+                        .send(Command::MoveSlider {
+                            slider: "X".to_string(),
+                            value: new_value,
+                        })
+                        .unwrap();
                 }
-                _ => {
-                    return (context, mode);
+                if yrel != 0 {
+                    let current = slider_values.get("Y").copied().unwrap();
+                    let new_value =
+                        (current - yrel as f32 / renderer.height as f32).clamp(0.0, 1.0);
+                    slider_values.insert("Y".to_string(), new_value);
+                    command_sender
+                        .send(Command::MoveSlider {
+                            slider: "Y".to_string(),
+                            value: new_value,
+                        })
+                        .unwrap();
                 }
+                return (context, Mode::MoveSliders { program_index });
             }
-        }
+            _ => {
+                return (context, mode);
+            }
+        },
         _ => {
             return (context, mode);
         }

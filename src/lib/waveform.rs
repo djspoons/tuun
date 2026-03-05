@@ -1,22 +1,6 @@
 use std::fmt;
 use std::fmt::Debug;
 
-// TODO move this out of the waveform?
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Slider {
-    X,
-    Y,
-}
-
-impl fmt::Display for Slider {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Slider::X => write!(f, "X"),
-            Slider::Y => write!(f, "Y"),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum Operator {
     Add,
@@ -111,9 +95,9 @@ pub enum Waveform<State = ()> {
         negative_waveform: Box<Waveform<State>>,
     },
     /*
-     * Slider generates samples from an interactive "slider" input.
+     * Slider generates samples from a named interactive "slider" input.
      */
-    Slider(Slider),
+    Slider(String),
     /*
      * Marked waveforms generate the same samples as the inner waveform and are used to signal that a certain
      * event will occur or has occurred. Each status update will include a list of marked waveforms, along with
@@ -188,7 +172,7 @@ impl<State> fmt::Display for Waveform<State> {
                 "Alt({}, {}, {})",
                 trigger, positive_waveform, negative_waveform
             ),
-            Slider(slider) => write!(f, "Slider({})", slider),
+            Slider(slider) => write!(f, "Slider(\"{}\")", slider),
             Marked { id, waveform } => {
                 write!(f, "Marked({}, {})", id, waveform)
             }

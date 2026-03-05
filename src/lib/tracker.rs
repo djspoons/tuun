@@ -33,9 +33,9 @@ pub enum Command<I> {
     SendCurrentBuffer,
     MoveSlider {
         // The slider to set
-        slider: waveform::Slider,
-        // The amount to change it by
-        delta: f32,
+        slider: String,
+        // The absolute value to set it to
+        value: f32,
     },
 }
 
@@ -57,7 +57,7 @@ where
     // than once if a given waveform is both active and pending
     pub marks: Vec<Mark<I>>,
     // The current values of the sliders (as of buffer_start)
-    pub slider_values: HashMap<waveform::Slider, f32>,
+    pub slider_values: HashMap<String, f32>,
     // Some status updates will include the current buffer
     pub buffer: Option<Vec<f32>>,
     // The current tracker load, the ratio of sample frequency to samples generated per second
@@ -128,7 +128,7 @@ where
             send_current_buffer: false,
             slider_state: generator::SliderState {
                 last_values: HashMap::new(),
-                changes: HashMap::new(),
+                values: HashMap::new(),
                 buffer_length: 0,
                 buffer_position: 0,
             },
@@ -291,14 +291,8 @@ where
             self.sample_rate as f32 / (out.len() as f32 / generate_start.elapsed().as_secs_f32()),
         );
 
-        // Update the slider values based on the changes
-        for (slider, change) in self.slider_state.changes.iter() {
-            let last_value = self.slider_state.last_values.remove(slider).unwrap_or(0.5);
-            self.slider_state
-                .last_values
-                .insert(slider.clone(), (last_value + change).min(1.0).max(0.0));
-        }
-        self.slider_state.changes.clear();
+        // Update last_values to match current values
+        self.slider_state.last_values = self.slider_state.values.clone();
 
         // Copy the marks from finished waveforms into the status
         for active in finished {
@@ -370,12 +364,8 @@ where
             Command::SendCurrentBuffer => {
                 self.send_current_buffer = true;
             }
-            Command::MoveSlider { slider, delta } => {
-                self.slider_state
-                    .changes
-                    .entry(slider)
-                    .and_modify(|v| *v += delta)
-                    .or_insert(delta);
+            Command::MoveSlider { slider, value } => {
+                self.slider_state.values.insert(slider, value);
             }
         }
     }

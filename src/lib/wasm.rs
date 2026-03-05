@@ -12,6 +12,8 @@
 //! const samples = tuun.generate(waveform, 4096);
 //! ```
 
+use std::collections::HashMap;
+
 use wasm_bindgen::prelude::*;
 
 use crate::{builtins, generator, optimizer, parser};
@@ -23,6 +25,7 @@ use crate::{builtins, generator, optimizer, parser};
 pub struct Wasm {
     sample_rate: i32,
     context: Vec<(String, parser::Expr)>,
+    slider_state: generator::SliderState,
 }
 
 #[wasm_bindgen(js_class = "Tuun")]
@@ -91,6 +94,12 @@ impl Wasm {
         Ok(Wasm {
             sample_rate,
             context,
+            slider_state: generator::SliderState {
+                last_values: HashMap::new(),
+                values: HashMap::new(),
+                buffer_length: 0,
+                buffer_position: 0,
+            },
         })
     }
 
@@ -132,11 +141,15 @@ impl Wasm {
         }
     }
 
+    pub fn set_slider_value(&mut self, name: &str, value: f32) {
+        self.slider_state.values.insert(name.to_string(), value);
+    }
+
     /// Generates audio samples from a waveform.
     ///
     /// # Arguments
     /// * `waveform` - The WasmWaveform to generate from
-    /// * `num_samples` - The number of samples to generate
+    /// * `desired` - The number of samples to generate
     ///
     /// # Returns
     /// A Float32Array of audio samples in the range [-1.0, 1.0]
@@ -146,15 +159,18 @@ impl Wasm {
     /// const samples = tuun.generate(waveform, 4096);
     /// // samples is a Float32Array that can be used with Web Audio API
     /// ```
-    pub fn generate(&self, waveform: &mut WasmWaveform, num_samples: usize) -> Vec<f32> {
-        let mut audio_gen = generator::Generator::new(self.sample_rate);
-        audio_gen.slider_state = None;
-        audio_gen.capture_state = None;
+    pub fn generate(&mut self, waveform: &mut WasmWaveform, desired: usize) -> Vec<f32> {
+        self.slider_state.buffer_length = desired;
+        self.slider_state.buffer_position = 0;
 
-        let (updated_waveform, samples) = audio_gen.generate(waveform.inner.clone(), num_samples);
-        waveform.inner = updated_waveform;
+        let mut g = generator::Generator::new(self.sample_rate);
+        g.slider_state = Some(&self.slider_state);
 
-        samples
+        let (inner, out) = g.generate(waveform.inner.clone(), desired);
+        waveform.inner = inner;
+
+        self.slider_state.last_values = self.slider_state.values.clone();
+        return out;
     }
 
     /// Returns the current sample rate.
@@ -167,7 +183,7 @@ impl Wasm {
 /// A waveform that can be used to generate audio samples.
 ///
 /// This wraps the internal Waveform type and maintains state between
-/// generation calls for time-dependent waveforms.
+/// calls to generate().
 #[wasm_bindgen]
 pub struct WasmWaveform {
     inner: generator::Waveform,
@@ -178,7 +194,7 @@ impl WasmWaveform {
     /// Returns a string representation of the waveform (for debugging).
     #[wasm_bindgen(js_name = toString)]
     pub fn to_string(&self) -> String {
-        format!("{:?}", self.inner)
+        format!("{}", self.inner)
     }
 }
 
@@ -198,7 +214,7 @@ mod tests {
     /// Test all examples from the web UI to ensure they parse and generate samples
     #[test]
     fn test_web_ui_examples() {
-        let tuun = Wasm::new(44100, 120.0).expect("Failed to create Tuun instance");
+        let mut tuun = Wasm::new(44100, 120.0).expect("Failed to create Tuun instance");
 
         let examples = vec![
             ("sine(2764, 0)", "Sine wave (440 Hz)"),
@@ -260,7 +276,7 @@ mod tests {
     /// Test context functions that require special definitions
     #[test]
     fn test_context_functions() {
-        let tuun = Wasm::new(44100, 120.0).expect("Failed to create Tuun instance");
+        let mut tuun = Wasm::new(44100, 120.0).expect("Failed to create Tuun instance");
 
         // Test lpf with various expressions
         let lpf_examples = vec![

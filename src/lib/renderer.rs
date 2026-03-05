@@ -374,12 +374,7 @@ impl Renderer {
             });
         self.canvas
             .fill_rect(sdl2::rect::Rect::new(
-                (self.width as f32
-                    * *status
-                        .slider_values
-                        .get(&waveform::Slider::X)
-                        .unwrap_or(&0.5)) as i32
-                    - 3,
+                (self.width as f32 * *status.slider_values.get("X").unwrap_or(&0.0)) as i32 - 3,
                 0,
                 6,
                 16,
@@ -389,11 +384,7 @@ impl Renderer {
             .fill_rect(sdl2::rect::Rect::new(
                 0,
                 self.height as i32
-                    - (self.height as f32
-                        * *status
-                            .slider_values
-                            .get(&waveform::Slider::Y)
-                            .unwrap_or(&0.5)) as i32
+                    - (self.height as f32 * *status.slider_values.get("Y").unwrap_or(&0.0)) as i32
                     - 3,
                 16,
                 6,
@@ -541,14 +532,8 @@ impl Renderer {
             Mode::Select { message, .. } => message,
             Mode::MoveSliders { .. } => &format!(
                 "X = {:.3}, Y = {:.3}",
-                status
-                    .slider_values
-                    .get(&waveform::Slider::X)
-                    .unwrap_or(&0.5),
-                status
-                    .slider_values
-                    .get(&waveform::Slider::Y)
-                    .unwrap_or(&0.5)
+                status.slider_values.get("X").unwrap_or(&0.5),
+                status.slider_values.get("Y").unwrap_or(&0.5)
             )
             .to_string(),
             Mode::Exit => "",

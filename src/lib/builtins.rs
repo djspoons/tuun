@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use crate::parser::{BuiltInFn, Expr, simplify};
-use crate::waveform::{Operator, Slider, Waveform};
+use crate::waveform::{Operator, Waveform};
 use Expr::{Application, Bool, BuiltIn, Error, Float, List, Tuple};
 
 fn unary_op(
@@ -490,6 +490,13 @@ pub fn alt(mut arguments: Vec<Expr>) -> Expr {
     })
 }
 
+fn slider(arguments: Vec<Expr>) -> Expr {
+    match &arguments[..] {
+        [Expr::String(slider)] => Expr::Waveform(Waveform::Slider(slider.to_string())),
+        _ => return Expr::Error("Expected one string argument to slider".to_string()),
+    }
+}
+
 fn mark(arguments: Vec<Expr>) -> Expr {
     match &arguments[..] {
         [Float(id)] if *id >= 1.0 && id.fract() == 0.0 => {
@@ -575,8 +582,6 @@ pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
     context.push(("false".to_string(), Expr::Bool(false)));
     context.push(("time".to_string(), Expr::Waveform(Waveform::Time(()))));
     context.push(("noise".to_string(), Expr::Waveform(Waveform::Noise)));
-    context.push(("X".to_string(), Expr::Waveform(Waveform::Slider(Slider::X))));
-    context.push(("Y".to_string(), Expr::Waveform(Waveform::Slider(Slider::Y))));
 
     let builtins: Vec<(&str, fn(Vec<Expr>) -> Expr)> = vec![
         ("+", plus),
@@ -605,6 +610,7 @@ pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
         ("~*", waveform_convolution),
         ("reset", reset),
         ("alt", alt),
+        ("slider", slider),
         ("mark", mark),
         ("capture", capture),
         ("_chord", chord),
