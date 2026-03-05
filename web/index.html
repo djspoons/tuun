@@ -29,7 +29,7 @@
         <tuun-synth
             description="Low-pass filter example"
             expression="square(220) | lpf(Q, cutoff)"
-            sliders='[{"label":"Q","min":0.1,"max":1,"value":0.707},{"label":"cutoff","min":200,"max":10000,"value":2000}]'
+            sliders='["Q:0.1:1:0.707","cutoff:200:10000:2000"]'
             controls
             expanded>
         </tuun-synth>
@@ -48,9 +48,9 @@
 
         <h2>No controls</h2>
         <tuun-synth
-            description="Pure tone (550 Hz) with slider"
-            expression="slider1 * $550"
-            sliders='[{"value":1}]'>
+            description="Pure tone (550 Hz) with fader"
+            expression="fader * $550"
+            sliders='["fader"]'>
         </tuun-synth>
 
         <h2>Expression as element body (see code)</h2>
