@@ -28,7 +28,9 @@ The way that you use the Tuun language is up to you! There's nothing baked in ab
 
 ## Tuun Waveforms
 
-Tuun has several primitive waveforms and waveform combinators. These are the "assembly language" of Tuun. The first primitive, `Const`, isn't exactly a "wave" but is used to create waves: `Const` generates a stream where every sample is the same value. This can be used with the [`Sine` combinator](sine.md) to produce a sine wave. `Sine` takes two arguments: one for the angular frequency (in radians per second) and one for the phase offset. For example, the following will generate a tone at 440 Hz.
+Tuun has several primitive waveforms and waveform combinators. These are the "assembly language" of Tuun, and akin to the "unit generators" of the [MUSIC languages](https://en.wikipedia.org/wiki/MUSIC-N).
+
+The first primitive, `Const`, isn't exactly a "wave" but is used to create waves: `Const` generates a stream where every sample is the same value. This can be used with the [`Sine` combinator](sine.md) to produce a sine wave. `Sine` takes two arguments: one for the angular frequency (in radians per second) and one for the phase offset. For example, the following will generate a tone at 440 Hz.
 
 ```
 Sine(Const(2 * PI * 440), Const(0))

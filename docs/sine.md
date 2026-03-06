@@ -186,32 +186,30 @@ Sine(w_c + I * w_m * Sine(w_m, PI / 2), 0)
 ```
 (Eliding the `Const` primitive here and below for clarity.)
 
-The following is an example of an FM tone where the index of modulation `I` starts at 0 and increases by 1 every two seconds. Notice how the number of harmonics generally increases, and some harmonics fade in and out over time.
+The following is an example of an FM tone where the index of modulation `I` is controlled by the slider below. Notice how the number of harmonics generally increases as `I` increases, and some harmonics fade in and out over time.
 <div class="container">
-  <tuun-synth description="FM synthesis tone (increasing index of modulation)">
+  <tuun-synth description="FM synthesis tone (index of modulation)" sliders='["index:0:10"]'>
     let
       fc = 440,
-      I = linear(0, 0.5),
+      I = index,
       D = 1,
       fm = D/2 * fc
     in
       sine(2*pi * (fc + (I * fm * sine(2*pi * fm, pi/2))), 0)
-        | fin(time - 20)
   </tuun-synth>
 </div>
 
 Though phase offset is difficult to perceive audibly in general, the choice of the phase offset *in the modulator* can have significant effects on the relative strength of the sideband frequencies. (See "The Effect of Modulator Phase on Timbres in FM Synthesis." John A. Bate, in _Computer Music Journal_, Vol. 14 (1990) for a discussion of this and other variations of FM synthesis.) In the following, the index of modulation `I` is held constant while the modular phase varies over time.
 
 <div class="container">
-  <tuun-synth description="FM synthesis tone (increasing modulator phase)">
+  <tuun-synth description="FM synthesis tone (modulator phase)" sliders='["phi:0:1.57:1.57"]'>
     let
       fc = 440,
-      I = 6,
+      I = 5,
       D = 1,
       fm = D/2 * fc
     in
-      sine(2*pi * (fc + (I * fm * sine(2*pi * fm, linear(pi/2,pi/8)))), 0)
-        | fin(time - 10)
+      sine(2*pi * (fc + (I * fm * sine(2*pi * fm, phi))), 0)
   </tuun-synth>
 </div>
 
@@ -225,12 +223,12 @@ Technically is *phase* modulation (PM) synthesis rather than frequency modulatio
 
 One case where they are *not* equivalent is where the modulator has a non-zero DC offset (that is, where its average value over time is not zero). In general, the DC offset of the first parameter of `Sine` determines the frequency that we perceive; if the modulator has a non-zero DC offset, it will cause this frequency to shift.
 
-An example of a modulator with a non-zero DC offset is a pulse wave. FM will accumulate this offset over time, leading to a shift in pitch. (The examples below are played first without and then with a pure tone at the carrier frequency to demonstrate this shift: notice the beats in the FM example after 3 seconds.) PM, on the other hand, handles this case without changes in pitch. Note, however, that FM and PM have very different timbres with this modulator.
+An example of a modulator with a non-zero DC offset is a pulse wave. FM will accumulate this offset over time, leading to a shift in pitch. (In the examples below, a fader can be used to add in a pure tone at the desired carrier frequency.) PM, on the other hand, handles this case without changes in pitch. Note, however, that FM and PM have very different timbres with this modulator.
 
 First, FM with pulse modulator: `Sine(w_c + I * w_m * pulse(0.5, w_m), 0)`
 
 <div class="container">
-  <tuun-synth description="FM synthesis tone with pulse modulator (+ pure tone after 3 seconds)">
+  <tuun-synth description="FM synthesis tone with pulse modulator (with pure tone)" sliders='["pure_tone_amplitude:0:1:0"]'>
     <script type="text/tuun">
       let
         fc = 440,
@@ -239,8 +237,7 @@ First, FM with pulse modulator: `Sine(w_c + I * w_m * pulse(0.5, w_m), 0)`
         fm = D/2 * fc
       in
         <[sine(2*pi * (fc + (I * fm * pulse(0.5, fm))), 0) | seq(time - 3),
-         $fc]>
-         | fin(time - 6)
+         pure_tone_amplitude * $fc]>
     </script>
   </tuun-synth>
 </div>
@@ -248,7 +245,7 @@ First, FM with pulse modulator: `Sine(w_c + I * w_m * pulse(0.5, w_m), 0)`
 Second, PM with pulse modulator `Sine(w_c, I * pulse(0.5, w_m))`
 
 <div class="container">
-  <tuun-synth description="PM synthesis tone with pulse modulator (+ pure tone after 3 seconds)">
+  <tuun-synth description="PM synthesis tone with pulse modulator (with pure tone)" sliders='["pure_tone_amplitude:0:1:0"]'>
     <script type="text/tuun">
       let
         fc = 440,
@@ -257,8 +254,7 @@ Second, PM with pulse modulator `Sine(w_c, I * pulse(0.5, w_m))`
         fm = D/2 * fc
       in
         <[sine(2*pi * fc, I * pulse(0.5, fm)) | seq(time - 3),
-         $fc]>
-         | fin(time - 6)
+         pure_tone_amplitude * $fc]>
     </script>
   </tuun-synth>
 </div>
