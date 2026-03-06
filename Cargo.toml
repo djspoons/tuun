@@ -17,6 +17,11 @@ crate-type = ["cdylib", "rlib"]
 name = "sweep"
 path = "src/misc/sweep.rs"
 
+[[bin]]
+name = "web_checker"
+path = "src/misc/web_checker.rs"
+required-features = ["clap"]
+
 [features]
 default = ["native"]
 native = ["sdl2", "clap"]
