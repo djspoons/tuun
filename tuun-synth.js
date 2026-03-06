@@ -10,21 +10,27 @@ class TuunRuntime {
         this.activeInstance = null;
         this._initPromise = null;
         this._sampleRate = null;
+        this._tempo = null;
     }
 
-    async ensureInitialized(sampleRate = 44100) {
-        if (this._sampleRate === sampleRate && this._initPromise) {
-            return this._initPromise;
+    async ensureInitialized(sampleRate = 44100, tempo = 120) {
+        const needsInit = this._sampleRate !== sampleRate
+            || this._tempo !== tempo
+            || !this._initPromise;
+
+        if (needsInit) {
+            this._sampleRate = sampleRate;
+            this._tempo = tempo;
+            this._initPromise = this._doInit(sampleRate, tempo).catch(err => {
+                this._initPromise = null;
+                throw err;
+            });
         }
-        this._sampleRate = sampleRate;
-        this._initPromise = this._doInit(sampleRate).catch(err => {
-            this._initPromise = null;
-            throw err;
-        });
+
         return this._initPromise;
     }
 
-    async _doInit(sampleRate) {
+    async _doInit(sampleRate, tempo) {
         if (!this.wasmModule) {
             const wasmUrl = new URL('./pkg/tuun_bg.wasm', import.meta.url);
             const resp = await fetch(wasmUrl);
@@ -41,23 +47,23 @@ class TuunRuntime {
         this.audioContext = new (window.AudioContext || window.webkitAudioContext)({
             sampleRate
         });
-        this.tuun = new Tuun(sampleRate);
+        this.tuun = new Tuun(sampleRate, tempo);
 
         const processorUrl = new URL('./tuun-processor.js', import.meta.url);
         await this.audioContext.audioWorklet.addModule(processorUrl);
     }
 
     parse(expression) {
-        const wf = this.tuun.parse(expression);
-        wf.free();
+        const w = this.tuun.parse(expression);
+        w.free();
     }
 
     createWorkletNode() {
         return new AudioWorkletNode(this.audioContext, 'tuun-processor', {
             processorOptions: {
                 wasmModule: this.wasmModule,
-                bufferSize: 1024,
-                sampleRate: this._sampleRate
+                sampleRate: this._sampleRate,
+                tempo: this._tempo
             }
         });
     }
@@ -249,6 +255,19 @@ select:focus {
     border-color: #667eea;
 }
 
+input[type="number"] {
+    width: 70px;
+    padding: 4px 6px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 14px;
+}
+
+input[type="number"]:focus {
+    outline: none;
+    border-color: #667eea;
+}
+
 .error {
     margin-top: 8px;
     padding: 8px 10px;
@@ -260,6 +279,40 @@ select:focus {
     font-family: monospace;
 }
 
+.sliders {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 8px;
+    padding-left: 40px;
+}
+
+.slider-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+}
+
+.slider-row label {
+    min-width: 60px;
+    font-weight: 500;
+    color: #666;
+}
+
+.slider-row input[type="range"] {
+    flex: 1;
+    accent-color: #667eea;
+}
+
+.slider-row .slider-value {
+    min-width: 50px;
+    text-align: right;
+    font-family: 'Monaco', 'Menlo', monospace;
+    font-size: 13px;
+    color: #555;
+}
+
 .hidden {
     display: none !important;
 }
@@ -268,7 +321,7 @@ select:focus {
 // ─── <tuun-synth> Custom Element ─────────────────────────────────
 
 class TuunSynthElement extends HTMLElement {
-    static observedAttributes = ['expression', 'description', 'controls', 'expanded'];
+    static observedAttributes = ['expression', 'description', 'controls', 'expanded', 'tempo', 'sliders'];
 
     constructor() {
         super();
@@ -277,6 +330,8 @@ class TuunSynthElement extends HTMLElement {
         this._expanded = false;
         this._originalExpression = '';
         this._workletNode = null;
+        this._sliders = [];
+        this._sliderValues = new Map();
     }
 
     connectedCallback() {
@@ -284,6 +339,8 @@ class TuunSynthElement extends HTMLElement {
         const bodyText = script ? script.textContent : this.textContent;
         this._originalExpression = this._dedent(bodyText) || this.getAttribute('expression') || '';
         this._expanded = !this.getAttribute('description') || this.hasAttribute('expanded');
+        this._sliders = this._parseSliders();
+        this._sliderValues = new Map(this._sliders.map(s => [s.label, s.value]));
         this._render();
         this._bindEvents();
     }
@@ -312,6 +369,11 @@ class TuunSynthElement extends HTMLElement {
         } else if (name === 'controls') {
             const ctrl = this.shadowRoot.querySelector('.controls');
             if (ctrl) ctrl.classList.toggle('hidden', !this.hasAttribute('controls'));
+        } else if (name === 'sliders') {
+            this._sliders = this._parseSliders();
+            this._sliderValues = new Map(this._sliders.map(s => [s.label, s.value]));
+            this._render();
+            this._bindEvents();
         }
     }
 
@@ -334,7 +396,11 @@ class TuunSynthElement extends HTMLElement {
                         <textarea rows="1">${expression}</textarea>
                         <button class="reset-button" title="Reset expression" disabled>&#x21BA;</button>
                     </div>
+                    ${this._renderSliders()}
                     <div class="controls ${hasControls ? '' : 'hidden'}">
+                        <label>Tempo:
+                            <input type="number" class="tempo" value="${this._getTempo()}" min="1" max="999" step="1">
+                        </label>
                         <label>Sample Rate:
                             <select class="sample-rate">
                                 <option value="22050">22050 Hz</option>
@@ -354,6 +420,7 @@ class TuunSynthElement extends HTMLElement {
                         <textarea rows="1">${expression}</textarea>
                         <button class="reset-button" title="Reset expression" disabled>&#x21BA;</button>
                     </div>
+                    ${this._renderSliders()}
                     <div class="controls ${hasControls ? '' : 'hidden'}">
                         <label>Sample Rate:
                             <select class="sample-rate">
@@ -361,6 +428,9 @@ class TuunSynthElement extends HTMLElement {
                                 <option value="44100" selected>44100 Hz</option>
                                 <option value="48000">48000 Hz</option>
                             </select>
+                        </label>
+                        <label>Tempo:
+                            <input type="number" class="tempo" value="${this._getTempo()}" min="1" max="999" step="1">
                         </label>
                     </div>
                     <div class="error hidden"></div>
@@ -406,6 +476,25 @@ class TuunSynthElement extends HTMLElement {
             sampleRate.addEventListener('change', () => this._handleSampleRateChange());
         }
 
+        const tempo = this.shadowRoot.querySelector('.tempo');
+        if (tempo) {
+            tempo.addEventListener('change', () => this._handleTempoChange());
+        }
+
+        this.shadowRoot.querySelectorAll('input[type="range"]').forEach(input => {
+            input.addEventListener('input', () => {
+                const label = input.dataset.label;
+                const val = parseFloat(input.value);
+                const decimals = parseInt(input.dataset.decimals);
+                this._sliderValues.set(label, val);
+                if (this._isPlaying && this._workletNode) {
+                    this._workletNode.port.postMessage({ type: 'slider', name: label, value: val });
+                }
+                const span = input.nextElementSibling;
+                if (span) span.textContent = val.toFixed(decimals);
+            });
+        });
+
         this._updateResetButton();
     }
 
@@ -444,8 +533,8 @@ class TuunSynthElement extends HTMLElement {
 
     async _play(expression) {
         expression = this._stripComments(expression);
-        const sampleRate = this._getSampleRate();
-        await runtime.ensureInitialized(sampleRate);
+        expression = this._prependSliderBindings(expression);
+        await runtime.ensureInitialized(this._getSampleRate(), this._getTempo());
         runtime.parse(expression);
         runtime.setPlaying(this);
 
@@ -456,6 +545,9 @@ class TuunSynthElement extends HTMLElement {
         }
 
         this._workletNode.port.postMessage({ type: 'play', expression });
+        for (const [label, value] of this._sliderValues) {
+            this._workletNode.port.postMessage({ type: 'slider', name: label, value });
+        }
         this._isPlaying = true;
         this._updatePlayButton();
     }
@@ -518,9 +610,29 @@ class TuunSynthElement extends HTMLElement {
             this._workletNode = null;
         }
         try {
-            await runtime.ensureInitialized(this._getSampleRate());
+            await runtime.ensureInitialized(this._getSampleRate(), this._getTempo());
         } catch (error) {
             this._showError('Failed to change sample rate');
+        }
+    }
+
+    _getTempo() {
+        const input = this.shadowRoot.querySelector('.tempo');
+        if (input) return parseFloat(input.value) || 120;
+        const attr = this.getAttribute('tempo');
+        return attr ? parseFloat(attr) || 120 : 120;
+    }
+
+    async _handleTempoChange() {
+        this.stop();
+        if (this._workletNode) {
+            this._workletNode.disconnect();
+            this._workletNode = null;
+        }
+        try {
+            await runtime.ensureInitialized(this._getSampleRate(), this._getTempo());
+        } catch (error) {
+            this._showError('Failed to change tempo');
         }
     }
 
@@ -571,6 +683,52 @@ class TuunSynthElement extends HTMLElement {
         const indent = lines[0].match(/^(\s*)/)[1];
         if (!indent) return lines.join('\n');
         return lines.map(l => l.startsWith(indent) ? l.slice(indent.length) : l).join('\n');
+    }
+
+    _renderSliders() {
+        if (!this._sliders.length) return '';
+        const rows = this._sliders.map(s => `
+            <div class="slider-row">
+                <label>${this._escapeHtml(s.label)}</label>
+                <input type="range" min="${s.min}" max="${s.max}" step="any" value="${s.value}" data-label="${this._escapeHtml(s.label)}" data-decimals="${s.decimals}">
+                <span class="slider-value">${Number(s.value).toFixed(s.decimals)}</span>
+            </div>`).join('');
+        return `<div class="sliders">${rows}</div>`;
+    }
+
+    _parseSliders() {
+        // Format: JSON array of "label:min:max:value" strings
+        // min, max, value are optional (defaults: 0, 1, (min+max)/2)
+        // e.g. '["fader"]' or '["Q:0.1:1:0.707","cutoff:200:10000:2000"]'
+        // The label must be a valid Tuun identifier.
+        const attr = this.getAttribute('sliders');
+        if (!attr) return [];
+        let arr;
+        try { arr = JSON.parse(attr); } catch { return []; }
+        if (!Array.isArray(arr)) return [];
+
+        return arr.map((s, i) => {
+            const parts = String(s).split(':');
+            const label = parts[0].replace(/^[^a-zA-Z]+/, '').replace(/[^a-zA-Z0-9_#]/g, '') || `slider${i+1}`;
+            const min = parts.length > 1 ? Number(parts[1]) : 0;
+            const max = parts.length > 2 ? Number(parts[2]) : 1;
+            const value = parts.length > 3 ? Number(parts[3]) : (min + max) / 2;
+            const intDigits = Math.max(1, String(Math.floor(Math.abs(max))).length);
+            const decimals = Math.max(0, 3 - intDigits);
+            return { label, min, max, value, decimals };
+        });
+    }
+
+    _prependSliderBindings(expression) {
+        if (!this._sliderValues.size) return expression;
+        const bindings = [...this._sliderValues.entries()]
+            .map(([label, value]) => `${label} = slider("${label}")`)
+            .join(', ');
+        return `let ${bindings} in ${expression}`;
+    }
+
+    _getSliderValues() {
+        return this._sliderValues;
     }
 
     _escapeHtml(text) {

@@ -13,12 +13,13 @@ export function main(): void;
 export class Tuun {
   free(): void;
   /**
-   * Creates a new Tuun instance with the specified sample rate.
+   * Creates a new Tuun instance with the specified sample rate and tempo.
    *
    * # Arguments
    * * `sample_rate` - The audio sample rate in Hz (e.g., 44100)
+   * * `tempo` - The tempo in beats per minute (e.g., 120)
    */
-  constructor(sample_rate: number);
+  constructor(sample_rate: number, tempo: number);
   /**
    * Parses a Tuun expression and returns a WasmWaveform.
    *
@@ -34,12 +35,13 @@ export class Tuun {
    * ```
    */
   parse(expression: string): WasmWaveform;
+  set_slider_value(name: string, value: number): void;
   /**
    * Generates audio samples from a waveform.
    *
    * # Arguments
    * * `waveform` - The WasmWaveform to generate from
-   * * `num_samples` - The number of samples to generate
+   * * `desired` - The number of samples to generate
    *
    * # Returns
    * A Float32Array of audio samples in the range [-1.0, 1.0]
@@ -50,7 +52,7 @@ export class Tuun {
    * // samples is a Float32Array that can be used with Web Audio API
    * ```
    */
-  generate(waveform: WasmWaveform, num_samples: number): Float32Array;
+  generate(waveform: WasmWaveform, desired: number): Float32Array;
   /**
    * Returns the current sample rate.
    */
@@ -60,7 +62,7 @@ export class Tuun {
  * A waveform that can be used to generate audio samples.
  *
  * This wraps the internal Waveform type and maintains state between
- * generation calls for time-dependent waveforms.
+ * calls to generate().
  */
 export class WasmWaveform {
   private constructor();
@@ -76,8 +78,9 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
   readonly memory: WebAssembly.Memory;
   readonly __wbg_tuun_free: (a: number, b: number) => void;
-  readonly tuun_new: (a: number) => [number, number, number];
+  readonly tuun_new: (a: number, b: number) => [number, number, number];
   readonly tuun_parse: (a: number, b: number, c: number) => [number, number, number];
+  readonly tuun_set_slider_value: (a: number, b: number, c: number, d: number) => void;
   readonly tuun_generate: (a: number, b: number, c: number) => [number, number];
   readonly tuun_sample_rate: (a: number) => number;
   readonly __wbg_wasmwaveform_free: (a: number, b: number) => void;
