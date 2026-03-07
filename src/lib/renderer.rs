@@ -1,3 +1,4 @@
+use std::fmt;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -16,31 +17,66 @@ use crate::parser;
 use crate::tracker;
 use crate::waveform;
 
+pub type ProgramId = i32;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum WaveformId {
     // Beats are silent waveforms that are used to keep time. The bool tracks whether
     // it is an odd or even measure (false == odd).
     Beats(bool),
-    Program(usize), // Program index starts at 1
+    Program(ProgramId),
 }
 
 #[derive(Debug)]
+// `active_program_index` should be the index of the active program in the `programs` array
 pub enum Mode {
     Select {
-        program_index: usize,
+        active_program_index: usize,
         message: String,
     },
     Edit {
-        program_index: usize,
+        active_program_index: usize,
         // TODO unicode!!
         cursor_position: usize, // Cursor is located before the character this position
         errors: Vec<parser::Error>,
         message: String,
     },
     MoveSliders {
-        program_index: usize, // Don't forget this
+        active_program_index: usize, // Don't forget this
     },
     Exit,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ProgramSliders {
+    pub configs: Vec<parser::SliderConfig>,
+    /// Normalized values in 0.0..1.0, parallel to configs
+    pub normalized_values: Vec<f32>,
+}
+
+impl ProgramSliders {
+    pub fn slider_display(&self) -> Vec<SliderDisplay> {
+        self.configs
+            .iter()
+            .enumerate()
+            .map(|(j, config)| {
+                let norm = self.normalized_values[j];
+                SliderDisplay {
+                    label: config.label.clone(),
+                    axis: if j == 0 { "X" } else { "Y" },
+                    normalized_value: norm,
+                    actual_value: config.min + norm * (config.max - config.min),
+                }
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Program {
+    pub text: String,
+    pub id: ProgramId,
+    pub sliders: ProgramSliders,
 }
 
 pub struct SliderDisplay {
@@ -48,6 +84,16 @@ pub struct SliderDisplay {
     pub axis: &'static str, // "X" or "Y"
     pub normalized_value: f32,
     pub actual_value: f32,
+}
+
+impl fmt::Display for SliderDisplay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}({}) = {:.3}",
+            self.label, self.axis, self.actual_value
+        )
+    }
 }
 
 fn make_texture<'a>(
@@ -158,11 +204,10 @@ impl Renderer {
     pub fn render(
         &mut self,
         ttf_context: &Sdl2TtfContext,
-        programs: &[String],
+        programs: &[Program],
         status: &tracker::Status<WaveformId>,
         mode: &Mode,
         metrics: &mut Metrics,
-        slider_display: &[SliderDisplay],
     ) {
         // TODO so much clean-up
         let now = Instant::now();
@@ -191,21 +236,20 @@ impl Renderer {
         self.canvas.clear();
 
         let mut y = 10;
-        for (i, program) in programs.iter().enumerate() {
-            let program_index = i + 1;
-            let color = match (&mode, is_pending_program(&status, now, program_index)) {
+        for (index, program) in programs.iter().enumerate() {
+            let color = match (&mode, is_pending_program(&status, now, program.id)) {
                 (_, true) => ACTIVE_COLOR,
                 (
                     Mode::Edit {
-                        program_index: edit_program_index,
+                        active_program_index,
                         ..
                     },
                     _,
-                ) if program_index == *edit_program_index => EDIT_COLOR,
+                ) if index == *active_program_index => EDIT_COLOR,
                 _ => INACTIVE_COLOR,
             };
-            if !is_pending_program(&status, now, program_index) || current_beat % 2 == 1 {
-                let number = char::from_u32(0x31 + i as u32).unwrap().to_string();
+            if !is_pending_program(&status, now, program.id) || current_beat % 2 == 1 {
+                let number = char::from_u32(0x31 + index as u32).unwrap().to_string();
                 let number_texture = make_texture(&font, color, &texture_creator, &number);
                 let TextureQuery {
                     width: number_width,
@@ -232,7 +276,7 @@ impl Renderer {
                 height: circle_height,
                 ..
             } = circle_texture.query();
-            if is_active_program(status, now, program_index) {
+            if is_active_program(status, now, program.id) {
                 self.canvas
                     .copy(
                         &circle_texture,
@@ -249,14 +293,18 @@ impl Renderer {
 
             match *mode {
                 Mode::Edit {
-                    program_index: edit_program_index,
+                    active_program_index,
                     cursor_position,
                     ref errors,
                     ..
                 } => {
-                    if edit_program_index != program_index && !program.is_empty() {
-                        let text_texture =
-                            make_texture(&font, INACTIVE_COLOR, &texture_creator, program);
+                    if active_program_index != index && !program.text.is_empty() {
+                        let text_texture = make_texture(
+                            &font,
+                            INACTIVE_COLOR,
+                            &texture_creator,
+                            program.text.as_str(),
+                        );
                         let TextureQuery {
                             width: text_width,
                             height: text_height,
@@ -274,11 +322,11 @@ impl Renderer {
                                 )),
                             )
                             .unwrap();
-                    } else if edit_program_index == program_index {
+                    } else if active_program_index == index {
                         // Loop over each character in program and check to see if it's in any of the error
                         // ranges
                         let mut x = self.nav_width as i32;
-                        for (j, c) in program.chars().enumerate() {
+                        for (j, c) in program.text.chars().enumerate() {
                             let color = if errors.iter().any(|e| match e.range() {
                                 Some(range) if range.contains(&j) => true,
                                 _ => false,
@@ -306,7 +354,7 @@ impl Renderer {
                                 .unwrap();
                             x += char_width as i32;
                         }
-                        if cursor_position == program.len() {
+                        if cursor_position == program.text.len() {
                             // Draw the cursor at the end of the line
                             let color = if !errors.is_empty() {
                                 ERROR_COLOR
@@ -318,14 +366,14 @@ impl Renderer {
                     }
                 }
                 Mode::Select {
-                    program_index: mode_program_index,
+                    active_program_index,
                     ..
                 }
                 | Mode::MoveSliders {
-                    program_index: mode_program_index,
+                    active_program_index,
                     ..
                 } => {
-                    if mode_program_index == program_index {
+                    if active_program_index == index {
                         match mode {
                             Mode::Select { .. } => {
                                 let prompt_texture =
@@ -346,9 +394,13 @@ impl Renderer {
                             _ => (),
                         }
                     }
-                    if !program.is_empty() {
-                        let text_texture =
-                            make_texture(&font, INACTIVE_COLOR, &texture_creator, program);
+                    if !program.text.is_empty() {
+                        let text_texture = make_texture(
+                            &font,
+                            INACTIVE_COLOR,
+                            &texture_creator,
+                            program.text.as_str(),
+                        );
                         let TextureQuery {
                             width: text_width,
                             height: text_height,
@@ -380,6 +432,20 @@ impl Renderer {
             INACTIVE_COLOR
         };
         self.canvas.set_draw_color(slider_color);
+        let slider_display: Vec<SliderDisplay> = match &mode {
+            Mode::MoveSliders {
+                active_program_index,
+            }
+            | Mode::Select {
+                active_program_index,
+                ..
+            }
+            | Mode::Edit {
+                active_program_index,
+                ..
+            } => programs[*active_program_index].sliders.slider_display(),
+            Mode::Exit => Vec::new(),
+        };
         // First slider: horizontal indicator at top
         if let Some(s) = slider_display.get(0) {
             self.canvas
@@ -548,7 +614,7 @@ impl Renderer {
                 } else {
                     &slider_display
                         .iter()
-                        .map(|s| format!("{}({}) = {:.3}", s.label, s.axis, s.actual_value))
+                        .map(|s| format!("{}", s))
                         .collect::<Vec<_>>()
                         .join(", ")
                 }
@@ -743,19 +809,19 @@ pub fn beats_waveform(tempo: u32, beats_per_measure: u32) -> waveform::Waveform 
 pub fn is_pending_program(
     status: &tracker::Status<WaveformId>,
     now: Instant,
-    program_index: usize,
+    program_id: ProgramId,
 ) -> bool {
     status.marks.iter().any(|w| {
-        w.waveform_id == WaveformId::Program(program_index) && w.mark_id == 0 && w.start > now
+        w.waveform_id == WaveformId::Program(program_id) && w.mark_id == 0 && w.start > now
     })
 }
 
 pub fn is_active_program(
     status: &tracker::Status<WaveformId>,
     now: Instant,
-    program_index: usize,
+    program_id: ProgramId,
 ) -> bool {
     status.marks.iter().any(|w| {
-        w.waveform_id == WaveformId::Program(program_index) && w.mark_id == 0 && w.start <= now
+        w.waveform_id == WaveformId::Program(program_id) && w.mark_id == 0 && w.start <= now
     })
 }

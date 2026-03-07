@@ -91,7 +91,7 @@ lpf = fn(Q, fc) =>
     a2 =  1 - alpha,
     // Take the first element of w. If w is not a waveform then this will promote it to a constant
     // one before multiplying it, yielding the same result as `fixed([w])`.
-    fst = fn(w) => w * fixed([1.0])
+    fst = fn(w) => fixed([1.0]) * w
   in
     filter(append(fst(b0/a0), fst(b1/a0), fst(b2/a0)), append(fst(a1/a0), fst(a2/a0))),
 
@@ -106,8 +106,8 @@ harmonica = fn(dur, freq) =>
     osc2 = reset(osc1, pulse(0.7, add_cents(add_semitones(freq, 8), 7))),
     osc = 0.375 * osc1 + 0.5 * osc2,
     a = 0.13,
-    d = 0.33,
     r = 0.33,
+    d = max(0.33, dur - (a + r)),
     s = max(dur - (a + d + r), 0)
   in
     osc
