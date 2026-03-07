@@ -1,23 +1,31 @@
 // Amplitude
-$220 * Y
+//#{sliders=["amplitude:0:1:0.5"]}
+$220 * amplitude
 
 // Duration (best in 4 beats per measure)
-let w = $220 | fin(time - (X * duration_from_beats(1))) | seq(time - (duration_from_beats(2))) in <[w, w]>
+//#{sliders=["scale:0:1:0.5"]}
+let w = $220 | fin(time - (scale * duration_from_beats(1))) | seq(time - (duration_from_beats(2))) in <[w, w]>
 
 // Pulse width modulation
-pulse(X, 220)
-// maybe take abs instead of shift/scale?
-pulse(($(110 * X) + 1) / 2, 220)
+//#{sliders=["width:0:1:0.5"]}
+pulse(width, 220)
+//#{sliders=["frequency:1:110:25","depth:0:1:0.5"]}
+pulse($frequency * depth, 220)
 
 // Filters
-square(220) | lpf(X, Y / 8 * sampling_frequency)
+//#{sliders=["Q:0.1:1:0.707","cutoff:100:11000"]}
+square(220) | lpf(Q, cutoff)
 
 // Amplitude envelope
-$220 | ADSR(X, Y, 0, 0, 0)
-$220 | ADSR(0.0, 0.0, X, 0.5, Y)
+//#{sliders=["attack:0:1:0.5","decay:0:1:0.5"]}
+$220 | ADSR(attack, decay, 0, 0, 0)
+//#{sliders=["sustain_level:0:1:0.5","release:0:1:0.5"]}
+$220 | ADSR(0.0, 0.0, sustain_level, 0.5, release)
 
 // Harmonics
-let over = fn (x) => $(220*x) * (1/x * Y) in $220 + <map(over, [3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 33, 35, 37, 39])>
+//#{sliders=["depth:0:1:0.5"]}
+let over = fn (x) => $(220*x) * (1/x * depth) in $220 + <map(over, [3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 33, 35, 37, 39])>
 
 // Frequency
-$(X * 1000 + 50)
+//#{sliders=["frequency:50:1000:200"]}
+$(frequency)

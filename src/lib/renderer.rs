@@ -43,6 +43,13 @@ pub enum Mode {
     Exit,
 }
 
+pub struct SliderDisplay {
+    pub label: String,
+    pub axis: &'static str, // "X" or "Y"
+    pub normalized_value: f32,
+    pub actual_value: f32,
+}
+
 fn make_texture<'a>(
     font: &Font<'a, 'static>,
     color: Color,
@@ -155,6 +162,7 @@ impl Renderer {
         status: &tracker::Status<WaveformId>,
         mode: &Mode,
         metrics: &mut Metrics,
+        slider_display: &[SliderDisplay],
     ) {
         // TODO so much clean-up
         let now = Instant::now();
@@ -366,30 +374,34 @@ impl Renderer {
         }
 
         // Draw the sliders
-        self.canvas
-            .set_draw_color(if let Mode::MoveSliders { .. } = mode {
-                ACTIVE_COLOR
-            } else {
-                INACTIVE_COLOR
-            });
-        self.canvas
-            .fill_rect(sdl2::rect::Rect::new(
-                (self.width as f32 * *status.slider_values.get("X").unwrap_or(&0.0)) as i32 - 3,
-                0,
-                6,
-                16,
-            ))
-            .unwrap();
-        self.canvas
-            .fill_rect(sdl2::rect::Rect::new(
-                0,
-                self.height as i32
-                    - (self.height as f32 * *status.slider_values.get("Y").unwrap_or(&0.0)) as i32
-                    - 3,
-                16,
-                6,
-            ))
-            .unwrap();
+        let slider_color = if let Mode::MoveSliders { .. } = mode {
+            ACTIVE_COLOR
+        } else {
+            INACTIVE_COLOR
+        };
+        self.canvas.set_draw_color(slider_color);
+        // First slider: horizontal indicator at top
+        if let Some(s) = slider_display.get(0) {
+            self.canvas
+                .fill_rect(sdl2::rect::Rect::new(
+                    (self.width as f32 * s.normalized_value) as i32 - 3,
+                    0,
+                    6,
+                    16,
+                ))
+                .unwrap();
+        }
+        // Second slider: vertical indicator at left
+        if let Some(s) = slider_display.get(1) {
+            self.canvas
+                .fill_rect(sdl2::rect::Rect::new(
+                    0,
+                    self.height as i32 - (self.height as f32 * s.normalized_value) as i32 - 3,
+                    16,
+                    6,
+                ))
+                .unwrap();
+        }
 
         // Save the new buffer if present
         if let Some(buffer) = &status.buffer {
@@ -530,12 +542,17 @@ impl Renderer {
         let mut message = match mode {
             Mode::Edit { message, .. } => message,
             Mode::Select { message, .. } => message,
-            Mode::MoveSliders { .. } => &format!(
-                "X = {:.3}, Y = {:.3}",
-                status.slider_values.get("X").unwrap_or(&0.5),
-                status.slider_values.get("Y").unwrap_or(&0.5)
-            )
-            .to_string(),
+            Mode::MoveSliders { .. } => {
+                if slider_display.is_empty() {
+                    &"No sliders configured".to_string()
+                } else {
+                    &slider_display
+                        .iter()
+                        .map(|s| format!("{}({}) = {:.3}", s.label, s.axis, s.actual_value))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            }
             Mode::Exit => "",
         };
 

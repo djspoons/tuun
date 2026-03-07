@@ -781,6 +781,12 @@ pub fn extend_context(
             Ok(())
         }
         (Pattern::Tuple(patterns), Expr::Tuple(arguments)) => {
+            if patterns.len() != arguments.len() {
+                return Err(Error::new(format!(
+                    "Mismatched number of elements in pattern {:?} and arguments {:?}",
+                    patterns, arguments
+                )));
+            }
             for (pattern, argument) in patterns.iter().zip(arguments) {
                 extend_context(context, pattern, argument)?;
             }

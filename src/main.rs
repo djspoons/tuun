@@ -11,7 +11,7 @@ use sdl2::event::Event;
 use sdl2::ttf::Sdl2TtfContext;
 
 use metric::Metric;
-use renderer::{Mode, Renderer, WaveformId};
+use renderer::{Mode, Renderer, SliderDisplay, WaveformId};
 use tracker::Command;
 use tuun::builtins;
 use tuun::generator;
@@ -21,6 +21,136 @@ use tuun::parser;
 use tuun::renderer;
 use tuun::tracker;
 use tuun::waveform;
+
+#[derive(Debug, Clone)]
+struct SliderConfig {
+    label: String,
+    min: f32,
+    max: f32,
+    value: f32,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ProgramSliders {
+    configs: Vec<SliderConfig>,
+    /// Normalized values in 0.0..1.0, parallel to configs
+    normalized_values: Vec<f32>,
+}
+
+impl ProgramSliders {
+    fn slider_display(&self) -> Vec<SliderDisplay> {
+        self.configs
+            .iter()
+            .enumerate()
+            .map(|(j, config)| {
+                let norm = self.normalized_values[j];
+                SliderDisplay {
+                    label: config.label.clone(),
+                    axis: if j == 0 { "X" } else { "Y" },
+                    normalized_value: norm,
+                    actual_value: config.min + norm * (config.max - config.min),
+                }
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Program {
+    text: String,
+    index: usize,
+    sliders: ProgramSliders,    
+}
+
+fn slider_tracker_key(program_index: usize, label: &str) -> String {
+    format!("{}:{}", program_index, label)
+}
+
+fn prepend_native_slider_bindings(program: &Program) -> String {
+    if program.sliders.configs.is_empty() {
+        return program.text.clone();
+    }
+    let bindings = program
+        .sliders
+        .configs
+        .iter()
+        .map(|c| {
+            format!(
+                "{} = slider(\"{}\")",
+                c.label,
+                slider_tracker_key(program.index, &c.label)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("let {} in {}", bindings, program.text)
+}
+
+fn parse_slider_pragma(line: &str) -> Option<Vec<SliderConfig>> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with("//#{") || !trimmed.ends_with('}') {
+        return None;
+    }
+    let inner = &trimmed[4..trimmed.len() - 1]; // strip "//#{" and "}"
+    if !inner.starts_with("sliders=") {
+        return None;
+    }
+    let sliders_value = inner["sliders=".len()..].trim();
+    if !sliders_value.starts_with('[') || !sliders_value.ends_with(']') {
+        return None;
+    }
+    let list_inner = &sliders_value[1..sliders_value.len() - 1];
+
+    let mut configs = Vec::new();
+    for item in list_inner.split(',') {
+        let item = item.trim().trim_matches('"');
+        if item.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = item.split(':').collect();
+        let label = parts[0].to_string();
+        if label.is_empty() {
+            continue;
+        }
+        let min = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+        const MIN_GAP: f32 = 0.01;
+        let max = f32::max(
+            parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(1.0),
+            min + MIN_GAP,
+        );
+        let value = parts
+            .get(3)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or((min + max) / 2.0)
+            .clamp(min, max);
+        configs.push(SliderConfig {
+            label,
+            min,
+            max,
+            value,
+        });
+    }
+    Some(configs)
+}
+
+fn send_initial_slider_values(
+    programs: &[Program],
+    command_sender: &std::sync::mpsc::Sender<Command<WaveformId>>,
+) {
+    for program in programs {
+        for (j, config) in program.sliders.configs.iter().enumerate() {
+            let key = slider_tracker_key(program.index, &config.label);
+            let actual_value =
+                config.min + program.sliders.normalized_values[j] * (config.max - config.min);
+            command_sender
+                .send(Command::MoveSlider {
+                    slider: key,
+                    value: actual_value,
+                })
+                .unwrap();
+        }
+    }
+}
 
 #[derive(ClapParser, Debug)]
 #[command(version, about, long_about = None)]
@@ -73,14 +203,6 @@ fn load_context(program_index: usize, args: &Args) -> (Vec<(String, parser::Expr
         parser::Expr::Float(args.sample_rate as f32),
     ));
     builtins::add_prelude(&mut context);
-    context.push((
-        "X".to_string(),
-        parser::Expr::Waveform(waveform::Waveform::Slider("X".to_string())),
-    ));
-    context.push((
-        "Y".to_string(),
-        parser::Expr::Waveform(waveform::Waveform::Slider("Y".to_string())),
-    ));
 
     let mut bindings = 0;
     let mut errors = Vec::new();
@@ -143,12 +265,23 @@ fn load_context(program_index: usize, args: &Args) -> (Vec<(String, parser::Expr
 
 const NUM_PROGRAMS: usize = 8;
 
-fn load_programs(args: &Args, programs: &mut Vec<String>) {
+fn load_programs(args: &Args, programs: &mut Vec<Program>) {
     *programs = Vec::new();
     if !args.programs_file.is_empty() {
         let mut count = 0;
         let contents = fs::read_to_string(&args.programs_file).unwrap_or_default();
+        let mut pending_slider_configs: Option<Vec<SliderConfig>> = None;
         for line in contents.lines() {
+            // Check for slider pragma before stripping comments
+            if let Some(mut configs) = parse_slider_pragma(line) {
+                if configs.len() > 2 {
+                    eprintln!("Warning: more than 2 sliders specified, using first 2");
+                    configs.truncate(2);
+                }
+                pending_slider_configs = Some(configs);
+                continue;
+            }
+
             let line = if let Some(comment_index) = line.find("//") {
                 &line[..comment_index]
             } else {
@@ -156,28 +289,52 @@ fn load_programs(args: &Args, programs: &mut Vec<String>) {
             }
             .trim();
             if !line.is_empty() {
-                programs.push(line.to_string());
+                let sliders = if let Some(configs) = pending_slider_configs.take() {
+                    let normalized_values = configs
+                        .iter()
+                        .map(|c| ((c.value - c.min) / (c.max - c.min)).clamp(0.0, 1.0))
+                        .collect();
+                    ProgramSliders {
+                        configs,
+                        normalized_values,
+                    }
+                } else {
+                    ProgramSliders::default()
+                };
+                programs.push(Program {
+                    text: line.to_string(),
+                    index: programs.len() + 1,
+                    sliders,
+                });
                 count += 1;
             }
         }
         println!("Loaded {} programs from {}", count, args.programs_file);
     }
     // Add in any additional programs specified on the command line
-    for program in &args.programs {
-        if !program.is_empty() {
-            programs.push(program.to_string());
+    for program_text in &args.programs {
+        if !program_text.is_empty() {
+            programs.push(Program {
+                text: program_text.to_string(),
+                index: programs.len() + 1,
+                sliders: ProgramSliders::default(),
+            });
         }
     }
-    // Fill up to NUM_PROGRAMS with empty strings if necessary
+    // Fill up to NUM_PROGRAMS with empty entries if necessary
     while programs.len() < NUM_PROGRAMS {
-        programs.push(String::new());
+        programs.push(Program {
+            text: String::new(),
+            index: programs.len() + 1,
+            sliders: ProgramSliders::default(),
+        });
     }
 }
 
 pub fn main() {
     let args = Args::parse();
     let (mut context, mut mode) = load_context(1, &args);
-    let mut programs = Vec::new();
+    let mut programs: Vec<Program> = Vec::new();
     load_programs(&args, &mut programs);
 
     let (status_sender, status_receiver) = mpsc::channel();
@@ -186,7 +343,8 @@ pub fn main() {
     if !args.ui {
         println!("Starting in non-UI mode");
         // Filter out any empty programs
-        programs = programs.iter().filter(|p| !p.is_empty()).cloned().collect();
+        programs.retain(|p| !p.text.is_empty());
+
         let mut tracker = tracker::Tracker::<WaveformId>::new(
             args.sample_rate,
             args.output_dir.clone().into(),
@@ -196,6 +354,10 @@ pub fn main() {
         );
         use sdl2::audio::AudioCallback;
         let mut out = vec![0.0f32; args.buffer_size as usize];
+
+        // Send initial slider values to the tracker
+        send_initial_slider_values(&programs, &command_sender);
+
         // Call the callback to get at least one status update
         tracker.callback(&mut out);
         let mut status = status_receiver.recv().unwrap();
@@ -209,16 +371,20 @@ pub fn main() {
         }];
         const MARK_ID: u32 = 100;
         // Parse and send commands to play all of the waveforms.
-        for (i, program) in programs.iter().enumerate() {
-            println!("Playing program {}: {}", i + 1, program);
+        for program in &programs {
+            println!("Playing program {}: {}", program.index, program.text);
             // Wrap each program in a mark so that we can wait for it to finish
+            let marked = Program {
+                text: format!("({}) | mark({})", program.text, MARK_ID),
+                index: program.index,
+                sliders: program.sliders.clone(),
+            };
             let (_, mode) = play_waveform(
                 context.clone(),
                 &status,
                 &args,
-                i + 1,
-                program.len(),
-                format!("({}) | mark({})", program, MARK_ID).as_str(),
+                &marked,
+                program.text.len(),
                 &command_sender,
                 sdl2::keyboard::Mod::empty(),
             );
@@ -282,25 +448,8 @@ pub fn main() {
 
     start_beats(&command_sender, &status_receiver, &args);
 
-    // I don't totally love all of this state around sliders... but I don't see
-    // a better way at the moment and plan to redo a lot of it to make it more
-    // configurable anyway.
-    let mut slider_values: std::collections::HashMap<String, f32> =
-        std::collections::HashMap::new();
-    slider_values.insert("X".to_string(), 0.5);
-    command_sender
-        .send(Command::MoveSlider {
-            slider: "X".to_string(),
-            value: 0.5,
-        })
-        .unwrap();
-    slider_values.insert("Y".to_string(), 0.5);
-    command_sender
-        .send(Command::MoveSlider {
-            slider: "Y".to_string(),
-            value: 0.5,
-        })
-        .unwrap();
+    // Send initial slider values to the tracker for all programs
+    send_initial_slider_values(&programs, &command_sender);
 
     let mut status = tracker::Status {
         buffer_start: Instant::now(),
@@ -328,7 +477,6 @@ pub fn main() {
                 &status,
                 &mut programs,
                 &command_sender,
-                &mut slider_values,
             );
             if let Mode::Exit = mode {
                 return;
@@ -374,7 +522,23 @@ pub fn main() {
         if statuses_received > 1 {
             println!("Received {} statuses", statuses_received);
         }
-        renderer.render(&ttf_context, &programs, &status, &mode, &mut metrics);
+        let program_texts: Vec<String> = programs.iter().map(|p| p.text.clone()).collect();
+        let slider_display: Vec<SliderDisplay> = match &mode {
+            Mode::MoveSliders { program_index }
+            | Mode::Select { program_index, .. }
+            | Mode::Edit { program_index, .. } => {
+                programs[*program_index - 1].sliders.slider_display()
+            }
+            Mode::Exit => Vec::new(),
+        };
+        renderer.render(
+            &ttf_context,
+            &program_texts,
+            &status,
+            &mode,
+            &mut metrics,
+            &slider_display,
+        );
     }
 }
 
@@ -442,6 +606,7 @@ fn edit_mode_from_program(program_index: usize, cursor_position: usize, program:
                 Err(errors) => errors,
             }
         },
+        // TODO could show the current sliders here
         message: String::new(),
     }
 }
@@ -453,9 +618,8 @@ fn process_event<I>(
     event: Event,
     mode: Mode,
     status: &tracker::Status<WaveformId>,
-    programs: &mut Vec<String>,
+    programs: &mut Vec<Program>,
     command_sender: &std::sync::mpsc::Sender<Command<WaveformId>>,
-    slider_values: &mut std::collections::HashMap<String, f32>,
 ) -> (Vec<(String, parser::Expr)>, Mode) {
     use sdl2::keyboard::Mod;
     use sdl2::keyboard::Scancode;
@@ -480,9 +644,8 @@ fn process_event<I>(
                             context,
                             status,
                             args,
-                            program_index,
-                            programs[program_index - 1].len(),
                             &programs[program_index - 1],
+                            programs[program_index - 1].text.len(),
                             command_sender,
                             keymod,
                         );
@@ -499,8 +662,8 @@ fn process_event<I>(
                     }
                     let mut mode = edit_mode_from_program(
                         program_index,
-                        programs[program_index - 1].len(),
-                        &programs[program_index - 1],
+                        programs[program_index - 1].text.len(),
+                        &programs[program_index - 1].text,
                     );
                     mode = match mode {
                         Mode::Edit {
@@ -581,9 +744,8 @@ fn process_event<I>(
                     context,
                     status,
                     args,
-                    program_index,
-                    cursor_position,
                     &programs[program_index - 1],
+                    cursor_position,
                     command_sender,
                     keymod,
                 ),
@@ -597,39 +759,39 @@ fn process_event<I>(
                 ) => {
                     // If the option key is down, clear the last word
                     let mut new_cursor_position = cursor_position;
-                    let mut program = programs[program_index - 1].clone();
+                    let mut text = programs[program_index - 1].text.clone();
                     if keymod.contains(Mod::LALTMOD) {
                         if let Some(char_index) =
-                            program[..cursor_position].rfind(|e: char| !e.is_whitespace())
+                            text[..cursor_position].rfind(|e: char| !e.is_whitespace())
                         {
                             if let Some(space_index) =
-                                program[..char_index].rfind(char::is_whitespace)
+                                text[..char_index].rfind(char::is_whitespace)
                             {
                                 // Remove everything between that whitespace and the cursor
-                                let mut new_program = program[..=space_index].to_string();
-                                new_program.push_str(&program[cursor_position..]);
-                                program = new_program;
+                                let mut new_text = text[..=space_index].to_string();
+                                new_text.push_str(&text[cursor_position..]);
+                                text = new_text;
                                 new_cursor_position = space_index + 1;
                             } else {
-                                program = program[cursor_position..].to_string();
+                                text = text[cursor_position..].to_string();
                                 new_cursor_position = 0;
                             }
                         } else {
                             // No non-whitespace characters, so clear everything before the cursor
-                            program = program[cursor_position..].to_string();
+                            text = text[cursor_position..].to_string();
                             new_cursor_position = 0;
                         }
                     } else {
-                        if !program.is_empty() && cursor_position > 0 {
-                            program.remove(cursor_position - 1);
+                        if !text.is_empty() && cursor_position > 0 {
+                            text.remove(cursor_position - 1);
                             new_cursor_position = cursor_position - 1;
                         }
                     }
-                    programs[program_index - 1] = program;
+                    programs[program_index - 1].text = text;
                     let mode = edit_mode_from_program(
                         program_index,
                         new_cursor_position,
-                        &programs[program_index - 1],
+                        &programs[program_index - 1].text,
                     );
                     (context, mode)
                 }
@@ -684,12 +846,12 @@ fn process_event<I>(
                 ) => {
                     let new_cursor_position;
                     if keymod.contains(Mod::LALTMOD) {
-                        let program = &programs[program_index - 1];
+                        let text = &programs[program_index - 1].text;
                         if let Some(char_index) =
-                            program[..cursor_position].rfind(|e: char| !e.is_whitespace())
+                            text[..cursor_position].rfind(|e: char| !e.is_whitespace())
                         {
                             if let Some(space_index) =
-                                program[..char_index].rfind(char::is_whitespace)
+                                text[..char_index].rfind(char::is_whitespace)
                             {
                                 new_cursor_position = space_index + 1;
                             } else {
@@ -722,7 +884,7 @@ fn process_event<I>(
                 ) => {
                     // TODO check for LALTMOD and move to next word
                     let cursor_position =
-                        programs[program_index - 1].len().min(cursor_position + 1);
+                        programs[program_index - 1].text.len().min(cursor_position + 1);
                     (
                         context,
                         Mode::Edit {
@@ -762,7 +924,7 @@ fn process_event<I>(
                     context,
                     Mode::Edit {
                         program_index,
-                        cursor_position: programs[program_index - 1].len(),
+                        cursor_position: programs[program_index - 1].text.len(),
                         errors,
                         message,
                     },
@@ -821,6 +983,7 @@ fn process_event<I>(
                     } else if text == "L" {
                         // Load programs
                         load_programs(&args, programs);
+                        send_initial_slider_values(&programs, command_sender);
                         return (
                             context,
                             Mode::Select {
@@ -835,8 +998,32 @@ fn process_event<I>(
                         let filename = format!("programs_{}.tuunp", datetime);
                         let mut file = fs::File::create(&filename).unwrap();
                         for program in programs.iter() {
-                            if !program.is_empty() {
-                                writeln!(file, "{}", program).unwrap();
+                            if !program.text.is_empty() {
+                                let ps = &program.sliders;
+                                if !ps.configs.is_empty() {
+                                    let slider_strs: Vec<String> = ps
+                                        .configs
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(j, c)| {
+                                            let actual =
+                                                c.min + ps.normalized_values[j] * (c.max - c.min);
+                                            format!(
+                                                "\"{}:{}:{}:{}\"",
+                                                c.label, c.min, c.max, actual
+                                            )
+                                        })
+                                        .collect();
+                                    writeln!(
+                                        file,
+                                        "//#{}{}{}",
+                                        "{sliders=[",
+                                        slider_strs.join(","),
+                                        "]}"
+                                    )
+                                    .unwrap();
+                                }
+                                writeln!(file, "{}", program.text).unwrap();
                             }
                         }
                         return (
@@ -851,8 +1038,8 @@ fn process_event<I>(
                         match play_waveform_helper(
                             &context,
                             program_index,
-                            programs[program_index - 1].len(),
-                            programs[program_index - 1].as_str(),
+                            programs[program_index - 1].text.len(),
+                            &programs[program_index - 1],
                             args,
                             false,
                         ) {
@@ -884,17 +1071,17 @@ fn process_event<I>(
                     cursor_position,
                     ..
                 } => {
-                    let mut new_program =
-                        programs[program_index - 1][..cursor_position].to_string();
-                    new_program.push_str(&text);
-                    new_program.push_str(&programs[program_index - 1][cursor_position..]);
-                    programs[program_index - 1] = new_program;
+                    let mut new_text =
+                        programs[program_index - 1].text[..cursor_position].to_string();
+                    new_text.push_str(&text);
+                    new_text.push_str(&programs[program_index - 1].text[cursor_position..]);
+                    programs[program_index - 1].text = new_text;
                     return (
                         context,
                         edit_mode_from_program(
                             program_index,
                             cursor_position + text.len(),
-                            &programs[program_index - 1],
+                            &programs[program_index - 1].text,
                         ),
                     );
                 }
@@ -905,26 +1092,30 @@ fn process_event<I>(
         }
         Event::MouseMotion { xrel, yrel, .. } => match mode {
             Mode::MoveSliders { program_index, .. } => {
-                if xrel != 0 {
-                    let current = slider_values.get("X").copied().unwrap();
-                    let new_value = (current + xrel as f32 / renderer.width as f32).clamp(0.0, 1.0);
-                    slider_values.insert("X".to_string(), new_value);
+                let ps = &mut programs[program_index - 1].sliders;
+                // First slider maps to mouse X axis
+                if xrel != 0 && !ps.configs.is_empty() {
+                    let norm = &mut ps.normalized_values[0];
+                    *norm = (*norm + xrel as f32 / renderer.width as f32).clamp(0.0, 1.0);
+                    let config = &ps.configs[0];
+                    let actual_value = config.min + *norm * (config.max - config.min);
                     command_sender
                         .send(Command::MoveSlider {
-                            slider: "X".to_string(),
-                            value: new_value,
+                            slider: slider_tracker_key(program_index, &config.label),
+                            value: actual_value,
                         })
                         .unwrap();
                 }
-                if yrel != 0 {
-                    let current = slider_values.get("Y").copied().unwrap();
-                    let new_value =
-                        (current - yrel as f32 / renderer.height as f32).clamp(0.0, 1.0);
-                    slider_values.insert("Y".to_string(), new_value);
+                // Second slider maps to mouse Y axis
+                if yrel != 0 && ps.configs.len() >= 2 {
+                    let norm = &mut ps.normalized_values[1];
+                    *norm = (*norm - yrel as f32 / renderer.height as f32).clamp(0.0, 1.0);
+                    let config = &ps.configs[1];
+                    let actual_value = config.min + *norm * (config.max - config.min);
                     command_sender
                         .send(Command::MoveSlider {
-                            slider: "Y".to_string(),
-                            value: new_value,
+                            slider: slider_tracker_key(program_index, &config.label),
+                            value: actual_value,
                         })
                         .unwrap();
                 }
@@ -962,16 +1153,15 @@ fn play_waveform(
     context: Vec<(String, parser::Expr)>,
     status: &tracker::Status<WaveformId>,
     args: &Args,
-    program_index: usize,
+    program: &Program,
     cursor_position: usize,
-    program: &str,
     command_sender: &std::sync::mpsc::Sender<Command<WaveformId>>,
     keymod: sdl2::keyboard::Mod,
 ) -> (Vec<(String, parser::Expr)>, Mode) {
     use sdl2::keyboard::Mod;
     match play_waveform_helper(
         &context,
-        program_index,
+        program.index,
         cursor_position,
         program,
         args,
@@ -988,7 +1178,7 @@ fn play_waveform(
                 }
                 message = format!(
                     "Looping waveform {} every {:?} beats",
-                    program_index, repeat_every_beats
+                    program.index, repeat_every_beats
                 );
                 repeat_every = Some(renderer::duration_from_beats(
                     args.tempo,
@@ -996,13 +1186,13 @@ fn play_waveform(
                 ));
             } else {
                 // Otherwise, play it once
-                message = format!("Playing waveform {}", program_index);
+                message = format!("Playing waveform {}", program.index);
                 repeat_every = None;
             }
             command_sender
                 .send(Command::Play {
                     // TODO maybe extend the mark to the full measure?
-                    id: WaveformId::Program(program_index),
+                    id: WaveformId::Program(program.index),
                     waveform: waveform::Waveform::Marked {
                         id: 0,
                         waveform: Box::new(waveform),
@@ -1015,7 +1205,7 @@ fn play_waveform(
             return (
                 context,
                 Mode::Select {
-                    program_index,
+                    program_index: program.index,
                     message,
                 },
             );
@@ -1029,11 +1219,12 @@ fn play_waveform_helper(
     context: &Vec<(String, parser::Expr)>,
     program_index: usize,
     cursor_position: usize,
-    program: &str,
+    program: &Program,
     args: &Args,
     should_precompute: bool,
 ) -> WaveformOrMode {
-    match parser::parse_program(program) {
+    let program_text = prepend_native_slider_bindings(program);
+    match parser::parse_program(&program_text) {
         Ok(expr) => {
             println!("Parser returned: {}", &expr);
             match parser::simplify(context, expr) {

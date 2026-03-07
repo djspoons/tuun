@@ -1,5 +1,6 @@
 
 // math
+min = fn(x, y) => if x < y then x else y,
 max = fn(x, y) => if x < y then y else x,
 pi = 3.14159265,
 
