@@ -68,7 +68,7 @@ fn send_initial_slider_values(
 #[derive(ClapParser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    #[arg(default_value_t = 90)]
+    #[arg(long = "tempo", default_value_t = 90)]
     tempo: u32,
     #[arg(long = "beats_per_measure", default_value_t = 4)]
     beats_per_measure: u32,
