@@ -64,8 +64,8 @@ R = fn(dur, level) => fn(w) => w * Rw(dur, level),
 
 over = fn(freq) => fn(x) => $(freq*x) * (1/x),
 
-add_semitones = fn(freq, n) => freq * pow(2, n/12),
-add_cents = fn(freq, n) => freq * pow(2, n/1200),
+add_semitones = fn(freq, n) => pow(2, n/12) * freq,
+add_cents = fn(freq, n) => pow(2, n/1200) * freq,
 
 odd_hrm = fn(freq) => {map(over(freq), [1, 3, 5, 7, 9, 11])},
 just_third = fn(freq) => {[odd_hrm(freq), odd_hrm(freq * 5/4)]},
@@ -81,7 +81,7 @@ moving_average = fn(n) =>
 // RBJ Cookbook
 lpf = fn(Q, fc) =>
   let
-    w0 = 2*pi*fc/sampling_frequency,
+    w0 = 2*pi*fc/sample_rate,
     alpha = sin(w0)/(2*Q),
     b0 = (1 - cos(w0))/2,
     b1 =  1 - cos(w0),

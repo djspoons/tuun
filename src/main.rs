@@ -112,7 +112,7 @@ fn load_context(active_program_index: usize, args: &Args) -> (Vec<(String, parse
     let mut context: Vec<(String, parser::Expr)> = Vec::new();
     context.push(("tempo".to_string(), parser::Expr::Float(args.tempo as f32)));
     context.push((
-        "sampling_frequency".to_string(),
+        "sample_rate".to_string(),
         parser::Expr::Float(args.sample_rate as f32),
     ));
     builtins::add_prelude(&mut context);
@@ -1003,7 +1003,7 @@ fn process_event<I>(
                             if !program.text.is_empty() {
                                 let ps = &program.sliders;
                                 if !ps.configs.is_empty() {
-                                    let slider_strs: Vec<String> = ps
+                                    let slider_strings: Vec<String> = ps
                                         .configs
                                         .iter()
                                         .enumerate()
@@ -1020,7 +1020,7 @@ fn process_event<I>(
                                         file,
                                         "//#{}{}{}",
                                         "{sliders=[",
-                                        slider_strs.join(","),
+                                        slider_strings.join(","),
                                         "]}"
                                     )
                                     .unwrap();

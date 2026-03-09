@@ -45,11 +45,7 @@ impl Wasm {
 
         // Initialize context with builtins
         let mut context = Vec::new();
-        // sampling_frequency must be a Float, not a Waveform, for use in calculations (e.g., lpf)
-        context.push((
-            "sampling_frequency".to_string(),
-            Expr::Float(sample_rate as f32),
-        ));
+        context.push(("sample_rate".to_string(), Expr::Float(sample_rate as f32)));
         builtins::add_prelude(&mut context);
 
         context.push(("tempo".to_string(), Expr::Float(tempo)));

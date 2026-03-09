@@ -14,10 +14,7 @@ struct Args {
 fn load_context() -> Vec<(String, parser::Expr)> {
     // TODO this context business is now getting duplicated across main, here, and the web stuff
     let mut context = Vec::new();
-    context.push((
-        "sampling_frequency".to_string(),
-        parser::Expr::Float(44100.0),
-    ));
+    context.push(("sample_rate".to_string(), parser::Expr::Float(44100.0)));
     context.push(("tempo".to_string(), parser::Expr::Float(120.0)));
     builtins::add_prelude(&mut context);
 
