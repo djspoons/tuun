@@ -374,26 +374,25 @@ impl Renderer {
                     ..
                 } => {
                     if active_program_index == index {
-                        match mode {
-                            Mode::Select { .. } => {
-                                let prompt_texture =
-                                    make_texture(&font, INACTIVE_COLOR, &texture_creator, " ▸ ");
-                                self.canvas
-                                    .copy(
-                                        &prompt_texture,
-                                        None,
-                                        Some(sdl2::rect::Rect::new(
-                                            0,
-                                            y,
-                                            self.prompt_width,
-                                            self.line_height,
-                                        )),
-                                    )
-                                    .unwrap();
-                            }
-                            _ => (),
-                        }
+                        let color = match mode {
+                            Mode::MoveSliders { .. } => ACTIVE_COLOR,
+                            _ => INACTIVE_COLOR, // Select
+                        };
+                        let prompt_texture = make_texture(&font, color, &texture_creator, " ▸ ");
+                        self.canvas
+                            .copy(
+                                &prompt_texture,
+                                None,
+                                Some(sdl2::rect::Rect::new(
+                                    0,
+                                    y,
+                                    self.prompt_width,
+                                    self.line_height,
+                                )),
+                            )
+                            .unwrap();
                     }
+
                     if !program.text.is_empty() {
                         let text_texture = make_texture(
                             &font,
