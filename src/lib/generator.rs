@@ -1,8 +1,8 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::f64;
 use std::fmt::Debug;
 use std::io::BufWriter;
+use std::{f64, usize};
 
 use fastrand;
 
@@ -60,24 +60,6 @@ enum MaybeOption<T> {
     Maybe, // The value may or may not be present
 }
 
-const MAX_FILTER_LENGTH: usize = 1000; // Maximum length of the filter coefficients
-
-fn truncate_or_pad_left<T>(mut v: Vec<T>, size: usize, val: T) -> Vec<T>
-where
-    T: Clone,
-{
-    if v.len() == size {
-        return v;
-    } else if v.len() > size {
-        return v.drain(v.len() - size..).collect();
-    } else {
-        // v.len() < size
-        let mut out = vec![val; size - v.len()];
-        out.append(&mut v);
-        return out;
-    }
-}
-
 impl<'a> Generator<'a> {
     // Create a new generator with the given sample frequency. Note that slider_state and capture_state must be set
     // before `generate` is called.
@@ -94,6 +76,7 @@ impl<'a> Generator<'a> {
     // Waveforms should be initialized with `initialize_state` before the first call to `generate`. The returned
     // waveform supports being "re-initialized" -- unless it depends on some external state (as Slider does), it
     // will generate the same samples each time it's initialized.
+    // TODO take a &mut waveform instead
     pub fn generate(&self, waveform: Waveform, desired: usize) -> (Waveform, Vec<f32>) {
         use State::*;
         use waveform::Waveform::*;
@@ -227,18 +210,20 @@ impl<'a> Generator<'a> {
                 feedback,
                 state: Initial,
             } => {
-                let (_, ff_len) = self.remaining(*feed_forward.clone(), MAX_FILTER_LENGTH);
-                // Generate the input samples so that they can be used in the feed forward part of the filter. Note
-                // that we could do this later but that complicates the management of the inner waveform.
-                let (inner, input) = self.generate(*inner, ff_len - 1);
-                let (_, fb_len) = self.remaining(*feedback.clone(), MAX_FILTER_LENGTH);
-                // Fill the previous output samples with zeros to match the length of `feedback`.
-                let output = vec![0.0; fb_len];
+                // Generate the input samples so that they can be used in the feed-forward part of the filter.
+                let ff_count = feed_forward.len();
+                assert!(ff_count >= 1);
+                let (inner, input) = self.generate(*inner, ff_count - 1);
+                // Fill the previous output samples with zeros to match the number of feedback coefficients.
+                let fb_count = feedback.len();
+                let output = vec![0.0; fb_count];
+
                 /*
                 println!(
-                    "Started generate for Filter({:?}, {:?}, {:?}) with {} samples for feed-forward and {} samples for feedback",
-                    inner, feed_forward, feedback, ff_len, fb_len
+                    "Started generate for Filter with {} feed-forward and {} feedback coefficients",
+                    ff_count, fb_count
                 );
+
                 */
                 return self.generate(
                     Filter {
@@ -252,50 +237,115 @@ impl<'a> Generator<'a> {
             }
             Filter {
                 waveform: inner,
-                feed_forward,
-                feedback,
+                mut feed_forward,
+                mut feedback,
                 state:
                     Samples {
-                        input: previous_in,
-                        output: previous_out,
+                        mut input,
+                        output: mut out,
                     },
             } => {
-                // Generate the filter coefficients.
-                // TODO should we rationalize how often the parameters are evaluated? Should it be on every sample? Or
-                // at least something more predictable than once per buffer?
-                let (_, ff_out) =
-                    self.generate(initialize_state(*feed_forward.clone()), MAX_FILTER_LENGTH);
-                let (_, fb_out) =
-                    self.generate(initialize_state(*feedback.clone()), MAX_FILTER_LENGTH);
+                // In general, we want the length of the output to match that of the input. This
+                // follows from the fact that each point is a sum of products: as long as at least one
+                // summand is defined than the sum is defined. (If we wanted to be totally true to that
+                // approach, we should verify that the coefficient waveforms are long enough so those
+                // products are also defined, but the coefficient waveforms are almost always infinite
+                // in length and doing so greatly complicates the code below, so we just blindly
+                // zero-extend the coefficient waveforms.)
+                //
+                // Doing so means that the last output point will only depend on one input point (and the
+                // second to last output will only depend on two input points, all the way back to the
+                // `ff_count-1`^th to last point.) This means that if the inner waveform is not able to
+                // generate `desired` points, we can zero-extend `input` up to `ff_count-1` points. We keep
+                // track of this by saving fewer than ff_count points for the next call to `generate()`.
+                // This is the same thing that happens when the first call to `generate()` with Initial
+                // state doesn't generate `ff_count - 1` points.
 
                 // Set up the input and output. Each will have extra samples at the beginning from a previous
-                // call to `generate`.
-                let mut input = truncate_or_pad_left(previous_in, ff_out.len() - 1, 0.0);
-                let (inner, mut inner_out) = self.generate(*inner, desired);
+                // call to `generate`. As noted above, `input` will be shorter than `ff_count - 1` in cases
+                // where we've reached the end of the inner waveform. In those cases, we extend `input` with
+                // up to `ff_count - 1` zeros.
+                let ff_count = feed_forward.len();
+                let (inner, mut inner_out, input_padding) = if ff_count == input.len() + 1 {
+                    let (inner, inner_out) = self.generate(*inner, desired);
+                    let input_padding = (desired - inner_out.len()).min(ff_count - 1);
+                    (inner, inner_out, input_padding)
+                } else {
+                    // We've already exhausted `inner` on a previous call to generate (or in the Initial
+                    // arm above). We will be able to generate `input.len()` more samples. To do that, we
+                    // need to pad by `ff_count - 1`.
+                    (*inner, vec![], ff_count - 1)
+                };
                 input.append(&mut inner_out);
-                // Use `previous_out` to fill in samples in `out` that we'll use to compute the feedback part of the
-                // filter. We'll trim off these extra samples at the end.
-                let mut out = truncate_or_pad_left(previous_out, fb_out.len(), 0.0);
+                input.resize(input.len() + input_padding, 0.0);
+
+                let fb_count = feedback.len();
+                assert_eq!(fb_count, out.len());
                 // Set the output length based on the size of the inner waveform.
-                out.resize(input.len() - (ff_out.len() - 1) + fb_out.len(), 0.0);
+                out.resize(input.len() - (ff_count - 1) + fb_count, 0.0);
+
+                let mut recompute_coefficients = true;
+                let mut ff_outs = vec![];
+                let mut fb_outs = vec![];
 
                 // Run the filter!!
-                for i in fb_out.len()..out.len() {
-                    for (j, &ff) in ff_out.iter().enumerate() {
-                        out[i] += ff * input[i - fb_out.len() + (ff_out.len() - 1) - j];
+                for i in fb_count..out.len() {
+                    if recompute_coefficients {
+                        recompute_coefficients = false;
+                        ff_outs = Vec::with_capacity(ff_count);
+                        fb_outs = Vec::with_capacity(fb_count);
+
+                        // Gather the coefficients for this element of the output, zero-extending if necessary.
+                        feed_forward = {
+                            let mut new_feed_forward = Vec::with_capacity(ff_count);
+                            for w in feed_forward.into_iter() {
+                                if let Const(_) = w {
+                                } else {
+                                    recompute_coefficients = true;
+                                }
+                                let (new_w, mut samples) = self.generate(w, 1);
+                                new_feed_forward.push(new_w);
+                                ff_outs.push(samples.pop().unwrap_or(0.0));
+                            }
+                            new_feed_forward
+                        };
+                        feedback = {
+                            let mut new_feedback = Vec::with_capacity(ff_count);
+                            for w in feedback.into_iter() {
+                                if let Const(_) = w {
+                                } else {
+                                    recompute_coefficients = true;
+                                }
+                                let (new_w, mut samples) = self.generate(w, 1);
+                                new_feedback.push(new_w);
+                                fb_outs.push(samples.pop().unwrap_or(0.0));
+                            }
+                            new_feedback
+                        };
+                        /*
+                        println!(
+                            "In generate() for Filter, generated coefficients:\n  b = {:?}\n  a = {:?}",
+                            ff_outs, fb_outs
+                        );
+                        */
                     }
-                    for (j, &fb) in fb_out.iter().enumerate() {
+
+                    for (j, &ff) in ff_outs.iter().enumerate() {
+                        out[i] += ff * input[i - fb_count + (ff_count - 1) - j];
+                    }
+                    for (j, &fb) in fb_outs.iter().enumerate() {
                         out[i] -= fb * out[i - j - 1];
                     }
                 }
 
-                // Save the last few samples of both the input and the output.
-                let previous_in = input[input.len() - (ff_out.len() - 1)..].to_vec();
-                let previous_out = out[out.len() - fb_out.len()..].to_vec();
-
-                // Remove the fb_out.len() samples from the beginning of `out` (these were included to compute
+                // Save the last few samples of both the input and the output... but don't save any zeros
+                // in the input that were padding on to the end.
+                let previous_in =
+                    input[input.len() - (ff_count - 1)..input.len() - input_padding].to_vec();
+                let previous_out = out[out.len() - fb_count..].to_vec();
+                // Remove the fb_count samples from the beginning of `out` (these were included to compute
                 // the feedback part of the filter).
-                out.drain(0..fb_out.len());
+                out.drain(0..fb_count);
                 return (
                     Filter {
                         waveform: Box::new(inner),
@@ -660,13 +710,52 @@ impl<'a> Generator<'a> {
                 );
             }
             Filter {
+                waveform,
+                feed_forward,
+                feedback,
+                state: Initial,
+            } => {
+                let ff_count = feed_forward.len();
+                let fb_count = feedback.len();
+                assert!(ff_count >= 1);
+                return self.remaining(
+                    Filter {
+                        waveform,
+                        feed_forward,
+                        feedback,
+                        state: Samples {
+                            input: vec![0.0; ff_count - 1],
+                            output: vec![0.0; fb_count],
+                        },
+                    },
+                    max,
+                );
+            }
+            Filter {
                 waveform: inner,
                 feed_forward,
                 feedback,
-                state,
+                state: state @ Samples { .. },
             } => {
-                let (_, ff_len) = self.remaining(initialize_state(*feed_forward.clone()), max);
-                let (inner, inner_len) = self.remaining(*inner, max + (ff_len.saturating_sub(1)));
+                // TODO I think this logic could be made to better parallel that of generate() (by actually advancing in the Initial arm and "padding" here.)
+                let (inner, inner_len) = self.remaining(*inner, max);
+                // Only the length of inner matters, but we need to advance all of the coefficient waveforms
+                let feed_forward = {
+                    let mut new_feed_forward = Vec::with_capacity(feed_forward.len());
+                    for w in feed_forward.into_iter() {
+                        let (new_w, _) = self.remaining(w, inner_len);
+                        new_feed_forward.push(new_w);
+                    }
+                    new_feed_forward
+                };
+                let feedback = {
+                    let mut new_feedback = Vec::with_capacity(feedback.len());
+                    for w in feedback.into_iter() {
+                        let (new_w, _) = self.remaining(w, inner_len);
+                        new_feedback.push(new_w);
+                    }
+                    new_feedback
+                };
                 return (
                     Filter {
                         waveform: Box::new(inner),
@@ -674,8 +763,11 @@ impl<'a> Generator<'a> {
                         feedback,
                         state,
                     },
-                    inner_len.saturating_sub(ff_len.saturating_sub(1)),
+                    inner_len,
                 );
+            }
+            Filter { .. } => {
+                unreachable!("Filter with non-Initial, non-Samples state")
             }
             Append(a, b) => {
                 let (a, a_len) = self.remaining(*a, max);
@@ -835,7 +927,10 @@ impl<'a> Generator<'a> {
                     _ => MaybeOption::Maybe,
                 }
             }
-            _ => MaybeOption::Maybe,
+            _ => {
+                println!("Unhandled case in greater_or_equals_at: {}", waveform);
+                MaybeOption::Maybe
+            }
         }
     }
 
@@ -909,6 +1004,9 @@ impl<'a> Generator<'a> {
             // Choose a `desired` which is long enough to generate any reasonable waveform, but give some room
             // for cases like `Filter` that may need to make it longer.
             let (_, out) = g.generate(waveform, usize::MAX / 2);
+            if out.len() == usize::MAX / 2 {
+                println!("Warning: precompute generated max samples (maybe not finite?)");
+            }
             waveform::Waveform::Fixed(out, State::Initial)
         }
 
@@ -1095,18 +1193,60 @@ impl<'a> Generator<'a> {
                     feed_forward,
                     feedback,
                     state,
-                } => do_three(
-                    g,
-                    *waveform,
-                    *feed_forward,
-                    *feedback,
-                    |waveform, feed_forward, feedback| Filter {
-                        waveform: Box::new(waveform),
-                        feed_forward: Box::new(feed_forward),
-                        feedback: Box::new(feedback),
+                } => {
+                    let inner = precompute_internal(g, *waveform);
+                    let ff: Vec<_> = feed_forward
+                        .into_iter()
+                        .map(|w| precompute_internal(g, w))
+                        .collect();
+                    let fb: Vec<_> = feedback
+                        .into_iter()
+                        .map(|w| precompute_internal(g, w))
+                        .collect();
+
+                    let mut reason: Option<Reason> = None;
+                    if let NPC(why, _) = &inner {
+                        reason = Some(*why);
+                    }
+                    for r in &ff {
+                        if let NPC(why, _) = r {
+                            reason = Some(match reason {
+                                Some(prev) => resolve_reason(prev, *why),
+                                None => *why,
+                            });
+                        }
+                    }
+                    for r in &fb {
+                        if let NPC(why, _) = r {
+                            reason = Some(match reason {
+                                Some(prev) => resolve_reason(prev, *why),
+                                None => *why,
+                            });
+                        }
+                    }
+
+                    // If `reason` is Some then we will be returning NPC for the Filter, so generate
+                    // samples for any pre-computable sub-waveforms.
+                    let extract = |r: Result| match (r, &reason) {
+                        (PC(w), Some(_)) => generate_fixed(g, w),
+                        (PC(w), None) => w,
+                        (NPC(_, w), _) => w,
+                    };
+                    let inner_wf = extract(inner);
+                    let ff_wfs: Vec<_> = ff.into_iter().map(|r| extract(r)).collect();
+                    let fb_wfs: Vec<_> = fb.into_iter().map(|r| extract(r)).collect();
+
+                    let filter_wf = Filter {
+                        waveform: Box::new(inner_wf),
+                        feed_forward: ff_wfs,
+                        feedback: fb_wfs,
                         state,
-                    },
-                ),
+                    };
+                    match reason {
+                        Some(why) => NPC(why, filter_wf),
+                        None => PC(filter_wf),
+                    }
+                }
                 Reset {
                     trigger,
                     waveform,
@@ -1662,8 +1802,8 @@ mod tests {
         // FIRs
         let w1 = Filter {
             waveform: Box::new(Time(())),
-            feed_forward: Box::new(Fixed(vec![2.0, 2.0, 2.0], ())),
-            feedback: Box::new(Fixed(vec![], ())),
+            feed_forward: vec![Const(2.0), Const(2.0), Const(2.0)],
+            feedback: vec![],
             state: (),
         };
         run_tests(&w1, &vec![6.0, 12.0, 18.0, 24.0, 30.0, 36.0, 42.0, 48.0]);
@@ -1677,19 +1817,19 @@ mod tests {
                 )),
                 waveform: Box::new(Time(())),
             }),
-            feed_forward: Box::new(Fixed(vec![2.0, 2.0, 2.0], ())),
-            feedback: Box::new(Fixed(vec![], ())),
+            feed_forward: vec![Const(2.0), Const(2.0), Const(2.0)],
+            feedback: vec![],
             state: (),
         };
-        run_tests(&w2, &vec![6.0, 12.0, 18.0]);
+        run_tests(&w2, &vec![6.0, 12.0, 18.0, 14.0, 8.0]);
 
         let w = Filter {
             waveform: Box::new(Fixed(vec![1.0, 2.0, 3.0], ())),
-            feed_forward: Box::new(Fixed(vec![2.0, 2.0, 2.0, 2.0, 2.0], ())),
-            feedback: Box::new(Fixed(vec![], ())),
+            feed_forward: vec![Const(2.0), Const(2.0), Const(2.0), Const(2.0), Const(2.0)],
+            feedback: vec![],
             state: (),
         };
-        check_length(&g, &w, 0, 0, 5);
+        check_length(&g, &w, 0, 3, 5);
 
         let w3 = Filter {
             waveform: Box::new(Fin {
@@ -1700,13 +1840,13 @@ mod tests {
                 )),
                 waveform: Box::new(Time(())),
             }),
-            feed_forward: Box::new(Fixed(vec![2.0, 2.0, 2.0, 2.0, 2.0], ())),
-            feedback: Box::new(Fixed(vec![], ())),
+            feed_forward: vec![Const(2.0), Const(2.0), Const(2.0), Const(2.0), Const(2.0)],
+            feedback: vec![],
             state: (),
         };
         let g = new_test_generator(1);
-        check_length(&g, &w3, 0, 4, MAX_LENGTH);
-        run_tests(&w3, &vec![20.0, 30.0, 40.0, 50.0]);
+        check_length(&g, &w3, 0, 8, MAX_LENGTH);
+        run_tests(&w3, &vec![20.0, 30.0, 40.0, 50.0, 44.0, 36.0, 26.0, 14.0]);
 
         let w4 = Filter {
             waveform: Box::new(Reset {
@@ -1715,16 +1855,16 @@ mod tests {
                 waveform: Box::new(Time(())),
                 state: (),
             }),
-            feed_forward: Box::new(Fixed(vec![2.0, 2.0], ())),
-            feedback: Box::new(Fixed(vec![], ())),
+            feed_forward: vec![Const(2.0), Const(2.0)],
+            feedback: vec![],
             state: (),
         };
         run_tests(&w4, &vec![0.0, 2.0, 6.0, 4.0, 2.0, 6.0, 4.0, 2.0]);
 
         let w5 = Filter {
             waveform: Box::new(Const(1.0)),
-            feed_forward: Box::new(Fixed(vec![0.2, 0.2, 0.2, 0.2, 0.2], ())),
-            feedback: Box::new(Fixed(vec![], ())),
+            feed_forward: vec![Const(0.2), Const(0.2), Const(0.2), Const(0.2), Const(0.2)],
+            feedback: vec![],
             state: (),
         };
         run_tests(&w5, &vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
@@ -1732,8 +1872,8 @@ mod tests {
         // IIRs
         let w6 = Filter {
             waveform: Box::new(Time(())),
-            feed_forward: Box::new(Fixed(vec![0.5], ())),
-            feedback: Box::new(Fixed(vec![-0.5], ())),
+            feed_forward: vec![Const(0.5)],
+            feedback: vec![Const(-0.5)],
             state: (),
         };
         run_tests(
@@ -1745,12 +1885,12 @@ mod tests {
         let w7 = Filter {
             waveform: Box::new(Filter {
                 waveform: Box::new(Time(())),
-                feed_forward: Box::new(Fixed(vec![0.5], ())),
-                feedback: Box::new(Fixed(vec![-0.5], ())),
+                feed_forward: vec![Const(0.5)],
+                feedback: vec![Const(-0.5)],
                 state: (),
             }),
-            feed_forward: Box::new(Fixed(vec![0.4], ())),
-            feedback: Box::new(Fixed(vec![-0.6], ())),
+            feed_forward: vec![Const(0.4)],
+            feedback: vec![Const(-0.6)],
             state: (),
         };
         run_tests(
@@ -1759,6 +1899,29 @@ mod tests {
                 0.0, 0.2, 0.62, 1.222, 1.9582, 2.7874203, 3.6787024, 4.610347,
             ],
         );
+
+        // Input is Const(1.0), so out[n] = 1.0*1.0 + n*1.0 = n+1.
+        let w8 = Filter {
+            waveform: Box::new(Const(1.0)),
+            feed_forward: vec![Const(1.0), Time(())],
+            feedback: vec![],
+            state: (),
+        };
+        run_tests(&w8, &vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+
+        let w9 = Filter {
+            waveform: Box::new(finite_const_waveform(1.0, 3, 0)),
+            feed_forward: vec![
+                Const(1.0),
+                finite_const_waveform(2.0, 1, 0),
+                finite_const_waveform(3.0, 2, 0),
+            ],
+            feedback: vec![],
+            state: (),
+        };
+        run_tests(&w9, &vec![6.0, 3.0, 0.0]);
+
+        // TODO add test where length of inner waveform is less than ff_count - 1
     }
 
     #[test]

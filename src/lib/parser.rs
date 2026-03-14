@@ -872,6 +872,7 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
     }
 }
 
+// TODO rename evaluate?
 pub fn simplify(context: &Vec<(String, Expr)>, mut expr: Expr) -> Result<Expr, Error> {
     expr = substitute(context, expr);
     return simplify_closed(expr);

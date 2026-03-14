@@ -1,4 +1,4 @@
-#  Tuun Languages
+#  Tuun Language Overview
 
 Tuun is an interactive, language-based sound and music generation system. It has two main components:
 
@@ -146,7 +146,7 @@ There are the combinators that combine the samples themselves.
  * `a ~- b` - subtracts sample points
  * `a ~. b` - multiplies sample points together
  * `a ~/ b` - divides sample points
- * `Filter(a, b, c)` - modifies `a` using a finite or infinite impulse response filter
+ * [`Filter(c, [b_0, ...], [a_1, ...])`](filter.md) - processes `c` using a finite or infinite impulse response filter with the given coefficients
 
 There are three combinators for describing periodic waveforms:
 
@@ -162,23 +162,23 @@ And finally, there are these two waveforms that provide ways of dynamically inte
 
 For comparison, here are the lengths and offsets of each waveform:
 
-| Waveform             | length                             | offset                      |
-| ----------------     | ------                             | ------                      |
-| `Const(_)`           | ∞                                  | 0                           |
-| `Time`               | ∞                                  | 0                           |
-| `Noise`              | ∞                                  | 0                           |
-| `Slider(_)`          | ∞                                  | 0                           |
-| `Fixed(v)`           | length of v                        | 0                           |
-| `Fin(length, a)`     | position w/ `length` >= 0.0        | a.offset                    |
-| `Seq(offset, a)`     | a.length                           | position w/ `offset` >= 0.0 |
-| `Filter(a, b, c)`    | a.length                           | a.offset                    |
-| `Marked(a)`          | a.length                           | a.offset                    |
-| `Append(a, b)`.      | a.length + b.length                | a.offset + b.offset         |
-| `a ~+ b`             | max(a.length, a.offset + b.length) | a.offset + b.offset         |
-| `a ~. b`             | min(a.length, a.offset + b.length) | a.offset + b.offset         |
-| `Sine(a, b)`         | min(a.length, b.length)            | a.offset + b.offset         |
-| `Reset(trigger, a)`  | trigger.length                     | trigger.offset              |
-| `Alt(trigger, a, b)` | trigger.length                     | trigger.offset              |
+| Waveform                | length                             | offset                      |
+| ----------------        | ------                             | ------                      |
+| `Const(_)`              | ∞                                  | 0                           |
+| `Time`                  | ∞                                  | 0                           |
+| `Noise`                 | ∞                                  | 0                           |
+| `Slider(_)`             | ∞                                  | 0                           |
+| `Fixed(v)`              | length of v                        | 0                           |
+| `Fin(length, a)`        | position w/ `length` >= 0.0        | a.offset                    |
+| `Seq(offset, a)`        | a.length                           | position w/ `offset` >= 0.0 |
+| `Filter(c, [b_0, ...], [a_1, ...])` | c.length               | c.offset                    |
+| `Marked(a)`             | a.length                           | a.offset                    |
+| `Append(a, b)`.         | a.length + b.length                | a.offset + b.offset         |
+| `a ~+ b`                | max(a.length, a.offset + b.length) | a.offset + b.offset         |
+| `a ~. b`                | min(a.length, a.offset + b.length) | a.offset + b.offset         |
+| `Sine(a, b)`            | min(a.length, b.length)            | a.offset + b.offset         |
+| `Reset(trigger, a)`     | trigger.length                     | trigger.offset              |
+| `Alt(trigger, a, b)`    | trigger.length                     | trigger.offset              |
 
 This small set of combinators is enough to create synthesizers, filters, and even musical compositions with the help of the Tuun expressions.
 

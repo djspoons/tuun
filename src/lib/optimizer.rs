@@ -119,8 +119,8 @@ pub fn replace_seq(waveform: Waveform) -> (Waveform, Waveform) {
                 offset,
                 Filter {
                     waveform: Box::new(waveform),
-                    feed_forward: Box::new(replace_seq(*feed_forward).1),
-                    feedback: Box::new(replace_seq(*feedback).1),
+                    feed_forward: feed_forward.into_iter().map(|w| replace_seq(w).1).collect(),
+                    feedback: feedback.into_iter().map(|w| replace_seq(w).1).collect(),
                     state,
                 },
             )
@@ -314,8 +314,8 @@ pub fn simplify(waveform: Waveform) -> Waveform {
             state,
         } => Filter {
             waveform: Box::new(simplify(*waveform)),
-            feed_forward: Box::new(simplify(*feed_forward)),
-            feedback: Box::new(simplify(*feedback)),
+            feed_forward: feed_forward.into_iter().map(simplify).collect(),
+            feedback: feedback.into_iter().map(simplify).collect(),
             state,
         },
         BinaryPointOp(Operator::Add, a, b) => {

@@ -92,6 +92,13 @@ pub fn power(arguments: Vec<Expr>) -> Expr {
     }
 }
 
+pub fn log(arguments: Vec<Expr>) -> Expr {
+    match arguments[..] {
+        [Float(value), Float(base)] => Expr::Float(value.log(base)),
+        _ => Expr::Error("Invalid arguments for log".to_string()),
+    }
+}
+
 pub fn sqrt(arguments: Vec<Expr>) -> Expr {
     match arguments[..] {
         [Float(value)] if value >= 0.0 => Expr::Float(value.sqrt()),
@@ -397,6 +404,9 @@ pub fn seq(mut arguments: Vec<Expr>) -> Expr {
     }
 }
 
+/*
+// TODO reconsider this: maybe this doesn't make sense any more... or the right argument
+// needs to be a list of waveforms
 pub fn waveform_convolution(mut arguments: Vec<Expr>) -> Expr {
     if arguments.len() != 2 {
         return Expr::Error(format!("Expected two arguments for ~*"));
@@ -406,8 +416,8 @@ pub fn waveform_convolution(mut arguments: Vec<Expr>) -> Expr {
             let waveform = match (a, b) {
                 (Expr::Waveform(a), Expr::Waveform(b)) => Waveform::Filter {
                     waveform: Box::new(a),
-                    feed_forward: Box::new(b),
-                    feedback: Box::new(Waveform::Fixed(vec![], ())),
+                    feed_forward: vec![b],
+                    feedback: vec![],
                     state: (),
                 },
                 _ => return Expr::Error("Invalid arguments for ~*".to_string()),
@@ -416,28 +426,68 @@ pub fn waveform_convolution(mut arguments: Vec<Expr>) -> Expr {
         }
     }
 }
+*/
 
 pub fn waveform_filter(mut arguments: Vec<Expr>) -> Expr {
     if arguments.len() != 2 {
         return Expr::Error("Expected two waveforms".to_string());
     }
     let feed_forward = match arguments.remove(0) {
-        Expr::Waveform(a) => a,
-        Float(value) => Waveform::Const(value),
-        _ => return Expr::Error("First argument must be a waveform or float".to_string()),
+        Expr::List(exprs) => {
+            if exprs.len() == 0 {
+                return Expr::Error(
+                    "Filter requires at least one feed-forward coefficient".to_string(),
+                );
+            }
+            let mut feed_forward = Vec::with_capacity(exprs.len());
+            for expr in exprs {
+                match expr {
+                    Expr::Waveform(a) => feed_forward.push(a),
+                    Float(value) => feed_forward.push(Waveform::Const(value)),
+                    _ => {
+                        return Expr::Error(
+                            "Filter feed_forward argument must be a list".to_string(),
+                        );
+                    }
+                }
+            }
+            feed_forward
+        }
+        _ => return Expr::Error("First argument to filter must be a list".to_string()),
     };
     let feedback = match arguments.remove(0) {
-        Expr::Waveform(b) => b,
-        Float(value) => Waveform::Const(value),
-        _ => return Expr::Error("Second argument must be a waveform or float".to_string()),
+        Expr::List(exprs) => {
+            let mut feedback = Vec::with_capacity(exprs.len());
+            for expr in exprs {
+                match expr {
+                    Expr::Waveform(a) => feedback.push(a),
+                    Float(value) => feedback.push(Waveform::Const(value)),
+                    _ => return Expr::Error("Filter feedback argument must be a list".to_string()),
+                }
+            }
+            feedback
+        }
+        _ => return Expr::Error("Second argument to filter must be a list".to_string()),
     };
 
     BuiltIn {
-        name: format!("filter({}, {})", feed_forward, feedback),
+        name: format!(
+            "filter([{}], [{}])",
+            feed_forward
+                .iter()
+                .map(|w| format!("{}", w))
+                .collect::<Vec<_>>()
+                .join(", "),
+            feedback
+                .iter()
+                .map(|w| format!("{}", w))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         function: curry(move |waveform: Box<Waveform>| Waveform::Filter {
             waveform: waveform,
-            feed_forward: Box::new(feed_forward.clone()),
-            feedback: Box::new(feedback.clone()),
+            feed_forward: feed_forward.clone(),
+            feedback: feedback.clone(),
             state: (),
         }),
     }
@@ -595,6 +645,7 @@ pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
         (">", greater_than),
         (">=", greater_than_equals),
         ("pow", power),
+        ("log", log),
         ("sqrt", sqrt),
         ("exp", exp),
         ("sine", sine),
@@ -607,7 +658,7 @@ pub fn add_prelude(context: &mut Vec<(String, Expr)>) {
         ("fin", fin),
         ("seq", seq),
         ("filter", waveform_filter),
-        ("~*", waveform_convolution),
+        //("~*", waveform_convolution),
         ("reset", reset),
         ("alt", alt),
         ("slider", slider),

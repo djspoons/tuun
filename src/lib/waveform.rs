@@ -70,8 +70,8 @@ pub enum Waveform<State = ()> {
     // TODO maybe add a_0 back in?
     Filter {
         waveform: Box<Waveform<State>>,
-        feed_forward: Box<Waveform<State>>, // b_0, b_1, ...
-        feedback: Box<Waveform<State>>,     // a_1, a_2, ...
+        feed_forward: Vec<Waveform<State>>, // b_0, b_1, ...
+        feedback: Vec<Waveform<State>>,     // a_1, a_2, ...
         state: State,
     },
     BinaryPointOp(Operator, Box<Waveform<State>>, Box<Waveform<State>>),
@@ -154,7 +154,17 @@ impl<State> fmt::Display for Waveform<State> {
                 feed_forward,
                 feedback,
                 ..
-            } => write!(f, "Filter({}, {}, {})", waveform, feed_forward, feedback),
+            } => {
+                let ff: Vec<String> = feed_forward.iter().map(|w| format!("{}", w)).collect();
+                let fb: Vec<String> = feedback.iter().map(|w| format!("{}", w)).collect();
+                write!(
+                    f,
+                    "Filter({}, [{}], [{}])",
+                    waveform,
+                    ff.join(", "),
+                    fb.join(", ")
+                )
+            }
             BinaryPointOp(op, a, b) => {
                 write!(f, "{:?}({}, {})", op, a, b)
             }
@@ -221,10 +231,15 @@ where
             feedback,
             ..
         } => Filter {
-            // Don't initialize the inner waveform until we can determine the length of feed_forward
             waveform: Box::new(initialize_state(*waveform, state.clone())),
-            feed_forward: Box::new(initialize_state(*feed_forward, state.clone())),
-            feedback: Box::new(initialize_state(*feedback, state.clone())),
+            feed_forward: feed_forward
+                .into_iter()
+                .map(|w| initialize_state(w, state.clone()))
+                .collect(),
+            feedback: feedback
+                .into_iter()
+                .map(|w| initialize_state(w, state.clone()))
+                .collect(),
             state: state,
         },
         BinaryPointOp(op, a, b) => BinaryPointOp(
@@ -293,8 +308,8 @@ pub fn remove_state<State>(w: Waveform<State>) -> Waveform<()> {
             ..
         } => Filter {
             waveform: Box::new(remove_state(*waveform)),
-            feed_forward: Box::new(remove_state(*feed_forward)),
-            feedback: Box::new(remove_state(*feedback)),
+            feed_forward: feed_forward.into_iter().map(remove_state).collect(),
+            feedback: feedback.into_iter().map(remove_state).collect(),
             state: (),
         },
         BinaryPointOp(op, a, b) => {
