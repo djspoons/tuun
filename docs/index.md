@@ -13,8 +13,9 @@ Many of the pages below include embedded synthesizer elements, but if you'd like
 
 ## Waveform and Language Design
 
-* [Overview](tuun-langs.md)
+* [Language Overview](tuun-langs.md)
 * [Sine](sine.md)
+* [Filter](filter.md)
 
 ## Using Tuun
 
