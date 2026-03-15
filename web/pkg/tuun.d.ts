@@ -37,14 +37,16 @@ export class Tuun {
   parse(expression: string): WasmWaveform;
   set_slider_value(name: string, value: number): void;
   /**
-   * Generates audio samples from a waveform.
+   * Generates audio samples from a waveform. Updates the internal state
+   * of the waveform so that the next call to `generate()` will continue
+   * from the point at which this call left off.
    *
    * # Arguments
    * * `waveform` - The WasmWaveform to generate from
    * * `desired` - The number of samples to generate
    *
    * # Returns
-   * A Float32Array of audio samples in the range [-1.0, 1.0]
+   * A Float32Array of audio samples
    *
    * # Example
    * ```javascript
