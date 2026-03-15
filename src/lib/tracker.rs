@@ -169,8 +169,8 @@ where
             }
             Append(a, b) => {
                 self.process_marked(waveform_id, start, &*a, out);
-                let (_, a_len) = self.generator.remaining(
-                    *a.clone(),
+                let a_len = self.generator.length(
+                    &mut a.clone(),
                     10 * self.sample_rate as usize, // XXX
                 );
                 let start = start + Duration::from_secs_f32(a_len as f32 / self.sample_rate as f32);
@@ -185,8 +185,8 @@ where
                 self.process_marked(waveform_id, start, &*b, out);
             }
             Marked { waveform, id } => {
-                let (_, len) = self.generator.remaining(
-                    *waveform.clone(),
+                let len = self.generator.length(
+                    &mut waveform.clone(),
                     10 * self.sample_rate as usize, // XXX
                 );
                 out.push(Mark {
@@ -432,7 +432,7 @@ where
                             generator.slider_state = Some(&self.slider_state);
                             let capture_state = RefCell::new(&mut capture_state);
                             generator.capture_state = Some(capture_state);
-                            (waveform, _) = generator.generate(waveform, delta_samples);
+                            _ = generator.generate(&mut waveform, delta_samples);
                         }
                     }
                     self.active_waveforms.push(ActiveWaveform {
@@ -500,11 +500,7 @@ where
                     generator.slider_state = Some(&self.slider_state);
                     let capture_state = RefCell::new(&mut active.capture_state);
                     generator.capture_state = Some(capture_state);
-                    let (waveform, out) = generator.generate(
-                        active.waveform.clone(), // XXX avoid this clone?
-                        segment_length,
-                    );
-                    active.waveform = waveform;
+                    let out = generator.generate(&mut active.waveform, segment_length);
                     tmp = out;
                 }
                 if tmp.len() > segment_length {

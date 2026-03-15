@@ -777,6 +777,9 @@ pub fn extend_context(
 ) -> Result<(), Error> {
     match (pattern, argument) {
         (Pattern::Identifier(name), argument) => {
+            /*
+            println!("  {} = {}", name, argument);
+            */
             context.push((name.clone(), argument.clone()));
             Ok(())
         }

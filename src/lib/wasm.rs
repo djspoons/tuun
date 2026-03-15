@@ -165,8 +165,7 @@ impl Wasm {
         let mut g = generator::Generator::new(self.sample_rate);
         g.slider_state = Some(&self.slider_state);
 
-        let (inner, out) = g.generate(waveform.inner.clone(), desired);
-        waveform.inner = inner;
+        let out = g.generate(&mut waveform.inner, desired);
 
         self.slider_state.last_values = self.slider_state.values.clone();
         return out;

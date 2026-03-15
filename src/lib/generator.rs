@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io::BufWriter;
-use std::{f64, usize};
+use std::{f64, mem, usize};
 
 use fastrand;
 
@@ -77,23 +77,27 @@ impl<'a> Generator<'a> {
     // waveform supports being "re-initialized" -- unless it depends on some external state (as Slider does), it
     // will generate the same samples each time it's initialized.
     // TODO take a &mut waveform instead
-    pub fn generate(&self, waveform: Waveform, desired: usize) -> (Waveform, Vec<f32>) {
+    pub fn generate(&self, waveform: &mut Waveform, desired: usize) -> Vec<f32> {
         use State::*;
         use waveform::Waveform::*;
         if desired == 0 {
-            return (waveform, vec![]);
+            return vec![];
         }
         match waveform {
             Const(value) => {
-                return (waveform, vec![value; desired]);
+                vec![*value; desired]
             }
-            Time(Initial) => self.generate(Time(Position(0)), desired),
+            Time(state @ Initial) => {
+                *state = Position(0);
+                self.generate(waveform, desired)
+            }
             Time(Position(position)) => {
                 let mut out = vec![0.0; desired];
                 for (i, x) in out.iter_mut().enumerate() {
-                    *x = (position + i) as f32 / self.sample_rate as f32;
+                    *x = (*position + i) as f32 / self.sample_rate as f32;
                 }
-                return (Time(Position(position + desired)), out);
+                *position = *position + desired;
+                out
             }
             Time(_) => unreachable!("Time waveform has non-Position state"),
             Noise => {
@@ -101,119 +105,94 @@ impl<'a> Generator<'a> {
                 for x in out.iter_mut() {
                     *x = fastrand::f32() * 2.0 - 1.0;
                 }
-                return (waveform, out);
+                out
             }
-            Fixed(samples, Initial) => self.generate(Fixed(samples, Position(0)), desired),
+            Fixed(_, state @ Initial) => {
+                *state = Position(0);
+                self.generate(waveform, desired)
+            }
             Fixed(samples, Position(position)) => {
                 let mut out = vec![];
-                if position < samples.len() {
-                    out.extend(&samples[position..(position + desired).min(samples.len())]);
+                if *position < samples.len() {
+                    out.extend(&samples[*position..(*position + desired).min(samples.len())]);
                 }
-                return (Fixed(samples, Position(position + out.len())), out);
+                *position = *position + out.len();
+                out
             }
             Fixed(_, _) => unreachable!("Fixed waveform has non-Initial, non-Position state"),
-            Fin {
-                length,
-                waveform: inner,
-            } => {
-                // Note that this call to remaining also advances the position of the `length` waveform.
-                if let (Fin { length, .. }, len) = self.remaining(
-                    Fin {
-                        length,
-                        waveform: inner.clone(),
-                    },
-                    desired,
-                ) {
-                    let (inner, out) = self.generate(*inner, len);
-                    return (
-                        Fin {
-                            length,
-                            waveform: Box::new(inner),
-                        },
-                        out,
-                    );
-                } else {
-                    unreachable!("remaining(Fin) returned a non-Fin waveform")
-                }
+            Fin { .. } => {
+                // Set the inner waveform aside for a moment while we calculate the length.
+                let Fin {
+                    waveform: inner, ..
+                } = waveform
+                else {
+                    unreachable!()
+                };
+                let tmp = mem::replace(inner, Box::new(Const(0.0)));
+                // Note that this call to length also advances the position of the `length` waveform.
+                let len = self.length(waveform, desired);
+                // Restore the inner waveform.
+                let Fin {
+                    waveform: inner, ..
+                } = waveform
+                else {
+                    unreachable!()
+                };
+                *inner = tmp;
+                // Note that this might generate less than `len` since the call to `length` above
+                // didn't account for the length of `inner`.
+                self.generate(inner, len)
             }
-            // XXX Maybe remove this?
-            Seq {
-                offset,
-                waveform: inner,
-            } => {
-                let (inner, out) = self.generate(*inner, desired);
-                return (
-                    Seq {
-                        offset,
-                        waveform: Box::new(inner),
-                    },
-                    out,
-                );
-            }
+            Seq { .. } => panic!("Got Seq in generate()"),
             Append(a, b) => {
-                let (a, mut a_out) = self.generate(*a, desired);
+                let mut a_out = self.generate(a, desired);
                 if a_out.len() == desired {
-                    return (Append(Box::new(a), b), a_out);
-                } else {
-                    // a_out.len() < desired
-                    let (b, mut b_out) = self.generate(*b, desired - a_out.len());
-                    a_out.append(&mut b_out);
-                    return (Append(Box::new(a), Box::new(b)), a_out);
+                    return a_out;
                 }
+                // a_out.len() < desired
+                let mut b_out = self.generate(b, desired - a_out.len());
+                a_out.append(&mut b_out);
+                a_out
             }
             Sine {
-                frequency,
-                phase,
-                state: Initial,
+                state: state @ Initial,
+                ..
             } => {
-                return self.generate(
-                    Sine {
-                        frequency: Box::new(*frequency),
-                        phase: Box::new(*phase),
-                        state: Phase { accumulator: 0.0 },
-                    },
-                    desired,
-                );
+                *state = Phase { accumulator: 0.0 };
+                self.generate(waveform, desired)
             }
             Sine {
                 frequency,
                 phase,
-                state: Phase { mut accumulator },
+                state: Phase { accumulator },
             } => {
                 // Instantaneous frequency.
-                let (frequency, f_out) = self.generate(*frequency, desired);
+                let f_out = self.generate(frequency, desired);
                 // Instantaneous phase offset.
-                let (phase, ph_out) = self.generate(*phase, f_out.len());
+                let ph_out = self.generate(phase, f_out.len());
                 let mut out = vec![0.0; ph_out.len()];
                 for (i, &phase_offset) in ph_out.iter().enumerate() {
-                    out[i] = (accumulator + phase_offset as f64).sin() as f32;
+                    out[i] = (*accumulator + phase_offset as f64).sin() as f32;
 
                     let f = f_out[i] as f64;
                     let phase_inc = f / self.sample_rate as f64;
 
                     // Move the accumulator according to the frequency and change in phase offset.
-                    accumulator = (accumulator + phase_inc).rem_euclid(f64::consts::TAU);
+                    *accumulator = (*accumulator + phase_inc).rem_euclid(f64::consts::TAU);
                 }
-                return (
-                    Sine {
-                        frequency: Box::new(frequency),
-                        phase: Box::new(phase),
-                        state: Phase { accumulator },
-                    },
-                    out,
-                );
+                out
             }
             Sine { .. } => unreachable!("Sine waveform has non-Initial, non-Phase state"),
             Filter {
                 waveform: inner,
                 feed_forward,
                 feedback,
-                state: Initial,
+                state: state @ Initial,
             } => {
                 // Generate the input samples so that they can be used in the feed-forward part of the filter.
                 let ff_count = feed_forward.len();
                 assert!(ff_count >= 1);
-                let (inner, input) = self.generate(*inner, ff_count - 1);
+                let input = self.generate(inner, ff_count - 1);
                 // Fill the previous output samples with zeros to match the number of feedback coefficients.
                 let fb_count = feedback.len();
                 let output = vec![0.0; fb_count];
@@ -223,29 +202,17 @@ impl<'a> Generator<'a> {
                     "Started generate for Filter with {} feed-forward and {} feedback coefficients",
                     ff_count, fb_count
                 );
-
                 */
-                return self.generate(
-                    Filter {
-                        waveform: Box::new(inner),
-                        feed_forward,
-                        feedback,
-                        state: Samples { input, output },
-                    },
-                    desired,
-                );
+                *state = Samples { input, output };
+                self.generate(waveform, desired)
             }
             Filter {
                 waveform: inner,
-                mut feed_forward,
-                mut feedback,
-                state:
-                    Samples {
-                        mut input,
-                        output: mut out,
-                    },
+                feed_forward,
+                feedback,
+                state: Samples { input, output },
             } => {
-                // In general, we want the length of the output to match that of the input. This
+                // In general, we want the length of the output to match that of the input `inner`. This
                 // follows from the fact that each point is a sum of products: as long as at least one
                 // summand is defined than the sum is defined. (If we wanted to be totally true to that
                 // approach, we should verify that the coefficient waveforms are long enough so those
@@ -266,22 +233,23 @@ impl<'a> Generator<'a> {
                 // where we've reached the end of the inner waveform. In those cases, we extend `input` with
                 // up to `ff_count - 1` zeros.
                 let ff_count = feed_forward.len();
-                let (inner, mut inner_out, input_padding) = if ff_count == input.len() + 1 {
-                    let (inner, inner_out) = self.generate(*inner, desired);
+                let (mut inner_out, input_padding) = if ff_count == input.len() + 1 {
+                    let inner_out = self.generate(inner, desired);
                     let input_padding = (desired - inner_out.len()).min(ff_count - 1);
-                    (inner, inner_out, input_padding)
+                    (inner_out, input_padding)
                 } else {
                     // We've already exhausted `inner` on a previous call to generate (or in the Initial
                     // arm above). We will be able to generate `input.len()` more samples. To do that, we
                     // need to pad by `ff_count - 1`.
-                    (*inner, vec![], ff_count - 1)
+                    (vec![], ff_count - 1)
                 };
                 input.append(&mut inner_out);
                 input.resize(input.len() + input_padding, 0.0);
 
                 let fb_count = feedback.len();
-                assert_eq!(fb_count, out.len());
+                assert_eq!(fb_count, output.len());
                 // Set the output length based on the size of the inner waveform.
+                let mut out = output.clone();
                 out.resize(input.len() - (ff_count - 1) + fb_count, 0.0);
 
                 let mut recompute_coefficients = true;
@@ -296,32 +264,22 @@ impl<'a> Generator<'a> {
                         fb_outs = Vec::with_capacity(fb_count);
 
                         // Gather the coefficients for this element of the output, zero-extending if necessary.
-                        feed_forward = {
-                            let mut new_feed_forward = Vec::with_capacity(ff_count);
-                            for w in feed_forward.into_iter() {
-                                if let Const(_) = w {
-                                } else {
-                                    recompute_coefficients = true;
-                                }
-                                let (new_w, mut samples) = self.generate(w, 1);
-                                new_feed_forward.push(new_w);
-                                ff_outs.push(samples.pop().unwrap_or(0.0));
+                        for w in feed_forward.iter_mut() {
+                            if let Const(_) = w {
+                            } else {
+                                recompute_coefficients = true;
                             }
-                            new_feed_forward
-                        };
-                        feedback = {
-                            let mut new_feedback = Vec::with_capacity(ff_count);
-                            for w in feedback.into_iter() {
-                                if let Const(_) = w {
-                                } else {
-                                    recompute_coefficients = true;
-                                }
-                                let (new_w, mut samples) = self.generate(w, 1);
-                                new_feedback.push(new_w);
-                                fb_outs.push(samples.pop().unwrap_or(0.0));
+                            let mut ff_out = self.generate(w, 1);
+                            ff_outs.push(ff_out.pop().unwrap_or(0.0));
+                        }
+                        for w in feedback.iter_mut() {
+                            if let Const(_) = w {
+                            } else {
+                                recompute_coefficients = true;
                             }
-                            new_feedback
-                        };
+                            let mut fb_out = self.generate(w, 1);
+                            fb_outs.push(fb_out.pop().unwrap_or(0.0));
+                        }
                         /*
                         println!(
                             "In generate() for Filter, generated coefficients:\n  b = {:?}\n  a = {:?}",
@@ -338,26 +296,16 @@ impl<'a> Generator<'a> {
                     }
                 }
 
-                // Save the last few samples of both the input and the output... but don't save any zeros
+                // Save the last few samples of both the input and the output... but don't save any zeros in `input`
                 // in the input that were padding on to the end.
-                let previous_in =
-                    input[input.len() - (ff_count - 1)..input.len() - input_padding].to_vec();
-                let previous_out = out[out.len() - fb_count..].to_vec();
+                input.drain(0..input.len() - (ff_count - 1));
+                input.truncate(input.len() - input_padding);
+                *output = out[out.len() - fb_count..].to_vec();
+
                 // Remove the fb_count samples from the beginning of `out` (these were included to compute
                 // the feedback part of the filter).
                 out.drain(0..fb_count);
-                return (
-                    Filter {
-                        waveform: Box::new(inner),
-                        feed_forward,
-                        feedback,
-                        state: Samples {
-                            input: previous_in,
-                            output: previous_out,
-                        },
-                    },
-                    out,
-                );
+                out
             }
             Filter { .. } => unreachable!("Filter waveform has non-Initial, non-Samples state"),
             BinaryPointOp(op, a, b) => {
@@ -366,8 +314,10 @@ impl<'a> Generator<'a> {
                     Operator::Multiply | Operator::Divide => {
                         // We need to make sure we generate a length based on the shorter waveform.
                         // TODO would it be better to push this down into generate_binary_op?
-                        let (_, len) = self
-                            .remaining(BinaryPointOp(op.clone(), a.clone(), b.clone()), desired);
+                        let len = self.length(
+                            &mut BinaryPointOp(op.clone(), a.clone(), b.clone()),
+                            desired,
+                        );
                         len
                     }
                     _ => desired,
@@ -380,33 +330,25 @@ impl<'a> Generator<'a> {
                         if b == 0.0 { 0.0 } else { a / b }
                     },
                 };
-                return self.generate_binary_op(op, op_fn, *a, *b, desired);
+                self.generate_binary_op(op_fn, a, b, desired)
             }
             Reset {
-                trigger,
-                waveform,
-                state: Initial,
+                state: state @ Initial,
+                ..
             } => {
                 // Start assuming that the trigger was previously negative.
-                return self.generate(
-                    Reset {
-                        trigger,
-                        waveform,
-                        state: Sign { signum: -1.0 },
-                    },
-                    desired,
-                );
+                *state = Sign { signum: -1.0 };
+                self.generate(waveform, desired)
             }
             Reset {
                 trigger,
                 waveform: inner,
-                state: Sign { mut signum },
+                state: Sign { signum },
             } => {
                 let mut generated = 0;
                 let mut out = Vec::new();
-                let mut inner = *inner;
 
-                let (trigger, t_out) = self.generate(*trigger, desired);
+                let t_out = self.generate(trigger, desired);
 
                 while generated < t_out.len() {
                     // Set to true if a restart will be triggered before desired is reached
@@ -414,35 +356,27 @@ impl<'a> Generator<'a> {
                     let mut inner_desired = t_out.len() - generated;
 
                     for (i, &x) in t_out[generated..].iter().enumerate() {
-                        if signum < 0.0 && x >= 0.0 {
+                        if *signum < 0.0 && x >= 0.0 {
                             inner_desired = i;
                             reset_inner_position = true;
-                            signum = x.signum();
+                            *signum = x.signum();
                             break;
-                        } else if signum >= 0.0 && x < 0.0 {
-                            signum = x.signum();
+                        } else if *signum >= 0.0 && x < 0.0 {
+                            *signum = x.signum();
                         }
                     }
 
-                    let (new_inner, mut tmp) = self.generate(inner, inner_desired);
-                    inner = new_inner;
+                    let mut tmp = self.generate(inner, inner_desired);
                     if tmp.len() < inner_desired {
                         tmp.resize(inner_desired, 0.0);
                     }
                     out.extend(tmp);
                     if reset_inner_position {
-                        inner = initialize_state(inner);
+                        waveform::set_state(inner, State::Initial);
                     }
                     generated += inner_desired;
                 }
-                return (
-                    Reset {
-                        trigger: Box::new(trigger),
-                        waveform: Box::new(inner),
-                        state: Sign { signum },
-                    },
-                    out,
-                );
+                out
             }
             Reset { .. } => unreachable!("Reset waveform has non-Initial, non-Sign state"),
             Alt {
@@ -450,12 +384,10 @@ impl<'a> Generator<'a> {
                 positive_waveform,
                 negative_waveform,
             } => {
-                let (trigger, mut out) = self.generate(*trigger, desired);
-                let (positive_waveform, mut positive_out) =
-                    self.generate(*positive_waveform, desired);
+                let mut out = self.generate(trigger, desired);
+                let mut positive_out = self.generate(positive_waveform, desired);
                 positive_out.resize(out.len(), 0.0);
-                let (negative_waveform, mut negative_out) =
-                    self.generate(*negative_waveform, desired);
+                let mut negative_out = self.generate(negative_waveform, desired);
                 negative_out.resize(out.len(), 0.0);
                 for (i, x) in out.iter_mut().enumerate() {
                     if *x >= 0.0 {
@@ -464,27 +396,16 @@ impl<'a> Generator<'a> {
                         *x = negative_out[i];
                     }
                 }
-                return (
-                    Alt {
-                        trigger: Box::new(trigger),
-                        positive_waveform: Box::new(positive_waveform),
-                        negative_waveform: Box::new(negative_waveform),
-                    },
-                    out,
-                );
+                out
             }
             Slider(slider) => {
                 if self.slider_state.is_none() {
                     println!("Warning: Slider waveform used, but no slider state set");
-                    return (Slider(slider), vec![0.0; desired]);
+                    return vec![0.0; desired];
                 }
                 let slider_state = self.slider_state.unwrap();
-                let last_value = slider_state
-                    .last_values
-                    .get(&slider)
-                    .cloned()
-                    .unwrap_or(0.0);
-                let target = slider_state.values.get(&slider);
+                let last_value = slider_state.last_values.get(slider).cloned().unwrap_or(0.0);
+                let target = slider_state.values.get(slider);
                 let change = match target {
                     None => {
                         println!("Warning: no slider value for \"{}", slider);
@@ -501,21 +422,11 @@ impl<'a> Generator<'a> {
                 for (i, x) in out.iter_mut().enumerate() {
                     *x = last_value + change * (buffer_progress + (i + 1) as f32 / desired as f32);
                 }
-                return (Slider(slider), out);
+                out
             }
             Marked {
-                waveform: inner,
-                id,
-            } => {
-                let (inner, out) = self.generate(*inner, desired);
-                return (
-                    Marked {
-                        waveform: Box::new(inner),
-                        id,
-                    },
-                    out,
-                );
-            }
+                waveform: inner, ..
+            } => self.generate(inner, desired),
             Captured {
                 file_stem,
                 waveform: inner,
@@ -523,23 +434,17 @@ impl<'a> Generator<'a> {
                 // TODO think through this again
                 //  - capture_state was set incorrectly when advancing position (i.e., when a waveform missed its start time)
                 //  - we used to not generate the inner waveform when that was set... or was it unset?
-                let (inner, out) = self.generate(*inner, desired);
+                let out = self.generate(inner, desired);
                 if self.capture_state.is_none() {
                     // This occurs, for example, when precomputing parts of a waveform.
-                    return (
-                        Captured {
-                            file_stem,
-                            waveform: Box::new(inner),
-                        },
-                        out,
-                    );
+                    return out;
                 }
                 match self
                     .capture_state
                     .as_ref()
                     .unwrap()
                     .borrow_mut()
-                    .get_mut(&file_stem)
+                    .get_mut(file_stem)
                 {
                     Some(writer) => {
                         for x in out.iter() {
@@ -552,13 +457,7 @@ impl<'a> Generator<'a> {
                         panic!("No open file for captured waveform {}", file_stem);
                     }
                 }
-                return (
-                    Captured {
-                        file_stem,
-                        waveform: Box::new(inner),
-                    },
-                    out,
-                );
+                out
             }
         }
     }
@@ -567,31 +466,29 @@ impl<'a> Generator<'a> {
     // offset by the offset of the first waveform. The `op` function is applied to each pair of samples.
     fn generate_binary_op(
         &self,
-        op: waveform::Operator,
         op_fn: fn(f32, f32) -> f32,
-        a: Waveform,
-        b: Waveform,
+        a: &mut Waveform,
+        b: &mut Waveform,
         desired: usize,
-    ) -> (Waveform, Vec<f32>) {
-        use waveform::Waveform::BinaryPointOp;
+    ) -> Vec<f32> {
         assert_eq!(self.offset(&a, desired), 0);
-        let (a, mut a_out) = self.generate(a, desired);
+        let mut a_out = self.generate(a, desired);
         match b {
             // In this branch (which is always taken if we've removed Seq's), check to see if we can
             // avoid generating the right-hand side and instead just apply the op directly.
             // TODO could also check f against the identity of op and skip the loop here
             Waveform::Const(f) => {
                 for x in a_out.iter_mut() {
-                    *x = op_fn(*x, f);
+                    *x = op_fn(*x, *f);
                 }
                 if desired > a_out.len() {
-                    a_out.resize(desired, op_fn(0.0, f));
+                    a_out.resize(desired, op_fn(0.0, *f));
                 }
                 // In theory, we need to advance `b`, but that's a no-op given that it's a Const
-                (BinaryPointOp(op, Box::new(a), Box::new(b)), a_out)
+                a_out
             }
             _ => {
-                let (b, b_out) = self.generate(b, desired);
+                let b_out = self.generate(b, desired);
                 // Merge the overlapping portion
                 for (i, x) in a_out.iter_mut().enumerate() {
                     if i >= b_out.len() {
@@ -603,96 +500,88 @@ impl<'a> Generator<'a> {
                 if b_out.len() > a_out.len() {
                     a_out.extend_from_slice(&b_out[a_out.len()..]);
                 }
-                (BinaryPointOp(op, Box::new(a), Box::new(b)), a_out)
+                a_out
             }
         }
     }
 
     // Returns the number of samples that `waveform` will generate or `max`, whichever is
-    // smaller, along with a copy of `waveform` that has been advanced to that point.
+    // smaller, while modifying `waveform` so that it has been advanced to that point.
     // Note that for waveforms that maintain state (other than position), the state is passed
     // through unchanged. This discontinuity may result in pops or clicks for audible waveforms.
-    // XXXXX rename as 'length'?
-    pub fn remaining(&self, waveform: Waveform, max: usize) -> (Waveform, usize) {
+    pub fn length(&self, waveform: &mut Waveform, max: usize) -> usize {
         use State::*;
         use waveform::Operator;
         use waveform::Waveform::*;
         match waveform {
-            Const { .. } => (waveform, max),
-            Time(Initial) => self.remaining(Time(Position(0)), max),
-            Time(Position(position)) => (Time(Position(position + max)), max),
+            Const { .. } => max,
+            Time(state @ Initial) => {
+                *state = Position(0);
+                self.length(waveform, max)
+            }
+            Time(Position(position)) => {
+                *position = *position + max;
+                max
+            }
             Time(_) => unreachable!("Time waveform with non-Initial, non-Position state"),
-            Noise => (Noise, max),
-            Fixed(samples, Initial) => self.remaining(Fixed(samples, Position(0)), max),
+            Noise => max,
+            Fixed(_, state @ Initial) => {
+                *state = Position(0);
+                self.length(waveform, max)
+            }
             Fixed(samples, Position(position)) => {
-                if position >= samples.len() {
-                    return (Fixed(samples, Position(position)), 0);
+                if *position >= samples.len() {
+                    return 0;
                 }
-                let len = max.min(samples.len() - position);
-                return (Fixed(samples, Position(position + len)), len);
+                let len = max.min(samples.len() - *position);
+                *position = *position + len;
+                return len;
             }
             Fixed(_, _) => unreachable!("Fixed waveform with non-Initial, non-Position state"),
             Fin {
                 length,
                 waveform: inner,
             } => {
-                // This is a little subtle, since Fin is not supposed to make waveforms longer. In particular, for
-                // optimizations that move Fin outside of a DotProduct, we need to check the length of the inner
-                // waveform to see if it's shorter than `length` would indicate.
-                // TODO figure out which of `length` or `length(waveform)` is cheaper and do that first.
-                let (new_inner, inner_len) = self.remaining(*inner.clone(), max);
-                match self.greater_or_equals_at(&length, 0.0, inner_len) {
+                // This is a little subtle, since Fin is not supposed to make waveforms longer.
+                // In particular, for optimizations that move Fin outside of a DotProduct, we need
+                // to check the length of the inner waveform to see if it's shorter than `length`
+                // would indicate.
+                match self.greater_or_equals_at(length, 0.0, max) {
                     MaybeOption::Some(len) => {
-                        // Advance `length` by `len` samples and make sure that `inner` is at the right point too
-                        let (length, _) = self.remaining(*length, len);
-                        let (inner, _) = self.remaining(*inner, len);
-                        return (
-                            Fin {
-                                length: Box::new(length),
-                                waveform: Box::new(inner),
-                            },
-                            len,
-                        );
+                        // Check to see if `inner` is shorter and use that result.
+                        let inner_len = self.length(inner, len);
+                        // Finally, advance `length` too
+                        let _ = self.length(length, inner_len);
+                        inner_len
                     }
                     MaybeOption::None => {
+                        // Check to see if `inner` is shorter and use that result.
+                        let inner_len = self.length(inner, max);
                         // Advance `length` by `inner_len` samples
-                        let (length, _) = self.remaining(*length, inner_len);
-                        return (
-                            Fin {
-                                length: Box::new(length),
-                                waveform: Box::new(new_inner),
-                            },
-                            inner_len,
-                        );
+                        let _ = self.length(length, inner_len);
+                        inner_len
                     }
                     MaybeOption::Maybe => {
                         println!(
                             "Warning: unable to determine root of Fin length cheaply, generating samples for: {:?}",
                             length
                         );
-                        let (new_length, length_out) = self.generate(*length.clone(), inner_len);
-                        for (i, &x) in length_out.iter().enumerate() {
-                            if x >= 0.0 {
-                                // Advance the original `length` and `inner` by `i` samples
-                                let (length, _) = self.remaining(*length, i);
-                                let (inner, _) = self.remaining(*inner, i);
-                                return (
-                                    Fin {
-                                        length: Box::new(length),
-                                        waveform: Box::new(inner),
-                                    },
-                                    i,
-                                );
+                        for i in 0..max {
+                            let length_out = self.generate(length, 1);
+                            if length_out.len() == 0 {
+                                return i;
+                            }
+                            // Advance inner by one sample and check to see if it's finished.
+                            let inner_len = self.length(inner, 1);
+                            if inner_len == 0 {
+                                return i;
+                            }
+                            if length_out[0] >= 0.0 {
+                                return i + 1;
                             }
                         }
-                        // Note that `new_length` and `new_inner` are already advanced by `inner_len` samples
-                        return (
-                            Fin {
-                                length: Box::new(new_length),
-                                waveform: Box::new(new_inner),
-                            },
-                            inner_len,
-                        );
+                        // Note that `new_length` and `new_inner` are already advanced by `max` samples
+                        max
                     }
                 }
             }
@@ -700,168 +589,99 @@ impl<'a> Generator<'a> {
                 offset,
                 waveform: inner,
             } => {
-                let (inner, len) = self.remaining(*inner, max);
-                return (
-                    Seq {
-                        offset,
-                        waveform: Box::new(inner),
-                    },
-                    len,
-                );
+                let len = self.length(inner, max);
+                // Advance the offset waveform
+                let _ = self.length(offset, len);
+                len
             }
             Filter {
                 waveform,
                 feed_forward,
                 feedback,
-                state: Initial,
+                state: state @ Initial,
             } => {
                 let ff_count = feed_forward.len();
                 let fb_count = feedback.len();
                 assert!(ff_count >= 1);
-                return self.remaining(
-                    Filter {
-                        waveform,
-                        feed_forward,
-                        feedback,
-                        state: Samples {
-                            input: vec![0.0; ff_count - 1],
-                            output: vec![0.0; fb_count],
-                        },
-                    },
-                    max,
-                );
+                *state = Samples {
+                    input: vec![0.0; ff_count - 1],
+                    output: vec![0.0; fb_count],
+                };
+                self.length(waveform, max)
             }
             Filter {
                 waveform: inner,
                 feed_forward,
                 feedback,
-                state: state @ Samples { .. },
+                state: Samples { .. },
             } => {
                 // TODO I think this logic could be made to better parallel that of generate() (by actually advancing in the Initial arm and "padding" here.)
-                let (inner, inner_len) = self.remaining(*inner, max);
+                let inner_len = self.length(inner, max);
                 // Only the length of inner matters, but we need to advance all of the coefficient waveforms
-                let feed_forward = {
-                    let mut new_feed_forward = Vec::with_capacity(feed_forward.len());
-                    for w in feed_forward.into_iter() {
-                        let (new_w, _) = self.remaining(w, inner_len);
-                        new_feed_forward.push(new_w);
-                    }
-                    new_feed_forward
-                };
-                let feedback = {
-                    let mut new_feedback = Vec::with_capacity(feedback.len());
-                    for w in feedback.into_iter() {
-                        let (new_w, _) = self.remaining(w, inner_len);
-                        new_feedback.push(new_w);
-                    }
-                    new_feedback
-                };
-                return (
-                    Filter {
-                        waveform: Box::new(inner),
-                        feed_forward,
-                        feedback,
-                        state,
-                    },
-                    inner_len,
-                );
+                for w in feed_forward.iter_mut() {
+                    let _ = self.length(w, inner_len);
+                }
+                for w in feedback.iter_mut() {
+                    let _ = self.length(w, inner_len);
+                }
+                inner_len
             }
             Filter { .. } => {
                 unreachable!("Filter with non-Initial, non-Samples state")
             }
             Append(a, b) => {
-                let (a, a_len) = self.remaining(*a, max);
-                let (b, b_len) = self.remaining(*b, max - a_len);
-                (Append(Box::new(a), Box::new(b)), a_len + b_len)
+                let a_len = self.length(a, max);
+                let b_len = self.length(b, max - a_len);
+                a_len + b_len
             }
             Sine {
-                frequency,
-                phase,
-                state,
+                frequency, phase, ..
             } => {
-                let (frequency, f_len) = self.remaining(*frequency, max);
-                let (phase, ph_len) = self.remaining(*phase, max);
-                (
-                    Sine {
-                        frequency: Box::new(frequency),
-                        phase: Box::new(phase),
-                        state,
-                    },
-                    f_len.min(ph_len),
-                )
+                let f_len = self.length(frequency, max);
+                let ph_len = self.length(phase, max);
+                f_len.min(ph_len)
             }
             BinaryPointOp(op, a, b) => {
-                let (a, a_len) = self.remaining(*a, max);
+                let a_len = self.length(a, max);
                 assert_eq!(self.offset(&a, max), 0); // XXXXX remove this?
-                let (b, b_len) = self.remaining(*b, max);
-                (
-                    BinaryPointOp(op.clone(), Box::new(a), Box::new(b)),
-                    match op {
-                        Operator::Add | Operator::Subtract => a_len.max(b_len),
-                        Operator::Multiply | Operator::Divide => a_len.min(b_len),
-                    },
-                )
+                let b_len = self.length(b, max);
+                match op {
+                    Operator::Add | Operator::Subtract => a_len.max(b_len),
+                    Operator::Multiply | Operator::Divide => a_len.min(b_len),
+                }
             }
-            Reset {
-                trigger,
-                waveform,
-                state,
-            } => {
-                let (trigger, len) = self.remaining(*trigger, max);
-                (
-                    Reset {
-                        trigger: Box::new(trigger),
-                        waveform,
-                        state,
-                    },
-                    len,
-                )
+            Reset { trigger, .. } => {
+                let len = self.length(trigger, max);
+                // We don't change the state of waveform here as its position
+                // isn't meaningful in a global sense.
+                len
             }
             Alt {
                 trigger,
                 positive_waveform,
                 negative_waveform,
             } => {
-                let (trigger, len) = self.remaining(*trigger, max);
-                (
-                    Alt {
-                        trigger: Box::new(trigger),
-                        positive_waveform,
-                        negative_waveform,
-                    },
-                    len,
-                )
+                let len = self.length(trigger, max);
+                // Advance the position of the positive and negative waveforms.
+                let _ = self.length(positive_waveform, len);
+                let _ = self.length(negative_waveform, len);
+                len
             }
-            Slider(slider) => (Slider(slider), max),
-            Marked { waveform, id } => {
-                let (waveform, len) = self.remaining(*waveform, max);
-                (
-                    Marked {
-                        waveform: Box::new(waveform),
-                        id,
-                    },
-                    len,
-                )
+            Slider(_) => max,
+            Marked { waveform, .. } => {
+                let len = self.length(waveform, max);
+                len
             }
-            Captured {
-                waveform,
-                file_stem,
-            } => {
-                let (waveform, len) = self.remaining(*waveform, max);
-                (
-                    Captured {
-                        waveform: Box::new(waveform),
-                        file_stem,
-                    },
-                    len,
-                )
+            Captured { waveform, .. } => {
+                let len = self.length(waveform, max);
+                len
             }
         }
     }
 
-    // If `waveform` will be greater than or equal to `value` at some point between its current position and `max`,
-    // return Some of the number of samples that would be generated before then, None if `waveform` will not be greater
-    // than or equal in that range, or Maybe if that can't be determined cheaply.
+    // If `waveform` will be greater than or equal to `value` at some point between its current position and
+    // `max`, return Some of the number of samples that would be generated before then, None if `waveform`
+    // will not be greater than or equal in that range, or Maybe if that can't be determined cheaply.
     fn greater_or_equals_at(
         &self,
         waveform: &Waveform,
@@ -886,13 +706,14 @@ impl<'a> Generator<'a> {
                     MaybeOption::Some(max.min((target_position - position) as usize))
                 }
             }
-            Append(a, b) => {
+            Append(a, _) => {
                 match self.greater_or_equals_at(a, value, max) {
                     MaybeOption::Some(size) => MaybeOption::Some(size),
                     MaybeOption::None => {
-                        let (_, a_len) = self.remaining(*a.clone(), max);
+                        /* XXX do we need this? for all cases? (maybe just for a = Fixed?)
+                        let a_len = self.length(*a.clone(), max);
                         if a_len == max {
-                            // We didn't reach the end of `a``, so `b` isn't relevant yet.
+                            // We didn't reach the end of `a`, so `b` isn't relevant yet.
                             MaybeOption::None
                         } else {
                             match self.greater_or_equals_at(&b, value, max - a_len) {
@@ -900,6 +721,9 @@ impl<'a> Generator<'a> {
                                 m => m,
                             }
                         }
+                        */
+                        println!("Warning: in greater_or_equals_at for Append... returning Maybe");
+                        MaybeOption::Maybe
                     }
                     m => m, // Maybe gets passed through
                 }
@@ -1000,13 +824,19 @@ impl<'a> Generator<'a> {
 
         // generate_fixed generates `waveform` up to some large number of samples. It should only be used on waveforms
         // that are pre-computable.
-        fn generate_fixed(g: &Generator, waveform: Waveform) -> Waveform {
+        fn generate_fixed(g: &Generator, mut waveform: Waveform) -> Waveform {
             // Choose a `desired` which is long enough to generate any reasonable waveform, but give some room
             // for cases like `Filter` that may need to make it longer.
-            let (_, out) = g.generate(waveform, usize::MAX / 2);
+
+            println!("Precomputing output for {}", &waveform);
+
+            let out = g.generate(&mut waveform, usize::MAX / 2);
             if out.len() == usize::MAX / 2 {
                 println!("Warning: precompute generated max samples (maybe not finite?)");
             }
+
+            println!("  ...generated {} samples", out.len());
+
             waveform::Waveform::Fixed(out, State::Initial)
         }
 
@@ -1378,11 +1208,11 @@ mod tests {
         max: usize,
     ) {
         let (_, waveform) = optimizer::replace_seq(waveform.clone());
-        let waveform = initialize_state(waveform);
+        let mut waveform = initialize_state(waveform);
         // Generate up to `position` and discard those samples.
-        let (waveform, _) = g.generate(waveform, position);
+        let _ = g.generate(&mut waveform, position);
         assert_eq!(
-            g.remaining(waveform.clone(), max).1,
+            g.length(&mut waveform.clone(), max),
             expected,
             "Expected length {} (with max = {}) for waveform: {:?}",
             expected,
@@ -1419,13 +1249,12 @@ mod tests {
             let mut w = initialize_state(no_seq_waveform.clone());
             let mut out = vec![0.0; desired.len()];
             for n in 0..out.len() / size {
-                let (new_w, tmp) = g.generate(w, size);
-                w = new_w;
+                let tmp = g.generate(&mut w, size);
                 (&mut out[n * size..(n * size + tmp.len())]).copy_from_slice(&tmp);
             }
             if out.len() % size != 0 {
                 // Generate any remaining samples
-                let (_, tmp) = g.generate(w, out.len() % size);
+                let tmp = g.generate(&mut w, out.len() % size);
                 let n = (out.len() - 1) / size;
                 (&mut out[n * size..(n * size + tmp.len())]).copy_from_slice(&tmp);
             }
@@ -1443,13 +1272,12 @@ mod tests {
             let mut w = initialize_state(optimized_waveform.clone());
             let mut out = vec![0.0; desired.len()];
             for n in 0..out.len() / size {
-                let (new_w, tmp) = g.generate(w, size);
-                w = new_w;
+                let tmp = g.generate(&mut w, size);
                 (&mut out[n * size..(n * size + tmp.len())]).copy_from_slice(&tmp);
             }
             if out.len() % size != 0 {
                 // Generate any remaining samples
-                let (_, tmp) = g.generate(w, out.len() % size);
+                let tmp = g.generate(&mut w, out.len() % size);
                 let n = (out.len() - 1) / size;
                 (&mut out[n * size..(n * size + tmp.len())]).copy_from_slice(&tmp);
             }
@@ -1469,13 +1297,12 @@ mod tests {
             // XXX check_length(&g, &w, 0, desired.len(), desired.len());
             let mut out = vec![0.0; desired.len()];
             for n in 0..out.len() / size {
-                let (new_w, tmp) = g.generate(w, size);
-                w = new_w;
+                let tmp = g.generate(&mut w, size);
                 (&mut out[n * size..(n * size + tmp.len())]).copy_from_slice(&tmp);
             }
             if out.len() % size != 0 {
                 // Generate any remaining samples
-                let (_, tmp) = g.generate(w, out.len() % size);
+                let tmp = g.generate(&mut w, out.len() % size);
                 let n = (out.len() - 1) / size;
                 (&mut out[n * size..(n * size + tmp.len())]).copy_from_slice(&tmp);
             }
@@ -1499,10 +1326,10 @@ mod tests {
         run_tests(&w, &vec![1.0, 2.0, 3.0, 4.0, 5.0]);
 
         let g = new_test_generator(1);
-        let w = initialize_state(w);
+        let mut w = initialize_state(w);
         // Advance past the end of the waveform
-        let (w, _) = g.generate(w, 6);
-        let (_, result) = g.generate(w, 8);
+        let _ = g.generate(&mut w, 6);
+        let result = g.generate(&mut w, 8);
         assert_eq!(result, vec![] as Vec<f32>);
     }
 
@@ -1519,8 +1346,8 @@ mod tests {
         });
     }
 
-    fn run_sin_test(g: &Generator, waveform: &super::Waveform, expected: Vec<f32>) {
-        let (_, result) = g.generate(waveform.clone(), expected.len());
+    fn run_sin_test(g: &Generator, waveform: &mut super::Waveform, expected: Vec<f32>) {
+        let result = g.generate(waveform, expected.len());
         for (i, &x) in result.iter().enumerate() {
             assert!(
                 (x - expected[i]).abs() < 1e-5,
@@ -1539,14 +1366,14 @@ mod tests {
         let g = new_test_generator(sample_frequency as i32);
 
         // As simple as possible
-        let w = initialize_state(*sin_waveform(1.0, 0.0));
+        let mut w = initialize_state(*sin_waveform(1.0, 0.0));
         let expected = (0..100)
             .map(|x: i32| (f64::consts::TAU * x as f64 / sample_frequency).sin() as f32)
             .collect();
-        run_sin_test(&g, &w, expected);
+        run_sin_test(&g, &mut w, expected);
 
         // Non-constant frequency: f = time + 10 Hz
-        let w3 = initialize_state(Waveform::Sine {
+        let mut w3 = initialize_state(Waveform::Sine {
             frequency: Box::new(BinaryPointOp(
                 Operator::Multiply,
                 Box::new(BinaryPointOp(
@@ -1565,17 +1392,17 @@ mod tests {
             phase.sin() as f32
         };
         let expected = (0..100).map(f_is_t_plus_ten).collect();
-        run_sin_test(&g, &w3, expected);
+        run_sin_test(&g, &mut w3, expected);
 
         // Non-zero phase offset
-        let w = initialize_state(*sin_waveform(0.25, f32::consts::PI));
+        let mut w = initialize_state(*sin_waveform(0.25, f32::consts::PI));
         let expected = (0..100)
             .map(|x| {
                 (f64::consts::TAU * 0.25 * x as f64 / sample_frequency + f64::consts::PI).sin()
                     as f32
             })
             .collect();
-        run_sin_test(&g, &w, expected);
+        run_sin_test(&g, &mut w, expected);
     }
 
     #[test]
@@ -1708,7 +1535,7 @@ mod tests {
         // Test a case to make sure that the sum generates enough samples, even when
         // the left-hand side is shorter and the right hasn't started yet.
         let (_, w5_no_seq) = optimizer::replace_seq(w5);
-        let (_, result) = g.generate(initialize_state(w5_no_seq.clone()), 2);
+        let result = g.generate(&mut initialize_state(w5_no_seq.clone()), 2);
         assert_eq!(result, vec![3.0, 0.0]);
 
         // This one is a little strange: the right-hand side doesn't generate any
@@ -1720,7 +1547,7 @@ mod tests {
             Box::new(finite_const_waveform(2.0, 0, 0)),
         );
         let (_, w6_no_seq) = optimizer::replace_seq(w6);
-        let (_, result) = g.generate(initialize_state(w6_no_seq), 2);
+        let result = g.generate(&mut initialize_state(w6_no_seq), 2);
         assert_eq!(result, vec![3.0, 0.0]);
 
         let w7 = BinaryPointOp(
@@ -1933,7 +1760,7 @@ mod tests {
         };
         let g = new_test_generator(1);
         let position = g.greater_or_equals_at(&initialize_state(w1.clone()), 0.0, 10);
-        let (_, out) = g.generate(initialize_state(w2), 10);
+        let out = g.generate(&mut initialize_state(w2), 10);
         assert!(position.is_some());
         assert_eq!(position.unwrap(), out.len());
         for (i, x) in out.iter().enumerate() {

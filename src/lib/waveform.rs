@@ -345,3 +345,81 @@ pub fn remove_state<State>(w: Waveform<State>) -> Waveform<()> {
         },
     }
 }
+
+pub fn set_state<S>(waveform: &mut Waveform<S>, new_state: S)
+where
+    S: Clone,
+{
+    use Waveform::*;
+    match waveform {
+        Const(_) => (),
+        Time(state) => *state = new_state,
+        Noise => (),
+        Fixed(_, state) => *state = new_state,
+        Fin { length, waveform } => {
+            set_state(length, new_state.clone());
+            set_state(waveform, new_state);
+        }
+        Seq { offset, waveform } => {
+            set_state(offset, new_state.clone());
+            set_state(waveform, new_state);
+        }
+        Append(a, b) => {
+            set_state(a, new_state.clone());
+            set_state(b, new_state);
+        }
+        Sine {
+            frequency,
+            phase,
+            state,
+        } => {
+            set_state(frequency, new_state.clone());
+            set_state(phase, new_state.clone());
+            *state = new_state;
+        }
+        Filter {
+            waveform,
+            feed_forward,
+            feedback,
+            state,
+        } => {
+            set_state(waveform, new_state.clone());
+            let _ = feed_forward
+                .into_iter()
+                .map(|w| set_state(w, new_state.clone()));
+            let _ = feedback
+                .into_iter()
+                .map(|w| set_state(w, new_state.clone()));
+            *state = new_state;
+        }
+        BinaryPointOp(_, a, b) => {
+            set_state(a, new_state.clone());
+            set_state(b, new_state);
+        }
+        Reset {
+            trigger,
+            waveform,
+            state,
+        } => {
+            set_state(trigger, new_state.clone());
+            set_state(waveform, new_state.clone());
+            *state = new_state;
+        }
+        Alt {
+            trigger,
+            positive_waveform,
+            negative_waveform,
+        } => {
+            set_state(trigger, new_state.clone());
+            set_state(positive_waveform, new_state.clone());
+            set_state(negative_waveform, new_state);
+        }
+        Slider(_) => (),
+        Marked { waveform, .. } => {
+            set_state(waveform, new_state);
+        }
+        Captured { waveform, .. } => {
+            set_state(waveform, new_state);
+        }
+    }
+}

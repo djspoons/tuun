@@ -14,14 +14,13 @@ fn bench_filter(c: &mut Criterion) {
             let generator = generator::Generator::new(44100);
             let w1 = Filter {
                 waveform: Box::new(Time(())),
-                feed_forward: Box::new(Fixed(vec![0.5], ())),
-                feedback: Box::new(Fixed(vec![-0.5], ())),
+                feed_forward: vec![Fixed(vec![0.5], ())],
+                feedback: vec![Fixed(vec![-0.5], ())],
                 state: (),
             };
             let mut w1 = generator::initialize_state(w1);
             for _ in 0..43 {
-                let (tmp, _) = generator.generate(w1, 1024);
-                w1 = tmp;
+                let _ = generator.generate(&mut w1, 1024);
             }
         });
     });
@@ -31,17 +30,22 @@ fn bench_filter(c: &mut Criterion) {
             let generator = generator::Generator::new(44100);
             let w2 = Filter {
                 waveform: Box::new(Time(())),
-                feed_forward: Box::new(Fixed(
-                    vec![0.00107949, 0.00323847, 0.00323847, 0.00107949],
-                    (),
-                )),
-                feedback: Box::new(Fixed(vec![-2.56103158, 2.2132402, -0.64357271], ())),
+                feed_forward: vec![
+                    Fixed(vec![0.00107949], ()),
+                    Fixed(vec![0.00323847], ()),
+                    Fixed(vec![0.00323847], ()),
+                    Fixed(vec![0.00107949], ()),
+                ],
+                feedback: vec![
+                    Fixed(vec![-2.56103158], ()),
+                    Fixed(vec![2.2132402], ()),
+                    Fixed(vec![-0.64357271], ()),
+                ],
                 state: (),
             };
             let mut w2 = generator::initialize_state(w2);
             for _ in 0..43 {
-                let (tmp, _) = generator.generate(w2, 1024);
-                w2 = tmp;
+                let _ = generator.generate(&mut w2, 1024);
             }
         });
     });
@@ -62,8 +66,7 @@ fn bench_marks(c: &mut Criterion) {
             let mut w = generator::initialize_state(w);
             for _ in 0..3438 {
                 // Approx. the length of the waveform
-                let (tmp, _) = generator.generate(w, 1024);
-                w = tmp;
+                let _ = generator.generate(&mut w, 1024);
             }
         });
     });
@@ -113,8 +116,7 @@ fn bench_large(c: &mut Criterion) {
                                 let mut w = generator::initialize_state(waveform);
 
                                 for _ in 0..43 {
-                                    let (tmp, _) = generator.generate(w, 1024);
-                                    w = tmp;
+                                    let _ = generator.generate(&mut w, 1024);
                                 }
                             } else {
                                 panic!("Expected waveform");
