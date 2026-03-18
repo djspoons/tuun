@@ -149,7 +149,6 @@ where
             }
             // TODO Fin seems not quite right here, since its length might truncate any marks inside it
             Fin { waveform, .. }
-            | Seq { waveform, .. }
             | Filter { waveform, .. }
             | Reset {
                 trigger: waveform, ..
@@ -178,10 +177,6 @@ where
             }
             BinaryPointOp(_, a, b) => {
                 self.process_marked(waveform_id, start, &*a, out);
-                // TODO do something about this constant for max
-                let offset = self.generator.offset(&*a, 10 * self.sample_rate as usize);
-                let start =
-                    start + Duration::from_secs_f32(offset as f32 / self.sample_rate as f32);
                 self.process_marked(waveform_id, start, &*b, out);
             }
             Marked { waveform, id } => {
@@ -211,7 +206,6 @@ where
                 return;
             }
             Fin { waveform, .. }
-            | Seq { waveform, .. }
             | Filter { waveform, .. }
             | Reset {
                 trigger: waveform, ..

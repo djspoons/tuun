@@ -143,7 +143,6 @@ impl<'a> Generator<'a> {
                 // didn't account for the length of `inner`.
                 self.generate(inner, len)
             }
-            Seq { .. } => panic!("Got Seq in generate()"),
             Append(a, b) => {
                 let mut a_out = self.generate(a, desired);
                 if a_out.len() == desired {
@@ -461,7 +460,6 @@ impl<'a> Generator<'a> {
         extend_to_longer: bool,
         mut desired: usize,
     ) -> Vec<f32> {
-        assert_eq!(self.offset(&a, desired), 0);
         let mut a_out = self.generate(a, desired);
         match b {
             // In this branch (which is always taken if we've removed Seq's), check to see if we can
@@ -585,15 +583,6 @@ impl<'a> Generator<'a> {
                         max
                     }
                 }
-            }
-            Seq {
-                offset,
-                waveform: inner,
-            } => {
-                let len = self.length(inner, max);
-                // Advance the offset waveform
-                let _ = self.length(offset, len);
-                len
             }
             Filter {
                 waveform,
@@ -732,13 +721,6 @@ impl<'a> Generator<'a> {
             }
             BinaryPointOp(op @ (Operator::Add | Operator::Subtract), a, b) => {
                 use waveform::Operator::{Add, Subtract};
-                // If a has an offset, we'd need to handle the overlapping and non-overlapping parts
-                // separately, and since we don't expect this to be called on non-optimized waveforms (except
-                // in tests), just give up.
-                // TODO update this
-                if self.offset(a, max) != 0 {
-                    return MaybeOption::Maybe;
-                }
                 match (op, a.as_ref(), b.as_ref()) {
                     // TODO need to consider Sliders and constant functions of Sliders as const
                     (Add, Const(va), Const(vb)) if va + vb >= value => MaybeOption::Some(0),
@@ -757,43 +739,6 @@ impl<'a> Generator<'a> {
                 println!("Unhandled case in greater_or_equals_at: {}", waveform);
                 MaybeOption::Maybe
             }
-        }
-    }
-
-    // Returns the offset at which the next waveform should start (in samples). This is determined entirely by
-    // `waveform` (this function is pure).
-    // XXX Maybe move it to the test section?
-    pub fn offset(&self, waveform: &Waveform, max: usize) -> usize {
-        use waveform::Waveform::*;
-        match waveform {
-            Const { .. } | Time(_) | Noise | Fixed(_, _) => 0,
-            Fin { waveform, .. } => self.offset(waveform, max),
-            Seq { offset, .. } => match self.greater_or_equals_at(&offset, 0.0, max) {
-                MaybeOption::Some(size) => size,
-                MaybeOption::None => max,
-                MaybeOption::Maybe => {
-                    panic!(
-                        "Unable to determine offset of Seq offset cheaply: {:?}",
-                        offset
-                    );
-                }
-            },
-            Append(a, b) => (self.offset(a, max) + self.offset(b, max)).min(max),
-            Sine {
-                frequency, phase, ..
-            } => self.offset(frequency, max) + self.offset(phase, max),
-            Filter { waveform, .. } => self.offset(waveform, max),
-            BinaryPointOp(_, a, b) => {
-                let a_offset = self.offset(a, max);
-                if a_offset == max {
-                    return max;
-                }
-                let b_offset = self.offset(b, max - a_offset);
-                return a_offset + b_offset;
-            }
-            Reset { trigger, .. } | Alt { trigger, .. } => self.offset(trigger, max),
-            Slider { .. } => 0,
-            Marked { waveform, .. } | Captured { waveform, .. } => self.offset(waveform, max),
         }
     }
 
@@ -980,11 +925,6 @@ impl<'a> Generator<'a> {
                         waveform: Box::new(waveform.into()),
                     }),
                 },
-                Seq { .. } => {
-                    panic!(
-                        "Seq should have been replaced by replace_seq before precompute is called"
-                    );
-                }
                 Append(a, b) => do_two(g, *a, *b, |a, b| Append(Box::new(a), Box::new(b))),
                 Sine {
                     frequency,
@@ -1171,8 +1111,7 @@ mod tests {
         expected: usize,
         max: usize,
     ) {
-        let (_, waveform) = optimizer::replace_seq(waveform.clone());
-        let mut waveform = initialize_state(waveform);
+        let mut waveform = initialize_state(waveform.clone());
         // Generate up to `position` and discard those samples.
         let _ = g.generate(&mut waveform, position);
         assert_eq!(
@@ -1189,28 +1128,9 @@ mod tests {
         let g = new_test_generator(1);
         // Check that `waveform` would generate at least as many samples as `desired`.
         check_length(&g, &waveform, 0, desired.len(), desired.len());
-        /*
-        // We can't currently generate for waveforms that contain Seq, so skip this.
-        for size in [1, 2, 4, 8] {
-            let g = new_test_generator(1);
-            let mut w = initialize_state(waveform.clone());
-            let mut out = vec![0.0; desired.len()];
-            for n in 0..out.len() / size {
-                let (w, tmp) = g.generate(w, size);
-                (&mut out[n * size..(n * size + tmp.len())]).copy_from_slice(&tmp);
-            }
-            assert_eq!(
-                out, desired,
-                "Failed output for size {} on waveform:\n{:#?}",
-                size, waveform
-            );
-        }
-        */
 
         for size in [1, 2, 4, 8] {
-            let (_, no_seq_waveform) = optimizer::replace_seq(waveform.clone());
-            check_length(&g, &no_seq_waveform, 0, desired.len(), desired.len());
-            let mut w = initialize_state(no_seq_waveform.clone());
+            let mut w = initialize_state(waveform.clone());
             let mut out = vec![0.0; desired.len()];
             for n in 0..out.len() / size {
                 let tmp = g.generate(&mut w, size);
@@ -1224,14 +1144,13 @@ mod tests {
             }
             assert_eq!(
                 out, *desired,
-                "Failed output for size {} on waveform\n{:#?}\nwith seq's removed\n{:#?}",
-                size, waveform, no_seq_waveform
+                "Failed output for size {} on waveform\n{:#?}",
+                size, waveform
             );
         }
 
         for size in [1, 2, 4, 8] {
-            let (_, no_seq_waveform) = optimizer::replace_seq(waveform.clone());
-            let optimized_waveform = optimizer::simplify(no_seq_waveform.clone());
+            let optimized_waveform = optimizer::simplify(waveform.clone());
             check_length(&g, &optimized_waveform, 0, desired.len(), desired.len());
             let mut w = initialize_state(optimized_waveform.clone());
             let mut out = vec![0.0; desired.len()];
@@ -1254,8 +1173,7 @@ mod tests {
 
         for size in [1, 2, 4, 8] {
             let g = new_test_generator(1);
-            let (_, no_seq_waveform) = optimizer::replace_seq(waveform.clone());
-            let optimized_waveform = optimizer::simplify(no_seq_waveform.clone());
+            let optimized_waveform = optimizer::simplify(waveform.clone());
             let precomputed_waveform = g.precompute(initialize_state(optimized_waveform));
             let mut w = precomputed_waveform.clone();
             // XXX check_length(&g, &w, 0, desired.len(), desired.len());

@@ -38,15 +38,6 @@ pub enum Waveform<State = ()> {
         waveform: Box<Waveform<State>>,
     },
     /*
-     * Seq sets the offset of `waveform`. The offset is determined by the first point at which the `offset` waveform
-     * is >= 0.0. For example, `Seq(Const(0.0), _)` has an offset 0 seconds and `Seq(Subtract(Time, Const(2.0)), _)` has
-     * an offset of 2 seconds.
-     */
-    Seq {
-        offset: Box<Waveform<State>>,
-        waveform: Box<Waveform<State>>,
-    },
-    /*
      * Append concatenates two waveforms, generating all samples from the first waveform and
      * then all samples from the second (regardless of the offset of the first).
      */
@@ -143,9 +134,6 @@ impl<State> fmt::Display for Waveform<State> {
             Fin { length, waveform } => {
                 write!(f, "Fin({}, {})", length, waveform)
             }
-            Seq { offset, waveform } => {
-                write!(f, "Seq({}, {})", offset, waveform)
-            }
             Append(a, b) => write!(f, "Append({}, {})", a, b),
             Sine {
                 frequency, phase, ..
@@ -209,10 +197,6 @@ where
         Fixed(samples, _) => Fixed(samples, state),
         Fin { length, waveform } => Fin {
             length: Box::new(initialize_state(*length, state.clone())),
-            waveform: Box::new(initialize_state(*waveform, state)),
-        },
-        Seq { offset, waveform } => Seq {
-            offset: Box::new(initialize_state(*offset, state.clone())),
             waveform: Box::new(initialize_state(*waveform, state)),
         },
         Append(a, b) => Append(
@@ -290,10 +274,6 @@ pub fn remove_state<State>(w: Waveform<State>) -> Waveform<()> {
             length: Box::new(remove_state(*length)),
             waveform: Box::new(remove_state(*waveform)),
         },
-        Seq { offset, waveform } => Seq {
-            offset: Box::new(remove_state(*offset)),
-            waveform: Box::new(remove_state(*waveform)),
-        },
         Append(a, b) => Append(Box::new(remove_state(*a)), Box::new(remove_state(*b))),
         Sine {
             frequency, phase, ..
@@ -359,10 +339,6 @@ where
         Fixed(_, state) => *state = new_state,
         Fin { length, waveform } => {
             set_state(length, new_state.clone());
-            set_state(waveform, new_state);
-        }
-        Seq { offset, waveform } => {
-            set_state(offset, new_state.clone());
             set_state(waveform, new_state);
         }
         Append(a, b) => {
