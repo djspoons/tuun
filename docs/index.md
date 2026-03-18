@@ -11,9 +11,10 @@ Many of the pages below include embedded synthesizer elements, but if you'd like
     expanded />
 </div>
 
-## Waveform and Language Design
+## Waveform, Language, System Design
 
 * [Language Overview](tuun-langs.md)
+* [Architecture](architecture.md)
 * [Sine](sine.md)
 * [Filter](filter.md)
 

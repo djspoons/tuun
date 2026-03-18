@@ -30,7 +30,8 @@ Additive synthesis often requires many primitive waveforms to be combined; this 
           map(amp(0.4), odd(3 * freq)),
           map(amp(0.2), odd(6 * freq))
         )} * (1 + 0.05 * $3)
-        | ADSR(a, d, s_level, max(dur - (a + d + r), 0), r),
+        | ADSR(a, d, s_level, max(dur - (a + d + r), 0), r)
+        | seq(time - dur),
     in
       <map(organ, [(Q, @48), (Q, @52), (W, @55)])>
   </tuun-synth>
@@ -57,7 +58,7 @@ Subtractive synthesis starts with a waveform with many component frequencies and
 <div class="container">
   <tuun-synth description="Pulse wave" expanded>
   let pulse_inst = fn(dur, freq) =>
-    pulse(0.93, freq) | amp(0.2) | ADSR(0.01, 0, 1, dur, 0.01)
+    pulse(0.93, freq) | amp(0.2) | ADSR(0.01, 0, 1, dur, 0.01) | seq(time - dur)
   in
     <map(pulse_inst, [(Q, @60), (Q, @64), (W, @67)])>
   </tuun-synth>
@@ -117,7 +118,7 @@ This instrument is based on an example from [Chowning's original article on freq
             I = I_max | envelope,
             fm = D/2 * fc
           in
-            sine(2*pi * fc, $fm * I) | envelope,
+            sine(2*pi * fc, $fm * I) | envelope | seq(time - dur),
         
         brass = pm_synth(5, 1, 0.1, 0.1, 0.7, 0.1),
       in
