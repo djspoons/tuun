@@ -181,7 +181,7 @@ fn first_root(waveform: &Waveform) -> Option<Waveform> {
 
 // Given waveforms that represent offsets (and assuming offset waveforms are of the form
 // `Time ~+ w` or `Const(x)`) return a new waveform which represents the sum of those offsets.
-fn add_offsets(a: Waveform, b: Waveform) -> Waveform {
+fn add_offsets(a: Waveform, b: Waveform) -> Expr {
     match (first_root(&a), first_root(&b)) {
         (Some(a_root), Some(b_root)) => {
             let b = optimizer::simplify(Waveform::BinaryPointOp(
@@ -193,15 +193,16 @@ fn add_offsets(a: Waveform, b: Waveform) -> Waveform {
                 )),
                 Box::new(Waveform::Const(-1.0)),
             ));
-            Waveform::BinaryPointOp(Operator::Add, Box::new(Waveform::Time(())), Box::new(b))
+            Expr::Waveform(Waveform::BinaryPointOp(
+                Operator::Add,
+                Box::new(Waveform::Time(())),
+                Box::new(b),
+            ))
         }
-        (a_root, b_root) => {
-            // XXX return error, don't panic
-            panic!(
-                "Cannot add offsets that are not linear functions of Time, got {:?} and {:?} for {:?} and {:?}",
-                a_root, b_root, a, b
-            );
-        }
+        (a_root, b_root) => Error(format!(
+            "Cannot add offsets that are not linear functions of Time, got {:?} and {:?} for {:?} and {:?}",
+            a_root, b_root, a, b
+        )),
     }
 }
 
@@ -214,6 +215,12 @@ pub fn followed_by(mut arguments: Vec<Expr>) -> Expr {
             match (*offset, *waveform) {
                 (Expr::Waveform(offset), Expr::Waveform(waveform)) => (offset, waveform),
                 // We know that the arguments are values and Seq-as-a-value always has two waveforms.
+                (err @ Error(_), _) => {
+                    return err;
+                }
+                (_, err @ Error(_)) => {
+                    return err;
+                }
                 _ => panic!("Found a non-Waveform element in a Seq value"),
             }
         }
@@ -254,11 +261,17 @@ pub fn followed_by(mut arguments: Vec<Expr>) -> Expr {
         } => {
             let (b_offset, b) = match (*b_offset, *waveform) {
                 (Expr::Waveform(b_offset), Expr::Waveform(b)) => (b_offset, b),
+                (err @ Error(_), _) => {
+                    return err;
+                }
+                (_, err @ Error(_)) => {
+                    return err;
+                }
                 _ => panic!("Found a non-Waveform element in a Seq value"),
             };
             let total_offset = add_offsets(a_offset.clone(), b_offset);
             Seq {
-                offset: Box::new(Expr::Waveform(total_offset)),
+                offset: Box::new(total_offset),
                 waveform: Box::new(Expr::Waveform(Waveform::BinaryPointOp(
                     Operator::Merge,
                     Box::new(a),
