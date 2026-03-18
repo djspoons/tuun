@@ -1150,7 +1150,7 @@ mod tests {
         }
 
         for size in [1, 2, 4, 8] {
-            let optimized_waveform = optimizer::simplify(waveform.clone());
+            let optimized_waveform = optimizer::optimize(waveform.clone());
             check_length(&g, &optimized_waveform, 0, desired.len(), desired.len());
             let mut w = initialize_state(optimized_waveform.clone());
             let mut out = vec![0.0; desired.len()];
@@ -1173,7 +1173,7 @@ mod tests {
 
         for size in [1, 2, 4, 8] {
             let g = new_test_generator(1);
-            let optimized_waveform = optimizer::simplify(waveform.clone());
+            let optimized_waveform = optimizer::optimize(waveform.clone());
             let precomputed_waveform = g.precompute(initialize_state(optimized_waveform));
             let mut w = precomputed_waveform.clone();
             // XXX check_length(&g, &w, 0, desired.len(), desired.len());

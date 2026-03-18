@@ -36,8 +36,7 @@ fn load_context() -> Vec<(String, parser::Expr)> {
             for (pattern, expr) in parsed_defs {
                 match parser::evaluate(&context, expr) {
                     Ok(expr) => {
-                        if let Err(e) = parser::extend_context(&mut context, &pattern, &expr)
-                        {
+                        if let Err(e) = parser::extend_context(&mut context, &pattern, &expr) {
                             eprintln!("Warning: Failed to add context definition: {:?}", e);
                         }
                     }

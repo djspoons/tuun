@@ -1261,8 +1261,8 @@ fn play_waveform_helper(
                         }
                     };
                     if args.optimize {
-                        waveform = optimizer::simplify(waveform);
-                        println!("optimizer::simplify returned: {}", &waveform);
+                        waveform = optimizer::optimize(waveform);
+                        println!("optimizer::optimize returned: {}", &waveform);
                     }
                     if should_precompute && args.precompute {
                         let generator = generator::Generator::new(args.sample_rate);

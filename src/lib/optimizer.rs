@@ -9,12 +9,12 @@ fn first_root(waveform: &Waveform) -> Option<Waveform> {
         Time(_) => Some(Const(0.0)),
         BinaryPointOp(Operator::Add, a, b) => match (&**a, &**b) {
             // TODO should really check that Time doesn't appear on the other side too
-            (Time(_), w) => Some(simplify(BinaryPointOp(
+            (Time(_), w) => Some(optimize(BinaryPointOp(
                 Operator::Multiply,
                 Box::new(w.clone()),
                 Box::new(Const(-1.0)),
             ))),
-            (w, Time(_)) => Some(simplify(BinaryPointOp(
+            (w, Time(_)) => Some(optimize(BinaryPointOp(
                 Operator::Multiply,
                 Box::new(w.clone()),
                 Box::new(Const(-1.0)),
@@ -24,7 +24,7 @@ fn first_root(waveform: &Waveform) -> Option<Waveform> {
         BinaryPointOp(Operator::Subtract, a, b) => first_root(&BinaryPointOp(
             Operator::Add,
             a.clone(),
-            Box::new(simplify(BinaryPointOp(
+            Box::new(optimize(BinaryPointOp(
                 Operator::Multiply,
                 b.clone(),
                 Box::new(Const(-1.0)),
@@ -34,34 +34,34 @@ fn first_root(waveform: &Waveform) -> Option<Waveform> {
     }
 }
 
-// Simplify waveform expressions by...
+// Optimize waveform expressions by...
 //   * eliminating constants in binary operators and Sine
 //   * re-associates binary operations so that Consts are on the right
 //   * pulling Fin's up and combining nested Fin's
 //   * replacing zero-length waveforms with the canonical `Fixed(vec![])`
 //   * handling some common cases of Fin in Sum and DotProduct
 // This function must be called after replace_seq.
-pub fn simplify(waveform: Waveform) -> Waveform {
+pub fn optimize(waveform: Waveform) -> Waveform {
     use Waveform::*;
     match waveform {
         // No changes for these:
         w @ (Const(_) | Time(_) | Noise | Fixed(_, _)) => w,
         Fin { length, waveform } => {
-            let length = simplify(*length);
+            let length = optimize(*length);
             match length {
                 // Zero length
                 Const(a) if a >= 0.0 => Fixed(vec![], ()),
                 Fixed(v, _) if v.len() >= 1 && v[0] >= 0.0 => Fixed(vec![], ()),
                 // TODO for longer Fixed, replace with * Fixed(vec![1.0; v.len()])?
                 Time(_) => Fixed(vec![], ()),
-                length => match simplify(*waveform) {
+                length => match optimize(*waveform) {
                     // Nested Fin's
                     Fin {
                         length: inner_length,
                         waveform,
                     } => match (first_root(&length), first_root(&*inner_length)) {
                         (Some(Const(a)), Some(Const(b))) => Fin {
-                            length: Box::new(simplify(BinaryPointOp(
+                            length: Box::new(optimize(BinaryPointOp(
                                 Operator::Subtract,
                                 Box::new(Time(())),
                                 Box::new(Const(a.min(b))),
@@ -84,8 +84,8 @@ pub fn simplify(waveform: Waveform) -> Waveform {
             }
         }
         Append(a, b) => {
-            let a = simplify(*a);
-            let b = simplify(*b);
+            let a = optimize(*a);
+            let b = optimize(*b);
             match (a, b) {
                 (Fixed(a, _), b) if a.len() == 0 => b,
                 (a, Fixed(b, _)) if b.len() == 0 => a,
@@ -99,8 +99,8 @@ pub fn simplify(waveform: Waveform) -> Waveform {
             phase,
             state,
         } => {
-            let frequency = simplify(*frequency);
-            let phase = simplify(*phase);
+            let frequency = optimize(*frequency);
+            let phase = optimize(*phase);
             match (frequency, phase) {
                 (Const(0.0), Const(p)) => Const(p.sin()),
                 (Const(0.0), Fixed(v, _)) => {
@@ -120,13 +120,13 @@ pub fn simplify(waveform: Waveform) -> Waveform {
             feedback,
             state,
         } => Filter {
-            waveform: Box::new(simplify(*waveform)),
-            feed_forward: feed_forward.into_iter().map(simplify).collect(),
-            feedback: feedback.into_iter().map(simplify).collect(),
+            waveform: Box::new(optimize(*waveform)),
+            feed_forward: feed_forward.into_iter().map(optimize).collect(),
+            feedback: feedback.into_iter().map(optimize).collect(),
             state,
         },
         BinaryPointOp(Operator::Add, a, b) => {
-            match (simplify(*a), simplify(*b)) {
+            match (optimize(*a), optimize(*b)) {
                 // Add yields the shorter of the two inputs.
                 (Fixed(a, _), _) if a.len() == 0 => Fixed(vec![], ()),
                 (_, Fixed(b, _)) if b.len() == 0 => Fixed(vec![], ()),
@@ -134,7 +134,7 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                 // Adding 0 is identity (because Add truncates to shorter, and Const is infinite)
                 (a, Const(0.0)) => a,
                 // Commute (moving constants to the right)
-                (Const(a), b) => simplify(BinaryPointOp(
+                (Const(a), b) => optimize(BinaryPointOp(
                     Operator::Add,
                     Box::new(b),
                     Box::new(Const(a)),
@@ -143,7 +143,7 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                 (BinaryPointOp(Operator::Add, a, b), Const(c)) => BinaryPointOp(
                     Operator::Add,
                     a,
-                    Box::new(simplify(BinaryPointOp(
+                    Box::new(optimize(BinaryPointOp(
                         Operator::Add,
                         b,
                         Box::new(Const(c)),
@@ -164,22 +164,22 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                     },
                 ) if first_root(&a_length) == first_root(&b_length) => Fin {
                     length: a_length,
-                    waveform: Box::new(simplify(BinaryPointOp(Operator::Add, a, b))),
+                    waveform: Box::new(optimize(BinaryPointOp(Operator::Add, a, b))),
                 },
                 (a, b) => BinaryPointOp(Operator::Add, Box::new(a), Box::new(b)),
             }
         }
-        BinaryPointOp(Operator::Subtract, a, b) => simplify(BinaryPointOp(
+        BinaryPointOp(Operator::Subtract, a, b) => optimize(BinaryPointOp(
             Operator::Add,
             a,
-            Box::new(simplify(BinaryPointOp(
+            Box::new(optimize(BinaryPointOp(
                 Operator::Multiply,
                 b,
                 Box::new(Const(-1.0)),
             ))),
         )),
         BinaryPointOp(Operator::Merge, a, b) => {
-            match (simplify(*a), simplify(*b)) {
+            match (optimize(*a), optimize(*b)) {
                 // Merge yields the longer of the two inputs.
                 (Fixed(a, _), b) if a.len() == 0 => b,
                 (a, Fixed(b, _)) if b.len() == 0 => a,
@@ -188,7 +188,7 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                 // TODO could check for other infinite waveforms
                 (a @ (Time(_) | Noise), Const(0.0)) => a,
                 // Commute (moving constants to the right)
-                (Const(a), b) => simplify(BinaryPointOp(
+                (Const(a), b) => optimize(BinaryPointOp(
                     Operator::Merge,
                     Box::new(b),
                     Box::new(Const(a)),
@@ -205,7 +205,7 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                     Fin {
                         length: b_length,
                         waveform: b,
-                    } if first_root(&a_length) == first_root(&b_length) => simplify(Append(
+                    } if first_root(&a_length) == first_root(&b_length) => optimize(Append(
                         Box::new(Fin {
                             length: a_length,
                             waveform: Box::new(BinaryPointOp(Operator::Merge, a, b)),
@@ -225,7 +225,7 @@ pub fn simplify(waveform: Waveform) -> Waveform {
             }
         }
         BinaryPointOp(Operator::Multiply, a, b) => {
-            match (simplify(*a), simplify(*b)) {
+            match (optimize(*a), optimize(*b)) {
                 (Fixed(a, _), _) if a.len() == 0 => Fixed(vec![], ()),
                 (_, Fixed(b, _)) if b.len() == 0 => Fixed(vec![], ()),
                 (Const(1.0), b) => b,
@@ -233,7 +233,7 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                 (Const(a), Const(b)) => Const(a * b),
                 (Fixed(a, _), Const(b)) => Fixed(a.into_iter().map(|x| x * b).collect(), ()),
                 // Commute (moving constants to the right)
-                (Const(a), b) => simplify(BinaryPointOp(
+                (Const(a), b) => optimize(BinaryPointOp(
                     Operator::Multiply,
                     Box::new(b),
                     Box::new(Const(a)),
@@ -242,7 +242,7 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                 (BinaryPointOp(Operator::Multiply, a, b), Const(c)) => BinaryPointOp(
                     Operator::Multiply,
                     a,
-                    Box::new(simplify(BinaryPointOp(
+                    Box::new(optimize(BinaryPointOp(
                         Operator::Multiply,
                         b,
                         Box::new(Const(c)),
@@ -252,12 +252,12 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                 // (a + b) * c == (a * c) + (b * c)
                 (BinaryPointOp(Operator::Add, a, b), Const(c)) => BinaryPointOp(
                     Operator::Add,
-                    Box::new(simplify(BinaryPointOp(
+                    Box::new(optimize(BinaryPointOp(
                         Operator::Multiply,
                         a,
                         Box::new(Const(c)),
                     ))),
-                    Box::new(simplify(BinaryPointOp(
+                    Box::new(optimize(BinaryPointOp(
                         Operator::Multiply,
                         b,
                         Box::new(Const(c)),
@@ -266,7 +266,7 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                 // (a / b) * c == (a * c) / b
                 (BinaryPointOp(Operator::Divide, a, b), Const(c)) => BinaryPointOp(
                     Operator::Divide,
-                    Box::new(simplify(BinaryPointOp(
+                    Box::new(optimize(BinaryPointOp(
                         Operator::Multiply,
                         a,
                         Box::new(Const(c)),
@@ -279,17 +279,17 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                 // ... though currently Alt generates both branches, so better not to do too much work
 
                 // Pull Fin out
-                (Fin { length, waveform }, b) => simplify(Fin {
+                (Fin { length, waveform }, b) => optimize(Fin {
                     length,
-                    waveform: Box::new(simplify(BinaryPointOp(
+                    waveform: Box::new(optimize(BinaryPointOp(
                         Operator::Multiply,
                         waveform,
                         Box::new(b),
                     ))),
                 }),
-                (a, Fin { length, waveform }) => simplify(Fin {
+                (a, Fin { length, waveform }) => optimize(Fin {
                     length,
-                    waveform: Box::new(simplify(BinaryPointOp(
+                    waveform: Box::new(optimize(BinaryPointOp(
                         Operator::Multiply,
                         Box::new(a),
                         waveform,
@@ -299,10 +299,10 @@ pub fn simplify(waveform: Waveform) -> Waveform {
             }
         }
         BinaryPointOp(Operator::Divide, a, b) => {
-            match (simplify(*a), simplify(*b)) {
+            match (optimize(*a), optimize(*b)) {
                 (_, Fixed(b, _)) if b.len() == 0 => Fixed(vec![], ()),
                 // Prefer multiplication
-                (a, Const(b)) => simplify(BinaryPointOp(
+                (a, Const(b)) => optimize(BinaryPointOp(
                     Operator::Multiply,
                     Box::new(a),
                     Box::new(Const(1.0 / b)),
@@ -311,27 +311,27 @@ pub fn simplify(waveform: Waveform) -> Waveform {
                 (BinaryPointOp(Operator::Divide, a, b), c) => BinaryPointOp(
                     Operator::Divide,
                     a,
-                    Box::new(simplify(BinaryPointOp(Operator::Multiply, b, Box::new(c)))),
+                    Box::new(optimize(BinaryPointOp(Operator::Multiply, b, Box::new(c)))),
                 ),
                 // (a / (b / c)) == (a * c) / b
                 (a, BinaryPointOp(Operator::Divide, b, c)) => BinaryPointOp(
                     Operator::Divide,
-                    Box::new(simplify(BinaryPointOp(Operator::Multiply, Box::new(a), c))),
+                    Box::new(optimize(BinaryPointOp(Operator::Multiply, Box::new(a), c))),
                     b,
                 ),
 
                 // Pull Fin out
-                (Fin { length, waveform }, b) => simplify(Fin {
+                (Fin { length, waveform }, b) => optimize(Fin {
                     length,
-                    waveform: Box::new(simplify(BinaryPointOp(
+                    waveform: Box::new(optimize(BinaryPointOp(
                         Operator::Divide,
                         waveform,
                         Box::new(b),
                     ))),
                 }),
-                (a, Fin { length, waveform }) => simplify(Fin {
+                (a, Fin { length, waveform }) => optimize(Fin {
                     length,
-                    waveform: Box::new(simplify(BinaryPointOp(
+                    waveform: Box::new(optimize(BinaryPointOp(
                         Operator::Divide,
                         Box::new(a),
                         waveform,
@@ -345,8 +345,8 @@ pub fn simplify(waveform: Waveform) -> Waveform {
             waveform,
             state,
         } => Reset {
-            trigger: Box::new(simplify(*trigger)),
-            waveform: Box::new(simplify(*waveform)),
+            trigger: Box::new(optimize(*trigger)),
+            waveform: Box::new(optimize(*waveform)),
             state,
         },
         Alt {
@@ -354,16 +354,16 @@ pub fn simplify(waveform: Waveform) -> Waveform {
             positive_waveform,
             negative_waveform,
         } => Alt {
-            trigger: Box::new(simplify(*trigger)),
-            positive_waveform: Box::new(simplify(*positive_waveform)),
-            negative_waveform: Box::new(simplify(*negative_waveform)),
+            trigger: Box::new(optimize(*trigger)),
+            positive_waveform: Box::new(optimize(*positive_waveform)),
+            negative_waveform: Box::new(optimize(*negative_waveform)),
         },
         w @ Slider(_) => w,
         Marked { id, waveform } => {
             // TODO could pull out Fin if process_marks better implemented Fin
             Marked {
                 id,
-                waveform: Box::new(simplify(*waveform)),
+                waveform: Box::new(optimize(*waveform)),
             }
         }
         Captured {
@@ -371,7 +371,7 @@ pub fn simplify(waveform: Waveform) -> Waveform {
             waveform,
         } => Captured {
             file_stem,
-            waveform: Box::new(simplify(*waveform)),
+            waveform: Box::new(optimize(*waveform)),
         },
     }
 }
@@ -382,7 +382,7 @@ mod tests {
     use Waveform::*;
 
     #[test]
-    fn test_simplify() {
+    fn test_optimize() {
         let w1 = BinaryPointOp(
             Operator::Add,
             Box::new(BinaryPointOp(
@@ -396,7 +396,7 @@ mod tests {
             )),
             Box::new(Const(4.0)),
         );
-        assert_eq!(simplify(w1), Const(10.0));
+        assert_eq!(optimize(w1), Const(10.0));
 
         let w2 = BinaryPointOp(
             Operator::Add,
@@ -416,7 +416,7 @@ mod tests {
             Box::new(Const(5.0)),
         );
         assert_eq!(
-            simplify(w2),
+            optimize(w2),
             BinaryPointOp(
                 Operator::Add,
                 Box::new(Sine {
@@ -446,7 +446,7 @@ mod tests {
             Box::new(Const(5.0)),
         );
         assert_eq!(
-            simplify(w3),
+            optimize(w3),
             BinaryPointOp(
                 Operator::Multiply,
                 Box::new(Sine {
@@ -476,7 +476,7 @@ mod tests {
             Box::new(Const(5.0)),
         );
         assert_eq!(
-            simplify(w4),
+            optimize(w4),
             BinaryPointOp(
                 Operator::Add,
                 Box::new(BinaryPointOp(
@@ -512,7 +512,7 @@ mod tests {
             }),
         );
         assert_eq!(
-            simplify(w5),
+            optimize(w5),
             Fin {
                 length: Box::new(BinaryPointOp(
                     Operator::Add,

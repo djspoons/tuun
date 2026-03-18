@@ -74,9 +74,7 @@ impl Wasm {
                 for (pattern, expr) in parsed_defs {
                     match parser::evaluate(&context, expr) {
                         Ok(expr) => {
-                            if let Err(e) =
-                                parser::extend_context(&mut context, &pattern, &expr)
-                            {
+                            if let Err(e) = parser::extend_context(&mut context, &pattern, &expr) {
                                 eprintln!("Warning: Failed to add context definition: {:?}", e);
                             }
                         }
@@ -123,7 +121,7 @@ impl Wasm {
         // Extract the waveform from the expression
         match expr {
             parser::Expr::Waveform(waveform) => {
-                let waveform = optimizer::simplify(waveform);
+                let waveform = optimizer::optimize(waveform);
                 // TODO could precompute here as well
 
                 // Initialize the waveform state for generation
@@ -133,7 +131,7 @@ impl Wasm {
             parser::Expr::Seq { waveform, .. } => {
                 match *waveform {
                     parser::Expr::Waveform(waveform) => {
-                        let waveform = optimizer::simplify(waveform);
+                        let waveform = optimizer::optimize(waveform);
                         // TODO could precompute here as well
 
                         // Initialize the waveform state for generation

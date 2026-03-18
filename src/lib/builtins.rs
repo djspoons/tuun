@@ -154,12 +154,12 @@ fn first_root(waveform: &Waveform) -> Option<Waveform> {
         Time(_) => Some(Const(0.0)),
         BinaryPointOp(Operator::Add, a, b) => match (&**a, &**b) {
             // TODO should really check that Time doesn't appear on the other side too
-            (Time(_), w) => Some(optimizer::simplify(BinaryPointOp(
+            (Time(_), w) => Some(optimizer::optimize(BinaryPointOp(
                 Operator::Multiply,
                 Box::new(w.clone()),
                 Box::new(Const(-1.0)),
             ))),
-            (w, Time(_)) => Some(optimizer::simplify(BinaryPointOp(
+            (w, Time(_)) => Some(optimizer::optimize(BinaryPointOp(
                 Operator::Multiply,
                 Box::new(w.clone()),
                 Box::new(Const(-1.0)),
@@ -169,7 +169,7 @@ fn first_root(waveform: &Waveform) -> Option<Waveform> {
         BinaryPointOp(Operator::Subtract, a, b) => first_root(&BinaryPointOp(
             Operator::Add,
             a.clone(),
-            Box::new(optimizer::simplify(BinaryPointOp(
+            Box::new(optimizer::optimize(BinaryPointOp(
                 Operator::Multiply,
                 b.clone(),
                 Box::new(Const(-1.0)),
@@ -184,7 +184,7 @@ fn first_root(waveform: &Waveform) -> Option<Waveform> {
 fn add_offsets(a: Waveform, b: Waveform) -> Expr {
     match (first_root(&a), first_root(&b)) {
         (Some(a_root), Some(b_root)) => {
-            let b = optimizer::simplify(Waveform::BinaryPointOp(
+            let b = optimizer::optimize(Waveform::BinaryPointOp(
                 Operator::Multiply,
                 Box::new(Waveform::BinaryPointOp(
                     Operator::Add,
