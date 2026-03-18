@@ -1,8 +1,8 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use tuun::builtins;
-use tuun::parser;
 
+use tuun::builtins;
 use tuun::generator;
+use tuun::parser;
 use tuun::renderer;
 use tuun::waveform;
 
@@ -54,10 +54,14 @@ fn bench_filter(c: &mut Criterion) {
 fn bench_marks(c: &mut Criterion) {
     c.bench_function("marks_4_40", |b| {
         b.iter(|| {
+            let mut context = vec![];
+            builtins::add_prelude(&mut context);
             let generator = generator::Generator::new(44100);
             let mut ws = Vec::new();
             for _ in 0..40 {
-                ws.push(parser::Expr::Waveform(renderer::beats_waveform(120, 4)));
+                ws.push(parser::Expr::Waveform(renderer::beats_waveform(
+                    120, 4, &context,
+                )));
             }
             let w = match builtins::sequence(vec![parser::Expr::List(ws)]) {
                 parser::Expr::Waveform(w) => w,

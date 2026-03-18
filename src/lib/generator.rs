@@ -310,27 +310,15 @@ impl<'a> Generator<'a> {
             Filter { .. } => unreachable!("Filter waveform has non-Initial, non-Samples state"),
             BinaryPointOp(op, a, b) => {
                 use waveform::Operator;
-                let desired = match op {
-                    Operator::Multiply | Operator::Divide => {
-                        // We need to make sure we generate a length based on the shorter waveform.
-                        // TODO would it be better to push this down into generate_binary_op?
-                        let len = self.length(
-                            &mut BinaryPointOp(op.clone(), a.clone(), b.clone()),
-                            desired,
-                        );
-                        len
-                    }
-                    _ => desired,
-                };
                 let op_fn = match op {
-                    Operator::Add => std::ops::Add::add,
+                    Operator::Add | Operator::Merge => std::ops::Add::add,
                     Operator::Subtract => std::ops::Sub::sub,
                     Operator::Multiply => std::ops::Mul::mul,
                     Operator::Divide => |a: f32, b: f32| {
                         if b == 0.0 { 0.0 } else { a / b }
                     },
                 };
-                self.generate_binary_op(op_fn, a, b, desired)
+                self.generate_binary_op(op_fn, a, b, *op == Operator::Merge, desired)
             }
             Reset {
                 state: state @ Initial,
@@ -462,14 +450,16 @@ impl<'a> Generator<'a> {
         }
     }
 
-    // Generate a binary operation on two waveforms, up to 'desired' samples. The second waveform is
-    // offset by the offset of the first waveform. The `op` function is applied to each pair of samples.
+    // Generate a binary operation on two waveforms, up to 'desired' samples. The `op_fn` function
+    // is applied to each pair of samples. If `extend_to_longer` is true, the shorter waveform will
+    // be extended with zeros to match the length of the longer one.
     fn generate_binary_op(
         &self,
         op_fn: fn(f32, f32) -> f32,
         a: &mut Waveform,
         b: &mut Waveform,
-        desired: usize,
+        extend_to_longer: bool,
+        mut desired: usize,
     ) -> Vec<f32> {
         assert_eq!(self.offset(&a, desired), 0);
         let mut a_out = self.generate(a, desired);
@@ -481,14 +471,18 @@ impl<'a> Generator<'a> {
                 for x in a_out.iter_mut() {
                     *x = op_fn(*x, *f);
                 }
-                if desired > a_out.len() {
+                if desired > a_out.len() && extend_to_longer {
                     a_out.resize(desired, op_fn(0.0, *f));
                 }
                 // In theory, we need to advance `b`, but that's a no-op given that it's a Const
                 a_out
             }
             _ => {
-                let b_out = self.generate(b, desired);
+                if !extend_to_longer {
+                    // This will mean that `b` is no longer than `a`.
+                    desired = a_out.len();
+                }
+                let mut b_out = self.generate(b, desired);
                 // Merge the overlapping portion
                 for (i, x) in a_out.iter_mut().enumerate() {
                     if i >= b_out.len() {
@@ -496,9 +490,16 @@ impl<'a> Generator<'a> {
                     }
                     *x = op_fn(*x, b_out[i]);
                 }
-                // If the left side is shorter than the right, than append.
-                if b_out.len() > a_out.len() {
-                    a_out.extend_from_slice(&b_out[a_out.len()..]);
+                // At this point we've updated all of the elements up to the minimum of the two
+                // lengths.
+                // If the right side is shorter, then truncate.
+                if !extend_to_longer && b_out.len() < a_out.len() {
+                    a_out.truncate(b_out.len());
+                }
+                // If the left side is shorter than the right, then append.
+                if extend_to_longer && b_out.len() > a_out.len() {
+                    b_out.drain(0..a_out.len());
+                    a_out.append(&mut b_out);
                 }
                 a_out
             }
@@ -643,11 +644,12 @@ impl<'a> Generator<'a> {
             }
             BinaryPointOp(op, a, b) => {
                 let a_len = self.length(a, max);
-                assert_eq!(self.offset(&a, max), 0); // XXXXX remove this?
                 let b_len = self.length(b, max);
                 match op {
-                    Operator::Add | Operator::Subtract => a_len.max(b_len),
-                    Operator::Multiply | Operator::Divide => a_len.min(b_len),
+                    Operator::Add | Operator::Subtract | Operator::Multiply | Operator::Divide => {
+                        a_len.min(b_len)
+                    }
+                    Operator::Merge => a_len.max(b_len),
                 }
             }
             Reset { trigger, .. } => {
@@ -1140,9 +1142,7 @@ mod tests {
     use crate::optimizer;
     use waveform::Operator;
     use waveform::Waveform;
-    use waveform::Waveform::{
-        Append, BinaryPointOp, Const, Filter, Fin, Fixed, Reset, Seq, Sine, Time,
-    };
+    use waveform::Waveform::{Append, BinaryPointOp, Const, Filter, Fin, Fixed, Reset, Sine, Time};
 
     const MAX_LENGTH: usize = 1000;
 
@@ -1163,43 +1163,7 @@ mod tests {
         Generator::new(sample_frequency)
     }
 
-    fn finite_const_waveform(value: f32, fin_duration: u64, seq_duration: u64) -> Waveform {
-        return Seq {
-            offset: Box::new(BinaryPointOp(
-                Operator::Subtract,
-                Box::new(Time(())),
-                Box::new(Const(seq_duration as f32)),
-            )),
-            waveform: Box::new(Fin {
-                length: Box::new(BinaryPointOp(
-                    Operator::Subtract,
-                    Box::new(Time(())),
-                    Box::new(Const(fin_duration as f32)),
-                )),
-                waveform: Box::new(Const(value)),
-            }),
-        };
-    }
-
-    // Verifies that `waveform` has an offset of `expected` samples.
-    fn check_offset(g: &Generator, waveform: &Waveform, expected: usize) {
-        let (offset_waveform, _) = optimizer::replace_seq(waveform.clone());
-        let offset_waveform = initialize_state(offset_waveform);
-        match g.greater_or_equals_at(&offset_waveform, 0.0, MAX_LENGTH) {
-            MaybeOption::Some(offset) => {
-                assert_eq!(offset, expected);
-            }
-            m => {
-                assert!(
-                    false,
-                    "Failed to check offset waveform {:?} (expected {}, got {:?})",
-                    waveform, expected, m
-                );
-            }
-        }
-    }
-
-    // Verifies that `waveform` would generate `expected` samples using a call to `remaining`.
+    // Verifies that `waveform` would generate `expected` samples using a call to `length`.
     fn check_length(
         g: &Generator,
         waveform: &Waveform,
@@ -1373,7 +1337,7 @@ mod tests {
         run_sin_test(&g, &mut w, expected);
 
         // Non-constant frequency: f = time + 10 Hz
-        let mut w3 = initialize_state(Waveform::Sine {
+        let mut w = initialize_state(Waveform::Sine {
             frequency: Box::new(BinaryPointOp(
                 Operator::Multiply,
                 Box::new(BinaryPointOp(
@@ -1392,7 +1356,7 @@ mod tests {
             phase.sin() as f32
         };
         let expected = (0..100).map(f_is_t_plus_ten).collect();
-        run_sin_test(&g, &mut w3, expected);
+        run_sin_test(&g, &mut w, expected);
 
         // Non-zero phase offset
         let mut w = initialize_state(*sin_waveform(0.25, f32::consts::PI));
@@ -1407,14 +1371,14 @@ mod tests {
 
     #[test]
     fn test_reset() {
-        let w1 = Reset {
+        let w = Reset {
             trigger: sin_waveform(0.25, 0.0),
             waveform: Box::new(Time(())),
             state: (),
         };
-        run_tests(&w1, &vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0, 3.0]);
+        run_tests(&w, &vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0, 3.0]);
 
-        let w2 = Reset {
+        let w = Reset {
             trigger: Box::new(Fin {
                 length: Box::new(BinaryPointOp(
                     Operator::Subtract,
@@ -1426,9 +1390,9 @@ mod tests {
             waveform: Box::new(Time(())),
             state: (),
         };
-        run_tests(&w2, &vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0]);
+        run_tests(&w, &vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0]);
 
-        let w3 = Reset {
+        let w = Reset {
             trigger: sin_waveform(0.25, 0.0),
             waveform: Box::new(Waveform::Fin {
                 length: Box::new(BinaryPointOp(
@@ -1440,24 +1404,24 @@ mod tests {
             }),
             state: (),
         };
-        run_tests(&w3, &vec![0.0, 1.0, 2.0, 0.0, 0.0, 1.0, 2.0, 0.0]);
+        run_tests(&w, &vec![0.0, 1.0, 2.0, 0.0, 0.0, 1.0, 2.0, 0.0]);
 
-        let w5 = Reset {
+        let w = Reset {
             trigger: sin_waveform(0.25, f32::consts::PI),
             waveform: Box::new(Time(())),
             state: (),
         };
-        run_tests(&w5, &vec![0.0, 1.0, 0.0, 1.0, 2.0, 3.0, 0.0, 1.0]);
+        run_tests(&w, &vec![0.0, 1.0, 0.0, 1.0, 2.0, 3.0, 0.0, 1.0]);
 
         // Test where a reset lines up with the buffer boundary and where there are multiple
         // resets in a buffer.
-        let w6 = Reset {
+        let w = Reset {
             trigger: sin_waveform(0.25, 0.0),
             waveform: Box::new(Time(())),
             state: (),
         };
         run_tests(
-            &w6,
+            &w,
             &vec![
                 0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0, 3.0,
             ],
@@ -1468,16 +1432,15 @@ mod tests {
     fn test_append() {
         let g = new_test_generator(1);
         let w = Append(
-            Box::new(finite_const_waveform(1.0, 3, 2)),
-            Box::new(finite_const_waveform(2.0, 3, 2)),
+            Box::new(Fixed(vec![1.0; 3], ())),
+            Box::new(Fixed(vec![2.0; 3], ())),
         );
 
-        check_offset(&g, &w, 4);
         check_length(&g, &w, 0, 6, MAX_LENGTH);
         check_length(&g, &w, 2, 4, MAX_LENGTH);
         check_length(&g, &w, 4, 2, MAX_LENGTH);
         run_tests(&w, &vec![1.0, 1.0, 1.0, 2.0, 2.0, 2.0]);
-        match g.precompute(initialize_state(optimizer::replace_seq(w).1)) {
+        match g.precompute(initialize_state(w)) {
             Fixed(_, _) => (), // Already checked the result above
             w => panic!(
                 "Expected the Append to be precomputed to a Fixed, but got {:?}",
@@ -1488,96 +1451,60 @@ mod tests {
 
     #[test]
     fn test_sum() {
-        let g = new_test_generator(1);
+        // Add yields a result as long as the shorter of the two inputs.
+
+        // Both infinite
+        let w = BinaryPointOp(Operator::Add, Box::new(Const(1.0)), Box::new(Const(2.0)));
+        run_tests(&w, &vec![3.0; 8]);
+
+        // One finite, one infinite: truncates to the finite length
         let w = BinaryPointOp(
             Operator::Add,
-            Box::new(finite_const_waveform(1.0, 5, 2)),
-            Box::new(finite_const_waveform(1.0, 5, 2)),
+            Box::new(Fixed(vec![1.0, 2.0, 3.0], ())),
+            Box::new(Const(10.0)),
         );
-        check_offset(&g, &w, 4);
-        check_length(&g, &w, 0, 7, MAX_LENGTH);
-        run_tests(&w, &vec![1.0, 1.0, 2.0, 2.0, 2.0, 1.0, 1.0]);
+        run_tests(&w, &vec![11.0, 12.0, 13.0]);
 
-        let w2 = Fin {
+        // Both finite, different lengths: truncates to the shorter
+        let w = BinaryPointOp(
+            Operator::Add,
+            Box::new(Fixed(vec![1.0, 2.0], ())),
+            Box::new(Fixed(vec![10.0, 20.0, 30.0], ())),
+        );
+        run_tests(&w, &vec![11.0, 22.0]);
+
+        // Fin + Const
+        let w = Fin {
             length: Box::new(BinaryPointOp(
                 Operator::Subtract,
                 Box::new(Time(())),
-                Box::new(Const(8.0)),
+                Box::new(Const(4.0)),
             )),
             waveform: Box::new(BinaryPointOp(
                 Operator::Add,
-                Box::new(Seq {
-                    offset: Box::new(Const(0.0)),
-                    waveform: Box::new(Const(1.0)),
-                }),
-                Box::new(BinaryPointOp(
-                    Operator::Add,
-                    Box::new(Seq {
-                        offset: Box::new(Const(0.0)),
-                        waveform: Box::new(Const(2.0)),
-                    }),
-                    Box::new(Fin {
-                        length: Box::new(Const(0.0)),
-                        waveform: Box::new(Const(0.0)),
-                    }),
-                )),
+                Box::new(Const(1.0)),
+                Box::new(Const(2.0)),
             )),
         };
-        run_tests(&w2, &vec![3.0; 8]);
+        run_tests(&w, &vec![3.0, 3.0, 3.0, 3.0]);
 
-        let w5 = BinaryPointOp(
+        // Add with Fixed([], ()) yields empty (shorter is 0)
+        let w = BinaryPointOp(
             Operator::Add,
-            Box::new(finite_const_waveform(3.0, 1, 3)),
-            Box::new(finite_const_waveform(2.0, 2, 2)),
+            Box::new(Fixed(vec![], ())),
+            Box::new(Const(5.0)),
         );
-        run_tests(&w5, &vec![3.0, 0.0, 0.0, 2.0, 2.0]);
-
-        // Test a case to make sure that the sum generates enough samples, even when
-        // the left-hand side is shorter and the right hasn't started yet.
-        let (_, w5_no_seq) = optimizer::replace_seq(w5);
-        let result = g.generate(&mut initialize_state(w5_no_seq.clone()), 2);
-        assert_eq!(result, vec![3.0, 0.0]);
-
-        // This one is a little strange: the right-hand side doesn't generate any
-        // samples but we still want length(a ~+ b) to be
-        //   max(length(a), offset(a) + length(b)).
-        let w6 = BinaryPointOp(
-            Operator::Add,
-            Box::new(finite_const_waveform(3.0, 1, 3)),
-            Box::new(finite_const_waveform(2.0, 0, 0)),
-        );
-        let (_, w6_no_seq) = optimizer::replace_seq(w6);
-        let result = g.generate(&mut initialize_state(w6_no_seq), 2);
-        assert_eq!(result, vec![3.0, 0.0]);
-
-        let w7 = BinaryPointOp(
-            Operator::Add,
-            Box::new(Fixed(vec![1.0], ())),
-            Box::new(Const(0.0)),
-        );
-        run_tests(&w7, &vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        run_tests(&w, &vec![]);
     }
 
     #[test]
     fn test_dot_product() {
         let g = new_test_generator(1);
-        let w1 = BinaryPointOp(
-            Operator::Multiply,
-            Box::new(finite_const_waveform(3.0, 8, 2)),
-            Box::new(finite_const_waveform(2.0, 5, 2)),
-        );
-        check_offset(&g, &w1, 4);
-        check_length(&g, &w1, 0, 7, MAX_LENGTH);
-        run_tests(&w1, &vec![3.0, 3.0, 6.0, 6.0, 6.0, 6.0, 6.0]);
 
-        let w2 = BinaryPointOp(
-            Operator::Multiply,
-            Box::new(finite_const_waveform(3.0, 5, 2)),
-            Box::new(finite_const_waveform(2.0, 5, 2)),
-        );
-        run_tests(&w2, &vec![3.0, 3.0, 6.0, 6.0, 6.0]);
+        // Multiply yields a result as long as the shorter of the two inputs.
 
-        let w3 = Fin {
+        // Both infinite
+        let w = Fin {
             length: Box::new(BinaryPointOp(
                 Operator::Subtract,
                 Box::new(Time(())),
@@ -1589,37 +1516,87 @@ mod tests {
                 Box::new(Const(2.0)),
             )),
         };
-        run_tests(&w3, &vec![6.0; 8]);
+        run_tests(&w, &vec![6.0; 8]);
 
-        let w4 = BinaryPointOp(
-            Operator::Multiply,
-            Box::new(Seq {
-                offset: Box::new(BinaryPointOp(
-                    Operator::Subtract,
-                    Box::new(Time(())),
-                    Box::new(Const(1.0)),
-                )),
-                waveform: Box::new(Const(3.0)),
-            }),
-            Box::new(finite_const_waveform(2.0, 5, 5)),
-        );
-        run_tests(&w4, &vec![3.0, 6.0, 6.0, 6.0, 6.0, 6.0]);
-
+        // One finite, one infinite: truncates to finite
         let w = BinaryPointOp(
             Operator::Multiply,
-            Box::new(finite_const_waveform(3.0, 6, 2)),
+            Box::new(Fixed(vec![3.0, 4.0, 5.0], ())),
             Box::new(Const(2.0)),
         );
-        check_offset(&g, &w, 2);
-        check_length(&g, &w, 0, 6, MAX_LENGTH);
-        run_tests(&w, &vec![3.0, 3.0, 6.0, 6.0, 6.0, 6.0]);
-        match g.precompute(initialize_state(optimizer::replace_seq(w).1)) {
-            Fixed(_, _) => (), // Already checked the result above
+        run_tests(&w, &vec![6.0, 8.0, 10.0]);
+
+        // Both finite, different lengths: truncates to shorter
+        let w = BinaryPointOp(
+            Operator::Multiply,
+            Box::new(Fixed(vec![3.0, 4.0], ())),
+            Box::new(Fixed(vec![2.0, 5.0, 1.0], ())),
+        );
+        run_tests(&w, &vec![6.0, 20.0]);
+
+        // Multiply with empty Fixed yields empty
+        let w = BinaryPointOp(
+            Operator::Multiply,
+            Box::new(Fixed(vec![], ())),
+            Box::new(Const(5.0)),
+        );
+        run_tests(&w, &vec![]);
+
+        // Precompute: finite * Const should precompute to Fixed
+        let w = BinaryPointOp(
+            Operator::Multiply,
+            Box::new(Fixed(vec![3.0, 4.0, 5.0], ())),
+            Box::new(Const(2.0)),
+        );
+        run_tests(&w, &vec![6.0, 8.0, 10.0]);
+        match g.precompute(initialize_state(w)) {
+            Fixed(_, _) => (),
             w => panic!(
-                "Expected the Append to be precomputed to a Fixed, but got {:?}",
+                "Expected the result to be precomputed to a Fixed, but got {:?}",
                 w
             ),
         }
+    }
+
+    #[test]
+    fn test_merge() {
+        // Merge behaves like Add but yields a result as long as the longer of the two inputs.
+
+        // Both infinite
+        let w = BinaryPointOp(Operator::Merge, Box::new(Const(1.0)), Box::new(Const(2.0)));
+        run_tests(&w, &vec![3.0; 8]);
+
+        // Both finite, different lengths: extends to the longer
+        let w = BinaryPointOp(
+            Operator::Merge,
+            Box::new(Fixed(vec![1.0, 2.0], ())),
+            Box::new(Fixed(vec![10.0, 20.0, 30.0], ())),
+        );
+        run_tests(&w, &vec![11.0, 22.0, 30.0]);
+
+        // One finite, one infinite: extends to infinite
+        let w = BinaryPointOp(
+            Operator::Merge,
+            Box::new(Fixed(vec![1.0, 2.0], ())),
+            Box::new(Const(10.0)),
+        );
+        run_tests(&w, &vec![11.0, 12.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]);
+
+        // Both finite, same length
+        let w = BinaryPointOp(
+            Operator::Merge,
+            Box::new(Fixed(vec![1.0, 2.0], ())),
+            Box::new(Fixed(vec![10.0, 20.0], ())),
+        );
+        run_tests(&w, &vec![11.0, 22.0]);
+
+        // Merge with empty Fixed: the other side survives
+        let w5 = BinaryPointOp(
+            Operator::Merge,
+            Box::new(Fixed(vec![], ())),
+            Box::new(Fixed(vec![10.0, 20.0], ())),
+        );
+        run_tests(&w5, &vec![10.0, 20.0]);
     }
 
     #[test]
@@ -1627,15 +1604,15 @@ mod tests {
         let g = new_test_generator(1);
 
         // FIRs
-        let w1 = Filter {
+        let w = Filter {
             waveform: Box::new(Time(())),
             feed_forward: vec![Const(2.0), Const(2.0), Const(2.0)],
             feedback: vec![],
             state: (),
         };
-        run_tests(&w1, &vec![6.0, 12.0, 18.0, 24.0, 30.0, 36.0, 42.0, 48.0]);
+        run_tests(&w, &vec![6.0, 12.0, 18.0, 24.0, 30.0, 36.0, 42.0, 48.0]);
 
-        let w2 = Filter {
+        let w = Filter {
             waveform: Box::new(Fin {
                 length: Box::new(BinaryPointOp(
                     Operator::Subtract,
@@ -1648,7 +1625,7 @@ mod tests {
             feedback: vec![],
             state: (),
         };
-        run_tests(&w2, &vec![6.0, 12.0, 18.0, 14.0, 8.0]);
+        run_tests(&w, &vec![6.0, 12.0, 18.0, 14.0, 8.0]);
 
         let w = Filter {
             waveform: Box::new(Fixed(vec![1.0, 2.0, 3.0], ())),
@@ -1658,7 +1635,7 @@ mod tests {
         };
         check_length(&g, &w, 0, 3, 5);
 
-        let w3 = Filter {
+        let w = Filter {
             waveform: Box::new(Fin {
                 length: Box::new(BinaryPointOp(
                     Operator::Subtract,
@@ -1672,10 +1649,10 @@ mod tests {
             state: (),
         };
         let g = new_test_generator(1);
-        check_length(&g, &w3, 0, 8, MAX_LENGTH);
-        run_tests(&w3, &vec![20.0, 30.0, 40.0, 50.0, 44.0, 36.0, 26.0, 14.0]);
+        check_length(&g, &w, 0, 8, MAX_LENGTH);
+        run_tests(&w, &vec![20.0, 30.0, 40.0, 50.0, 44.0, 36.0, 26.0, 14.0]);
 
-        let w4 = Filter {
+        let w = Filter {
             waveform: Box::new(Reset {
                 // Pick a trigger that's far from zero on at our sampled points
                 trigger: sin_waveform(1.0 / 3.0, 3.0 * std::f32::consts::PI / 2.0),
@@ -1686,30 +1663,30 @@ mod tests {
             feedback: vec![],
             state: (),
         };
-        run_tests(&w4, &vec![0.0, 2.0, 6.0, 4.0, 2.0, 6.0, 4.0, 2.0]);
+        run_tests(&w, &vec![0.0, 2.0, 6.0, 4.0, 2.0, 6.0, 4.0, 2.0]);
 
-        let w5 = Filter {
+        let w = Filter {
             waveform: Box::new(Const(1.0)),
             feed_forward: vec![Const(0.2), Const(0.2), Const(0.2), Const(0.2), Const(0.2)],
             feedback: vec![],
             state: (),
         };
-        run_tests(&w5, &vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+        run_tests(&w, &vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
 
         // IIRs
-        let w6 = Filter {
+        let w = Filter {
             waveform: Box::new(Time(())),
             feed_forward: vec![Const(0.5)],
             feedback: vec![Const(-0.5)],
             state: (),
         };
         run_tests(
-            &w6,
+            &w,
             &vec![0.0, 0.5, 1.25, 2.125, 3.0625, 4.03125, 5.015625, 6.0078125],
         );
 
         // Cascade
-        let w7 = Filter {
+        let w = Filter {
             waveform: Box::new(Filter {
                 waveform: Box::new(Time(())),
                 feed_forward: vec![Const(0.5)],
@@ -1721,32 +1698,28 @@ mod tests {
             state: (),
         };
         run_tests(
-            &w7,
+            &w,
             &vec![
                 0.0, 0.2, 0.62, 1.222, 1.9582, 2.7874203, 3.6787024, 4.610347,
             ],
         );
 
         // Input is Const(1.0), so out[n] = 1.0*1.0 + n*1.0 = n+1.
-        let w8 = Filter {
+        let w = Filter {
             waveform: Box::new(Const(1.0)),
             feed_forward: vec![Const(1.0), Time(())],
             feedback: vec![],
             state: (),
         };
-        run_tests(&w8, &vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+        run_tests(&w, &vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
 
-        let w9 = Filter {
-            waveform: Box::new(finite_const_waveform(1.0, 3, 0)),
-            feed_forward: vec![
-                Const(1.0),
-                finite_const_waveform(2.0, 1, 0),
-                finite_const_waveform(3.0, 2, 0),
-            ],
+        let w = Filter {
+            waveform: Box::new(Fixed(vec![1.0; 3], ())),
+            feed_forward: vec![Const(1.0), Fixed(vec![2.0], ()), Fixed(vec![3.0; 2], ())],
             feedback: vec![],
             state: (),
         };
-        run_tests(&w9, &vec![6.0, 3.0, 0.0]);
+        run_tests(&w, &vec![6.0, 3.0, 0.0]);
 
         // TODO add test where length of inner waveform is less than ff_count - 1
     }

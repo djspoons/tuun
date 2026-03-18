@@ -7,6 +7,7 @@ pub enum Operator {
     Subtract,
     Multiply,
     Divide,
+    Merge,
 }
 
 #[derive(Debug, Clone, PartialEq)]

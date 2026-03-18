@@ -48,19 +48,20 @@ linear = fn(initial, slope) => initial + (time * slope),
 Aw = fn(dur) => linear(0.0, 1.0 / dur) | fin(time - dur) | seq(time - dur),
 Dw = fn(dur, level) => linear(1.0, (level - 1.0) / dur) | fin(time - dur) | seq(time - dur),
 Sw = fn(dur, level) => level | fin(time - dur) | seq(time - dur),
-Rw = fn(dur, level) => linear(level, -level / dur) | fin(time - dur) | seq(time - dur),
+// N.B. that R and Rw are not seq, since they are assumed to be the last part of the envelope.
+Rw = fn(dur, level) => linear(level, -level / dur) | fin(time - dur),
 // Combine them to create a new filter.
 ADSR = fn(attack_dur, decay_dur, sustain_level, sustain_dur, release_dur) =>
-  fn(w) => (w | seq(0)) * <[Aw(attack_dur),
-                            Dw(decay_dur, sustain_level),
-                            Sw(sustain_dur, sustain_level),
-                            Rw(release_dur, sustain_level)]>,
+  fn(w) => w * <[Aw(attack_dur),
+                 Dw(decay_dur, sustain_level),
+                 Sw(sustain_dur, sustain_level),
+                 Rw(release_dur, sustain_level)]>,
 
 // Also, we can create component filters... though note that the first three
 // don't change the length, so they need to be combined with R (or fin).
-A = fn(dur) => fn(w) => w * (Aw(dur) + 1),
-D = fn(dur, level) => fn(w) => w * (Dw(dur, level) + 1),
-S = fn(dur, level) => fn(w) => w * (Sw(dur, level) + 1),
+A = fn(dur) => fn(w) => w * (Aw(dur) \ 1),
+D = fn(dur, level) => fn(w) => w * (Dw(dur, level) \ 1),
+S = fn(dur, level) => fn(w) => w * (Sw(dur, level) \ 1),
 R = fn(dur, level) => fn(w) => w * Rw(dur, level),
 
 over = fn(freq) => fn(x) => $(freq*x) * (1/x),
@@ -132,7 +133,7 @@ Hw = 1 | fin(time - H) | seq(time - H),
 Qw = 1 | fin(time - Q) | seq(time - Q),
 Ew = 1 | fin(time - E) | seq(time - E),
 
-// Rests as waveforms: use with <> or +
+// Rests as waveforms: use with <> or \
 Wrw = 0 | fin(0) | seq(time - W),
 Hrw = 0 | fin(0) | seq(time - H),
 Qrw = 0 | fin(0) | seq(time - Q),
@@ -168,12 +169,17 @@ i = fn(key) => fn(inst) => fn(dur) => {map(amp(0.4), minor_triad(key)(fn(freq) =
 // <[I H, III H, i H]>
 // <[Hh(@67), Hh(@69)]>
 
-// Plays the given waveform w on the beats in bs, starting at 1. For example:
-// on_beats(bass, [1, 2, 3, 4])
+// Plays the given waveform `w` on the beats in `bs`, starting at 1. Beats
+// should be non-decreasing and `w` should *not* be a sequence-able waveform.
+// For example: on_beats(bass(Q) | unseq(), [1, 2, 3, 4])
 on_beats = fn(w, bs) => let
-  f = fn((offset, prev, ws), play_at_beat) =>
-      if offset == play_at_beat
-      then (play_at_beat, w, append(ws, [prev | seq(0)]))
-      else (play_at_beat, w, append(ws, [prev | seq(time - (duration_from_beats(play_at_beat - offset)))])),
-  (offset, prev, ws) = reduce(f, (1, 0 | fin(0), []), bs),
+  f = fn((current_beat, prev, ws), play_at_beat) =>
+      if
+        play_at_beat < current_beat
+      then
+        (play_at_beat, w, append(ws, [prev | seq(0)]))
+      else
+        (play_at_beat, w, append(ws,
+          [prev | seq(time - (duration_from_beats(play_at_beat - current_beat)))])),
+  (current_beat, prev, ws) = reduce(f, (1, 0 | fin(0), []), bs),
   in <append(ws, [prev])>,

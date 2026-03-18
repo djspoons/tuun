@@ -162,6 +162,11 @@ pub enum Expr {
         // Pure functions from a vector of values to a value
         function: BuiltInFn,
     },
+    // A sequence-able waveform. In value form, both offset and waveform are Expr::Waveform.
+    Seq {
+        offset: Box<Expr>,
+        waveform: Box<Expr>,
+    },
     // If-Then-Else expression
     IfThenElse {
         condition: Box<Expr>,
@@ -238,7 +243,6 @@ fn parse_unary_operator(input: LocatedSpan) -> IResult<LocatedSpan> {
             tag("@"),
             tag("$"),
             tag("%"),
-            tag("&"),
             tag("-"),
             tag("?"),
         )).parse(input)?;
@@ -420,7 +424,7 @@ fn parse_additive(input: LocatedSpan) -> IResult<Expr> {
         (
             parse_multiplicative,
             many0((
-                ws(alt((tag("+"), tag("-")))),
+                ws(alt((tag("+"), tag("-"), tag("&")))),
                 expect(parse_multiplicative, "expected expression after operator"),
             )),
         ),
@@ -524,7 +528,7 @@ fn parse_list(input: LocatedSpan) -> IResult<Expr> {
     return Ok((rest, Expr::List(exprs)));
 }
 
-fn parse_expr(input: LocatedSpan) -> IResult<Expr> {
+fn parse_reverse_application(input: LocatedSpan) -> IResult<Expr> {
     #[rustfmt::skip]
     let (rest, expr) = map(
         (
@@ -548,6 +552,29 @@ fn parse_expr(input: LocatedSpan) -> IResult<Expr> {
                         expr = Expr::default();
                     }
                 }
+            }
+            return expr;
+        }
+    ).parse(input)?;
+    return Ok((rest, expr));
+}
+
+fn parse_expr(input: LocatedSpan) -> IResult<Expr> {
+    #[rustfmt::skip]
+    let (rest, expr) = map(
+        (
+            parse_reverse_application,
+            many0(preceded(
+                    ws(char('\\')),
+                    expect(parse_reverse_application, "expected expression after \\ operator"),
+                )),
+        ),
+        |(mut expr, op_exprs)| {
+            for op_expr in op_exprs {
+                expr = Expr::Application {
+                    function: Box::new(Expr::Variable("\\".to_string())),
+                    argument: Box::new(Expr::Tuple(vec![expr, op_expr.unwrap_or_default()])),
+                };
             }
             return expr;
         }
@@ -633,6 +660,10 @@ fn substitute(context: &Vec<(String, Expr)>, expr: Expr) -> Expr {
     match expr {
         Bool(_) | Float(_) | String(_) => expr,
         Expr::Waveform(waveform) => Expr::Waveform(waveform),
+        Expr::Seq { offset, waveform } => Expr::Seq {
+            offset: Box::new(substitute(context, *offset)),
+            waveform: Box::new(substitute(context, *waveform)),
+        },
         Function { pattern, body } => {
             let mut context = context.clone();
             extend_with_trivial_context(&mut context, &pattern);
@@ -765,6 +796,7 @@ impl fmt::Display for Expr {
                 }
                 write!(f, "]")
             }
+            Expr::Seq { offset, waveform } => write!(f, "seq({}, {})", offset, waveform),
             Expr::Error(s) => write!(f, "{}", s),
         }
     }
@@ -804,8 +836,8 @@ pub fn extend_context(
 
 fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
     use Expr::{
-        Application, Bool, BuiltIn, Float, Function, IfThenElse, List, String, Tuple, Variable,
-        Waveform,
+        Application, Bool, BuiltIn, Float, Function, IfThenElse, List, Seq, String, Tuple,
+        Variable, Waveform,
     };
     match expr {
         Bool(_) | Float(_) | String(_) | Waveform(_) | Function { .. } => Ok(expr),
@@ -813,6 +845,14 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
             "Variable '{}' not found in context",
             name
         ))),
+        Seq { offset, waveform } => {
+            let offset = simplify_closed(*offset)?;
+            let waveform = simplify_closed(*waveform)?;
+            Ok(Seq {
+                offset: Box::new(offset),
+                waveform: Box::new(waveform),
+            })
+        }
         BuiltIn { .. } => Ok(expr),
         IfThenElse {
             condition,
@@ -1052,12 +1092,12 @@ mod tests {
             "(fn (x) => fn (y) => *(x, y))(4)(*(2, 3))"
         );
 
-        let input = "$200 | S(0.5, .25) | R(0.5, 1)";
+        let input = r"$200 | S(0.5, .25) | R(0.5, 1) \ $400";
         let result = parse_program(input);
         assert!(result.is_ok());
         assert_eq!(
             format!("{}", result.unwrap()),
-            "R(0.5, 1)(S(0.5, 0.25)($(200)))"
+            r"\(R(0.5, 1)(S(0.5, 0.25)($(200))), $(400))"
         );
     }
 

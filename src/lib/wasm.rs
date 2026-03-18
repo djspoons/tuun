@@ -123,13 +123,25 @@ impl Wasm {
         // Extract the waveform from the expression
         match simplified {
             parser::Expr::Waveform(waveform) => {
-                let (_, waveform) = optimizer::replace_seq(waveform);
                 let waveform = optimizer::simplify(waveform);
                 // TODO could precompute here as well
 
                 // Initialize the waveform state for generation
                 let waveform = generator::initialize_state(waveform);
                 Ok(WasmWaveform { inner: waveform })
+            }
+            parser::Expr::Seq { waveform, .. } => {
+                match *waveform {
+                    parser::Expr::Waveform(waveform) => {
+                        let waveform = optimizer::simplify(waveform);
+                        // TODO could precompute here as well
+
+                        // Initialize the waveform state for generation
+                        let waveform = generator::initialize_state(waveform);
+                        Ok(WasmWaveform { inner: waveform })
+                    }
+                    _ => panic!("Got non-Waveform in seq after simplify"),
+                }
             }
             other => Err(format!(
                 "Expression did not evaluate to a waveform, got: {:?}",

@@ -11,7 +11,6 @@ use sdl2::video::WindowContext;
 use realfft::RealFftPlanner;
 use realfft::num_complex::{Complex, ComplexFloat};
 
-use crate::builtins;
 use crate::metric::Metric;
 use crate::parser;
 use crate::tracker;
@@ -770,38 +769,35 @@ pub fn duration_from_beats(tempo: u32, beats: u64) -> Duration {
     Duration::from_secs_f32(beats as f32 * 60.0 / tempo as f32)
 }
 
-pub fn beats_waveform(tempo: u32, beats_per_measure: u32) -> waveform::Waveform {
-    use waveform::{Operator, Waveform};
+pub fn beats_waveform(
+    tempo: u32,
+    beats_per_measure: u32,
+    context: &Vec<(String, parser::Expr)>,
+) -> waveform::Waveform {
     let seconds_per_beat = duration_from_beats(tempo, 1);
     let mut ws = Vec::new();
     for i in 0..beats_per_measure {
-        ws.push(parser::Expr::Waveform(Waveform::Marked {
-            id: i + 1,
-            waveform: Box::new(Waveform::Fin {
-                // TODO don't really need to such a long length here... could be just Fixed
-                length: Box::new(Waveform::BinaryPointOp(
-                    Operator::Add,
-                    Box::new(Waveform::Time(())),
-                    Box::new(Waveform::Const(-seconds_per_beat.as_secs_f32())),
-                )),
-                waveform: Box::new(Waveform::Seq {
-                    offset: Box::new(Waveform::BinaryPointOp(
-                        Operator::Add,
-                        Box::new(Waveform::Time(())),
-                        Box::new(Waveform::Const(-seconds_per_beat.as_secs_f32())),
-                    )),
-                    waveform: Box::new(Waveform::Const(0.0)),
-                }),
-            }),
-        }));
+        ws.push(format!(
+            "0 | fin(time - {}) | seq(time - {}) | mark({})",
+            seconds_per_beat.as_secs_f32(),
+            seconds_per_beat.as_secs_f32(),
+            i + 1
+        ));
     }
-    match builtins::sequence(vec![parser::Expr::List(ws)]) {
-        parser::Expr::Waveform(waveform) => waveform::Waveform::Marked {
-            id: 0,
-            waveform: Box::new(waveform),
+    let expr = match parser::parse_program(&format!("<[{}]>", ws.join(", "))) {
+        Ok(expr) => expr,
+        Err(errors) => panic!("Error parsing beats waveform: {:?}", errors),
+    };
+    match parser::simplify(&context, expr) {
+        Ok(parser::Expr::Seq { waveform, .. }) => match *waveform {
+            parser::Expr::Waveform(waveform) => waveform::Waveform::Marked {
+                id: 0,
+                waveform: Box::new(waveform),
+            },
+            expr => panic!("Error creating beats waveform with seq, got {}", expr),
         },
-        parser::Expr::Error(e) => panic!("Error creating beats waveform: {}", e),
-        _ => panic!("Error creating beats waveform"),
+        Ok(expr) => panic!("Error creating beats waveform, got {}", expr),
+        Err(errors) => panic!("Error simplifying beats waveform: {:?}", errors),
     }
 }
 

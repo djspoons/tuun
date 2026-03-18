@@ -360,7 +360,7 @@ pub fn main() {
     renderer.video_subsystem.text_input().start();
     let mut event_pump = sdl_context.event_pump().unwrap();
 
-    start_beats(&command_sender, &status_receiver, &args);
+    start_beats(&command_sender, &status_receiver, &args, &context);
 
     // Send initial slider values to the tracker for all programs
     send_initial_slider_values(&programs, &command_sender);
@@ -444,16 +444,13 @@ fn start_beats(
     command_sender: &mpsc::Sender<Command<WaveformId>>,
     status_receiver: &mpsc::Receiver<tracker::Status<WaveformId>>,
     args: &Args,
+    context: &Vec<(String, parser::Expr)>,
 ) {
     // Play the odd Beats waveform starting immediately and repeating every two measures
     command_sender
         .send(Command::Play {
             id: WaveformId::Beats(false),
-            waveform: optimizer::replace_seq(renderer::beats_waveform(
-                args.tempo,
-                args.beats_per_measure,
-            ))
-            .1,
+            waveform: renderer::beats_waveform(args.tempo, args.beats_per_measure, context),
             start: Instant::now(),
             repeat_every: Some(
                 renderer::duration_from_beats(args.tempo, args.beats_per_measure as u64) * 2,
@@ -469,11 +466,11 @@ fn start_beats(
                         command_sender
                             .send(Command::Play {
                                 id: WaveformId::Beats(true),
-                                waveform: optimizer::replace_seq(renderer::beats_waveform(
+                                waveform: renderer::beats_waveform(
                                     args.tempo,
                                     args.beats_per_measure,
-                                ))
-                                .1,
+                                    context,
+                                ),
                                 start: mark.start + mark.duration,
                                 repeat_every: Some(
                                     renderer::duration_from_beats(
@@ -1245,32 +1242,36 @@ fn play_waveform_helper(
             match parser::simplify(context, expr) {
                 Ok(expr) => {
                     println!("parser::simplify returned: {}", &expr);
-                    if let parser::Expr::Waveform(waveform) = expr {
-                        let (_, mut waveform) = optimizer::replace_seq(waveform);
-                        println!("replace_seq returned: {}", &waveform);
-                        if args.optimize {
-                            waveform = optimizer::simplify(waveform);
-                            println!("optimizer::simplify returned: {}", &waveform);
+                    let mut waveform = match expr {
+                        parser::Expr::Waveform(waveform) => waveform,
+                        parser::Expr::Seq { waveform, .. } => match *waveform {
+                            parser::Expr::Waveform(waveform) => waveform,
+                            _ => panic!("Got non-Waveform in seq after simplify"),
+                        },
+                        _ => {
+                            println!("Expression is not a waveform, cannot play: {:#?}", expr);
+                            return WaveformOrMode::Mode(Mode::Edit {
+                                active_program_index,
+                                cursor_position,
+                                errors: vec![parser::Error::new(
+                                    "Expression is not a waveform".to_string(),
+                                )],
+                                message: format!("Not a waveform: {}", expr),
+                            });
                         }
-                        if should_precompute && args.precompute {
-                            let generator = generator::Generator::new(args.sample_rate);
-                            waveform = waveform::remove_state(
-                                generator.precompute(generator::initialize_state(waveform)),
-                            );
-                            println!("precompute returned: {}", &waveform);
-                        }
-                        return WaveformOrMode::Waveform(waveform);
-                    } else {
-                        println!("Expression is not a waveform, cannot play: {:#?}", expr);
-                        return WaveformOrMode::Mode(Mode::Edit {
-                            active_program_index,
-                            cursor_position,
-                            errors: vec![parser::Error::new(
-                                "Expression is not a waveform".to_string(),
-                            )],
-                            message: format!("Not a waveform: {}", expr),
-                        });
+                    };
+                    if args.optimize {
+                        waveform = optimizer::simplify(waveform);
+                        println!("optimizer::simplify returned: {}", &waveform);
                     }
+                    if should_precompute && args.precompute {
+                        let generator = generator::Generator::new(args.sample_rate);
+                        waveform = waveform::remove_state(
+                            generator.precompute(generator::initialize_state(waveform)),
+                        );
+                        println!("precompute returned: {}", &waveform);
+                    }
+                    return WaveformOrMode::Waveform(waveform);
                 }
                 Err(error) => {
                     // If there are errors, we stay in edit mode
