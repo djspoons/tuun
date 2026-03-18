@@ -37,7 +37,7 @@
         <h2>Not expanded</h2>
         <tuun-synth
             description="Harmonica"
-            expression="<map(fn(n) => harmonica(Q, @n), [60, 62, 64, 65, 67, 69, 71, 72])>"
+            expression="<map(fn(n) => harmonica(H, @n) | unseq() | seq(time - H*0.9), [60, 62, 64, 65, 67, 69, 71, 72])>"
             controls>
         </tuun-synth>
 
