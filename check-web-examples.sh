@@ -2,11 +2,13 @@
 set -e
 
 # Checks all tuun-synth expressions in .md and .html files.
-# Usage: ./check-web.sh
+# Usage: ./check-web.sh [root]
 
-FILES=$(find docs web \
-  -path 'docs/vendor' -prune -o \
-  -path 'docs/_site' -prune -o \
+ROOT=${1-docs}
+
+FILES=$(find ${ROOT} \
+  -path "${ROOT}/vendor" -prune -o \
+  -path "${ROOT}/_site" -prune -o \
   \( -name '*.md' -o -name '*.html' \) -print | sort)
 
 cargo run --bin web_checker -- $FILES

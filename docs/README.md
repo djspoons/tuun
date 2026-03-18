@@ -22,7 +22,7 @@ To release changes of that component to the documentation site, re-add the subtr
 ```sh
 git subtree split --prefix=web -b web-split
 git push -u origin web-split
-git subtree pull --prefix=docs/tuun origin web-split --squash
+git subtree pull --prefix=docs/tuun --squash origin web-split
 ```
 
 It's a good idea to check all of examples, including those in the `docs` folder.
