@@ -788,7 +788,7 @@ pub fn beats_waveform(
         Ok(expr) => expr,
         Err(errors) => panic!("Error parsing beats waveform: {:?}", errors),
     };
-    match parser::simplify(&context, expr) {
+    match parser::evaluate(&context, expr) {
         Ok(parser::Expr::Seq { waveform, .. }) => match *waveform {
             parser::Expr::Waveform(waveform) => waveform::Waveform::Marked {
                 id: 0,
@@ -797,7 +797,7 @@ pub fn beats_waveform(
             expr => panic!("Error creating beats waveform with seq, got {}", expr),
         },
         Ok(expr) => panic!("Error creating beats waveform, got {}", expr),
-        Err(errors) => panic!("Error simplifying beats waveform: {:?}", errors),
+        Err(errors) => panic!("Error evaluating beats waveform: {:?}", errors),
     }
 }
 

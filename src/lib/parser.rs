@@ -834,7 +834,7 @@ pub fn extend_context(
     }
 }
 
-fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
+fn evaluate_closed(expr: Expr) -> Result<Expr, Error> {
     use Expr::{
         Application, Bool, BuiltIn, Float, Function, IfThenElse, List, Seq, String, Tuple,
         Variable, Waveform,
@@ -846,8 +846,8 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
             name
         ))),
         Seq { offset, waveform } => {
-            let offset = simplify_closed(*offset)?;
-            let waveform = simplify_closed(*waveform)?;
+            let offset = evaluate_closed(*offset)?;
+            let waveform = evaluate_closed(*waveform)?;
             Ok(Seq {
                 offset: Box::new(offset),
                 waveform: Box::new(waveform),
@@ -858,20 +858,20 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
             condition,
             then,
             else_,
-        } => match simplify_closed(*condition)? {
-            Bool(true) => return simplify_closed(*then),
-            Bool(false) => return simplify_closed(*else_),
+        } => match evaluate_closed(*condition)? {
+            Bool(true) => return evaluate_closed(*then),
+            Bool(false) => return evaluate_closed(*else_),
             _ => return Err(Error::new("Expected boolean condition".to_string())),
         },
         Application { function, argument } => {
-            let function = simplify_closed(*function)?;
-            let argument = simplify_closed(*argument)?;
+            let function = evaluate_closed(*function)?;
+            let argument = evaluate_closed(*argument)?;
             match (function, argument) {
                 (Function { pattern, body }, argument) => {
                     let mut context = Vec::new();
                     extend_context(&mut context, &pattern, &argument)?;
                     let body = substitute(&context, *body);
-                    simplify_closed(body)
+                    evaluate_closed(body)
                 }
                 (BuiltIn { function, .. }, Tuple(actuals)) => {
                     let result = function.0(actuals);
@@ -899,7 +899,7 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
             return Ok(Tuple(
                 exprs
                     .into_iter()
-                    .map(|e| simplify_closed(e))
+                    .map(|e| evaluate_closed(e))
                     .collect::<Result<Vec<_>, _>>()?,
             ));
         }
@@ -907,7 +907,7 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
             return Ok(List(
                 exprs
                     .into_iter()
-                    .map(|e| simplify_closed(e))
+                    .map(|e| evaluate_closed(e))
                     .collect::<Result<Vec<_>, _>>()?,
             ));
         }
@@ -916,9 +916,9 @@ fn simplify_closed(expr: Expr) -> Result<Expr, Error> {
 }
 
 // TODO rename evaluate?
-pub fn simplify(context: &Vec<(String, Expr)>, mut expr: Expr) -> Result<Expr, Error> {
+pub fn evaluate(context: &Vec<(String, Expr)>, mut expr: Expr) -> Result<Expr, Error> {
     expr = substitute(context, expr);
-    return simplify_closed(expr);
+    return evaluate_closed(expr);
 }
 
 #[derive(Debug, Clone)]
@@ -1109,21 +1109,21 @@ mod tests {
         assert!(result.is_ok());
         let expr = result.unwrap();
         println!("Parsed expression: {}", expr);
-        let simplified = simplify(&context, expr).unwrap();
-        assert_eq!(format!("{}", simplified), "5");
+        let evaluated = evaluate(&context, expr).unwrap();
+        assert_eq!(format!("{}", evaluated), "5");
 
         let input = "(fn (x) => fn (y, z) => (x, y, z))(3)(4, 5)";
         let result = parse_program(input);
         assert!(result.is_ok());
         let expr = result.unwrap();
-        let simplified = simplify(&context, expr).unwrap();
-        assert_eq!(format!("{}", simplified), "(3, 4, 5)");
+        let evaluated = evaluate(&context, expr).unwrap();
+        assert_eq!(format!("{}", evaluated), "(3, 4, 5)");
 
         let input = "(fn (x, (y, z)) => (x, y, z))(3, (4, 5))";
         let result = parse_program(input);
         assert!(result.is_ok());
         let expr = result.unwrap();
-        let simplified = simplify(&context, expr).unwrap();
-        assert_eq!(format!("{}", simplified), "(3, 4, 5)");
+        let evaluated = evaluate(&context, expr).unwrap();
+        assert_eq!(format!("{}", evaluated), "(3, 4, 5)");
     }
 }

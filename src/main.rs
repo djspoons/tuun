@@ -138,7 +138,7 @@ fn load_context(active_program_index: usize, args: &Args) -> (Vec<(String, parse
             Ok(parsed_exprs) => {
                 println!("Parsed context from {}:", file);
                 for (pattern, parsed_expr) in parsed_exprs {
-                    match parser::simplify(&context, parsed_expr) {
+                    match parser::evaluate(&context, parsed_expr) {
                         Ok(expr) => {
                             match parser::extend_context(&mut context, &pattern, &expr) {
                                 Ok(_) => println!("   {}", &pattern),
@@ -149,7 +149,7 @@ fn load_context(active_program_index: usize, args: &Args) -> (Vec<(String, parse
                         }
                         Err(error) => {
                             println!(
-                                "Error simplifying context expression for {}: {:?}",
+                                "Error evaluating context expression for {}: {:?}",
                                 pattern, error
                             );
                             errors.push(error);
@@ -1239,14 +1239,14 @@ fn play_waveform_helper(
     match parser::parse_program(&program_text) {
         Ok(expr) => {
             println!("Parser returned: {}", &expr);
-            match parser::simplify(context, expr) {
+            match parser::evaluate(context, expr) {
                 Ok(expr) => {
-                    println!("parser::simplify returned: {}", &expr);
+                    println!("parser::evaluate returned: {}", &expr);
                     let mut waveform = match expr {
                         parser::Expr::Waveform(waveform) => waveform,
                         parser::Expr::Seq { waveform, .. } => match *waveform {
                             parser::Expr::Waveform(waveform) => waveform,
-                            _ => panic!("Got non-Waveform in seq after simplify"),
+                            _ => panic!("Got non-Waveform in seq after evaluate"),
                         },
                         _ => {
                             println!("Expression is not a waveform, cannot play: {:#?}", expr);
@@ -1275,7 +1275,7 @@ fn play_waveform_helper(
                 }
                 Err(error) => {
                     // If there are errors, we stay in edit mode
-                    println!("Errors while simplifying input: {:?}", error);
+                    println!("Errors while evaluating input: {:?}", error);
                     let message = format!("Error: {}", error.to_string());
                     return WaveformOrMode::Mode(Mode::Edit {
                         active_program_index,

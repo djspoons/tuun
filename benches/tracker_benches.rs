@@ -91,15 +91,15 @@ fn bench_large(c: &mut Criterion) {
         Ok(bindings) => {
             for (pattern, expr) in bindings {
                 //println!("Parsed binding: {:?} = {:}", &pattern, &expr);
-                match parser::simplify(&context, expr) {
+                match parser::evaluate(&context, expr) {
                     Ok(expr) => {
-                        //println!("Simplified to: {:}", &expr);
+                        //println!("Evaluated to: {:}", &expr);
                         match parser::extend_context(&mut context, &pattern, &expr) {
                             Ok(()) => {}
                             Err(e) => panic!("Failed to extend context: {:?}", e),
                         }
                     }
-                    Err(e) => panic!("Simplify failed: {:?}", e),
+                    Err(e) => panic!("Evaluate failed: {:?}", e),
                 }
             }
         }
@@ -112,9 +112,9 @@ fn bench_large(c: &mut Criterion) {
             match parser::parse_program(program) {
                 Ok(expr) => {
                     println!("Parser returned: {:}", &expr);
-                    match parser::simplify(&context, expr) {
+                    match parser::evaluate(&context, expr) {
                         Ok(expr) => {
-                            println!("Simplify returned: {:}", &expr);
+                            println!("Evaluate returned: {:}", &expr);
                             if let parser::Expr::Waveform(waveform) = expr {
                                 let generator = generator::Generator::new(44100);
                                 let mut w = generator::initialize_state(waveform);
@@ -126,7 +126,7 @@ fn bench_large(c: &mut Criterion) {
                                 panic!("Expected waveform");
                             }
                         }
-                        Err(e) => panic!("Simplify failed: {:?}", e),
+                        Err(e) => panic!("Evaluate failed: {:?}", e),
                     }
                 }
                 _ => panic!("Parse failed"),

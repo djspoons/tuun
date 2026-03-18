@@ -420,7 +420,7 @@ pub fn map(arguments: Vec<Expr>) -> Expr {
             let mut results = Vec::new();
             let context = vec![];
             for expr in exprs {
-                let result = parser::simplify(
+                let result = parser::evaluate(
                     &context,
                     Application {
                         function: Box::new(function.clone()),
@@ -444,7 +444,7 @@ pub fn reduce(arguments: Vec<Expr>) -> Expr {
             let context = vec![];
             let mut acc = acc.clone();
             for expr in exprs {
-                let result = parser::simplify(
+                let result = parser::evaluate(
                     &context,
                     Application {
                         function: Box::new(function.clone()),
@@ -470,7 +470,7 @@ pub fn unfold(arguments: Vec<Expr>) -> Expr {
             let mut current = seed.clone();
             for _ in 0..(*n as u32) {
                 results.push(current.clone());
-                let result = parser::simplify(
+                let result = parser::evaluate(
                     &context,
                     Application {
                         function: Box::new(function.clone()),

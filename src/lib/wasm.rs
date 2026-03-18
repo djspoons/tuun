@@ -72,15 +72,15 @@ impl Wasm {
         match parser::parse_context(&context_content) {
             Ok(parsed_defs) => {
                 for (pattern, expr) in parsed_defs {
-                    match parser::simplify(&context, expr) {
-                        Ok(simplified) => {
+                    match parser::evaluate(&context, expr) {
+                        Ok(expr) => {
                             if let Err(e) =
-                                parser::extend_context(&mut context, &pattern, &simplified)
+                                parser::extend_context(&mut context, &pattern, &expr)
                             {
                                 eprintln!("Warning: Failed to add context definition: {:?}", e);
                             }
                         }
-                        Err(e) => eprintln!("Warning: Failed to simplify context: {:?}", e),
+                        Err(e) => eprintln!("Warning: Failed to evaluate context: {:?}", e),
                     }
                 }
             }
@@ -116,12 +116,12 @@ impl Wasm {
         let parsed_expr = parser::parse_program(expression)
             .map_err(|errors| format!("Parse errors: {:?}", errors))?;
 
-        // Simplify the expression
-        let simplified = parser::simplify(&self.context, parsed_expr)
-            .map_err(|e| format!("Simplify error: {:?}", e))?;
+        // Evaluate the expression
+        let expr = parser::evaluate(&self.context, parsed_expr)
+            .map_err(|e| format!("Evaluate error: {:?}", e))?;
 
         // Extract the waveform from the expression
-        match simplified {
+        match expr {
             parser::Expr::Waveform(waveform) => {
                 let waveform = optimizer::simplify(waveform);
                 // TODO could precompute here as well
@@ -140,7 +140,7 @@ impl Wasm {
                         let waveform = generator::initialize_state(waveform);
                         Ok(WasmWaveform { inner: waveform })
                     }
-                    _ => panic!("Got non-Waveform in seq after simplify"),
+                    _ => panic!("Got non-Waveform in seq after evaluate"),
                 }
             }
             other => Err(format!(

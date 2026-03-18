@@ -34,14 +34,14 @@ fn load_context() -> Vec<(String, parser::Expr)> {
     match parser::parse_context(&context_content) {
         Ok(parsed_defs) => {
             for (pattern, expr) in parsed_defs {
-                match parser::simplify(&context, expr) {
-                    Ok(simplified) => {
-                        if let Err(e) = parser::extend_context(&mut context, &pattern, &simplified)
+                match parser::evaluate(&context, expr) {
+                    Ok(expr) => {
+                        if let Err(e) = parser::extend_context(&mut context, &pattern, &expr)
                         {
                             eprintln!("Warning: Failed to add context definition: {:?}", e);
                         }
                     }
-                    Err(e) => eprintln!("Warning: Failed to simplify context: {:?}", e),
+                    Err(e) => eprintln!("Warning: Failed to evaluate context: {:?}", e),
                 }
             }
         }
@@ -245,15 +245,15 @@ fn check_file(file: &str, context: &Vec<(String, parser::Expr)>) -> (usize, usiz
             expression
         };
 
-        // Parse and simplify
+        // Parse and evaluate
         match parser::parse_program(&expression) {
-            Ok(parsed) => match parser::simplify(context, parsed) {
+            Ok(parsed) => match parser::evaluate(context, parsed) {
                 Ok(_) => {
                     println!("  {}:{} [ok] \"{}\"", file, line, label);
                 }
                 Err(e) => {
                     eprintln!(
-                        "  {}:{} [FAIL] \"{}\" simplify error: {:?}",
+                        "  {}:{} [FAIL] \"{}\" evaluate error: {:?}",
                         file, line, label, e
                     );
                     failed += 1;
