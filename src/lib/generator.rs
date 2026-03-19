@@ -211,21 +211,14 @@ impl<'a> Generator<'a> {
                 feedback,
                 state: Samples { input, output },
             } => {
-                // In general, we want the length of the output to match that of the input `inner`. This
-                // follows from the fact that each point is a sum of products: as long as at least one
-                // summand is defined than the sum is defined. (If we wanted to be totally true to that
-                // approach, we should verify that the coefficient waveforms are long enough so those
-                // products are also defined, but the coefficient waveforms are almost always infinite
-                // in length and doing so greatly complicates the code below, so we just blindly
-                // zero-extend the coefficient waveforms.)
-                //
-                // Doing so means that the last output point will only depend on one input point (and the
-                // second to last output will only depend on two input points, all the way back to the
-                // `ff_count-1`^th to last point.) This means that if the inner waveform is not able to
-                // generate `desired` points, we can zero-extend `input` up to `ff_count-1` points. We keep
-                // track of this by saving fewer than ff_count points for the next call to `generate()`.
-                // This is the same thing that happens when the first call to `generate()` with Initial
-                // state doesn't generate `ff_count - 1` points.
+                // We want the length of the output to match that of the input `inner`. Doing so means that
+                // the last output point will only depend on one input point (and the  second to last output
+                // will only depend on two input points, all the way back to the `ff_count-1`^th to last 
+                // point.) This means that if the inner waveform is not able to generate `desired` points,
+                // we can zero-extend `input` up to `ff_count-1` points. We keep track of this by saving 
+                // fewer than ff_count points for the next call to `generate()`. This is the same thing that
+                // happens when the first call to `generate()` with Initial state doesn't generate 
+                // `ff_count - 1` points.
 
                 // Set up the input and output. Each will have extra samples at the beginning from a previous
                 // call to `generate`. As noted above, `input` will be shorter than `ff_count - 1` in cases

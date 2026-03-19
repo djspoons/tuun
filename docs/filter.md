@@ -119,9 +119,7 @@ Determining feedback coefficients can be a subtle art, and Tuun's library includ
 
 ## A Note on Length
 
-Tuun `Filter` waveforms are always the same length as their input. As noted above, finite waveforms are extended by $K-1$ samples (where $K$ is the number of feed-forward coefficients) since the first $K-1$ input samples are consumed for the first output sample.
-
-Recall that the length of the sum (or difference) of two waveforms is the *maximum* of their two lengths. Therefore, the length of a `Filter` waveform should be the maximum length of any element of the sums. Each of these elements is itself a product whose length should be the *minimum* of their respective lengths. However, in most cases the coefficient waveforms will be infinite, and tracking the lengths of each coefficient waveform would add significant complexity to the implementation. As such, Tuun assumes that the coefficient waveforms are at least as long as the input waveform and extends them with $0.0$ if they are not.
+Tuun `Filter` waveforms are always the same length as their input. As noted above, finite waveforms are extended by $K-1$ samples (where $K$ is the number of feed-forward coefficients) since the first $K-1$ input samples are consumed for the first output sample. In most cases the coefficient waveforms will be infinite; if they are not, they are extended with zeros to match the length of the input.
 
 Finally, note that because the length of a `Filter` waveform is independent of the coefficients (including their values), even an *infinite* impulse response filter could have a *finite* length. Similarly, a *finite* impulse response filter could have an *infinite* length.
 
