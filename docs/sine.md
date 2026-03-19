@@ -117,7 +117,7 @@ $$
 s[t_n] = \sin(a[t_n] + p[t_n])
 $$
 
-Notice how both operands to $+$ are phases and are measured in radians. We can the write a recurrence for the accumulated phase as follows:
+Notice how both operands to $+$ are phases and are measured in radians. We can then write a recurrence for the accumulated phase as follows:
 
 $$
 a[t_0] = 0
@@ -199,7 +199,7 @@ The following is an example of an FM tone where the index of modulation `I` is c
   </tuun-synth>
 </div>
 
-Though phase offset is difficult to perceive audibly in general, the choice of the phase offset *in the modulator* can have significant effects on the relative strength of the sideband frequencies. (See "The Effect of Modulator Phase on Timbres in FM Synthesis." John A. Bate, in _Computer Music Journal_, Vol. 14 (1990) for a discussion of this and other variations of FM synthesis.) In the following, the index of modulation `I` is held constant while the modular phase varies over time.
+Though phase offset is difficult to perceive audibly in general, the choice of the phase offset *in the modulator* can have significant effects on the relative strength of the sideband frequencies. (See "The Effect of Modulator Phase on Timbres in FM Synthesis." John A. Bate, in _Computer Music Journal_, Vol. 14 (1990) for a discussion of this and other variations of FM synthesis.) In the following, the index of modulation `I` is held constant while the modulator phase varies over time.
 
 <div class="container">
   <tuun-synth description="FM synthesis tone (modulator phase)" sliders='["phi:0:1.57:1.57"]'>

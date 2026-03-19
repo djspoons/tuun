@@ -123,6 +123,6 @@ Tuun `Filter` waveforms are always the same length as their input. As noted abov
 
 Recall that the length of the sum (or difference) of two waveforms is the *maximum* of their two lengths. Therefore, the length of a `Filter` waveform should be the maximum length of any element of the sums. Each of these elements is itself a product whose length should be the *minimum* of their respective lengths. However, in most cases the coefficient waveforms will be infinite, and tracking the lengths of each coefficient waveform would add significant complexity to the implementation. As such, Tuun assumes that the coefficient waveforms are at least as long as the input waveform and extends them with $0.0$ if they are not.
 
-Finally, note that because the length of a `Filter` waveform is independent of the coefficients (including their values), even a *infinite* impulse response filter could have a *finite* length. Similarly, a *finite* impulse response filter could have an *infinite* length.
+Finally, note that because the length of a `Filter` waveform is independent of the coefficients (including their values), even an *infinite* impulse response filter could have a *finite* length. Similarly, a *finite* impulse response filter could have an *infinite* length.
 
 <script type="module" src="tuun/tuun-synth.js"></script>

@@ -25,7 +25,7 @@ git push -u origin web-split
 git subtree pull --prefix=docs/tuun --squash origin web-split
 ```
 
-It's a good idea to check all of examples, including those in the `docs` folder.
+It's a good idea to check all of the examples, including those in the `docs` folder.
 ```sh
 ./check-web-examples.sh
 ```

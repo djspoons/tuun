@@ -3,12 +3,12 @@
 Tuun is an interactive, language-based sound and music generation system. It has two main components:
 
  * A tracker, which interfaces with the underlying audio subsystem, managing things like sample rates and buffers. It takes commands like "play this!" and gives updates on the state of playback.
- * An visual UI that enables users to compose sounds, enter those commands, and see the results.
+ * A visual UI that enables users to compose sounds, enter those commands, and see the results.
 
 Tuun has two languages:
 
  * A language of low-level waveforms and waveform combinators that are used by the tracker to generate samples to feed to the audio system.
- * A expression language that's used in the UI to specify those waveforms.
+ * An expression language that's used in the UI to specify those waveforms.
 
 We'll start with a brief introduction to the second one before we dive into the details.
 
@@ -42,18 +42,18 @@ $$
 $$
 where $f$ is the desired frequency (in Hertz) and $\phi$ is the desired phase offset.
 
-Every waveform has an intrinsic property called its _length_, which may be finite or infinite. The lengths of `Const` is infinite, and the length of `Sine` is determined by its inputs: `Sine` generates one sample of output for each sample of inputs. This means that the expression above will generate a tone that goes on forever.
+Every waveform has an intrinsic property called its _length_, which may be finite or infinite. The length of `Const` is infinite, and the length of `Sine` is determined by its inputs: `Sine` generates one sample of output for each sample of inputs. This means that the expression above will generate a tone that goes on forever.
 
 Since it's often useful to have waveforms that *don't* go on forever, Tuun includes the `Fin` combinator, which modifies a waveform to be finite. This leverages the `Time` combinator, which generates a stream where each sample is the time elapsed since the beginning of the waveform (in seconds). For example, the following will generate a tone at 220Hz for 2 seconds.
 
 ```
-Fin(Subtract(Subtract(Time, Const(-2))),
+Fin(Subtract(Time, Const(-2)),
   Sine(Const(2 * PI * 220), Const(0)))
 ```
 
 The length of `Fin` is given by its first parameter: `Fin` generates samples from this waveform until it gets a sample >= 0, at which point it stops. In the example above, it generates samples from the waveform `Subtract(Time, Const(2))`. The `Subtract` combinator subtracts each pair of corresponding samples, yielding a new stream. You can think of this waveform a bit like a countdown clock: it starts at -2 and then "counts down" (well, _up_) until it reaches 0. 
 
-We can use binary operators to modify outputs of waveforms as well. The `Multiply` combinator multiplies each sample in the first waveform by the corresponding sample in the second waveform.For example, we can change the amplitude of the Sine wave by multiplying by a constant waveform.
+We can use binary operators to modify outputs of waveforms as well. The `Multiply` combinator multiplies each sample in the first waveform by the corresponding sample in the second waveform. For example, we can change the amplitude of the Sine wave by multiplying by a constant waveform.
 
 ```
 Fin(Subtract(Time, Const(2)), 
@@ -93,7 +93,7 @@ Multiply(
 
 This plays a 220Hz tone for three seconds, increasing the amplitude for the first two seconds (the "attack") and decreasing it to silence during the third (the "release"). 
 
-Our last example show how to combine waveforms at a much smaller scale. Up until now, we've considered combining waveforms that last for one or two seconds. What about waveforms that last for 0.002 seconds? The tones we've created so far have all been sine waves at their root. Sine waves are one type of periodic waveform, but they can be used to create other periodic waveforms as well. The `Alt` combinator picks between two waveforms based on the sign of a third, called a trigger. For example, the following will generate a square wave.
+Our last example shows how to combine waveforms at a much smaller scale. Up until now, we've considered combining waveforms that last for one or two seconds. What about waveforms that last for 0.002 seconds? The tones we've created so far have all been sine waves at their root. Sine waves are one type of periodic waveform, but they can be used to create other periodic waveforms as well. The `Alt` combinator picks between two waveforms based on the sign of a third, called a trigger. For example, the following will generate a square wave.
 
 ```
 Alt(Sine(Const(2 * PI * 220), Const(0)), Const(1), Const(-1))
@@ -242,7 +242,7 @@ expr ::= ... | seq | unseq | "<" expr ">"
 binary_op ::= ... | "\"
 ```
 
-The first is `seq` (pronounced like "seek") and it take takes two waveforms: the first determines the offset, while the second is the waveform to be played. Effectively, it turns that second waveform into a seq waveform. Analogous to the first parameter to `fin`, the offset is determined by the first position at which the offset waveform is positive. Also like `fin`, `seq` is written in curried form, and it's not uncommon to see the two used together. The following plays three notes, each with a length of two seconds but without one second from the start of one to the start of the next.
+The first is `seq` (pronounced like "seek") and it take takes two waveforms: the first determines the offset, while the second is the waveform to be played. Effectively, it turns that second waveform into a seq waveform. Analogous to the first parameter to `fin`, the offset is determined by the first position at which the offset waveform is positive. Also like `fin`, `seq` is written in curried form, and it's not uncommon to see the two used together. The following plays three notes, each with a length of two seconds but with only one second from the start of one to the start of the next.
 
 <div class="container">
   <tuun-synth>

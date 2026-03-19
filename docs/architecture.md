@@ -31,11 +31,11 @@ Once parsing is complete, Tuun expressions are evaluated. This means functions a
 
 ### Abstract Waveform Optimizations
 
-Once a waveform has been produced, Tuun could move straight on to generating samples. However, there are often many aspects of the result of evaluating a Tuun expression that would lead to inefficient sample generation. That is, if we think of the waveform as a sort of assembly language program, there are many traditional compiler transformation that we can apply to improve performance.
+Once a waveform has been produced, Tuun could move straight on to generating samples. However, there are often many aspects of the result of evaluating a Tuun expression that would lead to inefficient sample generation. That is, if we think of the waveform as a sort of assembly language program, there are many traditional compiler transformations that we can apply to improve performance.
 
 For example, the optimizer folds constant waveforms and collapses nested `Fin`s to produce simpler waveforms that will generate the same results. It also anticipates strategies that the generator will use and, for example, moves constants to the right side of binary operators (so those operators can be implemented in place).
 
-Note that these transformation occur without generating any samples or evening knowing what the sample rate will be. Instead, they take advantage of algebraic properties of the waveforms, including the commutativity and associativity of addition and multiplication.
+Note that these transformations occur without generating any samples or even knowing what the sample rate will be. Instead, they take advantage of algebraic properties of the waveforms, including the commutativity and associativity of addition and multiplication.
 
 ### Sample Generation
 
