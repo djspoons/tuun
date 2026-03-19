@@ -80,11 +80,11 @@ fn bench_large(c: &mut Criterion) {
     match parser::parse_context(
         r#"
     pi = 3.14159265,
-    $ = fn(freq) => sin((2 * pi) ~. freq ~. time),
-    triangle = fn(freq) => let t = $freq, slope = 4*freq, a = time ~. slope ~+ -1, b = time ~. -slope ~+ 3 in alt(t, res(t, a), res(t, b)),
-    linear = fn(initial, slope) => initial ~+ (time ~. slope),
-    Rw = fn(dur, level) => linear(level, -level / dur) | fin(time ~+ -dur) | seq(dur),
-    R = fn(dur, level) => fn(w) => w ~. Rw(dur, level),"#,
+    $ = fn(freq_hz) => sine(2*pi * freq_hz, 0),
+    triangle = fn(freq_hz) => let t = $freq_hz, slope = 4 * freq_hz, a = time * slope - 1, b = time * -slope + 3 in alt(t, reset(t, a), reset(t, b)),
+    linear = fn(initial, slope) => initial + (time * slope),
+    Rw = fn(dur, level) => linear(level, -level / dur) | fin(time - dur),
+    R = fn(dur, level) => fn(w) => w * Rw(dur, level),"#,
     ) {
         Ok(bindings) => {
             for (pattern, expr) in bindings {
@@ -106,13 +106,13 @@ fn bench_large(c: &mut Criterion) {
 
     c.bench_function("large_440", |b| {
         b.iter(|| {
-            let program = "triangle(55) ~+ (noise ~. 0.2) | R(1.0, 1.0) | seq(1) | mark(2)";
+            let program = "triangle(55) + (noise * 0.2) | R(1.0, 1.0) | mark(2)";
             match parser::parse_program(program) {
                 Ok(expr) => {
-                    println!("Parser returned: {:}", &expr);
+                    //println!("Parser returned: {:}", &expr);
                     match parser::evaluate(&context, expr) {
                         Ok(expr) => {
-                            println!("Evaluate returned: {:}", &expr);
+                            //println!("Evaluate returned: {:}", &expr);
                             if let parser::Expr::Waveform(waveform) = expr {
                                 let generator = generator::Generator::new(44100);
                                 let mut w = generator::initialize_state(waveform);
