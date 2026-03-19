@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fmt;
 use std::fmt::Debug;
 use std::io::BufWriter;
 use std::{f64, mem, usize};
@@ -24,7 +25,7 @@ pub enum State {
     Sign { signum: f32 },
 }
 
-pub fn initialize_state<S>(waveform: waveform::Waveform<S>) -> Waveform {
+pub fn initialize_state<S, M>(waveform: waveform::Waveform<S, M>) -> waveform::Waveform<State, M> {
     return waveform::initialize_state(waveform, State::Initial);
 }
 
@@ -49,6 +50,8 @@ pub struct Generator<'a> {
         Option<RefCell<&'a mut HashMap<String, hound::WavWriter<BufWriter<std::fs::File>>>>>,
 }
 
+// This type is a little strange: it's here basically for testing and because `precompute` is not a generic as
+// it perhaps could be. See the note on `precompute` below.
 pub type Waveform = waveform::Waveform<State>;
 
 // TODO add metrics for waveform expr depth and total ops
@@ -77,7 +80,11 @@ impl<'a> Generator<'a> {
     // waveform supports being "re-initialized" -- unless it depends on some external state (as Slider does), it
     // will generate the same samples each time it's initialized.
     // TODO take a &mut waveform instead
-    pub fn generate(&self, waveform: &mut Waveform, desired: usize) -> Vec<f32> {
+    pub fn generate<M: Debug + fmt::Display>(
+        &self,
+        waveform: &mut waveform::Waveform<State, M>,
+        desired: usize,
+    ) -> Vec<f32> {
         use State::*;
         use waveform::Waveform::*;
         if desired == 0 {
@@ -213,11 +220,11 @@ impl<'a> Generator<'a> {
             } => {
                 // We want the length of the output to match that of the input `inner`. Doing so means that
                 // the last output point will only depend on one input point (and the  second to last output
-                // will only depend on two input points, all the way back to the `ff_count-1`^th to last 
+                // will only depend on two input points, all the way back to the `ff_count-1`^th to last
                 // point.) This means that if the inner waveform is not able to generate `desired` points,
-                // we can zero-extend `input` up to `ff_count-1` points. We keep track of this by saving 
+                // we can zero-extend `input` up to `ff_count-1` points. We keep track of this by saving
                 // fewer than ff_count points for the next call to `generate()`. This is the same thing that
-                // happens when the first call to `generate()` with Initial state doesn't generate 
+                // happens when the first call to `generate()` with Initial state doesn't generate
                 // `ff_count - 1` points.
 
                 // Set up the input and output. Each will have extra samples at the beginning from a previous
@@ -445,11 +452,11 @@ impl<'a> Generator<'a> {
     // Generate a binary operation on two waveforms, up to 'desired' samples. The `op_fn` function
     // is applied to each pair of samples. If `extend_to_longer` is true, the shorter waveform will
     // be extended with zeros to match the length of the longer one.
-    fn generate_binary_op(
+    fn generate_binary_op<M: Debug + fmt::Display>(
         &self,
         op_fn: fn(f32, f32) -> f32,
-        a: &mut Waveform,
-        b: &mut Waveform,
+        a: &mut waveform::Waveform<State, M>,
+        b: &mut waveform::Waveform<State, M>,
         extend_to_longer: bool,
         mut desired: usize,
     ) -> Vec<f32> {
@@ -458,7 +465,7 @@ impl<'a> Generator<'a> {
             // In this branch (which is always taken if we've removed Seq's), check to see if we can
             // avoid generating the right-hand side and instead just apply the op directly.
             // TODO could also check f against the identity of op and skip the loop here
-            Waveform::Const(f) => {
+            waveform::Waveform::Const(f) => {
                 for x in a_out.iter_mut() {
                     *x = op_fn(*x, *f);
                 }
@@ -501,7 +508,11 @@ impl<'a> Generator<'a> {
     // smaller, while modifying `waveform` so that it has been advanced to that point.
     // Note that for waveforms that maintain state (other than position), the state is passed
     // through unchanged. This discontinuity may result in pops or clicks for audible waveforms.
-    pub fn length(&self, waveform: &mut Waveform, max: usize) -> usize {
+    pub fn length<M: Debug + fmt::Display>(
+        &self,
+        waveform: &mut waveform::Waveform<State, M>,
+        max: usize,
+    ) -> usize {
         use State::*;
         use waveform::Operator;
         use waveform::Waveform::*;
@@ -666,9 +677,9 @@ impl<'a> Generator<'a> {
     // If `waveform` will be greater than or equal to `value` at some point between its current position and
     // `max`, return Some of the number of samples that would be generated before then, None if `waveform`
     // will not be greater than or equal in that range, or Maybe if that can't be determined cheaply.
-    fn greater_or_equals_at(
+    fn greater_or_equals_at<M: fmt::Display>(
         &self,
-        waveform: &Waveform,
+        waveform: &waveform::Waveform<State, M>,
         value: f32,
         max: usize,
     ) -> MaybeOption<usize> {
@@ -678,7 +689,7 @@ impl<'a> Generator<'a> {
         match waveform {
             Const(v) if *v >= value => MaybeOption::Some(0),
             Const(_) => MaybeOption::None,
-            Time(Initial) => self.greater_or_equals_at(&Time(Position(0)), value, max),
+            Time(Initial) => self.greater_or_equals_at::<M>(&Time(Position(0)), value, max),
             Time(Position(position)) => {
                 let current_value = *position as f32 / self.sample_rate as f32;
                 if current_value >= value {
@@ -737,8 +748,13 @@ impl<'a> Generator<'a> {
 
     // Replaces parts of `waveform` that can be precomputed with their equivalent Fixed versions. Notably,
     // infinite waveforms and waveforms that depend on or have dynamic behavior (Slider, Marked, Captured)
-    // cannot be replaced. This should be called after replace_seq.
+    // cannot be replaced.
     pub fn precompute(&self, waveform: Waveform) -> Waveform {
+        // Note that precompute doesn't operate on generic MarkIds... which is sort of strange in one way,
+        // but... also fine? It would be a lot of typing to add all the type parameters below, and it turns
+        // out that precompute is used on waveforms that are fresh from the parser, and therefore have the
+        // default type for MarkId.
+
         #[derive(Clone, Copy)]
         enum Reason {
             // The waveform is not pre-computable because it is infinite in length.
@@ -1637,7 +1653,7 @@ mod tests {
 
     #[test]
     fn test_greater_or_equals_at() {
-        let w1 = BinaryPointOp(Operator::Add, Box::new(Time(())), Box::new(Const(-5.0)));
+        let w1: Waveform = BinaryPointOp(Operator::Add, Box::new(Time(())), Box::new(Const(-5.0)));
         let w2 = Fin {
             length: Box::new(w1.clone()),
             waveform: Box::new(Time(())),

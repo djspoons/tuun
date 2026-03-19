@@ -26,6 +26,43 @@ pub enum WaveformId {
     Program(ProgramId),
 }
 
+impl WaveformId {
+    pub fn is_beats(&self) -> bool {
+        match self {
+            WaveformId::Beats(_) => true,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum MarkId {
+    TopLevel, // a mark for the whole Program
+    Slider(String),
+    UserDefined(u32),
+}
+
+impl fmt::Display for MarkId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MarkId::TopLevel => write!(f, "top-level"),
+            MarkId::Slider(name) => write!(f, "slider({})", name),
+            MarkId::UserDefined(id) => write!(f, "{}", id),
+        }
+    }
+}
+
+impl MarkId {
+    /// Returns a 0-based index for color and position calculations, or None if not applicable.
+    fn color_index(&self) -> Option<usize> {
+        match self {
+            MarkId::TopLevel => None,
+            MarkId::UserDefined(id) => Some((*id as usize).saturating_sub(1)),
+            MarkId::Slider(_) => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 // `active_program_index` should be the index of the active program in the `programs` array
 pub enum Mode {
@@ -204,7 +241,7 @@ impl Renderer {
         &mut self,
         ttf_context: &Sdl2TtfContext,
         programs: &[Program],
-        status: &tracker::Status<WaveformId>,
+        status: &tracker::Status<WaveformId, MarkId>,
         mode: &Mode,
         metrics: &mut Metrics,
     ) {
@@ -216,8 +253,9 @@ impl Renderer {
                 // XXX sometimes this doesn't match anything?
                 if mark.start <= status.buffer_start
                     && mark.start + mark.duration > status.buffer_start
+                    && let MarkId::UserDefined(beat) = mark.mark_id
                 {
-                    current_beat = mark.mark_id;
+                    current_beat = beat;
                 }
             }
         }
@@ -555,7 +593,7 @@ impl Renderer {
             // Find the start of the first Beats waveform that's odd/even
             for mark in status.marks.iter() {
                 if mark.waveform_id == WaveformId::Beats(even) {
-                    if mark.mark_id == 0 {
+                    if mark.mark_id == MarkId::TopLevel {
                         marks_start = marks_start.min(mark.start);
                         marks_duration = mark.duration;
                     }
@@ -563,21 +601,23 @@ impl Renderer {
             }
             for mark in status.marks.iter().rev() {
                 // Reverse so we draw earlier ones last
-                if let WaveformId::Beats(_) = mark.waveform_id {
+                if mark.waveform_id.is_beats() {
                     continue; // Skip beats
                 }
-                if mark.mark_id < 1
-                    || mark.start > marks_start + marks_duration
+                let color_idx = match mark.mark_id.color_index() {
+                    None => continue, // Skip if not user-defined
+                    Some(idx) => idx,
+                };
+                if mark.start > marks_start + marks_duration
                     || mark.start + mark.duration < marks_start
                 {
-                    continue; // Skip top-level marks and marks that don't start during the Beats waveform
+                    continue; // Skip marks that don't start during the Beats waveform
                 }
                 if mark.start < now && mark.start + mark.duration >= now {
-                    self.canvas.set_draw_color(
-                        mark_colors[(mark.mark_id - 1) as usize % mark_colors.len()],
-                    );
+                    self.canvas
+                        .set_draw_color(mark_colors[color_idx % mark_colors.len()]);
                 } else {
-                    let mut color = mark_colors[(mark.mark_id - 1) as usize % mark_colors.len()];
+                    let mut color = mark_colors[color_idx % mark_colors.len()];
                     color.r = color.r / 2;
                     color.g = color.g / 2;
                     color.b = color.b / 2;
@@ -586,8 +626,7 @@ impl Renderer {
                 let x = (mark.start - marks_start).as_secs_f32() / marks_duration.as_secs_f32()
                     * marks_width
                     + marks_x_offset;
-                let y =
-                    (mark.mark_id - 1) as f32 * marks_row_height + 2.0 * self.height as f32 / 3.0;
+                let y = color_idx as f32 * marks_row_height + 2.0 * self.height as f32 / 3.0;
                 let width =
                     mark.duration.as_secs_f32() / marks_duration.as_secs_f32() * marks_width;
                 let height = marks_row_height - marks_y_padding;
@@ -773,7 +812,7 @@ pub fn beats_waveform(
     tempo: u32,
     beats_per_measure: u32,
     context: &Vec<(String, parser::Expr)>,
-) -> waveform::Waveform {
+) -> waveform::Waveform<(), MarkId> {
     let seconds_per_beat = duration_from_beats(tempo, 1);
     let mut ws = Vec::new();
     for i in 0..beats_per_measure {
@@ -790,9 +829,9 @@ pub fn beats_waveform(
     };
     match parser::evaluate(&context, expr) {
         Ok(parser::Expr::Seq { waveform, .. }) => match *waveform {
-            parser::Expr::Waveform(waveform) => waveform::Waveform::Marked {
-                id: 0,
-                waveform: Box::new(waveform),
+            parser::Expr::Waveform(waveform) => waveform::Waveform::<(), MarkId>::Marked {
+                id: MarkId::TopLevel,
+                waveform: Box::new(waveform::map_marks(waveform, &MarkId::UserDefined)),
             },
             expr => panic!("Error creating beats waveform with seq, got {}", expr),
         },
@@ -802,21 +841,25 @@ pub fn beats_waveform(
 }
 
 pub fn is_pending_program(
-    status: &tracker::Status<WaveformId>,
+    status: &tracker::Status<WaveformId, MarkId>,
     now: Instant,
     program_id: ProgramId,
 ) -> bool {
     status.marks.iter().any(|w| {
-        w.waveform_id == WaveformId::Program(program_id) && w.mark_id == 0 && w.start > now
+        w.waveform_id == WaveformId::Program(program_id)
+            && w.mark_id == MarkId::TopLevel
+            && w.start > now
     })
 }
 
 pub fn is_active_program(
-    status: &tracker::Status<WaveformId>,
+    status: &tracker::Status<WaveformId, MarkId>,
     now: Instant,
     program_id: ProgramId,
 ) -> bool {
     status.marks.iter().any(|w| {
-        w.waveform_id == WaveformId::Program(program_id) && w.mark_id == 0 && w.start <= now
+        w.waveform_id == WaveformId::Program(program_id)
+            && w.mark_id == MarkId::TopLevel
+            && w.start <= now
     })
 }

@@ -12,7 +12,7 @@ fn bench_filter(c: &mut Criterion) {
     c.bench_function("filter_1_1", |b| {
         b.iter(|| {
             let generator = generator::Generator::new(44100);
-            let w1 = Filter {
+            let w1: waveform::Waveform = Filter {
                 waveform: Box::new(Time(())),
                 feed_forward: vec![Fixed(vec![0.5], ())],
                 feedback: vec![Fixed(vec![-0.5], ())],
@@ -28,7 +28,7 @@ fn bench_filter(c: &mut Criterion) {
     c.bench_function("filter_4_3", |b| {
         b.iter(|| {
             let generator = generator::Generator::new(44100);
-            let w2 = Filter {
+            let w2: waveform::Waveform = Filter {
                 waveform: Box::new(Time(())),
                 feed_forward: vec![
                     Fixed(vec![0.00107949], ()),
@@ -59,14 +59,12 @@ fn bench_marks(c: &mut Criterion) {
             let generator = generator::Generator::new(44100);
             let mut ws = Vec::new();
             for _ in 0..40 {
-                ws.push(parser::Expr::Waveform(renderer::beats_waveform(
-                    120, 4, &context,
-                )));
+                ws.push(renderer::beats_waveform(120, 4, &context));
             }
-            let w = match builtins::sequence(vec![parser::Expr::List(ws)]) {
-                parser::Expr::Waveform(w) => w,
-                _ => panic!("Expected waveform"),
-            };
+            let w = ws
+                .into_iter()
+                .reduce(|result, w| waveform::Waveform::Append(Box::new(result), Box::new(w)))
+                .unwrap();
             let mut w = generator::initialize_state(w);
             for _ in 0..3438 {
                 // Approx. the length of the waveform

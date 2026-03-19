@@ -11,7 +11,7 @@ use sdl2::event::Event;
 use sdl2::ttf::Sdl2TtfContext;
 
 use metric::Metric;
-use renderer::{Mode, Program, ProgramSliders, Renderer, WaveformId};
+use renderer::{MarkId, Mode, Program, ProgramSliders, Renderer, WaveformId};
 use tracker::Command;
 use tuun::builtins;
 use tuun::generator;
@@ -48,7 +48,7 @@ fn prepend_native_slider_bindings(program: &Program) -> String {
 
 fn send_initial_slider_values(
     programs: &[Program],
-    command_sender: &std::sync::mpsc::Sender<Command<WaveformId>>,
+    command_sender: &std::sync::mpsc::Sender<Command<WaveformId, MarkId>>,
 ) {
     for program in programs {
         for (j, config) in program.sliders.configs.iter().enumerate() {
@@ -258,7 +258,7 @@ pub fn main() {
         // Filter out any empty programs
         programs.retain(|p| !p.text.is_empty());
 
-        let mut tracker = tracker::Tracker::<WaveformId>::new(
+        let mut tracker = tracker::Tracker::<WaveformId, MarkId>::new(
             args.sample_rate,
             args.output_dir.clone().into(),
             args.date_format.clone(),
@@ -277,18 +277,15 @@ pub fn main() {
         // We need to add one Beats mark so that we can reuse the helper below to play waveforms
         status.marks = vec![tracker::Mark {
             waveform_id: WaveformId::Beats(false),
-            mark_id: 0,
+            mark_id: MarkId::TopLevel,
             start: Instant::now() + Duration::from_millis(100), // Some time in the near future
-
-            duration: Duration::from_secs(4), // Doesn't matter
+            duration: Duration::from_secs(4),                   // Doesn't matter
         }];
-        const MARK_ID: u32 = 100;
         // Parse and send commands to play all of the waveforms.
         for (index, program) in programs.iter().enumerate() {
             println!("Playing program {}: {}", program.id, program.text);
-            // Wrap each program in a mark so that we can wait for it to finish
-            let marked = Program {
-                text: format!("({}) | mark({})", program.text, MARK_ID),
+            let program = Program {
+                text: program.text.to_string(),
                 id: program.id,
                 sliders: program.sliders.clone(),
             };
@@ -298,7 +295,7 @@ pub fn main() {
                 &args,
                 index,
                 program.text.len(),
-                &marked,
+                &program,
                 &command_sender,
                 sdl2::keyboard::Mod::empty(),
             );
@@ -318,7 +315,7 @@ pub fn main() {
             let mark_count = status
                 .marks
                 .iter()
-                .filter(|mark| mark.mark_id == MARK_ID)
+                .filter(|mark| !mark.waveform_id.is_beats() && mark.mark_id == MarkId::TopLevel)
                 .count();
             if mark_count == 0 {
                 println!("All waveforms finished");
@@ -339,7 +336,7 @@ pub fn main() {
     let device = audio_subsystem
         .open_playback(None, &desired_spec, |spec| {
             println!("Spec: {:?}", spec);
-            tracker::Tracker::<WaveformId>::new(
+            tracker::Tracker::<WaveformId, MarkId>::new(
                 args.sample_rate,
                 args.output_dir.clone().into(),
                 args.date_format.clone(),
@@ -441,8 +438,8 @@ pub fn main() {
 }
 
 fn start_beats(
-    command_sender: &mpsc::Sender<Command<WaveformId>>,
-    status_receiver: &mpsc::Receiver<tracker::Status<WaveformId>>,
+    command_sender: &mpsc::Sender<Command<WaveformId, MarkId>>,
+    status_receiver: &mpsc::Receiver<tracker::Status<WaveformId, MarkId>>,
     args: &Args,
     context: &Vec<(String, parser::Expr)>,
 ) {
@@ -462,7 +459,9 @@ fn start_beats(
         match status_receiver.recv() {
             Ok(status) => {
                 for mark in status.marks {
-                    if mark.waveform_id == WaveformId::Beats(false) && mark.mark_id == 0 {
+                    if mark.waveform_id == WaveformId::Beats(false)
+                        && mark.mark_id == MarkId::TopLevel
+                    {
                         command_sender
                             .send(Command::Play {
                                 id: WaveformId::Beats(true),
@@ -526,9 +525,9 @@ fn process_event<I>(
     renderer: &Renderer,
     event: Event,
     mode: Mode,
-    status: &tracker::Status<WaveformId>,
+    status: &tracker::Status<WaveformId, MarkId>,
     programs: &mut Vec<Program>,
-    command_sender: &std::sync::mpsc::Sender<Command<WaveformId>>,
+    command_sender: &std::sync::mpsc::Sender<Command<WaveformId, MarkId>>,
 ) -> (Vec<(String, parser::Expr)>, Mode) {
     use sdl2::keyboard::Mod;
     use sdl2::keyboard::Scancode;
@@ -1143,10 +1142,12 @@ fn process_event<I>(
 }
 
 // Returns the start time of the next measure
-fn next_measure_start(status: &tracker::Status<WaveformId>) -> Instant {
+fn next_measure_start(status: &tracker::Status<WaveformId, MarkId>) -> Instant {
     for mark in &status.marks {
         match mark.waveform_id {
-            WaveformId::Beats(_) if mark.mark_id == 0 && mark.start > Instant::now() => {
+            WaveformId::Beats(_)
+                if mark.mark_id == MarkId::TopLevel && mark.start > Instant::now() =>
+            {
                 return mark.start;
             }
             _ => (),
@@ -1162,12 +1163,12 @@ enum WaveformOrMode {
 
 fn play_waveform(
     context: Vec<(String, parser::Expr)>,
-    status: &tracker::Status<WaveformId>,
+    status: &tracker::Status<WaveformId, MarkId>,
     args: &Args,
     active_program_index: usize,
     cursor_position: usize,
     program: &Program,
-    command_sender: &std::sync::mpsc::Sender<Command<WaveformId>>,
+    command_sender: &std::sync::mpsc::Sender<Command<WaveformId, MarkId>>,
     keymod: sdl2::keyboard::Mod,
 ) -> (Vec<(String, parser::Expr)>, Mode) {
     use sdl2::keyboard::Mod;
@@ -1206,8 +1207,8 @@ fn play_waveform(
                     // TODO maybe extend the mark to the full measure?
                     id: WaveformId::Program(program.id),
                     waveform: waveform::Waveform::Marked {
-                        id: 0,
-                        waveform: Box::new(waveform),
+                        id: MarkId::TopLevel,
+                        waveform: Box::new(waveform::map_marks(waveform, &MarkId::UserDefined)),
                     },
                     start: next_measure_start(&status),
                     repeat_every,

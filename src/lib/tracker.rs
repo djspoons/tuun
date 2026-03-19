@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fmt;
 use std::fmt::Debug;
 use std::io::BufWriter;
 use std::path;
@@ -12,11 +13,11 @@ use sdl2::audio;
 use crate::generator;
 use crate::waveform;
 
-pub enum Command<I> {
+pub enum Command<I, M> {
     Play {
         // A unique id for this waveform
         id: I,
-        waveform: waveform::Waveform,
+        waveform: waveform::Waveform<(), M>,
         // When the waveform should start playing; if in the past, then play immediately
         start: Instant,
         // If set, play this waveform in a loop
@@ -40,22 +41,23 @@ pub enum Command<I> {
 }
 
 #[derive(Debug, Clone)]
-pub struct Mark<I> {
+pub struct Mark<I, M> {
     pub waveform_id: I,
-    pub mark_id: u32,
+    pub mark_id: M,
     pub start: Instant,
     pub duration: Duration,
 }
 
 #[derive(Debug, Clone)]
-pub struct Status<I>
+pub struct Status<I, M>
 where
     I: Clone + Send,
+    M: Clone + Send,
 {
     pub buffer_start: Instant,
     // Marks for each active waveform as well as any pending waveforms; a mark may appear more
     // than once if a given waveform is both active and pending
-    pub marks: Vec<Mark<I>>,
+    pub marks: Vec<Mark<I, M>>,
     // The current values of the sliders (as of buffer_start)
     pub slider_values: HashMap<String, f32>,
     // Some status updates will include the current buffer
@@ -64,56 +66,62 @@ where
     pub tracker_load: Option<f32>,
 }
 
-struct ActiveWaveform<I>
+struct ActiveWaveform<I, M>
 where
     I: Clone,
+    M: Clone,
 {
     id: I,
-    waveform: generator::Waveform,
-    marks: Vec<Mark<I>>,
+    waveform: waveform::Waveform<generator::State, M>,
+    marks: Vec<Mark<I, M>>,
     // Open files used by Captured waveforms
     capture_state: HashMap<String, hound::WavWriter<BufWriter<std::fs::File>>>,
 }
 
 #[derive(Debug, Clone)]
-struct PendingWaveform<I> {
+struct PendingWaveform<I, M>
+where
+    M: Clone,
+{
     id: I,
-    waveform: generator::Waveform,
+    waveform: waveform::Waveform<generator::State, M>,
     start: Instant,
     repeat_every: Option<Duration>,
-    marks: Vec<Mark<I>>,
+    marks: Vec<Mark<I, M>>,
 }
 
-pub struct Tracker<'a, I>
+pub struct Tracker<'a, I, M>
 where
     I: Clone + Send,
+    M: Clone + Send + fmt::Display,
 {
     generator: generator::Generator<'a>,
     sample_rate: i32,
     captured_output_dir: path::PathBuf,
     captured_date_format: String,
-    command_receiver: mpsc::Receiver<Command<I>>,
-    status_sender: mpsc::Sender<Status<I>>,
+    command_receiver: mpsc::Receiver<Command<I, M>>,
+    status_sender: mpsc::Sender<Status<I, M>>,
 
     // Persistent generation state
-    active_waveforms: Vec<ActiveWaveform<I>>,
-    pending_waveforms: Vec<PendingWaveform<I>>, // sorted by start time
+    active_waveforms: Vec<ActiveWaveform<I, M>>,
+    pending_waveforms: Vec<PendingWaveform<I, M>>, // sorted by start time
     // Command state
     send_current_buffer: bool,
     slider_state: generator::SliderState,
 }
 
-impl<'a, I> Tracker<'a, I>
+impl<'a, I, M> Tracker<'a, I, M>
 where
     I: Clone + Send,
+    M: Clone + Send + Debug + PartialEq + fmt::Display,
 {
     pub fn new(
         sample_rate: i32,
         captured_output_dir: path::PathBuf,
         captured_date_format: String,
-        command_receiver: mpsc::Receiver<Command<I>>,
-        status_sender: mpsc::Sender<Status<I>>,
-    ) -> Tracker<'a, I> {
+        command_receiver: mpsc::Receiver<Command<I, M>>,
+        status_sender: mpsc::Sender<Status<I, M>>,
+    ) -> Tracker<'a, I, M> {
         return Tracker {
             generator: generator::Generator::new(sample_rate),
             sample_rate,
@@ -139,8 +147,8 @@ where
         &self,
         waveform_id: &I,
         start: Instant,
-        waveform: &generator::Waveform,
-        out: &mut Vec<Mark<I>>,
+        waveform: &waveform::Waveform<generator::State, M>,
+        out: &mut Vec<Mark<I, M>>,
     ) {
         use waveform::Waveform::*;
         match waveform {
@@ -186,7 +194,7 @@ where
                 );
                 out.push(Mark {
                     waveform_id: waveform_id.clone(),
-                    mark_id: *id,
+                    mark_id: id.clone(),
                     start,
                     duration: Duration::from_secs_f32(len as f32 / self.sample_rate as f32),
                 });
@@ -197,7 +205,7 @@ where
 
     fn process_captured<State>(
         &self,
-        waveform: &waveform::Waveform<State>,
+        waveform: &waveform::Waveform<State, M>,
         out: &mut HashMap<String, hound::WavWriter<BufWriter<std::fs::File>>>,
     ) {
         use waveform::Waveform::*;
@@ -254,9 +262,10 @@ where
     }
 }
 
-impl<'a, I> audio::AudioCallback for Tracker<'a, I>
+impl<'a, I, M> audio::AudioCallback for Tracker<'a, I, M>
 where
-    I: Clone + PartialEq + Send + Debug,
+    I: Clone + Debug + Send + PartialEq,
+    M: Clone + Debug + Send + PartialEq + fmt::Display ,
 {
     type Channel = f32;
 
@@ -311,12 +320,13 @@ where
     }
 }
 
-impl<'a, I> Tracker<'a, I>
+impl<'a, I, M> Tracker<'a, I, M>
 where
-    I: Clone + PartialEq + Debug + Send,
+    I: Clone + Debug + Send + PartialEq,
+    M: Clone + Debug + Send + PartialEq + fmt::Display,
 {
     // buffer_start is the time corresponding to the beginning of the current buffer
-    fn process_command(&mut self, command: Command<I>) {
+    fn process_command(&mut self, command: Command<I, M>) {
         match command {
             Command::Play {
                 id,
@@ -377,7 +387,7 @@ where
     // Generate from pending waveforms and active waveforms, filling the out buffer.
     // Returns how many samples were generated, or None if the no samples were generated
     // along with the set of active waveforms that finished generating
-    fn generate(&mut self, buffer_start: Instant, out: &mut [f32]) -> Vec<ActiveWaveform<I>> {
+    fn generate(&mut self, buffer_start: Instant, out: &mut [f32]) -> Vec<ActiveWaveform<I, M>> {
         // We'll generate in segments based on the set of active waveforms at a given time
         let mut segment_start = buffer_start;
         let mut segment_length = out.len();
