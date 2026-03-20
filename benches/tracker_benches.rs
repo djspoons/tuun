@@ -8,11 +8,12 @@ use tuun::waveform;
 
 fn bench_filter(c: &mut Criterion) {
     use waveform::Waveform::{Filter, Fixed, Time};
+    type Waveform = waveform::Waveform<u32>;
 
     c.bench_function("filter_1_1", |b| {
         b.iter(|| {
             let generator = generator::Generator::new(44100);
-            let w1: waveform::Waveform = Filter {
+            let w1: Waveform = Filter {
                 waveform: Box::new(Time(())),
                 feed_forward: vec![Fixed(vec![0.5], ())],
                 feedback: vec![Fixed(vec![-0.5], ())],
@@ -28,7 +29,7 @@ fn bench_filter(c: &mut Criterion) {
     c.bench_function("filter_4_3", |b| {
         b.iter(|| {
             let generator = generator::Generator::new(44100);
-            let w2: waveform::Waveform = Filter {
+            let w2: Waveform = Filter {
                 waveform: Box::new(Time(())),
                 feed_forward: vec![
                     Fixed(vec![0.00107949], ()),
@@ -75,7 +76,8 @@ fn bench_marks(c: &mut Criterion) {
 }
 
 fn bench_large(c: &mut Criterion) {
-    let mut context = Vec::new();
+    type Expr = parser::Expr<u32>;
+    let mut context: Vec<(String, Expr)> = Vec::new();
     builtins::add_prelude(&mut context);
     match parser::parse_context(
         r#"
@@ -106,7 +108,7 @@ fn bench_large(c: &mut Criterion) {
 
     c.bench_function("large_440", |b| {
         b.iter(|| {
-            let program = "triangle(55) + (noise * 0.2) | R(1.0, 1.0) | mark(2)";
+            let program = "triangle(55) + (noise * 0.2) | R(1.0, 1.0)";
             match parser::parse_program(program) {
                 Ok(expr) => {
                     //println!("Parser returned: {:}", &expr);

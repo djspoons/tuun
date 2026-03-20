@@ -132,9 +132,9 @@ where
 }
 
 #[derive(Clone)]
-pub struct BuiltInFn(pub Rc<dyn Fn(Vec<Expr>) -> Expr>);
+pub struct BuiltInFn<M>(pub Rc<dyn Fn(Vec<Expr<M>>) -> Expr<M>>);
 
-impl std::fmt::Debug for BuiltInFn {
+impl<M> std::fmt::Debug for BuiltInFn<M> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "BuiltInFn(...)")
     }
@@ -147,53 +147,53 @@ pub enum Pattern {
 }
 
 #[derive(Clone, Debug)]
-pub enum Expr {
+pub enum Expr<M> {
     // Values
     Bool(bool),
     Float(f32),
     String(String),
-    Waveform(waveform::Waveform),
+    Waveform(waveform::Waveform<M>),
     Function {
         pattern: Pattern,
-        body: Box<Expr>,
+        body: Box<Expr<M>>,
     },
     BuiltIn {
         name: String,
         // Pure functions from a vector of values to a value
-        function: BuiltInFn,
+        function: BuiltInFn<M>,
     },
     // A sequence-able waveform. In value form, both offset and waveform are Expr::Waveform.
     Seq {
-        offset: Box<Expr>,
-        waveform: Box<Expr>,
+        offset: Box<Expr<M>>,
+        waveform: Box<Expr<M>>,
     },
     // If-Then-Else expression
     IfThenElse {
-        condition: Box<Expr>,
-        then: Box<Expr>,
-        else_: Box<Expr>,
+        condition: Box<Expr<M>>,
+        then: Box<Expr<M>>,
+        else_: Box<Expr<M>>,
     },
     // Function application
     Variable(String),
     Application {
-        function: Box<Expr>,
-        argument: Box<Expr>,
+        function: Box<Expr<M>>,
+        argument: Box<Expr<M>>,
     },
     // Compound expressions
-    Tuple(Vec<Expr>),
-    List(Vec<Expr>),
+    Tuple(Vec<Expr<M>>),
+    List(Vec<Expr<M>>),
     // Errors
     Error(String),
 }
 
 // TODO use this in 'expect'?
-impl Default for Expr {
+impl<M> Default for Expr<M> {
     fn default() -> Self {
         Expr::Error("_".to_string())
     }
 }
 
-fn parse_string(input: LocatedSpan) -> IResult<Expr> {
+fn parse_string<M>(input: LocatedSpan) -> IResult<Expr<M>> {
     #[rustfmt::skip]
     let (rest, value) = delimited(
         char('"'),
@@ -204,7 +204,7 @@ fn parse_string(input: LocatedSpan) -> IResult<Expr> {
     return Ok((rest, Expr::String(value.fragment().to_string())));
 }
 
-fn parse_literal(input: LocatedSpan) -> IResult<Expr> {
+fn parse_literal<M>(input: LocatedSpan) -> IResult<Expr<M>> {
     #[rustfmt::skip]
     let (rest, value) = alt((
         // Handle parsing negative floats ourselves
@@ -265,7 +265,7 @@ fn parse_pattern(input: LocatedSpan) -> IResult<Pattern> {
     return Ok((rest, pattern));
 }
 
-fn parse_function(input: LocatedSpan) -> IResult<Expr> {
+fn parse_function<M>(input: LocatedSpan) -> IResult<Expr<M>> {
     #[rustfmt::skip]
     let (rest, expr) =
         ((delimited(
@@ -284,7 +284,7 @@ fn parse_function(input: LocatedSpan) -> IResult<Expr> {
     return Ok((rest, expr));
 }
 
-fn parse_bindings(input: LocatedSpan) -> IResult<Vec<(Pattern, Expr)>> {
+fn parse_bindings<M>(input: LocatedSpan) -> IResult<Vec<(Pattern, Expr<M>)>> {
     #[rustfmt::skip]
     let (rest, bindings) =
         // TODO maybe don't allow just a comma?
@@ -301,7 +301,7 @@ fn parse_bindings(input: LocatedSpan) -> IResult<Vec<(Pattern, Expr)>> {
     return Ok((rest, bindings));
 }
 
-fn parse_let(input: LocatedSpan) -> IResult<Expr> {
+fn parse_let<M>(input: LocatedSpan) -> IResult<Expr<M>> {
     #[rustfmt::skip]
     let (rest, expr) =
         (delimited(
@@ -326,7 +326,7 @@ fn parse_let(input: LocatedSpan) -> IResult<Expr> {
     return Ok((rest, expr));
 }
 
-fn parse_if_then_else(input: LocatedSpan) -> IResult<Expr> {
+fn parse_if_then_else<M>(input: LocatedSpan) -> IResult<Expr<M>> {
     #[rustfmt::skip]
     let (rest, expr) =
         (delimited(
@@ -347,7 +347,7 @@ fn parse_if_then_else(input: LocatedSpan) -> IResult<Expr> {
     return Ok((rest, expr));
 }
 
-fn parse_primitive(input: LocatedSpan) -> IResult<Expr> {
+fn parse_primitive<M>(input: LocatedSpan) -> IResult<Expr<M>> {
     #[rustfmt::skip]
     let (rest, value) = alt((
         parse_literal,
@@ -370,7 +370,7 @@ fn parse_primitive(input: LocatedSpan) -> IResult<Expr> {
     return Ok((rest, value));
 }
 
-fn parse_application(input: LocatedSpan) -> IResult<Expr> {
+fn parse_application<M>(input: LocatedSpan) -> IResult<Expr<M>> {
     #[rustfmt::skip]
     let (rest, expr) = map(
         (
@@ -394,7 +394,7 @@ fn parse_application(input: LocatedSpan) -> IResult<Expr> {
     return Ok((rest, expr));
 }
 
-fn parse_multiplicative(input: LocatedSpan) -> IResult<Expr> {
+fn parse_multiplicative<M>(input: LocatedSpan) -> IResult<Expr<M>> {
     #[rustfmt::skip]
     let (rest, value) = map(
         (
@@ -418,7 +418,7 @@ fn parse_multiplicative(input: LocatedSpan) -> IResult<Expr> {
     return Ok((rest, value));
 }
 
-fn parse_additive(input: LocatedSpan) -> IResult<Expr> {
+fn parse_additive<M>(input: LocatedSpan) -> IResult<Expr<M>> {
     #[rustfmt::skip]
     let (rest, value) = map(
         (
@@ -442,7 +442,7 @@ fn parse_additive(input: LocatedSpan) -> IResult<Expr> {
     return Ok((rest, value));
 }
 
-fn parse_relational(input: LocatedSpan) -> IResult<Expr> {
+fn parse_relational<M>(input: LocatedSpan) -> IResult<Expr<M>> {
     #[rustfmt::skip]
     let (rest, value) = map(
         (
@@ -465,7 +465,7 @@ fn parse_relational(input: LocatedSpan) -> IResult<Expr> {
     return Ok((rest, value));
 }
 
-fn parse_chord(input: LocatedSpan) -> IResult<Expr> {
+fn parse_chord<M>(input: LocatedSpan) -> IResult<Expr<M>> {
     #[rustfmt::skip]
     let (rest, expr) = delimited(
         (char('{'), multispace0),
@@ -481,7 +481,7 @@ fn parse_chord(input: LocatedSpan) -> IResult<Expr> {
     ));
 }
 
-fn parse_sequence(input: LocatedSpan) -> IResult<Expr> {
+fn parse_sequence<M>(input: LocatedSpan) -> IResult<Expr<M>> {
     #[rustfmt::skip]
     let (rest, expr) = delimited(
         (char('<'), multispace0),
@@ -499,7 +499,7 @@ fn parse_sequence(input: LocatedSpan) -> IResult<Expr> {
 
 /// Parses a parenthesized expression or expressions. If there is only one element, returns just that element;
 /// otherwise returns a Tuple of elements.
-fn parse_tuple(input: LocatedSpan) -> IResult<Expr> {
+fn parse_tuple<M>(input: LocatedSpan) -> IResult<Expr<M>> {
     #[rustfmt::skip]
     let (rest, mut exprs) = delimited(
         (char('('), multispace0),
@@ -515,7 +515,7 @@ fn parse_tuple(input: LocatedSpan) -> IResult<Expr> {
     return Ok((rest, Expr::Tuple(exprs)));
 }
 
-fn parse_list(input: LocatedSpan) -> IResult<Expr> {
+fn parse_list<M>(input: LocatedSpan) -> IResult<Expr<M>> {
     #[rustfmt::skip]
     let (rest, exprs) = delimited(
         (char('['), multispace0),
@@ -528,7 +528,7 @@ fn parse_list(input: LocatedSpan) -> IResult<Expr> {
     return Ok((rest, Expr::List(exprs)));
 }
 
-fn parse_reverse_application(input: LocatedSpan) -> IResult<Expr> {
+fn parse_reverse_application<M>(input: LocatedSpan) -> IResult<Expr<M>> {
     #[rustfmt::skip]
     let (rest, expr) = map(
         (
@@ -559,7 +559,7 @@ fn parse_reverse_application(input: LocatedSpan) -> IResult<Expr> {
     return Ok((rest, expr));
 }
 
-fn parse_expr(input: LocatedSpan) -> IResult<Expr> {
+fn parse_expr<M>(input: LocatedSpan) -> IResult<Expr<M>> {
     #[rustfmt::skip]
     let (rest, expr) = map(
         (
@@ -607,7 +607,10 @@ fn translate_parse_result<T>(result: IResult<T>) -> Result<T, Vec<Error>> {
     }
 }
 
-pub fn parse_program(input: &str) -> Result<Expr, Vec<Error>> {
+pub fn parse_program<M>(input: &str) -> Result<Expr<M>, Vec<Error>>
+where
+    M: fmt::Display,
+{
     let errors = RefCell::new(Vec::new());
     let span = LocatedSpan::new_extra(input, ParseState(&errors));
     #[rustfmt::skip]
@@ -628,7 +631,7 @@ pub fn parse_program(input: &str) -> Result<Expr, Vec<Error>> {
     translate_parse_result(result)
 }
 
-pub fn parse_context(input: &str) -> Result<Vec<(Pattern, Expr)>, Vec<Error>> {
+pub fn parse_context<M>(input: &str) -> Result<Vec<(Pattern, Expr<M>)>, Vec<Error>> {
     let errors = RefCell::new(Vec::new());
     let span = LocatedSpan::new_extra(input, ParseState(&errors));
     let result = all_consuming(ws(parse_bindings)).parse(span);
@@ -640,7 +643,7 @@ pub fn parse_context(input: &str) -> Result<Vec<(Pattern, Expr)>, Vec<Error>> {
 
 /// Extends the context with a binding for each identifier in the pattern that is bound to
 /// itself.
-fn extend_with_trivial_context(context: &mut Vec<(String, Expr)>, pattern: &Pattern) {
+fn extend_with_trivial_context<M>(context: &mut Vec<(String, Expr<M>)>, pattern: &Pattern) {
     match pattern {
         Pattern::Identifier(name) => {
             context.push((name.clone(), Expr::Variable(name.clone())));
@@ -653,7 +656,10 @@ fn extend_with_trivial_context(context: &mut Vec<(String, Expr)>, pattern: &Patt
     }
 }
 
-fn substitute(context: &Vec<(String, Expr)>, expr: Expr) -> Expr {
+fn substitute<M>(context: &Vec<(String, Expr<M>)>, expr: Expr<M>) -> Expr<M>
+where
+    M: Clone,
+{
     use Expr::{
         Application, Bool, BuiltIn, Float, Function, IfThenElse, List, String, Tuple, Variable,
     };
@@ -710,7 +716,10 @@ fn substitute(context: &Vec<(String, Expr)>, expr: Expr) -> Expr {
     }
 }
 
-fn fmt_with_parens(expr: &Expr, f: &mut fmt::Formatter) -> fmt::Result {
+fn fmt_with_parens<M>(expr: &Expr<M>, f: &mut fmt::Formatter) -> fmt::Result
+where
+    M: fmt::Display,
+{
     match expr {
         Expr::Float(_)
         | Expr::Waveform(_)
@@ -742,14 +751,17 @@ impl fmt::Display for Pattern {
     }
 }
 
-impl fmt::Display for Expr {
+impl<M> fmt::Display for Expr<M>
+where
+    M: fmt::Display,
+{
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Expr::Bool(value) => write!(f, "{}", value),
             Expr::Float(value) => write!(f, "{}", value),
             Expr::String(value) => write!(f, "{}", value),
             Expr::Waveform(waveform) => {
-                write!(f, "{:?}", waveform)
+                write!(f, "{}", waveform)
             }
             Expr::Function { pattern, body } => {
                 write!(f, "fn ")?;
@@ -802,11 +814,14 @@ impl fmt::Display for Expr {
     }
 }
 
-pub fn extend_context(
-    context: &mut Vec<(String, Expr)>,
+pub fn extend_context<M>(
+    context: &mut Vec<(String, Expr<M>)>,
     pattern: &Pattern,
-    argument: &Expr,
-) -> Result<(), Error> {
+    argument: &Expr<M>,
+) -> Result<(), Error>
+where
+    M: Clone + fmt::Debug,
+{
     match (pattern, argument) {
         (Pattern::Identifier(name), argument) => {
             /*
@@ -834,7 +849,10 @@ pub fn extend_context(
     }
 }
 
-fn evaluate_closed(expr: Expr) -> Result<Expr, Error> {
+fn evaluate_closed<M>(expr: Expr<M>) -> Result<Expr<M>, Error>
+where
+    M: Clone + fmt::Display + fmt::Debug,
+{
     use Expr::{
         Application, Bool, BuiltIn, Float, Function, IfThenElse, List, Seq, String, Tuple,
         Variable, Waveform,
@@ -916,7 +934,10 @@ fn evaluate_closed(expr: Expr) -> Result<Expr, Error> {
 }
 
 // TODO rename evaluate?
-pub fn evaluate(context: &Vec<(String, Expr)>, mut expr: Expr) -> Result<Expr, Error> {
+pub fn evaluate<M>(context: &Vec<(String, Expr<M>)>, mut expr: Expr<M>) -> Result<Expr<M>, Error>
+where
+    M: Clone + fmt::Display + fmt::Debug,
+{
     expr = substitute(context, expr);
     return evaluate_closed(expr);
 }
@@ -983,16 +1004,16 @@ mod tests {
     #[test]
     fn test_parse_variable() {
         let input = "fn";
-        let result = parse_program(input);
+        let result = parse_program::<u32>(input);
         assert!(result.is_err());
 
         let input = "my_var";
-        let result = parse_program(input);
+        let result = parse_program::<u32>(input);
         assert!(result.is_ok());
         assert_eq!(format!("{}", result.unwrap()), "my_var");
 
         let input = "$";
-        let result = parse_program(input);
+        let result = parse_program::<u32>(input);
         assert!(result.is_ok());
         assert_eq!(format!("{}", result.unwrap()), "$");
     }
@@ -1000,12 +1021,12 @@ mod tests {
     #[test]
     fn test_parse_arithmetic() {
         let input = "(10 - 8 - 1) * 6";
-        let result = parse_program(input);
+        let result = parse_program::<u32>(input);
         assert!(result.is_ok());
         assert_eq!(format!("{}", result.unwrap()), "*(-(-(10, 8), 1), 6)");
 
         let input = "1 + 2 * 3.5 * 8 + 10";
-        let result = parse_program(input);
+        let result = parse_program::<u32>(input);
         assert!(result.is_ok());
         assert_eq!(
             format!("{}", result.unwrap()),
@@ -1016,7 +1037,7 @@ mod tests {
     #[test]
     fn test_parse_chord() {
         let input = "{[$x, $y, $z]}";
-        let result = parse_program(input);
+        let result = parse_program::<u32>(input);
         assert!(result.is_ok());
         assert_eq!(format!("{}", result.unwrap()), "_chord([$(x), $(y), $(z)])");
     }
@@ -1024,7 +1045,7 @@ mod tests {
     #[test]
     fn test_parse_sequence() {
         let input = "<[$x, $y, $z]>";
-        let result = parse_program(input);
+        let result = parse_program::<u32>(input);
         assert!(result.is_ok());
         assert_eq!(
             format!("{}", result.unwrap()),
@@ -1035,12 +1056,12 @@ mod tests {
     #[test]
     fn test_parse_function() {
         let input = "fn (x) => x";
-        let result = parse_program(input);
+        let result = parse_program::<u32>(input);
         assert!(result.is_ok());
         assert_eq!(format!("{}", result.unwrap()), "fn (x) => x");
 
         let input = "fn(x, (y, z)) => x";
-        let result = parse_program(input);
+        let result = parse_program::<u32>(input);
         assert!(result.is_ok());
         assert_eq!(format!("{}", result.unwrap()), "fn (x, (y, z)) => x");
     }
@@ -1048,7 +1069,7 @@ mod tests {
     #[test]
     fn test_parse_let() {
         let input = "let x = 1, y = x + 1 in 2 * y";
-        let result = parse_program(input);
+        let result = parse_program::<u32>(input);
         assert!(result.is_ok());
         assert_eq!(
             format!("{}", result.unwrap()),
@@ -1056,7 +1077,7 @@ mod tests {
         );
 
         let input = "let (x, y) = (1, 2) in x * y";
-        let result = parse_program(input);
+        let result = parse_program::<u32>(input);
         assert!(result.is_ok());
         assert_eq!(
             format!("{}", result.unwrap()),
@@ -1067,17 +1088,17 @@ mod tests {
     #[test]
     fn test_parse_application() {
         let input = "(fn (x) => x * 2)(3)";
-        let result = parse_program(input);
+        let result = parse_program::<u32>(input);
         assert!(result.is_ok());
         assert_eq!(format!("{}", result.unwrap()), "(fn (x) => *(x, 2))(3)");
 
         let input = "Q($@70)";
-        let result = parse_program(input);
+        let result = parse_program::<u32>(input);
         assert!(result.is_ok());
         assert_eq!(format!("{}", result.unwrap()), "Q($(@(70)))");
 
         let input = "f(-1) - 1 < 0";
-        let result = parse_program(input);
+        let result = parse_program::<u32>(input);
         assert!(result.is_ok());
         assert_eq!(format!("{}", result.unwrap()), "<(-(f(-(1)), 1), 0)");
     }
@@ -1085,7 +1106,7 @@ mod tests {
     #[test]
     fn test_parse_pipe() {
         let input = "2 * 3 | (fn (x) => fn(y) => x * y)(4)";
-        let result = parse_program(input);
+        let result = parse_program::<u32>(input);
         assert!(result.is_ok());
         assert_eq!(
             format!("{}", result.unwrap()),
@@ -1093,7 +1114,7 @@ mod tests {
         );
 
         let input = r"$200 | S(0.5, .25) | R(0.5, 1) \ $400";
-        let result = parse_program(input);
+        let result = parse_program::<u32>(input);
         assert!(result.is_ok());
         assert_eq!(
             format!("{}", result.unwrap()),
@@ -1105,7 +1126,7 @@ mod tests {
     fn test_function_eval() {
         let context = Vec::new();
         let input = "(fn (x) => fn (x) => x)(7)(5)";
-        let result = parse_program(input);
+        let result = parse_program::<u32>(input);
         assert!(result.is_ok());
         let expr = result.unwrap();
         println!("Parsed expression: {}", expr);
@@ -1113,14 +1134,14 @@ mod tests {
         assert_eq!(format!("{}", evaluated), "5");
 
         let input = "(fn (x) => fn (y, z) => (x, y, z))(3)(4, 5)";
-        let result = parse_program(input);
+        let result = parse_program::<u32>(input);
         assert!(result.is_ok());
         let expr = result.unwrap();
         let evaluated = evaluate(&context, expr).unwrap();
         assert_eq!(format!("{}", evaluated), "(3, 4, 5)");
 
         let input = "(fn (x, (y, z)) => (x, y, z))(3, (4, 5))";
-        let result = parse_program(input);
+        let result = parse_program::<u32>(input);
         assert!(result.is_ok());
         let expr = result.unwrap();
         let evaluated = evaluate(&context, expr).unwrap();

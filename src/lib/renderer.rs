@@ -811,8 +811,8 @@ pub fn duration_from_beats(tempo: u32, beats: u64) -> Duration {
 pub fn beats_waveform(
     tempo: u32,
     beats_per_measure: u32,
-    context: &Vec<(String, parser::Expr)>,
-) -> waveform::Waveform<(), MarkId> {
+    context: &Vec<(String, parser::Expr<MarkId>)>,
+) -> waveform::Waveform<MarkId> {
     let seconds_per_beat = duration_from_beats(tempo, 1);
     let mut ws = Vec::new();
     for i in 0..beats_per_measure {
@@ -829,9 +829,9 @@ pub fn beats_waveform(
     };
     match parser::evaluate(&context, expr) {
         Ok(parser::Expr::Seq { waveform, .. }) => match *waveform {
-            parser::Expr::Waveform(waveform) => waveform::Waveform::<(), MarkId>::Marked {
+            parser::Expr::Waveform(waveform) => waveform::Waveform::<MarkId>::Marked {
                 id: MarkId::TopLevel,
-                waveform: Box::new(waveform::map_marks(waveform, &MarkId::UserDefined)),
+                waveform: Box::new(waveform),
             },
             expr => panic!("Error creating beats waveform with seq, got {}", expr),
         },

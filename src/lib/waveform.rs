@@ -11,12 +11,8 @@ pub enum Operator {
 }
 
 /// Waveform is a compact representation of a sequence of samples.
-///
-/// With its default type parameters, it represents abstract waveforms that may be parsed or displayed.
-/// Implementations that generate samples may specialize the State parameter to manage internal state.
-/// Implementation that use marks for other internal purposes may specialize the MarkId parameter.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Waveform<State = (), MarkId = u32> {
+pub enum Waveform<MarkId, State = ()> {
     /*
      * Const produces a stream of samples where each sample is the same constant value.
      */
@@ -39,14 +35,14 @@ pub enum Waveform<State = (), MarkId = u32> {
      * is 0 seconds in length and `Fin(Subtract(Time, Const(2.0)), _)` is 2 seconds in length.
      */
     Fin {
-        length: Box<Waveform<State, MarkId>>,
-        waveform: Box<Waveform<State, MarkId>>,
+        length: Box<Waveform<MarkId, State>>,
+        waveform: Box<Waveform<MarkId, State>>,
     },
     /*
      * Append concatenates two waveforms, generating all samples from the first waveform and
      * then all samples from the second (regardless of the offset of the first).
      */
-    Append(Box<Waveform<State, MarkId>>, Box<Waveform<State, MarkId>>),
+    Append(Box<Waveform<MarkId, State>>, Box<Waveform<MarkId, State>>),
     /*
      * Sine computes the sine with the given frequency and phase (both in radians). Or put another way,
      * it computes the sine of angle that changes according to the rate of the first parameter and the
@@ -55,8 +51,8 @@ pub enum Waveform<State = (), MarkId = u32> {
      * a parameter of a Filter.
      */
     Sine {
-        frequency: Box<Waveform<State, MarkId>>,
-        phase: Box<Waveform<State, MarkId>>,
+        frequency: Box<Waveform<MarkId, State>>,
+        phase: Box<Waveform<MarkId, State>>,
         state: State,
     },
     /*
@@ -66,15 +62,15 @@ pub enum Waveform<State = (), MarkId = u32> {
      */
     // TODO maybe add a_0 back in?
     Filter {
-        waveform: Box<Waveform<State, MarkId>>,
-        feed_forward: Vec<Waveform<State, MarkId>>, // b_0, b_1, ...
-        feedback: Vec<Waveform<State, MarkId>>,     // a_1, a_2, ...
+        waveform: Box<Waveform<MarkId, State>>,
+        feed_forward: Vec<Waveform<MarkId, State>>, // b_0, b_1, ...
+        feedback: Vec<Waveform<MarkId, State>>,     // a_1, a_2, ...
         state: State,
     },
     BinaryPointOp(
         Operator,
-        Box<Waveform<State, MarkId>>,
-        Box<Waveform<State, MarkId>>,
+        Box<Waveform<MarkId, State>>,
+        Box<Waveform<MarkId, State>>,
     ),
     /*
      * Reset generates a repeating waveform that restarts the given waveform whenever the trigger
@@ -82,8 +78,8 @@ pub enum Waveform<State = (), MarkId = u32> {
      * by the trigger waveform.
      */
     Reset {
-        trigger: Box<Waveform<State, MarkId>>,
-        waveform: Box<Waveform<State, MarkId>>,
+        trigger: Box<Waveform<MarkId, State>>,
+        waveform: Box<Waveform<MarkId, State>>,
         state: State,
     },
     /*
@@ -91,9 +87,9 @@ pub enum Waveform<State = (), MarkId = u32> {
      * the trigger waveform.
      */
     Alt {
-        trigger: Box<Waveform<State, MarkId>>,
-        positive_waveform: Box<Waveform<State, MarkId>>,
-        negative_waveform: Box<Waveform<State, MarkId>>,
+        trigger: Box<Waveform<MarkId, State>>,
+        positive_waveform: Box<Waveform<MarkId, State>>,
+        negative_waveform: Box<Waveform<MarkId, State>>,
     },
     /*
      * Slider generates samples from a named interactive "slider" input.
@@ -106,18 +102,18 @@ pub enum Waveform<State = (), MarkId = u32> {
      */
     Marked {
         id: MarkId,
-        waveform: Box<Waveform<State, MarkId>>,
+        waveform: Box<Waveform<MarkId, State>>,
     },
     /* Captured waveforms generate the same samples as the inner waveform and also write them to a file
      * beginning with the given file stem.
      */
     Captured {
         file_stem: String,
-        waveform: Box<Waveform<State, MarkId>>,
+        waveform: Box<Waveform<MarkId, State>>,
     },
 }
 
-impl<State, MarkId: fmt::Display> fmt::Display for Waveform<State, MarkId> {
+impl<MarkId: fmt::Display, State> fmt::Display for Waveform<MarkId, State> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use Waveform::*;
         match self {
@@ -194,7 +190,7 @@ impl<State, MarkId: fmt::Display> fmt::Display for Waveform<State, MarkId> {
     }
 }
 
-pub fn initialize_state<S, T, M>(waveform: Waveform<S, M>, state: T) -> Waveform<T, M>
+pub fn initialize_state<M, S, T>(waveform: Waveform<M, S>, state: T) -> Waveform<M, T>
 where
     T: Clone,
 {
@@ -272,7 +268,7 @@ where
     }
 }
 
-pub fn remove_state<S, M>(w: Waveform<S, M>) -> Waveform<(), M> {
+pub fn remove_state<M, S>(w: Waveform<M, S>) -> Waveform<M> {
     use Waveform::*;
     match w {
         Const(value) => Const(value),
@@ -336,7 +332,7 @@ pub fn remove_state<S, M>(w: Waveform<S, M>) -> Waveform<(), M> {
     }
 }
 
-pub fn set_state<S, M>(waveform: &mut Waveform<S, M>, new_state: S)
+pub fn set_state<M, S>(waveform: &mut Waveform<M, S>, new_state: S)
 where
     S: Clone,
 {
@@ -411,7 +407,7 @@ where
 }
 
 // Replace the contents of any Marked waveform in `waveform` with the given mark_id with a copy of `new_waveform.`
-pub fn substitute<S, M>(waveform: &mut Waveform<S, M>, mark_id: &M, new_waveform: &Waveform<S, M>)
+pub fn substitute<M, S>(waveform: &mut Waveform<M, S>, mark_id: &M, new_waveform: &Waveform<M, S>)
 where
     S: Clone,
     M: Clone + PartialEq + fmt::Display,
@@ -473,79 +469,5 @@ where
         Captured { waveform, .. } => substitute(waveform, mark_id, new_waveform),
         // Leaf nodes — nothing to recurse into
         Const(_) | Time(_) | Noise | Fixed(..) | Slider(_) => {}
-    }
-}
-
-// Transform all mark IDs in a waveform from type M to type N using the given function.
-pub fn map_marks<S, M, N, F>(waveform: Waveform<S, M>, f: &F) -> Waveform<S, N>
-where
-    F: Fn(M) -> N,
-    M: fmt::Display,
-    N: fmt::Display,
-{
-    use Waveform::*;
-    match waveform {
-        Const(value) => Const(value),
-        Time(state) => Time(state),
-        Noise => Noise,
-        Fixed(samples, state) => Fixed(samples, state),
-        Fin { length, waveform } => Fin {
-            length: Box::new(map_marks(*length, f)),
-            waveform: Box::new(map_marks(*waveform, f)),
-        },
-        Append(a, b) => Append(Box::new(map_marks(*a, f)), Box::new(map_marks(*b, f))),
-        Sine {
-            frequency,
-            phase,
-            state,
-        } => Sine {
-            frequency: Box::new(map_marks(*frequency, f)),
-            phase: Box::new(map_marks(*phase, f)),
-            state,
-        },
-        Filter {
-            waveform,
-            feed_forward,
-            feedback,
-            state,
-        } => Filter {
-            waveform: Box::new(map_marks(*waveform, f)),
-            feed_forward: feed_forward.into_iter().map(|w| map_marks(w, f)).collect(),
-            feedback: feedback.into_iter().map(|w| map_marks(w, f)).collect(),
-            state,
-        },
-        BinaryPointOp(op, a, b) => {
-            BinaryPointOp(op, Box::new(map_marks(*a, f)), Box::new(map_marks(*b, f)))
-        }
-        Reset {
-            trigger,
-            waveform,
-            state,
-        } => Reset {
-            trigger: Box::new(map_marks(*trigger, f)),
-            waveform: Box::new(map_marks(*waveform, f)),
-            state,
-        },
-        Alt {
-            trigger,
-            positive_waveform,
-            negative_waveform,
-        } => Alt {
-            trigger: Box::new(map_marks(*trigger, f)),
-            positive_waveform: Box::new(map_marks(*positive_waveform, f)),
-            negative_waveform: Box::new(map_marks(*negative_waveform, f)),
-        },
-        Slider(slider) => Slider(slider),
-        Marked { id, waveform } => Marked {
-            id: f(id),
-            waveform: Box::new(map_marks(*waveform, f)),
-        },
-        Captured {
-            file_stem,
-            waveform,
-        } => Captured {
-            file_stem,
-            waveform: Box::new(map_marks(*waveform, f)),
-        },
     }
 }

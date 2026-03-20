@@ -1,7 +1,15 @@
 use crate::waveform::{Operator, Waveform};
 
-// First root returns the first non-negative value at which the given waveform is zero. This is implemented for waveforms of the form BinaryPointOp(Operator::Add|Operator::Subtract, Time, _), Time, and Const(0); returns None otherwise.
-fn first_root(waveform: &Waveform) -> Option<Waveform> {
+// First root returns the first non-negative value at which the given waveform is zero. This
+// is implemented for waveforms of the forms:
+//   * BinaryPointOp(Operator::Add|Operator::Subtract, Time, _)
+//   * Time
+//   * Const(0)
+// It returns None otherwise.
+pub fn first_root<M>(waveform: &Waveform<M>) -> Option<Waveform<M>>
+where
+    M: Clone + PartialEq,
+{
     use Waveform::*;
     match waveform {
         Const(0.0) => Some(Const(0.0)),
@@ -41,7 +49,10 @@ fn first_root(waveform: &Waveform) -> Option<Waveform> {
 //   * replacing zero-length waveforms with the canonical `Fixed(vec![])`
 //   * handling some common cases of Fin in Sum and DotProduct
 // This function must be called after replace_seq.
-pub fn optimize(waveform: Waveform) -> Waveform {
+pub fn optimize<M>(waveform: Waveform<M>) -> Waveform<M>
+where
+    M: Clone + PartialEq,
+{
     use Waveform::*;
     match waveform {
         // No changes for these:
@@ -383,7 +394,7 @@ mod tests {
 
     #[test]
     fn test_optimize() {
-        let w1 = BinaryPointOp(
+        let w1: Waveform<(), ()> = BinaryPointOp(
             Operator::Add,
             Box::new(BinaryPointOp(
                 Operator::Add,
@@ -398,7 +409,7 @@ mod tests {
         );
         assert_eq!(optimize(w1), Const(10.0));
 
-        let w2 = BinaryPointOp(
+        let w2: Waveform<(), ()> = BinaryPointOp(
             Operator::Add,
             Box::new(BinaryPointOp(
                 Operator::Add,
@@ -428,7 +439,7 @@ mod tests {
             ),
         );
 
-        let w3 = BinaryPointOp(
+        let w3: Waveform<(), ()> = BinaryPointOp(
             Operator::Multiply,
             Box::new(BinaryPointOp(
                 Operator::Multiply,
@@ -458,7 +469,7 @@ mod tests {
             ),
         );
 
-        let w4 = BinaryPointOp(
+        let w4: Waveform<(), ()> = BinaryPointOp(
             Operator::Multiply,
             Box::new(BinaryPointOp(
                 Operator::Add,
@@ -492,7 +503,7 @@ mod tests {
             ),
         );
 
-        let w5 = BinaryPointOp(
+        let w5: Waveform<(), ()> = BinaryPointOp(
             Operator::Multiply,
             Box::new(Fin {
                 length: Box::new(BinaryPointOp(

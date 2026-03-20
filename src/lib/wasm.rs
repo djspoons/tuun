@@ -18,13 +18,15 @@ use wasm_bindgen::prelude::*;
 
 use crate::{builtins, generator, optimizer, parser};
 
+type MarkId = u32;
+
 /// WebAssembly interface for the Tuun synthesizer.
 ///
 /// Provides parsing, optimization, and audio generation from Tuun expressions.
 #[wasm_bindgen(js_name = "Tuun")]
 pub struct Wasm {
     sample_rate: i32,
-    context: Vec<(String, parser::Expr)>,
+    context: Vec<(String, parser::Expr<MarkId>)>,
     slider_state: generator::SliderState,
 }
 
@@ -194,7 +196,7 @@ impl Wasm {
 /// calls to generate().
 #[wasm_bindgen]
 pub struct WasmWaveform {
-    inner: generator::Waveform,
+    inner: generator::Waveform<MarkId>,
 }
 
 #[wasm_bindgen]

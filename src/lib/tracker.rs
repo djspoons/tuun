@@ -17,12 +17,22 @@ pub enum Command<I, M> {
     Play {
         // A unique id for this waveform
         id: I,
-        waveform: waveform::Waveform<(), M>,
+        waveform: waveform::Waveform<M>,
         // When the waveform should start playing; if in the past, then play immediately
         start: Instant,
         // If set, play this waveform in a loop
         repeat_every: Option<Duration>,
     },
+    /*
+    // TODO add this once we're ready for it
+    // Immediately modify the waveform with the given id to replace the contents of any marked waveform
+    // with the given mark_id with the new waveform.
+    Modify {
+        id: I,
+        mark_id: M,
+        waveform: waveform::Waveform<M>,
+    },
+    */
     Stop {
         // The id of the waveform to stop
         id: I,
@@ -58,8 +68,6 @@ where
     // Marks for each active waveform as well as any pending waveforms; a mark may appear more
     // than once if a given waveform is both active and pending
     pub marks: Vec<Mark<I, M>>,
-    // The current values of the sliders (as of buffer_start)
-    pub slider_values: HashMap<String, f32>,
     // Some status updates will include the current buffer
     pub buffer: Option<Vec<f32>>,
     // The current tracker load, the ratio of sample frequency to samples generated per second
@@ -72,7 +80,7 @@ where
     M: Clone,
 {
     id: I,
-    waveform: waveform::Waveform<generator::State, M>,
+    waveform: generator::Waveform<M>,
     marks: Vec<Mark<I, M>>,
     // Open files used by Captured waveforms
     capture_state: HashMap<String, hound::WavWriter<BufWriter<std::fs::File>>>,
@@ -84,7 +92,9 @@ where
     M: Clone,
 {
     id: I,
-    waveform: waveform::Waveform<generator::State, M>,
+    // TODO it seems like pending shouldn't have state, but because of the way
+    // we currently process marks, we do need state. Remove someday?
+    waveform: generator::Waveform<M>,
     start: Instant,
     repeat_every: Option<Duration>,
     marks: Vec<Mark<I, M>>,
@@ -147,7 +157,7 @@ where
         &self,
         waveform_id: &I,
         start: Instant,
-        waveform: &waveform::Waveform<generator::State, M>,
+        waveform: &generator::Waveform<M>,
         out: &mut Vec<Mark<I, M>>,
     ) {
         use waveform::Waveform::*;
@@ -203,9 +213,9 @@ where
         }
     }
 
-    fn process_captured<State>(
+    fn process_captured<S>(
         &self,
-        waveform: &waveform::Waveform<State, M>,
+        waveform: &waveform::Waveform<M, S>,
         out: &mut HashMap<String, hound::WavWriter<BufWriter<std::fs::File>>>,
     ) {
         use waveform::Waveform::*;
@@ -265,7 +275,7 @@ where
 impl<'a, I, M> audio::AudioCallback for Tracker<'a, I, M>
 where
     I: Clone + Debug + Send + PartialEq,
-    M: Clone + Debug + Send + PartialEq + fmt::Display ,
+    M: Clone + Debug + Send + PartialEq + fmt::Display,
 {
     type Channel = f32;
 
@@ -282,7 +292,6 @@ where
         let mut status_to_send = Status {
             buffer_start,
             marks: Vec::new(),
-            slider_values: self.slider_state.last_values.clone(),
             tracker_load: None,
             buffer: None,
         };
@@ -357,6 +366,34 @@ where
                 });
                 self.pending_waveforms.sort_by_key(|w| w.start);
             }
+            /*
+            TODO add this in once we're ready for it
+            Command::Modify {
+                id,
+                mark_id,
+                waveform,
+            } => {
+                println!(
+                    "Received command to replace mark {:?} in waveform {:?} with new waveform: {}",
+                    mark_id, id, waveform
+                );
+                let waveform = generator::initialize_state(waveform);
+                for active in &mut self.active_waveforms {
+                    if active.id == id {
+                        waveform::substitute(&mut active.waveform, &mark_id, &waveform);
+
+                        // XXX recompute marks?
+                    }
+                }
+                /*
+                for pending in &mut self.pending_waveforms {
+                    if pending.id == id {
+
+                    }
+                }
+                */
+            }
+            */
             Command::Stop { id } => {
                 println!("Received command to stop waveform {:?}", id);
                 self.active_waveforms.retain(|w| w.id != id);

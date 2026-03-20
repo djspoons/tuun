@@ -18,6 +18,7 @@ use tuun::generator;
 use tuun::metric;
 use tuun::optimizer;
 use tuun::parser;
+use tuun::parser::Expr;
 use tuun::renderer;
 use tuun::tracker;
 use tuun::waveform;
@@ -45,6 +46,46 @@ fn prepend_native_slider_bindings(program: &Program) -> String {
         .join(", ");
     format!("let {} in {}", bindings, program.text)
 }
+
+// Additional built-ins
+
+fn mark(arguments: Vec<Expr<MarkId>>) -> Expr<MarkId> {
+    match &arguments[..] {
+        [Expr::Float(id)] if *id >= 1.0 && id.fract() == 0.0 => {
+            let id = id.round() as u32;
+            Expr::BuiltIn {
+                name: format!("mark({})", id),
+                function: builtins::curry(move |waveform: Box<waveform::Waveform<MarkId>>| {
+                    waveform::Waveform::Marked {
+                        id: MarkId::UserDefined(id),
+                        waveform,
+                    }
+                }),
+            }
+        }
+        _ => Expr::Error("Invalid argument for mark".to_string()),
+    }
+}
+
+fn slider(arguments: Vec<Expr<MarkId>>) -> Expr<MarkId> {
+    match &arguments[..] {
+        [Expr::String(slider)] => Expr::Waveform(waveform::Waveform::Slider(slider.to_string())),
+        _ => Expr::Error("Expected one string argument to slider".to_string()),
+    }
+}
+
+/*
+// TODO use this instead once we implement sliders with Modify
+fn slider_mark(arguments: Vec<Expr<MarkId>>) -> Expr<MarkId> {
+    match &arguments[..] {
+        [Expr::String(slider), Expr::Float(value)] => Expr::Waveform(Waveform::Marked {
+            id: MarkId::Slider(slider.to_string()),
+            waveform: Box::new(Waveform::Const(*value)),
+        }),
+        _ => return Error("Expected one string argument to slider".to_string()),
+    }
+}
+ */
 
 fn send_initial_slider_values(
     programs: &[Program],
@@ -108,14 +149,28 @@ struct Args {
     output_dir: String, // Captures waveforms to the specified directory
 }
 
-fn load_context(active_program_index: usize, args: &Args) -> (Vec<(String, parser::Expr)>, Mode) {
-    let mut context: Vec<(String, parser::Expr)> = Vec::new();
-    context.push(("tempo".to_string(), parser::Expr::Float(args.tempo as f32)));
+fn load_context(active_program_index: usize, args: &Args) -> (Vec<(String, Expr<MarkId>)>, Mode) {
+    let mut context: Vec<(String, Expr<MarkId>)> = Vec::new();
+    context.push(("tempo".to_string(), Expr::Float(args.tempo as f32)));
     context.push((
         "sample_rate".to_string(),
-        parser::Expr::Float(args.sample_rate as f32),
+        Expr::Float(args.sample_rate as f32),
     ));
     builtins::add_prelude(&mut context);
+    context.push((
+        "mark".to_string(),
+        Expr::BuiltIn {
+            name: "mark".to_string(),
+            function: parser::BuiltInFn(std::rc::Rc::new(mark)),
+        },
+    ));
+    context.push((
+        "slider".to_string(),
+        Expr::BuiltIn {
+            name: "slider".to_string(),
+            function: parser::BuiltInFn(std::rc::Rc::new(slider)),
+        },
+    ));
 
     let mut bindings = 0;
     let mut errors = Vec::new();
@@ -365,7 +420,6 @@ pub fn main() {
     let mut status = tracker::Status {
         buffer_start: Instant::now(),
         marks: Vec::new(),
-        slider_values: std::collections::HashMap::new(),
         buffer: None,
         tracker_load: None,
     };
@@ -441,7 +495,7 @@ fn start_beats(
     command_sender: &mpsc::Sender<Command<WaveformId, MarkId>>,
     status_receiver: &mpsc::Receiver<tracker::Status<WaveformId, MarkId>>,
     args: &Args,
-    context: &Vec<(String, parser::Expr)>,
+    context: &Vec<(String, Expr<MarkId>)>,
 ) {
     // Play the odd Beats waveform starting immediately and repeating every two measures
     command_sender
@@ -499,7 +553,7 @@ fn edit_mode_from_program(
         errors: if program.is_empty() {
             Vec::new()
         } else {
-            match parser::parse_program(program) {
+            match parser::parse_program::<MarkId>(program) {
                 Ok(_) => Vec::new(),
                 Err(errors) => errors,
             }
@@ -521,14 +575,14 @@ fn id_from_index(index: usize) -> renderer::ProgramId {
 
 fn process_event<I>(
     args: &Args,
-    context: Vec<(String, parser::Expr)>,
+    context: Vec<(String, Expr<MarkId>)>,
     renderer: &Renderer,
     event: Event,
     mode: Mode,
     status: &tracker::Status<WaveformId, MarkId>,
     programs: &mut Vec<Program>,
     command_sender: &std::sync::mpsc::Sender<Command<WaveformId, MarkId>>,
-) -> (Vec<(String, parser::Expr)>, Mode) {
+) -> (Vec<(String, Expr<MarkId>)>, Mode) {
     use sdl2::keyboard::Mod;
     use sdl2::keyboard::Scancode;
     match event {
@@ -1157,12 +1211,12 @@ fn next_measure_start(status: &tracker::Status<WaveformId, MarkId>) -> Instant {
 }
 
 enum WaveformOrMode {
-    Waveform(waveform::Waveform),
+    Waveform(waveform::Waveform<MarkId>),
     Mode(Mode),
 }
 
 fn play_waveform(
-    context: Vec<(String, parser::Expr)>,
+    context: Vec<(String, Expr<MarkId>)>,
     status: &tracker::Status<WaveformId, MarkId>,
     args: &Args,
     active_program_index: usize,
@@ -1170,7 +1224,7 @@ fn play_waveform(
     program: &Program,
     command_sender: &std::sync::mpsc::Sender<Command<WaveformId, MarkId>>,
     keymod: sdl2::keyboard::Mod,
-) -> (Vec<(String, parser::Expr)>, Mode) {
+) -> (Vec<(String, Expr<MarkId>)>, Mode) {
     use sdl2::keyboard::Mod;
     match play_waveform_helper(
         &context,
@@ -1208,7 +1262,7 @@ fn play_waveform(
                     id: WaveformId::Program(program.id),
                     waveform: waveform::Waveform::Marked {
                         id: MarkId::TopLevel,
-                        waveform: Box::new(waveform::map_marks(waveform, &MarkId::UserDefined)),
+                        waveform: Box::new(waveform),
                     },
                     start: next_measure_start(&status),
                     repeat_every,
@@ -1229,7 +1283,7 @@ fn play_waveform(
     }
 }
 fn play_waveform_helper(
-    context: &Vec<(String, parser::Expr)>,
+    context: &Vec<(String, Expr<MarkId>)>,
     active_program_index: usize,
     cursor_position: usize,
     program: &Program,
@@ -1244,9 +1298,9 @@ fn play_waveform_helper(
                 Ok(expr) => {
                     println!("parser::evaluate returned: {}", &expr);
                     let mut waveform = match expr {
-                        parser::Expr::Waveform(waveform) => waveform,
-                        parser::Expr::Seq { waveform, .. } => match *waveform {
-                            parser::Expr::Waveform(waveform) => waveform,
+                        Expr::Waveform(waveform) => waveform,
+                        Expr::Seq { waveform, .. } => match *waveform {
+                            Expr::Waveform(waveform) => waveform,
                             _ => panic!("Got non-Waveform in seq after evaluate"),
                         },
                         _ => {

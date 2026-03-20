@@ -25,7 +25,9 @@ pub enum State {
     Sign { signum: f32 },
 }
 
-pub fn initialize_state<S, M>(waveform: waveform::Waveform<S, M>) -> waveform::Waveform<State, M> {
+pub type Waveform<M> = waveform::Waveform<M, State>;
+
+pub fn initialize_state<M, S>(waveform: waveform::Waveform<M, S>) -> Waveform<M> {
     return waveform::initialize_state(waveform, State::Initial);
 }
 
@@ -49,10 +51,6 @@ pub struct Generator<'a> {
     pub capture_state:
         Option<RefCell<&'a mut HashMap<String, hound::WavWriter<BufWriter<std::fs::File>>>>>,
 }
-
-// This type is a little strange: it's here basically for testing and because `precompute` is not a generic as
-// it perhaps could be. See the note on `precompute` below.
-pub type Waveform = waveform::Waveform<State>;
 
 // TODO add metrics for waveform expr depth and total ops
 
@@ -82,7 +80,7 @@ impl<'a> Generator<'a> {
     // TODO take a &mut waveform instead
     pub fn generate<M: Debug + fmt::Display>(
         &self,
-        waveform: &mut waveform::Waveform<State, M>,
+        waveform: &mut Waveform<M>,
         desired: usize,
     ) -> Vec<f32> {
         use State::*;
@@ -455,8 +453,8 @@ impl<'a> Generator<'a> {
     fn generate_binary_op<M: Debug + fmt::Display>(
         &self,
         op_fn: fn(f32, f32) -> f32,
-        a: &mut waveform::Waveform<State, M>,
-        b: &mut waveform::Waveform<State, M>,
+        a: &mut Waveform<M>,
+        b: &mut Waveform<M>,
         extend_to_longer: bool,
         mut desired: usize,
     ) -> Vec<f32> {
@@ -508,11 +506,7 @@ impl<'a> Generator<'a> {
     // smaller, while modifying `waveform` so that it has been advanced to that point.
     // Note that for waveforms that maintain state (other than position), the state is passed
     // through unchanged. This discontinuity may result in pops or clicks for audible waveforms.
-    pub fn length<M: Debug + fmt::Display>(
-        &self,
-        waveform: &mut waveform::Waveform<State, M>,
-        max: usize,
-    ) -> usize {
+    pub fn length<M: Debug + fmt::Display>(&self, waveform: &mut Waveform<M>, max: usize) -> usize {
         use State::*;
         use waveform::Operator;
         use waveform::Waveform::*;
@@ -679,7 +673,7 @@ impl<'a> Generator<'a> {
     // will not be greater than or equal in that range, or Maybe if that can't be determined cheaply.
     fn greater_or_equals_at<M: fmt::Display>(
         &self,
-        waveform: &waveform::Waveform<State, M>,
+        waveform: &Waveform<M>,
         value: f32,
         max: usize,
     ) -> MaybeOption<usize> {
@@ -749,12 +743,10 @@ impl<'a> Generator<'a> {
     // Replaces parts of `waveform` that can be precomputed with their equivalent Fixed versions. Notably,
     // infinite waveforms and waveforms that depend on or have dynamic behavior (Slider, Marked, Captured)
     // cannot be replaced.
-    pub fn precompute(&self, waveform: Waveform) -> Waveform {
-        // Note that precompute doesn't operate on generic MarkIds... which is sort of strange in one way,
-        // but... also fine? It would be a lot of typing to add all the type parameters below, and it turns
-        // out that precompute is used on waveforms that are fresh from the parser, and therefore have the
-        // default type for MarkId.
-
+    pub fn precompute<M>(&self, waveform: Waveform<M>) -> Waveform<M>
+    where
+        M: Clone + Debug + fmt::Display,
+    {
         #[derive(Clone, Copy)]
         enum Reason {
             // The waveform is not pre-computable because it is infinite in length.
@@ -762,15 +754,15 @@ impl<'a> Generator<'a> {
             // The waveform is not pre-computable because it depends on some run-time state or has a run-time effect.
             Dynamic,
         }
-        enum Result {
+        enum Result<M> {
             // Pre-computable
-            PC(Waveform),
+            PC(Waveform<M>),
             // Not-pre-computable
-            NPC(Reason, Waveform),
+            NPC(Reason, Waveform<M>),
         }
 
-        impl Into<Waveform> for Result {
-            fn into(self) -> Waveform {
+        impl<M> Into<Waveform<M>> for Result<M> {
+            fn into(self) -> Waveform<M> {
                 match self {
                     Result::PC(w) => w,
                     Result::NPC(_, w) => w,
@@ -780,7 +772,10 @@ impl<'a> Generator<'a> {
 
         // generate_fixed generates `waveform` up to some large number of samples. It should only be used on waveforms
         // that are pre-computable.
-        fn generate_fixed(g: &Generator, mut waveform: Waveform) -> Waveform {
+        fn generate_fixed<M>(g: &Generator, mut waveform: Waveform<M>) -> Waveform<M>
+        where
+            M: Debug + fmt::Display,
+        {
             // Choose a `desired` which is long enough to generate any reasonable waveform, but give some room
             // for cases like `Filter` that may need to make it longer.
 
@@ -796,7 +791,10 @@ impl<'a> Generator<'a> {
             waveform::Waveform::Fixed(out, State::Initial)
         }
 
-        fn precompute_internal(g: &Generator, waveform: Waveform) -> Result {
+        fn precompute_internal<M>(g: &Generator, waveform: Waveform<M>) -> Result<M>
+        where
+            M: Debug + fmt::Display,
+        {
             use Reason::*;
             use Result::*;
             use waveform::Operator;
@@ -804,11 +802,14 @@ impl<'a> Generator<'a> {
 
             // do_one_dynamic takes a waveform and determines if it can be pre-computed. If so, it applies `wf` and
             // then wraps the result in NPC(Dynamic).
-            fn do_one_dynamic<F: FnOnce(Waveform) -> Waveform>(
+            fn do_one_dynamic<M, F: FnOnce(Waveform<M>) -> Waveform<M>>(
                 g: &Generator,
-                a: Waveform,
+                a: Waveform<M>,
                 wf: F,
-            ) -> Result {
+            ) -> Result<M>
+            where
+                M: Debug + fmt::Display,
+            {
                 match precompute_internal(g, a) {
                     PC(a) => NPC(Dynamic, wf(generate_fixed(g, a))),
                     NPC(why, a) => NPC(why, wf(a)),
@@ -818,12 +819,15 @@ impl<'a> Generator<'a> {
             // do_two attempts to pre-compute two waveforms, then applies `wf` to the results. If both waveforms are
             // pre-computable, then the result is wrapped in PC. If at least one is not pre-computable, then the result
             // is wrapped in NPC, with the reason determined by the reason(s) for the two waveforms.
-            fn do_two<F: FnOnce(Waveform, Waveform) -> Waveform>(
+            fn do_two<M, F: FnOnce(Waveform<M>, Waveform<M>) -> Waveform<M>>(
                 g: &Generator,
-                a: Waveform,
-                b: Waveform,
+                a: Waveform<M>,
+                b: Waveform<M>,
                 wf: F,
-            ) -> Result {
+            ) -> Result<M>
+            where
+                M: Debug + fmt::Display,
+            {
                 match (precompute_internal(g, a), precompute_internal(g, b)) {
                     (PC(a), PC(b)) => PC(wf(a, b)),
                     (PC(a), NPC(why, b)) => NPC(why, wf(generate_fixed(g, a), b)),
@@ -845,13 +849,16 @@ impl<'a> Generator<'a> {
             // Like do_two, do_three, attempts to pre-compute the three waveforms, then applies `wf` to the results.
             // The result is wrapped in PC if all three are pre-computable, and NPC otherwise, with the reason
             // determined by the reason(s) for the three waveforms.
-            fn do_three<F: FnOnce(Waveform, Waveform, Waveform) -> Waveform>(
+            fn do_three<M, F: FnOnce(Waveform<M>, Waveform<M>, Waveform<M>) -> Waveform<M>>(
                 g: &Generator,
-                a: Waveform,
-                b: Waveform,
-                c: Waveform,
+                a: Waveform<M>,
+                b: Waveform<M>,
+                c: Waveform<M>,
                 wf: F,
-            ) -> Result {
+            ) -> Result<M>
+            where
+                M: Debug + fmt::Display,
+            {
                 match (
                     precompute_internal(g, a),
                     precompute_internal(g, b),
@@ -1008,7 +1015,7 @@ impl<'a> Generator<'a> {
 
                     // If `reason` is Some then we will be returning NPC for the Filter, so generate
                     // samples for any pre-computable sub-waveforms.
-                    let extract = |r: Result| match (r, &reason) {
+                    let extract = |r: Result<M>| match (r, &reason) {
                         (PC(w), Some(_)) => generate_fixed(g, w),
                         (PC(w), None) => w,
                         (NPC(_, w), _) => w,
@@ -1090,8 +1097,9 @@ mod tests {
     use super::*;
     use crate::optimizer;
     use waveform::Operator;
-    use waveform::Waveform;
     use waveform::Waveform::{Append, BinaryPointOp, Const, Filter, Fin, Fixed, Reset, Sine, Time};
+
+    type Waveform = waveform::Waveform<u32>;
 
     const MAX_LENGTH: usize = 1000;
 
@@ -1133,7 +1141,7 @@ mod tests {
         );
     }
 
-    fn run_tests(waveform: &waveform::Waveform, desired: &Vec<f32>) {
+    fn run_tests(waveform: &Waveform, desired: &Vec<f32>) {
         let g = new_test_generator(1);
         // Check that `waveform` would generate at least as many samples as `desired`.
         check_length(&g, &waveform, 0, desired.len(), desired.len());
@@ -1237,7 +1245,10 @@ mod tests {
         });
     }
 
-    fn run_sin_test(g: &Generator, waveform: &mut super::Waveform, expected: Vec<f32>) {
+    fn run_sin_test<M>(g: &Generator, waveform: &mut super::Waveform<M>, expected: Vec<f32>)
+    where
+        M: Debug + fmt::Display,
+    {
         let result = g.generate(waveform, expected.len());
         for (i, &x) in result.iter().enumerate() {
             assert!(
@@ -1321,7 +1332,7 @@ mod tests {
 
         let w = Reset {
             trigger: sin_waveform(0.25, 0.0),
-            waveform: Box::new(Waveform::Fin {
+            waveform: Box::new(Fin {
                 length: Box::new(BinaryPointOp(
                     Operator::Subtract,
                     Box::new(Time(())),
@@ -1654,7 +1665,7 @@ mod tests {
     #[test]
     fn test_greater_or_equals_at() {
         let w1: Waveform = BinaryPointOp(Operator::Add, Box::new(Time(())), Box::new(Const(-5.0)));
-        let w2 = Fin {
+        let w2: Waveform = Fin {
             length: Box::new(w1.clone()),
             waveform: Box::new(Time(())),
         };

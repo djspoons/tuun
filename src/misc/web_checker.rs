@@ -2,7 +2,7 @@ use std::fs;
 
 use clap::Parser as ClapParser;
 
-use tuun::{builtins, parser};
+use tuun::{builtins, parser, renderer};
 
 #[derive(ClapParser, Debug)]
 #[command(version, about = "Check tuun-synth expressions in .md and .html files")]
@@ -11,7 +11,7 @@ struct Args {
     input_files: Vec<String>,
 }
 
-fn load_context() -> Vec<(String, parser::Expr)> {
+fn load_context() -> Vec<(String, parser::Expr<renderer::MarkId>)> {
     // TODO this context business is now getting duplicated across main, here, and the web stuff
     let mut context = Vec::new();
     context.push(("sample_rate".to_string(), parser::Expr::Float(44100.0)));
@@ -160,7 +160,10 @@ fn find_tuun_synth_blocks(input: &str) -> Vec<(usize, &str)> {
     blocks
 }
 
-fn check_file(file: &str, context: &Vec<(String, parser::Expr)>) -> (usize, usize) {
+fn check_file(
+    file: &str,
+    context: &Vec<(String, parser::Expr<renderer::MarkId>)>,
+) -> (usize, usize) {
     let input = match fs::read_to_string(file) {
         Ok(s) => s,
         Err(e) => {
