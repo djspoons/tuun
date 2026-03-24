@@ -76,13 +76,6 @@ fn mark(arguments: Vec<Expr<MarkId>>) -> Expr<MarkId> {
     }
 }
 
-fn slider(arguments: Vec<Expr<MarkId>>) -> Expr<MarkId> {
-    match &arguments[..] {
-        [Expr::String(slider)] => Expr::Waveform(waveform::Waveform::Slider(slider.to_string())),
-        _ => Expr::Error("Expected one string argument to slider".to_string()),
-    }
-}
-
 #[derive(ClapParser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
@@ -139,13 +132,6 @@ fn load_context(active_program_index: usize, args: &Args) -> (Vec<(String, Expr<
         Expr::BuiltIn {
             name: "mark".to_string(),
             function: parser::BuiltInFn(std::rc::Rc::new(mark)),
-        },
-    ));
-    context.push((
-        "slider".to_string(),
-        Expr::BuiltIn {
-            name: "slider".to_string(),
-            function: parser::BuiltInFn(std::rc::Rc::new(slider)),
         },
     ));
 
