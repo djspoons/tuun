@@ -190,6 +190,7 @@ impl<MarkId: fmt::Display, State> fmt::Display for Waveform<MarkId, State> {
     }
 }
 
+// TODO: should use a mut&?
 pub fn initialize_state<M, S, T>(waveform: Waveform<M, S>, state: T) -> Waveform<M, T>
 where
     T: Clone,
@@ -268,6 +269,7 @@ where
     }
 }
 
+// TODO: should use a mut&?
 pub fn remove_state<M, S>(w: Waveform<M, S>) -> Waveform<M> {
     use Waveform::*;
     match w {

@@ -301,6 +301,19 @@ fn parse_bindings<M>(input: LocatedSpan) -> IResult<Vec<(Pattern, Expr<M>)>> {
     return Ok((rest, bindings));
 }
 
+pub fn make_let<M>(bindings: Vec<(Pattern, Expr<M>)>, mut expr: Expr<M>) -> Expr<M> {
+    for (pattern, binding) in bindings.into_iter().rev() {
+        expr = Expr::Application {
+            function: Box::new(Expr::Function {
+                pattern,
+                body: Box::new(expr),
+            }),
+            argument: Box::new(binding),
+        }
+    }
+    expr
+}
+
 fn parse_let<M>(input: LocatedSpan) -> IResult<Expr<M>> {
     #[rustfmt::skip]
     let (rest, expr) =
@@ -311,17 +324,8 @@ fn parse_let<M>(input: LocatedSpan) -> IResult<Expr<M>> {
         ),
         expect(parse_expr, "expected expression after 'in'")
         ).map(|(bindings, expr)| {
-            let mut expr = expr.unwrap_or_default();
-            for (pattern, binding) in bindings.into_iter().rev() {
-                expr = Expr::Application {
-                    function: Box::new(Expr::Function {
-                        pattern,
-                        body: Box::new(expr),
-                    }),
-                    argument: Box::new(binding),
-                }
-            }
-            expr
+            let expr = expr.unwrap_or_default();
+            make_let(bindings, expr)
         }).parse(input)?;
     return Ok((rest, expr));
 }
@@ -947,7 +951,7 @@ pub struct SliderConfig {
     pub label: String,
     pub min: f32,
     pub max: f32,
-    pub value: f32,
+    pub initial_value: f32,
 }
 
 pub fn parse_slider_pragma(line: &str) -> Option<Vec<SliderConfig>> {
@@ -982,7 +986,7 @@ pub fn parse_slider_pragma(line: &str) -> Option<Vec<SliderConfig>> {
             parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(1.0),
             min + MIN_GAP,
         );
-        let value = parts
+        let initial_value = parts
             .get(3)
             .and_then(|s| s.parse().ok())
             .unwrap_or((min + max) / 2.0)
@@ -991,7 +995,7 @@ pub fn parse_slider_pragma(line: &str) -> Option<Vec<SliderConfig>> {
             label,
             min,
             max,
-            value,
+            initial_value,
         });
     }
     Some(configs)

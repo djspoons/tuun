@@ -1,7 +1,9 @@
 use core::panic;
+use std::collections::HashMap;
 use std::fs;
 use std::process;
 use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use chrono;
@@ -23,28 +25,35 @@ use tuun::renderer;
 use tuun::tracker;
 use tuun::waveform;
 
-fn slider_tracker_key(program_id: renderer::ProgramId, label: &str) -> String {
-    format!("{}:{}", program_id, label)
+enum SliderEvent {
+    UpdateSlider {
+        id: WaveformId,
+        slider: String,
+        value: f32,
+    },
+    SetInitialValues(HashMap<(WaveformId, String), f32>),
 }
 
-fn prepend_native_slider_bindings(program: &Program) -> String {
+fn prepend_slider_bindings(program: &Program, expr: Expr<MarkId>) -> Expr<MarkId> {
     if program.sliders.configs.is_empty() {
-        return program.text.clone();
+        return expr;
     }
-    let bindings = program
-        .sliders
-        .configs
+    let configs = &program.sliders.configs;
+    let bindings = configs
         .iter()
-        .map(|c| {
-            format!(
-                "{} = slider(\"{}\")",
-                c.label,
-                slider_tracker_key(program.id, &c.label)
+        .zip(&program.sliders.normalized_values)
+        .map(|(config, normalized_value)| {
+            let value = config.min + normalized_value * (config.max - config.min);
+            (
+                parser::Pattern::Identifier(config.label.to_string()),
+                Expr::Waveform(waveform::Waveform::Marked {
+                    id: MarkId::Slider(config.label.to_string()),
+                    waveform: Box::new(waveform::Waveform::Const(value)),
+                }),
             )
         })
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("let {} in {}", bindings, program.text)
+        .collect::<Vec<_>>();
+    parser::make_let(bindings, expr)
 }
 
 // Additional built-ins
@@ -71,38 +80,6 @@ fn slider(arguments: Vec<Expr<MarkId>>) -> Expr<MarkId> {
     match &arguments[..] {
         [Expr::String(slider)] => Expr::Waveform(waveform::Waveform::Slider(slider.to_string())),
         _ => Expr::Error("Expected one string argument to slider".to_string()),
-    }
-}
-
-/*
-// TODO use this instead once we implement sliders with Modify
-fn slider_mark(arguments: Vec<Expr<MarkId>>) -> Expr<MarkId> {
-    match &arguments[..] {
-        [Expr::String(slider), Expr::Float(value)] => Expr::Waveform(Waveform::Marked {
-            id: MarkId::Slider(slider.to_string()),
-            waveform: Box::new(Waveform::Const(*value)),
-        }),
-        _ => return Error("Expected one string argument to slider".to_string()),
-    }
-}
- */
-
-fn send_initial_slider_values(
-    programs: &[Program],
-    command_sender: &std::sync::mpsc::Sender<Command<WaveformId, MarkId>>,
-) {
-    for program in programs {
-        for (j, config) in program.sliders.configs.iter().enumerate() {
-            let key = slider_tracker_key(program.id, &config.label);
-            let actual_value =
-                config.min + program.sliders.normalized_values[j] * (config.max - config.min);
-            command_sender
-                .send(Command::MoveSlider {
-                    slider: key,
-                    value: actual_value,
-                })
-                .unwrap();
-        }
     }
 }
 
@@ -233,7 +210,8 @@ fn load_context(active_program_index: usize, args: &Args) -> (Vec<(String, Expr<
 
 const NUM_PROGRAMS: usize = 8;
 
-fn load_programs(args: &Args, programs: &mut Vec<Program>) {
+// Returns the initial values for all sliders
+fn load_programs(args: &Args, programs: &mut Vec<Program>) -> HashMap<(WaveformId, String), f32> {
     *programs = Vec::new();
     if !args.programs_file.is_empty() {
         let mut count = 0;
@@ -260,7 +238,7 @@ fn load_programs(args: &Args, programs: &mut Vec<Program>) {
                 let sliders = if let Some(configs) = pending_slider_configs.take() {
                     let normalized_values = configs
                         .iter()
-                        .map(|c| ((c.value - c.min) / (c.max - c.min)).clamp(0.0, 1.0))
+                        .map(|c| ((c.initial_value - c.min) / (c.max - c.min)).clamp(0.0, 1.0))
                         .collect();
                     ProgramSliders {
                         configs,
@@ -297,13 +275,24 @@ fn load_programs(args: &Args, programs: &mut Vec<Program>) {
             sliders: ProgramSliders::default(),
         });
     }
+    // Copy initial values for each slider for all programs
+    let mut last_slider_values: HashMap<(WaveformId, String), f32> = HashMap::new();
+    for Program { id, sliders, .. } in programs {
+        for slider in &sliders.configs {
+            last_slider_values.insert(
+                (WaveformId::Program(id.clone()), slider.label.clone()),
+                slider.initial_value,
+            );
+        }
+    }
+    last_slider_values
 }
 
 pub fn main() {
     let args = Args::parse();
     let (mut context, mut mode) = load_context(0, &args);
     let mut programs: Vec<Program> = Vec::new();
-    load_programs(&args, &mut programs);
+    let last_slider_values = load_programs(&args, &mut programs);
 
     let (status_sender, status_receiver) = mpsc::channel();
     let (command_sender, command_receiver) = mpsc::channel();
@@ -322,9 +311,6 @@ pub fn main() {
         );
         use sdl2::audio::AudioCallback;
         let mut out = vec![0.0f32; args.buffer_size as usize];
-
-        // Send initial slider values to the tracker
-        send_initial_slider_values(&programs, &command_sender);
 
         // Call the callback to get at least one status update
         tracker.callback(&mut out);
@@ -414,8 +400,98 @@ pub fn main() {
 
     start_beats(&command_sender, &status_receiver, &args, &context);
 
-    // Send initial slider values to the tracker for all programs
-    send_initial_slider_values(&programs, &command_sender);
+    // Spawn a thread that batches slider updates, sending them approximately once per audio buffer
+    let buffer_duration =
+        Duration::from_secs_f32(args.buffer_size as f32 / args.sample_rate as f32);
+    let (slider_sender, slider_receiver) = mpsc::channel::<SliderEvent>();
+    let slider_command_sender = command_sender.clone();
+    thread::spawn(move || {
+        let mut last_slider_values = last_slider_values;
+        loop {
+            let mut pending: HashMap<(WaveformId, String), f32> = HashMap::new();
+            let deadline;
+
+            // Idle: block until the first slider update event arrives.
+            loop {
+                match slider_receiver.recv() {
+                    Ok(SliderEvent::UpdateSlider { id, slider, value }) => {
+                        pending.insert((id, slider), value);
+                        deadline = Instant::now() + buffer_duration;
+                        break;
+                    }
+                    Ok(SliderEvent::SetInitialValues(values)) => {
+                        // This occurs when the set of programs is reloaded.
+                        last_slider_values = values;
+                    }
+                    Err(_) => return, // channel closed, exit thread
+                };
+            }
+
+            // Accumulate: keep receiving events until the deadline.
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                match slider_receiver.recv_timeout(remaining) {
+                    Ok(SliderEvent::UpdateSlider { id, slider, value }) => {
+                        pending.insert((id, slider), value);
+                    }
+                    Ok(SliderEvent::SetInitialValues(values)) => {
+                        // What to do with these new values for waveforms that are playing? Especially ones
+                        // where the sliders are moving? Maybe think of something better in the future once
+                        // We understand better what "load_programs" does to currently playing waveforms.
+                        last_slider_values = values;
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => break,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                }
+            }
+
+            // Flush: send one Modify command per changed slider
+            for ((id, slider), value) in pending.drain() {
+                use waveform::Operator;
+                use waveform::Waveform::{Append, BinaryPointOp, Const, Fin, Time};
+
+                let last_value = last_slider_values
+                    .get_mut(&(id.clone(), slider.clone()))
+                    .unwrap();
+
+                // Create the waveform.
+                let waveform = Append(
+                    Box::new(Fin {
+                        length: Box::new(BinaryPointOp(
+                            Operator::Subtract,
+                            Box::new(Time(())),
+                            Box::new(Const(buffer_duration.as_secs_f32())),
+                        )),
+                        waveform: Box::new(BinaryPointOp(
+                            Operator::Add,
+                            Box::new(BinaryPointOp(
+                                Operator::Multiply,
+                                Box::new(Time(())),
+                                Box::new(Const(
+                                    (value - *last_value) / buffer_duration.as_secs_f32(),
+                                )),
+                            )),
+                            Box::new(Const(*last_value)),
+                        )),
+                    }),
+                    Box::new(Const(value)),
+                );
+
+                // Update the last value
+                *last_value = value;
+
+                // Technically we don't need to send a modify if the waveform is not playing...
+                let _ = slider_command_sender.send(Command::Modify {
+                    id,
+                    mark_id: MarkId::Slider(slider),
+                    waveform,
+                });
+            }
+        }
+    });
 
     let mut status = tracker::Status {
         buffer_start: Instant::now(),
@@ -442,6 +518,7 @@ pub fn main() {
                 &status,
                 &mut programs,
                 &command_sender,
+                &slider_sender,
             );
             if let Mode::Exit = mode {
                 return;
@@ -582,6 +659,7 @@ fn process_event<I>(
     status: &tracker::Status<WaveformId, MarkId>,
     programs: &mut Vec<Program>,
     command_sender: &std::sync::mpsc::Sender<Command<WaveformId, MarkId>>,
+    slider_sender: &mpsc::Sender<SliderEvent>,
 ) -> (Vec<(String, Expr<MarkId>)>, Mode) {
     use sdl2::keyboard::Mod;
     use sdl2::keyboard::Scancode;
@@ -1034,8 +1112,10 @@ fn process_event<I>(
                         return load_context(active_program_index, &args);
                     } else if text == "L" {
                         // Load programs
-                        load_programs(&args, programs);
-                        send_initial_slider_values(&programs, command_sender);
+                        let slider_values = load_programs(&args, programs);
+                        slider_sender
+                            .send(SliderEvent::SetInitialValues(slider_values))
+                            .unwrap();
                         return (
                             context,
                             Mode::Select {
@@ -1158,9 +1238,10 @@ fn process_event<I>(
                     *norm = (*norm + xrel as f32 / renderer.width as f32).clamp(0.0, 1.0);
                     let config = &ps.configs[0];
                     let actual_value = config.min + *norm * (config.max - config.min);
-                    command_sender
-                        .send(Command::MoveSlider {
-                            slider: slider_tracker_key(program.id, &config.label),
+                    slider_sender
+                        .send(SliderEvent::UpdateSlider {
+                            id: WaveformId::Program(program.id),
+                            slider: config.label.clone(),
                             value: actual_value,
                         })
                         .unwrap();
@@ -1171,9 +1252,10 @@ fn process_event<I>(
                     *norm = (*norm - yrel as f32 / renderer.height as f32).clamp(0.0, 1.0);
                     let config = &ps.configs[1];
                     let actual_value = config.min + *norm * (config.max - config.min);
-                    command_sender
-                        .send(Command::MoveSlider {
-                            slider: slider_tracker_key(program.id, &config.label),
+                    slider_sender
+                        .send(SliderEvent::UpdateSlider {
+                            id: WaveformId::Program(program.id),
+                            slider: config.label.clone(),
                             value: actual_value,
                         })
                         .unwrap();
@@ -1290,10 +1372,10 @@ fn play_waveform_helper(
     args: &Args,
     should_precompute: bool,
 ) -> WaveformOrMode {
-    let program_text = prepend_native_slider_bindings(program);
-    match parser::parse_program(&program_text) {
+    match parser::parse_program(&program.text) {
         Ok(expr) => {
             println!("Parser returned: {}", &expr);
+            let expr = prepend_slider_bindings(&program, expr);
             match parser::evaluate(context, expr) {
                 Ok(expr) => {
                     println!("parser::evaluate returned: {}", &expr);

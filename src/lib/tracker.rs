@@ -23,8 +23,6 @@ pub enum Command<I, M> {
         // If set, play this waveform in a loop
         repeat_every: Option<Duration>,
     },
-    /*
-    // TODO add this once we're ready for it
     // Immediately modify the waveform with the given id to replace the contents of any marked waveform
     // with the given mark_id with the new waveform.
     Modify {
@@ -32,7 +30,6 @@ pub enum Command<I, M> {
         mark_id: M,
         waveform: waveform::Waveform<M>,
     },
-    */
     Stop {
         // The id of the waveform to stop
         id: I,
@@ -81,6 +78,7 @@ where
 {
     id: I,
     waveform: generator::Waveform<M>,
+    start: Instant,
     marks: Vec<Mark<I, M>>,
     // Open files used by Captured waveforms
     capture_state: HashMap<String, hound::WavWriter<BufWriter<std::fs::File>>>,
@@ -153,66 +151,6 @@ where
         };
     }
 
-    fn process_marked(
-        &self,
-        waveform_id: &I,
-        start: Instant,
-        waveform: &generator::Waveform<M>,
-        out: &mut Vec<Mark<I, M>>,
-    ) {
-        use waveform::Waveform::*;
-        match waveform {
-            Const(_) | Time(_) | Noise | Fixed(_, _) | Slider { .. } => {
-                return;
-            }
-            // TODO Fin seems not quite right here, since its length might truncate any marks inside it
-            Fin { waveform, .. }
-            | Filter { waveform, .. }
-            | Reset {
-                trigger: waveform, ..
-            }
-            | Alt {
-                trigger: waveform, ..
-            }
-            | Captured { waveform, .. } => {
-                self.process_marked(waveform_id, start, waveform.as_ref(), out);
-            }
-            Sine {
-                frequency, phase, ..
-            } => {
-                // TODO this is a little strange... but maybe correct?
-                self.process_marked(waveform_id, start, frequency.as_ref(), out);
-                self.process_marked(waveform_id, start, phase.as_ref(), out);
-            }
-            Append(a, b) => {
-                self.process_marked(waveform_id, start, &*a, out);
-                let a_len = self.generator.length(
-                    &mut a.clone(),
-                    10 * self.sample_rate as usize, // XXX
-                );
-                let start = start + Duration::from_secs_f32(a_len as f32 / self.sample_rate as f32);
-                self.process_marked(waveform_id, start, b.as_ref(), out);
-            }
-            BinaryPointOp(_, a, b) => {
-                self.process_marked(waveform_id, start, &*a, out);
-                self.process_marked(waveform_id, start, &*b, out);
-            }
-            Marked { waveform, id } => {
-                let len = self.generator.length(
-                    &mut waveform.clone(),
-                    10 * self.sample_rate as usize, // XXX
-                );
-                out.push(Mark {
-                    waveform_id: waveform_id.clone(),
-                    mark_id: id.clone(),
-                    start,
-                    duration: Duration::from_secs_f32(len as f32 / self.sample_rate as f32),
-                });
-                self.process_marked(waveform_id, start, &*waveform, out);
-            }
-        }
-    }
-
     fn process_captured<S>(
         &self,
         waveform: &waveform::Waveform<M, S>,
@@ -268,6 +206,91 @@ where
                     .expect("Failed to create WAV writer");
                 out.insert(file_stem.clone(), writer);
             }
+        }
+    }
+}
+
+fn process_marked<I, M>(
+    generator: &generator::Generator,
+    sample_rate: f32,
+    waveform_id: &I,
+    start: Instant,
+    waveform: &generator::Waveform<M>,
+    out: &mut Vec<Mark<I, M>>,
+) where
+    M: Clone + Debug + fmt::Display,
+    I: Clone,
+{
+    use waveform::Waveform::*;
+    match waveform {
+        Const(_) | Time(_) | Noise | Fixed(_, _) | Slider { .. } => {
+            return;
+        }
+        // TODO Fin seems not quite right here, since its length might truncate any marks inside it
+        Fin { waveform, .. }
+        | Filter { waveform, .. }
+        | Reset {
+            trigger: waveform, ..
+        }
+        | Alt {
+            trigger: waveform, ..
+        }
+        | Captured { waveform, .. } => {
+            process_marked(
+                generator,
+                sample_rate,
+                waveform_id,
+                start,
+                waveform.as_ref(),
+                out,
+            );
+        }
+        Sine {
+            frequency, phase, ..
+        } => {
+            // TODO this is a little strange... but maybe correct?
+            process_marked(
+                generator,
+                sample_rate,
+                waveform_id,
+                start,
+                frequency.as_ref(),
+                out,
+            );
+            process_marked(
+                generator,
+                sample_rate,
+                waveform_id,
+                start,
+                phase.as_ref(),
+                out,
+            );
+        }
+        Append(a, b) => {
+            process_marked(generator, sample_rate, waveform_id, start, &*a, out);
+            let a_len = generator.length(
+                &mut a.clone(),
+                10 * sample_rate as usize, // XXX
+            );
+            let start = start + Duration::from_secs_f32(a_len as f32 / sample_rate as f32);
+            process_marked(generator, sample_rate, waveform_id, start, b.as_ref(), out);
+        }
+        BinaryPointOp(_, a, b) => {
+            process_marked(generator, sample_rate, waveform_id, start, &*a, out);
+            process_marked(generator, sample_rate, waveform_id, start, &*b, out);
+        }
+        Marked { waveform, id } => {
+            let len = generator.length(
+                &mut waveform.clone(),
+                10 * sample_rate as usize, // XXX
+            );
+            out.push(Mark {
+                waveform_id: waveform_id.clone(),
+                mark_id: id.clone(),
+                start,
+                duration: Duration::from_secs_f32(len as f32 / sample_rate as f32),
+            });
+            process_marked(generator, sample_rate, waveform_id, start, &*waveform, out);
         }
     }
 }
@@ -356,7 +379,14 @@ where
                 }
                 let mut marks = Vec::new();
                 let waveform = generator::initialize_state(waveform);
-                self.process_marked(&id, start, &waveform, &mut marks);
+                process_marked(
+                    &self.generator,
+                    self.sample_rate as f32,
+                    &id,
+                    start,
+                    &waveform,
+                    &mut marks,
+                );
                 self.pending_waveforms.push(PendingWaveform {
                     id,
                     waveform,
@@ -366,8 +396,6 @@ where
                 });
                 self.pending_waveforms.sort_by_key(|w| w.start);
             }
-            /*
-            TODO add this in once we're ready for it
             Command::Modify {
                 id,
                 mark_id,
@@ -381,19 +409,39 @@ where
                 for active in &mut self.active_waveforms {
                     if active.id == id {
                         waveform::substitute(&mut active.waveform, &mark_id, &waveform);
-
-                        // XXX recompute marks?
+                        println!("  new waveform is: {}", active.waveform);
+                        // Recompute the marks
+                        active.marks.clear();
+                        process_marked(
+                            &self.generator,
+                            self.sample_rate as f32,
+                            &active.id,
+                            active.start,
+                            // We need to re-initialize here because this waveform has moved forward
+                            // from the beginning, so if we use `active.start` above, we need to actually
+                            // restart here too.
+                            &generator::initialize_state(active.waveform.clone()),
+                            &mut active.marks,
+                        );
                     }
                 }
-                /*
                 for pending in &mut self.pending_waveforms {
                     if pending.id == id {
-
+                        waveform::substitute(&mut pending.waveform, &mark_id, &waveform);
+                        println!("  new waveform is: {}", pending.waveform);
+                        // Recompute the marks
+                        pending.marks.clear();
+                        process_marked(
+                            &self.generator,
+                            self.sample_rate as f32,
+                            &pending.id,
+                            pending.start,
+                            &pending.waveform,
+                            &mut pending.marks,
+                        );
                     }
                 }
-                */
             }
-            */
             Command::Stop { id } => {
                 println!("Received command to stop waveform {:?}", id);
                 self.active_waveforms.retain(|w| w.id != id);
@@ -422,8 +470,7 @@ where
     }
 
     // Generate from pending waveforms and active waveforms, filling the out buffer.
-    // Returns how many samples were generated, or None if the no samples were generated
-    // along with the set of active waveforms that finished generating
+    // Returns the set of active waveforms that finished generating.
     fn generate(&mut self, buffer_start: Instant, out: &mut [f32]) -> Vec<ActiveWaveform<I, M>> {
         // We'll generate in segments based on the set of active waveforms at a given time
         let mut segment_start = buffer_start;
@@ -478,6 +525,7 @@ where
                     }
                     self.active_waveforms.push(ActiveWaveform {
                         id: pending.id.clone(),
+                        start: pending.start,
                         waveform,
                         marks: pending.marks,
                         capture_state,
@@ -498,12 +546,16 @@ where
                         );
                         */
                         pending.marks = Vec::new();
-                        self.process_marked(
+                        let waveform = generator::initialize_state(pending.waveform);
+                        process_marked(
+                            &self.generator,
+                            self.sample_rate as f32,
                             &pending.id,
                             pending.start,
-                            &generator::initialize_state(pending.waveform.clone()),
+                            &waveform,
                             &mut pending.marks,
                         );
+                        pending.waveform = waveform;
                         self.pending_waveforms.push(pending);
                         self.pending_waveforms.sort_by_key(|w| w.start);
                     }

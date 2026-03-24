@@ -407,6 +407,14 @@ impl<'a> Generator<'a> {
                 for (i, x) in out.iter_mut().enumerate() {
                     *x = last_value + change * (buffer_progress + (i + 1) as f32 / desired as f32);
                 }
+                /*
+                println!(
+                    "Generated slider value: len = {}, start = {}, end = {}",
+                    out.len(),
+                    out[0],
+                    out[out.len() - 1]
+                );
+                */
                 out
             }
             Marked {
@@ -458,6 +466,8 @@ impl<'a> Generator<'a> {
         extend_to_longer: bool,
         mut desired: usize,
     ) -> Vec<f32> {
+        // Note that this approach may generate lots of samples from `a` that we don't need (in the
+        // case that `b` is much shorter.)
         let mut a_out = self.generate(a, desired);
         match b {
             // In this branch (which is always taken if we've removed Seq's), check to see if we can
@@ -780,9 +790,9 @@ impl<'a> Generator<'a> {
             // for cases like `Filter` that may need to make it longer.
 
             println!("Precomputing output for {}", &waveform);
-
-            let out = g.generate(&mut waveform, usize::MAX / 2);
-            if out.len() == usize::MAX / 2 {
+            let max_desired = (g.sample_rate * 10) as usize;
+            let out = g.generate(&mut waveform, max_desired);
+            if out.len() == max_desired {
                 println!("Warning: precompute generated max samples (maybe not finite?)");
             }
 
@@ -812,7 +822,7 @@ impl<'a> Generator<'a> {
             {
                 match precompute_internal(g, a) {
                     PC(a) => NPC(Dynamic, wf(generate_fixed(g, a))),
-                    NPC(why, a) => NPC(why, wf(a)),
+                    NPC(_, a) => NPC(Dynamic, wf(a)),
                 }
             }
 
@@ -910,7 +920,7 @@ impl<'a> Generator<'a> {
                 ) {
                     (length, NPC(Dynamic, waveform)) => {
                         println!(
-                            "Cannot precompute Fin because inner waveform is dynamic: {:?}",
+                            "Cannot precompute Fin because inner waveform is dynamic: {}",
                             &waveform
                         );
                         NPC(
@@ -923,7 +933,7 @@ impl<'a> Generator<'a> {
                     }
                     (NPC(Dynamic, length), waveform) => {
                         println!(
-                            "Cannot precompute Fin because length waveform is dynamic: {:?}",
+                            "Cannot precompute Fin because length waveform is dynamic: {}",
                             &length
                         );
                         NPC(

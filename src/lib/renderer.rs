@@ -16,9 +16,12 @@ use crate::parser;
 use crate::tracker;
 use crate::waveform;
 
+// TODO: rename Program as Clip? Or make Clip a type of program?
+// And the other type is Key(channel, key_number)?
+
 pub type ProgramId = i32;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum WaveformId {
     // Beats are silent waveforms that are used to keep time. The bool tracks whether
     // it is an odd or even measure (false == odd).
@@ -46,8 +49,8 @@ impl fmt::Display for MarkId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             MarkId::TopLevel => write!(f, "top-level"),
-            MarkId::Slider(name) => write!(f, "slider({})", name),
-            MarkId::UserDefined(id) => write!(f, "{}", id),
+            MarkId::Slider(name) => write!(f, "slider({:?})", name),
+            MarkId::UserDefined(id) => write!(f, "{:?}", id),
         }
     }
 }
