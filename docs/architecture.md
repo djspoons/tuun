@@ -63,7 +63,7 @@ The native Tuun app is a two-thread system: a **main thread** for UI and DSL eva
 User ──────►  │  SDL2 Event Loop    │────────────► │  Tracker         │
   keyboard    │                     │  (Play,      │                  │
   mouse       │  1. Parse text      │   Stop,      │  1. Drain cmds   │
-              │  2. Evaluate exprs  │   MoveSlider)│  2. Promote      │
+              │  2. Evaluate exprs  │   Modify)    │  2. Promote      │
               │  3. Optimize &      │              │     pending →    │
               │     precompute      │              │     active       │
               │  4. Send commands   │  Status      │  3. Generate &   │

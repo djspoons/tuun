@@ -242,7 +242,7 @@ First, FM with pulse modulator: `Sine(w_c + I * w_m * pulse(0.5, w_m), 0)`
   </tuun-synth>
 </div>
 
-Second, PM with pulse modulator `Sine(w_c, I * pulse(0.5, w_m))`
+Second, PM with pulse modulator: `Sine(w_c, I * pulse(0.5, w_m))`
 
 <div class="container">
   <tuun-synth description="PM synthesis tone with pulse modulator (with pure tone)" sliders='["pure_tone_amplitude:0:1:0"]'>

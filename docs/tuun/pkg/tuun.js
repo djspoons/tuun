@@ -89,12 +89,6 @@ function takeFromExternrefTable0(idx) {
     return value;
 }
 
-function _assertClass(instance, klass) {
-    if (!(instance instanceof klass)) {
-        throw new Error(`expected instance of ${klass.name}`);
-    }
-}
-
 let cachedFloat32ArrayMemory0 = null;
 
 function getFloat32ArrayMemory0() {
@@ -122,7 +116,7 @@ const TuunFinalization = (typeof FinalizationRegistry === 'undefined')
 /**
  * WebAssembly interface for the Tuun synthesizer.
  *
- * Provides parsing, optimization, and audio generation from Tuun expressions.
+ * Owns the currently-playing waveform.
  */
 export class Tuun {
 
@@ -156,66 +150,82 @@ export class Tuun {
         return this;
     }
     /**
-     * Parses a Tuun expression and returns a WasmWaveform.
+     * Parses an expression with slider bindings and prepares for playback.
      *
-     * # Arguments
-     * * `expression` - The Tuun expression string to parse
+     * `slider_json` is a JSON object mapping slider names to initial values,
+     * for example, `{"volume": 0.5, "cutoff": 2000}`.
+     * Pass `"{}"` for no sliders.
      *
-     * # Returns
-     * A WasmWaveform that can be used with `generate()`, or an error string
-     *
-     * # Example
+     * # Examples
      * ```javascript
-     * const waveform = tuun.parse("sine(2764, 0)");
+     * const waveform = tuun.parse("sine(2764, 0)", "{}");
      * ```
      * @param {string} expression
-     * @returns {WasmWaveform}
+     * @param {string} slider_json
      */
-    parse(expression) {
+    parse(expression, slider_json) {
         const ptr0 = passStringToWasm0(expression, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.tuun_parse(this.__wbg_ptr, ptr0, len0);
-        if (ret[2]) {
-            throw takeFromExternrefTable0(ret[1]);
+        const ptr1 = passStringToWasm0(slider_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.tuun_parse(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
         }
-        return WasmWaveform.__wrap(ret[0]);
     }
     /**
+     * Drops the current waveform.
+     */
+    stop() {
+        wasm.tuun_stop(this.__wbg_ptr);
+    }
+    /**
+     * Updates a slider value in the current waveform.
+     *
+     * Builds a linear ramp from the last value to the new value and
+     * substitutes it into the playing waveform.
      * @param {string} name
      * @param {number} value
      */
-    set_slider_value(name, value) {
+    update_slider(name, value) {
         const ptr0 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
-        wasm.tuun_set_slider_value(this.__wbg_ptr, ptr0, len0, value);
+        wasm.tuun_update_slider(this.__wbg_ptr, ptr0, len0, value);
     }
     /**
-     * Generates audio samples from a waveform. Updates the internal state
-     * of the waveform so that the next call to `generate()` will continue
-     * from the point at which this call left off.
+     * Generates audio samples from the current waveform. Updates the internal
+     * state of the waveform so that the next call to `generate()` will continue
+     * from the point at which this call left off. Returns an empty vector if
+     * not playing.
      *
      * # Arguments
-     * * `waveform` - The WasmWaveform to generate from
      * * `desired` - The number of samples to generate
      *
      * # Returns
      * A Float32Array of audio samples
      *
-     * # Example
+     * # Examples
      * ```javascript
-     * const samples = tuun.generate(waveform, 4096);
+     * tuun.parse("$440", "{}");
+     * const samples = tuun.generate(4096);
      * // samples is a Float32Array that can be used with Web Audio API
      * ```
-     * @param {WasmWaveform} waveform
      * @param {number} desired
      * @returns {Float32Array}
      */
-    generate(waveform, desired) {
-        _assertClass(waveform, WasmWaveform);
-        const ret = wasm.tuun_generate(this.__wbg_ptr, waveform.__wbg_ptr, desired);
+    generate(desired) {
+        const ret = wasm.tuun_generate(this.__wbg_ptr, desired);
         var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
         wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
         return v1;
+    }
+    /**
+     * Returns whether a waveform is currently playing.
+     * @returns {boolean}
+     */
+    is_playing() {
+        const ret = wasm.tuun_is_playing(this.__wbg_ptr);
+        return ret !== 0;
     }
     /**
      * Returns the current sample rate.
@@ -224,54 +234,6 @@ export class Tuun {
     get sample_rate() {
         const ret = wasm.tuun_sample_rate(this.__wbg_ptr);
         return ret;
-    }
-}
-
-const WasmWaveformFinalization = (typeof FinalizationRegistry === 'undefined')
-    ? { register: () => {}, unregister: () => {} }
-    : new FinalizationRegistry(ptr => wasm.__wbg_wasmwaveform_free(ptr >>> 0, 1));
-/**
- * A waveform that can be used to generate audio samples.
- *
- * This wraps the internal Waveform type and maintains state between
- * calls to generate().
- */
-export class WasmWaveform {
-
-    static __wrap(ptr) {
-        ptr = ptr >>> 0;
-        const obj = Object.create(WasmWaveform.prototype);
-        obj.__wbg_ptr = ptr;
-        WasmWaveformFinalization.register(obj, obj.__wbg_ptr, obj);
-        return obj;
-    }
-
-    __destroy_into_raw() {
-        const ptr = this.__wbg_ptr;
-        this.__wbg_ptr = 0;
-        WasmWaveformFinalization.unregister(this);
-        return ptr;
-    }
-
-    free() {
-        const ptr = this.__destroy_into_raw();
-        wasm.__wbg_wasmwaveform_free(ptr, 0);
-    }
-    /**
-     * Returns a string representation of the waveform (for debugging).
-     * @returns {string}
-     */
-    toString() {
-        let deferred1_0;
-        let deferred1_1;
-        try {
-            const ret = wasm.wasmwaveform_toString(this.__wbg_ptr);
-            deferred1_0 = ret[0];
-            deferred1_1 = ret[1];
-            return getStringFromWasm0(ret[0], ret[1]);
-        } finally {
-            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
-        }
     }
 }
 
