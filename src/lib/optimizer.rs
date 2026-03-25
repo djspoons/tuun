@@ -369,7 +369,6 @@ where
             positive_waveform: Box::new(optimize(*positive_waveform)),
             negative_waveform: Box::new(optimize(*negative_waveform)),
         },
-        w @ Slider(_) => w,
         Marked { id, waveform } => {
             // TODO could pull out Fin if process_marks better implemented Fin
             Marked {

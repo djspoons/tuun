@@ -2,7 +2,7 @@ use std::fs;
 
 use clap::Parser as ClapParser;
 
-use tuun::{builtins, parser, renderer};
+use tuun::{builtins, parser, renderer, slider};
 
 #[derive(ClapParser, Debug)]
 #[command(version, about = "Check tuun-synth expressions in .md and .html files")]
@@ -63,40 +63,6 @@ fn extract_attr<'a>(html: &'a str, attr_name: &str) -> Option<&'a str> {
         }
     }
     None
-}
-
-/// Parse slider config strings like "label:min:max:value" and prepend
-/// slider bindings to the expression.
-fn prepend_slider_bindings(expression: &str, sliders_attr: &str) -> String {
-    let trimmed = sliders_attr.trim();
-    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
-        return expression.to_string();
-    }
-    let inner = &trimmed[1..trimmed.len() - 1];
-
-    let mut labels = Vec::new();
-    for item in inner.split(',') {
-        let item = item.trim().trim_matches('"');
-        if item.is_empty() {
-            continue;
-        }
-        let parts: Vec<&str> = item.split(':').collect();
-        let label = parts[0];
-        if !label.is_empty() {
-            labels.push(label.to_string());
-        }
-    }
-
-    if labels.is_empty() {
-        return expression.to_string();
-    }
-
-    let bindings = labels
-        .iter()
-        .map(|label| format!("{} = slider(\"{}\")", label, label))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("let {} in {}", bindings, expression)
 }
 
 /// Strip tuun comments (// to end of line) from an expression.
@@ -240,27 +206,33 @@ fn check_file(
             }
         };
 
-        // Prepend slider bindings if present
-        let expression = if let Some(sliders) = extract_attr(block, "sliders") {
-            prepend_slider_bindings(&expression, sliders)
-        } else {
-            expression
-        };
-
         // Parse and evaluate
         match parser::parse_program(&expression) {
-            Ok(parsed) => match parser::evaluate(context, parsed) {
-                Ok(_) => {
-                    println!("  {}:{} [ok] \"{}\"", file, line, label);
+            Ok(expr) => {
+                let configs = if let Some(configs) = extract_attr(block, "sliders") {
+                    slider::parse_slider_configs(configs)
+                } else {
+                    vec![]
+                };
+                let expr = slider::prepend_slider_bindings(
+                    &configs,
+                    &vec![0.0; configs.len()],
+                    renderer::MarkId::Slider,
+                    expr,
+                );
+                match parser::evaluate(context, expr) {
+                    Ok(_) => {
+                        println!("  {}:{} [ok] \"{}\"", file, line, label);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "  {}:{} [FAIL] \"{}\" evaluate error: {:?}",
+                            file, line, label, e
+                        );
+                        failed += 1;
+                    }
                 }
-                Err(e) => {
-                    eprintln!(
-                        "  {}:{} [FAIL] \"{}\" evaluate error: {:?}",
-                        file, line, label, e
-                    );
-                    failed += 1;
-                }
-            },
+            }
             Err(errors) => {
                 eprintln!(
                     "  {}:{} [FAIL] \"{}\" parse errors: {:?}",

@@ -946,61 +946,6 @@ where
     return evaluate_closed(expr);
 }
 
-#[derive(Debug, Clone)]
-pub struct SliderConfig {
-    pub label: String,
-    pub min: f32,
-    pub max: f32,
-    pub initial_value: f32,
-}
-
-pub fn parse_slider_pragma(line: &str) -> Option<Vec<SliderConfig>> {
-    let trimmed = line.trim();
-    if !trimmed.starts_with("//#{") || !trimmed.ends_with('}') {
-        return None;
-    }
-    let inner = &trimmed[4..trimmed.len() - 1]; // strip "//#{" and "}"
-    if !inner.starts_with("sliders=") {
-        return None;
-    }
-    let sliders_value = inner["sliders=".len()..].trim();
-    if !sliders_value.starts_with('[') || !sliders_value.ends_with(']') {
-        return None;
-    }
-    let list_inner = &sliders_value[1..sliders_value.len() - 1];
-
-    let mut configs = Vec::new();
-    for item in list_inner.split(',') {
-        let item = item.trim().trim_matches('"');
-        if item.is_empty() {
-            continue;
-        }
-        let parts: Vec<&str> = item.split(':').collect();
-        let label = parts[0].to_string();
-        if label.is_empty() {
-            continue;
-        }
-        let min = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-        const MIN_GAP: f32 = 0.01;
-        let max = f32::max(
-            parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(1.0),
-            min + MIN_GAP,
-        );
-        let initial_value = parts
-            .get(3)
-            .and_then(|s| s.parse().ok())
-            .unwrap_or((min + max) / 2.0)
-            .clamp(min, max);
-        configs.push(SliderConfig {
-            label,
-            min,
-            max,
-            initial_value,
-        });
-    }
-    Some(configs)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -31,23 +31,11 @@ pub fn initialize_state<M, S>(waveform: waveform::Waveform<M, S>) -> Waveform<M>
     return waveform::initialize_state(waveform, State::Initial);
 }
 
-pub struct SliderState {
-    // The values of sliders at the end of the last generate call
-    pub last_values: HashMap<String, f32>,
-    // The current target values for each slider
-    pub values: HashMap<String, f32>,
-    // The length of the current buffer being generated
-    pub buffer_length: usize,
-    // The position in the buffer where the next sample will be written
-    pub buffer_position: usize,
-}
-
 /*
  * Generator converts waveforms into sequences of samples.
  */
 pub struct Generator<'a> {
     sample_rate: i32,
-    pub slider_state: Option<&'a SliderState>,
     pub capture_state:
         Option<RefCell<&'a mut HashMap<String, hound::WavWriter<BufWriter<std::fs::File>>>>>,
 }
@@ -62,12 +50,11 @@ enum MaybeOption<T> {
 }
 
 impl<'a> Generator<'a> {
-    // Create a new generator with the given sample frequency. Note that slider_state and capture_state must be set
+    // Create a new generator with the given sample frequency. Note that capture_state must be set
     // before `generate` is called.
     pub fn new(sample_rate: i32) -> Self {
         Generator {
             sample_rate,
-            slider_state: None,
             capture_state: None,
         }
     }
@@ -75,8 +62,7 @@ impl<'a> Generator<'a> {
     // Generate a vector of samples up to `desired` length and return a new waveform that will continue where this
     // one left off. If fewer than 'desired' samples are generated, that indicates that this waveform has finished.
     // Waveforms should be initialized with `initialize_state` before the first call to `generate`. The returned
-    // waveform supports being "re-initialized" -- unless it depends on some external state (as Slider does), it
-    // will generate the same samples each time it's initialized.
+    // waveform supports being "re-initialized" -- it will generate the same samples each time it's initialized.
     // TODO take a &mut waveform instead
     pub fn generate<M: Debug + fmt::Display>(
         &self,
@@ -383,40 +369,6 @@ impl<'a> Generator<'a> {
                 }
                 out
             }
-            Slider(slider) => {
-                if self.slider_state.is_none() {
-                    println!("Warning: Slider waveform used, but no slider state set");
-                    return vec![0.0; desired];
-                }
-                let slider_state = self.slider_state.unwrap();
-                let last_value = slider_state.last_values.get(slider).cloned().unwrap_or(0.0);
-                let target = slider_state.values.get(slider);
-                let change = match target {
-                    None => {
-                        println!("Warning: no slider value for \"{}", slider);
-                        0.0
-                    }
-                    Some(target) => target - last_value,
-                };
-                // Use a linear interpolation between the last value and the target. This is almost right, but if
-                // a slider waveform is used in a binary op, then buffer_position + position might not be large
-                // enough.
-                let mut out = vec![0.0; desired];
-                let buffer_progress =
-                    slider_state.buffer_position as f32 / slider_state.buffer_length as f32;
-                for (i, x) in out.iter_mut().enumerate() {
-                    *x = last_value + change * (buffer_progress + (i + 1) as f32 / desired as f32);
-                }
-                /*
-                println!(
-                    "Generated slider value: len = {}, start = {}, end = {}",
-                    out.len(),
-                    out[0],
-                    out[out.len() - 1]
-                );
-                */
-                out
-            }
             Marked {
                 waveform: inner, ..
             } => self.generate(inner, desired),
@@ -666,7 +618,6 @@ impl<'a> Generator<'a> {
                 let _ = self.length(negative_waveform, len);
                 len
             }
-            Slider(_) => max,
             Marked { waveform, .. } => {
                 let len = self.length(waveform, max);
                 len
@@ -730,7 +681,7 @@ impl<'a> Generator<'a> {
             BinaryPointOp(op @ (Operator::Add | Operator::Subtract), a, b) => {
                 use waveform::Operator::{Add, Subtract};
                 match (op, a.as_ref(), b.as_ref()) {
-                    // TODO need to consider Sliders and constant functions of Sliders as const
+                    // TODO need to consider constant functions as const
                     (Add, Const(va), Const(vb)) if va + vb >= value => MaybeOption::Some(0),
                     (Add, Const(_), Const(_)) => MaybeOption::None,
                     (Add, Const(va), _) => self.greater_or_equals_at(b, value - va, max),
@@ -743,6 +694,7 @@ impl<'a> Generator<'a> {
                     _ => MaybeOption::Maybe,
                 }
             }
+            // TODO think about Marked here
             _ => {
                 println!("Unhandled case in greater_or_equals_at: {}", waveform);
                 MaybeOption::Maybe
@@ -751,7 +703,7 @@ impl<'a> Generator<'a> {
     }
 
     // Replaces parts of `waveform` that can be precomputed with their equivalent Fixed versions. Notably,
-    // infinite waveforms and waveforms that depend on or have dynamic behavior (Slider, Marked, Captured)
+    // infinite waveforms and waveforms that depend on or have dynamic behavior (Marked, Captured)
     // cannot be replaced.
     pub fn precompute<M>(&self, waveform: Waveform<M>) -> Waveform<M>
     where
@@ -1069,8 +1021,6 @@ impl<'a> Generator<'a> {
                         negative_waveform: Box::new(negative_waveform),
                     },
                 ),
-                // Slider is always dynamic.
-                Slider(_) => NPC(Dynamic, waveform),
                 // Marked and Captured may pre-compute their inner waveforms, but they themselves are still dynamic.
                 Marked { waveform, id } => do_one_dynamic(g, *waveform, |waveform| Marked {
                     waveform: Box::new(waveform),

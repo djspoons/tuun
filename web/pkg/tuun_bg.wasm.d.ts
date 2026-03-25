@@ -3,12 +3,12 @@
 export const memory: WebAssembly.Memory;
 export const __wbg_tuun_free: (a: number, b: number) => void;
 export const tuun_new: (a: number, b: number) => [number, number, number];
-export const tuun_parse: (a: number, b: number, c: number) => [number, number, number];
-export const tuun_set_slider_value: (a: number, b: number, c: number, d: number) => void;
-export const tuun_generate: (a: number, b: number, c: number) => [number, number];
+export const tuun_parse: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+export const tuun_stop: (a: number) => void;
+export const tuun_update_slider: (a: number, b: number, c: number, d: number) => void;
+export const tuun_generate: (a: number, b: number) => [number, number];
+export const tuun_is_playing: (a: number) => number;
 export const tuun_sample_rate: (a: number) => number;
-export const __wbg_wasmwaveform_free: (a: number, b: number) => void;
-export const wasmwaveform_toString: (a: number) => [number, number];
 export const main: () => void;
 export const __wbindgen_free: (a: number, b: number, c: number) => void;
 export const __wbindgen_malloc: (a: number, b: number) => number;

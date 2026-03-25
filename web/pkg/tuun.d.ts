@@ -8,7 +8,7 @@ export function main(): void;
 /**
  * WebAssembly interface for the Tuun synthesizer.
  *
- * Provides parsing, optimization, and audio generation from Tuun expressions.
+ * Owns the currently-playing waveform.
  */
 export class Tuun {
   free(): void;
@@ -21,58 +21,57 @@ export class Tuun {
    */
   constructor(sample_rate: number, tempo: number);
   /**
-   * Parses a Tuun expression and returns a WasmWaveform.
+   * Parses an expression with slider bindings and prepares for playback.
    *
-   * # Arguments
-   * * `expression` - The Tuun expression string to parse
+   * `slider_json` is a JSON object mapping slider names to initial values,
+   * for example, `{"volume": 0.5, "cutoff": 2000}`.
+   * Pass `"{}"` for no sliders.
    *
-   * # Returns
-   * A WasmWaveform that can be used with `generate()`, or an error string
-   *
-   * # Example
+   * # Examples
    * ```javascript
-   * const waveform = tuun.parse("sine(2764, 0)");
+   * const waveform = tuun.parse("sine(2764, 0)", "{}");
    * ```
    */
-  parse(expression: string): WasmWaveform;
-  set_slider_value(name: string, value: number): void;
+  parse(expression: string, slider_json: string): void;
   /**
-   * Generates audio samples from a waveform. Updates the internal state
-   * of the waveform so that the next call to `generate()` will continue
-   * from the point at which this call left off.
+   * Drops the current waveform.
+   */
+  stop(): void;
+  /**
+   * Updates a slider value in the current waveform.
+   *
+   * Builds a linear ramp from the last value to the new value and
+   * substitutes it into the playing waveform.
+   */
+  update_slider(name: string, value: number): void;
+  /**
+   * Generates audio samples from the current waveform. Updates the internal
+   * state of the waveform so that the next call to `generate()` will continue
+   * from the point at which this call left off. Returns an empty vector if
+   * not playing.
    *
    * # Arguments
-   * * `waveform` - The WasmWaveform to generate from
    * * `desired` - The number of samples to generate
    *
    * # Returns
    * A Float32Array of audio samples
    *
-   * # Example
+   * # Examples
    * ```javascript
-   * const samples = tuun.generate(waveform, 4096);
+   * tuun.parse("$440", "{}");
+   * const samples = tuun.generate(4096);
    * // samples is a Float32Array that can be used with Web Audio API
    * ```
    */
-  generate(waveform: WasmWaveform, desired: number): Float32Array;
+  generate(desired: number): Float32Array;
+  /**
+   * Returns whether a waveform is currently playing.
+   */
+  is_playing(): boolean;
   /**
    * Returns the current sample rate.
    */
   readonly sample_rate: number;
-}
-/**
- * A waveform that can be used to generate audio samples.
- *
- * This wraps the internal Waveform type and maintains state between
- * calls to generate().
- */
-export class WasmWaveform {
-  private constructor();
-  free(): void;
-  /**
-   * Returns a string representation of the waveform (for debugging).
-   */
-  toString(): string;
 }
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
@@ -81,12 +80,12 @@ export interface InitOutput {
   readonly memory: WebAssembly.Memory;
   readonly __wbg_tuun_free: (a: number, b: number) => void;
   readonly tuun_new: (a: number, b: number) => [number, number, number];
-  readonly tuun_parse: (a: number, b: number, c: number) => [number, number, number];
-  readonly tuun_set_slider_value: (a: number, b: number, c: number, d: number) => void;
-  readonly tuun_generate: (a: number, b: number, c: number) => [number, number];
+  readonly tuun_parse: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+  readonly tuun_stop: (a: number) => void;
+  readonly tuun_update_slider: (a: number, b: number, c: number, d: number) => void;
+  readonly tuun_generate: (a: number, b: number) => [number, number];
+  readonly tuun_is_playing: (a: number) => number;
   readonly tuun_sample_rate: (a: number) => number;
-  readonly __wbg_wasmwaveform_free: (a: number, b: number) => void;
-  readonly wasmwaveform_toString: (a: number) => [number, number];
   readonly main: () => void;
   readonly __wbindgen_free: (a: number, b: number, c: number) => void;
   readonly __wbindgen_malloc: (a: number, b: number) => number;

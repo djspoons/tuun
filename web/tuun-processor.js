@@ -4,7 +4,6 @@ class TuunProcessor extends AudioWorkletProcessor {
     constructor(options) {
         super();
         const { wasmModule, sampleRate, tempo } = options.processorOptions;
-        this.waveform = null;
         this.playing = false;
 
         // Initialize WASM synchronously from the pre-compiled module
@@ -13,68 +12,55 @@ class TuunProcessor extends AudioWorkletProcessor {
         this.port.postMessage({ type: 'ready' });
 
         this.port.onmessage = (event) => {
+            //console.log("tuun-processor: got '" + event.data.type + "' message with data: " + JSON.stringify(event.data));
             switch (event.data.type) {
                 case 'play':
-                    this._play(event.data.expression);
+                    try {
+                        this.tuun.parse(
+                            event.data.expression,
+                            event.data.sliders,
+                        );
+                        this.playing = true;
+                    } catch (e) {
+                        this.port.postMessage({ type: 'error', message: e.toString() });
+                    }
                     break;
                 case 'stop':
-                    this._stop();
+                    this.tuun.stop();
+                    this.playing = false;
                     break;
-                case 'slider':
-                    this.tuun.set_slider_value(event.data.name, event.data.value);
+                case 'update_sliders':
+                    for (const [name, value] of Object.entries(event.data.values)) {
+                        this.tuun.update_slider(name, value);
+                    }
                     break;
             }
         };
     }
 
-    _play(expression) {
-        this._stop();
-        try {
-            this.waveform = this.tuun.parse(expression);
-            this.playing = true;
-        } catch (e) {
-            this.port.postMessage({ type: 'error', message: e.toString() });
-        }
-    }
-
-    _stop() {
-        this.playing = false;
-        if (this.waveform) {
-            this.waveform.free();
-            this.waveform = null;
-        }
-    }
-
     process(inputs, outputs) {
         const output = outputs[0][0];
 
-        if (!this.playing || !this.waveform) {
+        if (!this.playing) {
             output.fill(0);
             return true;
         }
 
         try {
-            const samples = this.tuun.generate(this.waveform, output.length);
-
-            /* TODO remove this?
-            if (samples.length === 0) {
-                output.fill(0);
-                this._stop();
-                this.port.postMessage({ type: 'ended' });
-                return true;
-            }
-            */
+            const samples = this.tuun.generate(output.length);
 
             output.set(samples.subarray(0, Math.min(samples.length, output.length)));
 
             if (samples.length < output.length) {
                 output.fill(0, samples.length);
-                this._stop();
+                this.tuun.stop();
+                this.playing = false;
                 this.port.postMessage({ type: 'ended' });
             }
         } catch (e) {
             output.fill(0);
-            this._stop();
+            this.tuun.stop();
+            this.playing = false;
             this.port.postMessage({ type: 'error', message: 'Generation failed: ' + e });
         }
 

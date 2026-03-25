@@ -1,33 +1,41 @@
 //! WebAssembly interface for Tuun music synthesizer.
 //!
 //! This module provides JavaScript-friendly bindings for the core synthesis engine.
-//!
-//! # Example (JavaScript)
-//! ```javascript
-//! import init, { Tuun } from './pkg/tuun.js';
-//!
-//! await init();
-//! const tuun = new Tuun(44100);
-//! const waveform = tuun.parse("sine(2764, 0)");
-//! const samples = tuun.generate(waveform, 4096);
-//! ```
+//! The `Wasm` struct acts as a simple single-waveform tracker: it owns the currently
+//! playing waveform and handles slider updates via `Waveform::Marked` + `waveform::substitute`.
 
 use std::collections::HashMap;
+use std::fmt;
+use std::time::Duration;
 
 use wasm_bindgen::prelude::*;
 
-use crate::{builtins, generator, optimizer, parser};
+use crate::{builtins, generator, optimizer, parser, slider, waveform};
 
-type MarkId = u32;
+#[derive(Clone, Debug, PartialEq)]
+enum MarkId {
+    // We currently only support marked waveforms as part of the slider implementation.
+    Slider(String),
+}
+
+impl fmt::Display for MarkId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MarkId::Slider(name) => write!(f, "slider({:?})", name),
+        }
+    }
+}
 
 /// WebAssembly interface for the Tuun synthesizer.
 ///
-/// Provides parsing, optimization, and audio generation from Tuun expressions.
+/// Owns the currently-playing waveform.
 #[wasm_bindgen(js_name = "Tuun")]
 pub struct Wasm {
     sample_rate: i32,
     context: Vec<(String, parser::Expr<MarkId>)>,
-    slider_state: generator::SliderState,
+    waveform: Option<generator::Waveform<MarkId>>,
+    last_slider_values: HashMap<String, f32>,
+    buffer_duration: Duration,
 }
 
 #[wasm_bindgen(js_class = "Tuun")]
@@ -90,97 +98,131 @@ impl Wasm {
         Ok(Wasm {
             sample_rate,
             context,
-            slider_state: generator::SliderState {
-                last_values: HashMap::new(),
-                values: HashMap::new(),
-                buffer_length: 0,
-                buffer_position: 0,
-            },
+            waveform: None,
+            last_slider_values: HashMap::new(),
+            buffer_duration: Duration::from_secs_f32(128.0 / sample_rate as f32),
         })
     }
 
-    /// Parses a Tuun expression and returns a WasmWaveform.
+    /// Parses an expression with slider bindings and prepares for playback.
     ///
-    /// # Arguments
-    /// * `expression` - The Tuun expression string to parse
+    /// `slider_json` is a JSON object mapping slider names to initial values,
+    /// for example, `{"volume": 0.5, "cutoff": 2000}`.
+    /// Pass `"{}"` for no sliders.
     ///
-    /// # Returns
-    /// A WasmWaveform that can be used with `generate()`, or an error string
-    ///
-    /// # Example
+    /// # Examples
     /// ```javascript
-    /// const waveform = tuun.parse("sine(2764, 0)");
+    /// const waveform = tuun.parse("sine(2764, 0)", "{}");
     /// ```
-    pub fn parse(&self, expression: &str) -> Result<WasmWaveform, String> {
-        // Parse the program
+    pub fn parse(&mut self, expression: &str, slider_json: &str) -> Result<(), String> {
         let parsed_expr = parser::parse_program(expression)
             .map_err(|errors| format!("Parse errors: {:?}", errors))?;
+        let sliders = parse_json(slider_json)?;
 
-        // Evaluate the expression
-        let expr = parser::evaluate(&self.context, parsed_expr)
+        // Wrap with slider bindings: let name = Marked(Slider(name), Const(value)) in ...
+        let expr = if sliders.is_empty() {
+            parsed_expr
+        } else {
+            let bindings = sliders
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        parser::Pattern::Identifier(name.clone()),
+                        parser::Expr::Waveform(waveform::Waveform::Marked {
+                            id: MarkId::Slider(name.clone()),
+                            waveform: Box::new(waveform::Waveform::Const(*value)),
+                        }),
+                    )
+                })
+                .collect();
+            parser::make_let(bindings, parsed_expr)
+        };
+
+        let expr = parser::evaluate(&self.context, expr)
             .map_err(|e| format!("Evaluate error: {:?}", e))?;
 
-        // Extract the waveform from the expression
-        match expr {
-            parser::Expr::Waveform(waveform) => {
-                let waveform = optimizer::optimize(waveform);
-                // TODO could precompute here as well
+        // TODO Do we want to precompute here?
 
-                // Initialize the waveform state for generation
-                let waveform = generator::initialize_state(waveform);
-                Ok(WasmWaveform { inner: waveform })
+        let waveform = match expr {
+            parser::Expr::Waveform(w) => w,
+            parser::Expr::Seq { waveform, .. } => match *waveform {
+                parser::Expr::Waveform(w) => w,
+                _ => return Err("Got non-Waveform in seq after evaluate".to_string()),
+            },
+            other => {
+                return Err(format!(
+                    "Expression did not evaluate to a waveform, got: {:?}",
+                    other
+                ));
             }
-            parser::Expr::Seq { waveform, .. } => {
-                match *waveform {
-                    parser::Expr::Waveform(waveform) => {
-                        let waveform = optimizer::optimize(waveform);
-                        // TODO could precompute here as well
+        };
 
-                        // Initialize the waveform state for generation
-                        let waveform = generator::initialize_state(waveform);
-                        Ok(WasmWaveform { inner: waveform })
-                    }
-                    _ => panic!("Got non-Waveform in seq after evaluate"),
-                }
-            }
-            other => Err(format!(
-                "Expression did not evaluate to a waveform, got: {:?}",
-                other
-            )),
-        }
+        let waveform = optimizer::optimize(waveform);
+        let waveform = generator::initialize_state(waveform);
+
+        self.waveform = Some(waveform);
+        self.last_slider_values = sliders;
+
+        Ok(())
     }
 
-    pub fn set_slider_value(&mut self, name: &str, value: f32) {
-        self.slider_state.values.insert(name.to_string(), value);
+    /// Drops the current waveform.
+    pub fn stop(&mut self) {
+        self.waveform = None;
+        self.last_slider_values.clear();
     }
 
-    /// Generates audio samples from a waveform. Updates the internal state
-    /// of the waveform so that the next call to `generate()` will continue
-    /// from the point at which this call left off.
+    /// Updates a slider value in the current waveform.
+    ///
+    /// Builds a linear ramp from the last value to the new value and
+    /// substitutes it into the playing waveform.
+    pub fn update_slider(&mut self, name: &str, value: f32) {
+        let waveform = match &mut self.waveform {
+            Some(w) => w,
+            None => return,
+        };
+
+        let last_value = self.last_slider_values.get(name).copied().unwrap_or(value);
+
+        let ramp = slider::make_ramp(last_value, value, self.buffer_duration.as_secs_f32());
+        let ramp = generator::initialize_state(ramp);
+        waveform::substitute(waveform, &MarkId::Slider(name.to_string()), &ramp);
+
+        self.last_slider_values.insert(name.to_string(), value);
+    }
+
+    /// Generates audio samples from the current waveform. Updates the internal
+    /// state of the waveform so that the next call to `generate()` will continue
+    /// from the point at which this call left off. Returns an empty vector if
+    /// not playing.
     ///
     /// # Arguments
-    /// * `waveform` - The WasmWaveform to generate from
     /// * `desired` - The number of samples to generate
     ///
     /// # Returns
     /// A Float32Array of audio samples
     ///
-    /// # Example
+    /// # Examples
     /// ```javascript
-    /// const samples = tuun.generate(waveform, 4096);
+    /// tuun.parse("$440", "{}");
+    /// const samples = tuun.generate(4096);
     /// // samples is a Float32Array that can be used with Web Audio API
     /// ```
-    pub fn generate(&mut self, waveform: &mut WasmWaveform, desired: usize) -> Vec<f32> {
-        self.slider_state.buffer_length = desired;
-        self.slider_state.buffer_position = 0;
+    pub fn generate(&mut self, desired: usize) -> Vec<f32> {
+        self.buffer_duration = Duration::from_secs_f32(desired as f32 / self.sample_rate as f32);
 
-        let mut g = generator::Generator::new(self.sample_rate);
-        g.slider_state = Some(&self.slider_state);
+        let waveform = match &mut self.waveform {
+            Some(w) => w,
+            None => return vec![0.0; desired],
+        };
 
-        let out = g.generate(&mut waveform.inner, desired);
+        let g = generator::Generator::new(self.sample_rate);
+        g.generate(waveform, desired)
+    }
 
-        self.slider_state.last_values = self.slider_state.values.clone();
-        return out;
+    /// Returns whether a waveform is currently playing.
+    pub fn is_playing(&self) -> bool {
+        self.waveform.is_some()
     }
 
     /// Returns the current sample rate.
@@ -190,25 +232,35 @@ impl Wasm {
     }
 }
 
-/// A waveform that can be used to generate audio samples.
-///
-/// This wraps the internal Waveform type and maintains state between
-/// calls to generate().
-#[wasm_bindgen]
-pub struct WasmWaveform {
-    inner: generator::Waveform<MarkId>,
-}
-
-#[wasm_bindgen]
-impl WasmWaveform {
-    /// Returns a string representation of the waveform (for debugging).
-    #[wasm_bindgen(js_name = toString)]
-    pub fn to_string(&self) -> String {
-        format!("{}", self.inner)
+/// Parses a simple JSON object like `{"name": 0.5, "other": 1.0}` into a HashMap.
+fn parse_json(json: &str) -> Result<HashMap<String, f32>, String> {
+    let trimmed = json.trim();
+    if trimmed == "{}" {
+        return Ok(HashMap::new());
     }
+    if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
+        return Err("JSON must be an object".to_string());
+    }
+    let inner = &trimmed[1..trimmed.len() - 1];
+    let mut result = HashMap::new();
+    for pair in inner.split(',') {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = pair.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            return Err(format!("Invalid entry: {}", pair));
+        }
+        let key = parts[0].trim().trim_matches('"');
+        let value: f32 = parts[1]
+            .trim()
+            .parse()
+            .map_err(|_| format!("Invalid value for '{}': {}", key, parts[1].trim()))?;
+        result.insert(key.to_string(), value);
+    }
+    Ok(result)
 }
-
-// Additional utility functions that don't need to be part of a struct
 
 /// Initializes the WASM module.
 /// This is called automatically when you import the module.
@@ -234,14 +286,10 @@ mod tests {
         for (expr, description) in examples {
             println!("Testing: {} - {}", description, expr);
 
-            // Test parsing
-            let mut waveform = tuun
-                .parse(expr)
+            tuun.parse(expr, "{}")
                 .unwrap_or_else(|e| panic!("Failed to parse '{}': {}", expr, e));
 
-            // Test generation (small sample to verify it doesn't crash)
-            let samples = tuun.generate(&mut waveform, 100);
-
+            let samples = tuun.generate(100);
             assert_eq!(samples.len(), 100, "Expected 100 samples for '{}'", expr);
 
             for (i, &sample) in samples.iter().enumerate() {
@@ -254,6 +302,7 @@ mod tests {
                 );
             }
 
+            tuun.stop();
             println!("  ✓ Parsed and generated successfully");
         }
     }
@@ -261,34 +310,26 @@ mod tests {
     /// Test that invalid expressions produce appropriate errors
     #[test]
     fn test_invalid_expressions() {
-        let tuun = Wasm::new(44100, 120.0).expect("Failed to create Tuun instance");
+        let mut tuun = Wasm::new(44100, 120.0).expect("Failed to create Tuun instance");
 
-        let invalid_examples = vec![
-            "undefined_function()",
-            "sine(2764)", // Wrong number of args
-            "1 + ",       // Incomplete expression
-        ];
+        let invalid_examples = vec!["undefined_function()", "sine(2764)", "1 + "];
 
         for expr in invalid_examples {
             println!("Testing invalid expression: {}", expr);
-
-            let result = tuun.parse(expr);
+            let result = tuun.parse(expr, "{}");
             assert!(
                 result.is_err(),
                 "Expected error for invalid expression '{}', but got success",
                 expr
             );
-
             println!("  ✓ Correctly rejected");
         }
     }
 
-    /// Test context functions that require special definitions
     #[test]
     fn test_context_functions() {
         let mut tuun = Wasm::new(44100, 120.0).expect("Failed to create Tuun instance");
 
-        // Test lpf with various expressions
         let lpf_examples = vec![
             ("$440 * Qw | lpf(0.5, 1900)", "Low-pass filtered sine wave"),
             ("noise * 0.1 | lpf(0.7, 2000)", "Low-pass filtered noise"),
@@ -301,14 +342,12 @@ mod tests {
         for (expr, description) in lpf_examples {
             println!("Testing lpf: {} - {}", description, expr);
 
-            let mut waveform = tuun
-                .parse(expr)
+            tuun.parse(expr, "{}")
                 .unwrap_or_else(|e| panic!("Failed to parse '{}': {}", expr, e));
 
-            let samples = tuun.generate(&mut waveform, 100);
+            let samples = tuun.generate(100);
             assert_eq!(samples.len(), 100, "Expected 100 samples for '{}'", expr);
 
-            // Verify samples are in valid range [-1.0, 1.0]
             for (i, &sample) in samples.iter().enumerate() {
                 assert!(
                     sample >= -1.0 && sample <= 1.0,
@@ -319,6 +358,7 @@ mod tests {
                 );
             }
 
+            tuun.stop();
             println!("  ✓ lpf filter works correctly");
         }
     }

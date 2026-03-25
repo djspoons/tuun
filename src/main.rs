@@ -22,6 +22,7 @@ use tuun::optimizer;
 use tuun::parser;
 use tuun::parser::Expr;
 use tuun::renderer;
+use tuun::slider;
 use tuun::tracker;
 use tuun::waveform;
 
@@ -32,28 +33,6 @@ enum SliderEvent {
         value: f32,
     },
     SetInitialValues(HashMap<(WaveformId, String), f32>),
-}
-
-fn prepend_slider_bindings(program: &Program, expr: Expr<MarkId>) -> Expr<MarkId> {
-    if program.sliders.configs.is_empty() {
-        return expr;
-    }
-    let configs = &program.sliders.configs;
-    let bindings = configs
-        .iter()
-        .zip(&program.sliders.normalized_values)
-        .map(|(config, normalized_value)| {
-            let value = config.min + normalized_value * (config.max - config.min);
-            (
-                parser::Pattern::Identifier(config.label.to_string()),
-                Expr::Waveform(waveform::Waveform::Marked {
-                    id: MarkId::Slider(config.label.to_string()),
-                    waveform: Box::new(waveform::Waveform::Const(value)),
-                }),
-            )
-        })
-        .collect::<Vec<_>>();
-    parser::make_let(bindings, expr)
 }
 
 // Additional built-ins
@@ -202,10 +181,10 @@ fn load_programs(args: &Args, programs: &mut Vec<Program>) -> HashMap<(WaveformI
     if !args.programs_file.is_empty() {
         let mut count = 0;
         let contents = fs::read_to_string(&args.programs_file).unwrap_or_default();
-        let mut pending_slider_configs: Option<Vec<parser::SliderConfig>> = None;
+        let mut pending_slider_configs: Option<Vec<slider::SliderConfig>> = None;
         for line in contents.lines() {
             // Check for slider pragma before stripping comments
-            if let Some(mut configs) = parser::parse_slider_pragma(line) {
+            if let Some(mut configs) = slider::parse_slider_pragma(line) {
                 if configs.len() > 2 {
                     eprintln!("Warning: more than 2 sliders specified, using first 2");
                     configs.truncate(2);
@@ -436,35 +415,11 @@ pub fn main() {
 
             // Flush: send one Modify command per changed slider
             for ((id, slider), value) in pending.drain() {
-                use waveform::Operator;
-                use waveform::Waveform::{Append, BinaryPointOp, Const, Fin, Time};
-
                 let last_value = last_slider_values
                     .get_mut(&(id.clone(), slider.clone()))
                     .unwrap();
 
-                // Create the waveform.
-                let waveform = Append(
-                    Box::new(Fin {
-                        length: Box::new(BinaryPointOp(
-                            Operator::Subtract,
-                            Box::new(Time(())),
-                            Box::new(Const(buffer_duration.as_secs_f32())),
-                        )),
-                        waveform: Box::new(BinaryPointOp(
-                            Operator::Add,
-                            Box::new(BinaryPointOp(
-                                Operator::Multiply,
-                                Box::new(Time(())),
-                                Box::new(Const(
-                                    (value - *last_value) / buffer_duration.as_secs_f32(),
-                                )),
-                            )),
-                            Box::new(Const(*last_value)),
-                        )),
-                    }),
-                    Box::new(Const(value)),
-                );
+                let waveform = slider::make_ramp(*last_value, value, buffer_duration.as_secs_f32());
 
                 // Update the last value
                 *last_value = value;
@@ -1361,7 +1316,12 @@ fn play_waveform_helper(
     match parser::parse_program(&program.text) {
         Ok(expr) => {
             println!("Parser returned: {}", &expr);
-            let expr = prepend_slider_bindings(&program, expr);
+            let expr = slider::prepend_slider_bindings(
+                &program.sliders.configs,
+                &program.sliders.normalized_values,
+                MarkId::Slider,
+                expr,
+            );
             match parser::evaluate(context, expr) {
                 Ok(expr) => {
                     println!("parser::evaluate returned: {}", &expr);

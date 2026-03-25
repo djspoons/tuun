@@ -3,6 +3,7 @@ pub mod generator;
 pub mod metric;
 pub mod optimizer;
 pub mod parser;
+pub mod slider;
 pub mod waveform;
 
 // Native-only modules (SDL2-dependent)

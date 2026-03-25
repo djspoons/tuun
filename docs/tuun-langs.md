@@ -132,10 +132,9 @@ There are three combinators for describing periodic waveforms:
  * `Alt(trigger, a, b)` - generates samples from `a` when `trigger` is positive and from `b` otherwise
  * `Reset(trigger, a)` - restarts the second waveform each time the `trigger` switches from negative to positive
 
-And finally, there are these two waveforms that provide ways of dynamically interacting with waveforms through a user interface.
+And finally, a combinator that provides ways of dynamically interacting with waveforms through a user interface. Marked waveforms are used to indicate when parts of a waveform start and stop as well as part of dynamically updating waveforms during playback.
 
- * `Slider(_)` - generates samples dynamically based on user input (for example, a track-pad)
- * `Marked(a)` - provides updates as to when `a` starts and stops
+ * `Marked(a)` - generates samples from `a`
 
 
 For comparison, here are the lengths and offsets of each waveform:
@@ -145,7 +144,6 @@ For comparison, here are the lengths and offsets of each waveform:
 | `Const(_)`              | ∞
 | `Time`                  | ∞
 | `Noise`                 | ∞
-| `Slider(_)`             | ∞
 | `Fixed(v)`              | length of v
 | `Fin(a, b)`             | position w/ `a` >= 0.0
 | `Sine(a, b)`            | min(a.length, b.length)

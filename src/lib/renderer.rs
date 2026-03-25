@@ -13,6 +13,7 @@ use realfft::num_complex::{Complex, ComplexFloat};
 
 use crate::metric::Metric;
 use crate::parser;
+use crate::slider;
 use crate::tracker;
 use crate::waveform;
 
@@ -88,7 +89,7 @@ pub enum Mode {
 
 #[derive(Debug, Clone, Default)]
 pub struct ProgramSliders {
-    pub configs: Vec<parser::SliderConfig>,
+    pub configs: Vec<slider::SliderConfig>,
     /// Normalized values in 0.0..1.0, parallel to configs
     pub normalized_values: Vec<f32>,
 }

@@ -92,10 +92,6 @@ pub enum Waveform<MarkId, State = ()> {
         negative_waveform: Box<Waveform<MarkId, State>>,
     },
     /*
-     * Slider generates samples from a named interactive "slider" input.
-     */
-    Slider(String),
-    /*
      * Marked waveforms generate the same samples as the inner waveform and are used to signal that a certain
      * event will occur or has occurred. Each status update will include a list of marked waveforms, along with
      * their start times and durations.
@@ -176,7 +172,6 @@ impl<MarkId: fmt::Display, State> fmt::Display for Waveform<MarkId, State> {
                 "Alt({}, {}, {})",
                 trigger, positive_waveform, negative_waveform
             ),
-            Slider(slider) => write!(f, "Slider(\"{}\")", slider),
             Marked { id, waveform } => {
                 write!(f, "Marked({}, {})", id, waveform)
             }
@@ -254,7 +249,6 @@ where
             positive_waveform: Box::new(initialize_state(*positive_waveform, state.clone())),
             negative_waveform: Box::new(initialize_state(*negative_waveform, state)),
         },
-        Slider(slider) => Slider(slider),
         Marked { id, waveform } => Marked {
             id,
             waveform: Box::new(initialize_state(*waveform, state)),
@@ -319,7 +313,6 @@ pub fn remove_state<M, S>(w: Waveform<M, S>) -> Waveform<M> {
             positive_waveform: Box::new(remove_state(*positive_waveform)),
             negative_waveform: Box::new(remove_state(*negative_waveform)),
         },
-        Slider(slider) => Slider(slider),
         Marked { id, waveform } => Marked {
             id,
             waveform: Box::new(remove_state(*waveform)),
@@ -398,7 +391,6 @@ where
             set_state(positive_waveform, new_state.clone());
             set_state(negative_waveform, new_state);
         }
-        Slider(_) => (),
         Marked { waveform, .. } => {
             set_state(waveform, new_state);
         }
@@ -470,6 +462,6 @@ where
         }
         Captured { waveform, .. } => substitute(waveform, mark_id, new_waveform),
         // Leaf nodes — nothing to recurse into
-        Const(_) | Time(_) | Noise | Fixed(..) | Slider(_) => {}
+        Const(_) | Time(_) | Noise | Fixed(..) => {}
     }
 }

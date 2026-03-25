@@ -39,12 +39,6 @@ pub enum Command<I, M> {
         id: I,
     },
     SendCurrentBuffer,
-    MoveSlider {
-        // The slider to set
-        slider: String,
-        // The absolute value to set it to
-        value: f32,
-    },
 }
 
 #[derive(Debug, Clone)]
@@ -115,7 +109,6 @@ where
     pending_waveforms: Vec<PendingWaveform<I, M>>, // sorted by start time
     // Command state
     send_current_buffer: bool,
-    slider_state: generator::SliderState,
 }
 
 impl<'a, I, M> Tracker<'a, I, M>
@@ -142,12 +135,6 @@ where
             pending_waveforms: Vec::new(),
 
             send_current_buffer: false,
-            slider_state: generator::SliderState {
-                last_values: HashMap::new(),
-                values: HashMap::new(),
-                buffer_length: 0,
-                buffer_position: 0,
-            },
         };
     }
 
@@ -158,7 +145,7 @@ where
     ) {
         use waveform::Waveform::*;
         match waveform {
-            Const(_) | Time(_) | Noise | Fixed(_, _) | Slider { .. } => {
+            Const(_) | Time(_) | Noise | Fixed(_, _) => {
                 return;
             }
             Fin { waveform, .. }
@@ -223,7 +210,7 @@ fn process_marked<I, M>(
 {
     use waveform::Waveform::*;
     match waveform {
-        Const(_) | Time(_) | Noise | Fixed(_, _) | Slider { .. } => {
+        Const(_) | Time(_) | Noise | Fixed(_, _) => {
             return;
         }
         // TODO Fin seems not quite right here, since its length might truncate any marks inside it
@@ -325,9 +312,6 @@ where
         status_to_send.tracker_load = Some(
             self.sample_rate as f32 / (out.len() as f32 / generate_start.elapsed().as_secs_f32()),
         );
-
-        // Update last_values to match current values
-        self.slider_state.last_values = self.slider_state.values.clone();
 
         // Copy the marks from finished waveforms into the status
         for active in finished {
@@ -453,9 +437,6 @@ where
             Command::SendCurrentBuffer => {
                 self.send_current_buffer = true;
             }
-            Command::MoveSlider { slider, value } => {
-                self.slider_state.values.insert(slider, value);
-            }
         }
     }
 
@@ -475,7 +456,6 @@ where
         // We'll generate in segments based on the set of active waveforms at a given time
         let mut segment_start = buffer_start;
         let mut segment_length = out.len();
-        self.slider_state.buffer_length = out.len();
 
         // Keep track of any active waveforms that finish generating
         let mut finished = Vec::new();
@@ -515,9 +495,6 @@ where
                             // We need to actually generate and discard these samples to make sure that any stateful
                             // waveforms are properly initialized.
                             let mut generator = generator::Generator::new(self.sample_rate);
-                            // TODO this is a little weird since we don't really care about sliders... but :shrug:
-                            self.slider_state.buffer_position = 0;
-                            generator.slider_state = Some(&self.slider_state);
                             let capture_state = RefCell::new(&mut capture_state);
                             generator.capture_state = Some(capture_state);
                             _ = generator.generate(&mut waveform, delta_samples);
@@ -589,8 +566,6 @@ where
                 let tmp: Vec<f32>;
                 {
                     let mut generator = generator::Generator::new(self.sample_rate);
-                    self.slider_state.buffer_position = filled;
-                    generator.slider_state = Some(&self.slider_state);
                     let capture_state = RefCell::new(&mut active.capture_state);
                     generator.capture_state = Some(capture_state);
                     let out = generator.generate(&mut active.waveform, segment_length);
