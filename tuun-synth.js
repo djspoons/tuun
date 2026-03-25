@@ -53,9 +53,10 @@ class TuunRuntime {
         await this.audioContext.audioWorklet.addModule(processorUrl);
     }
 
-    parse(expression) {
-        const w = this.tuun.parse(expression);
-        w.free();
+    parse(expression, sliders) {
+        const result = this.tuun.parse(expression, sliders);
+        // If successful, tell the module to discard any state.
+        this.tuun.stop();
     }
 
     createWorkletNode() {
@@ -488,7 +489,11 @@ class TuunSynthElement extends HTMLElement {
                 const decimals = parseInt(input.dataset.decimals);
                 this._sliderValues.set(label, val);
                 if (this._isPlaying && this._workletNode) {
-                    this._workletNode.port.postMessage({ type: 'slider', name: label, value: val });
+                    if (!this._pendingSliderUpdates) this._pendingSliderUpdates = new Map();
+                    this._pendingSliderUpdates.set(label, val);
+                    if (!this._batchTimerId) {
+                        this._batchTimerId = setTimeout(() => this._flushSliderUpdates(), 46);
+                    }
                 }
                 const span = input.nextElementSibling;
                 if (span) span.textContent = val.toFixed(decimals);
@@ -533,9 +538,11 @@ class TuunSynthElement extends HTMLElement {
 
     async _play(expression) {
         expression = this._stripComments(expression);
-        expression = this._prependSliderBindings(expression);
         await runtime.ensureInitialized(this._getSampleRate(), this._getTempo());
-        runtime.parse(expression);
+        const sliders = JSON.stringify(Object.fromEntries(this._sliderValues) || {});
+        // First, check to see if the expression parses.
+        runtime.parse(expression, sliders);
+        // Claim our status as the active instance.
         runtime.setPlaying(this);
 
         await this._ensureWorkletNode();
@@ -544,10 +551,12 @@ class TuunSynthElement extends HTMLElement {
             await runtime.audioContext.resume();
         }
 
-        this._workletNode.port.postMessage({ type: 'play', expression });
-        for (const [label, value] of this._sliderValues) {
-            this._workletNode.port.postMessage({ type: 'slider', name: label, value });
-        }
+        // Send a message to the processor to start playing.
+        this._workletNode.port.postMessage({
+            type: 'play',
+            expression,
+            sliders,
+        });
         this._isPlaying = true;
         this._updatePlayButton();
     }
@@ -592,6 +601,13 @@ class TuunSynthElement extends HTMLElement {
     stop() {
         if (this._workletNode) {
             this._workletNode.port.postMessage({ type: 'stop' });
+        }
+        if (this._batchTimerId) {
+            clearTimeout(this._batchTimerId);
+            this._batchTimerId = null;
+        }
+        if (this._pendingSliderUpdates) {
+            this._pendingSliderUpdates.clear();
         }
         this._isPlaying = false;
         this._updatePlayButton();
@@ -719,12 +735,15 @@ class TuunSynthElement extends HTMLElement {
         });
     }
 
-    _prependSliderBindings(expression) {
-        if (!this._sliderValues.size) return expression;
-        const bindings = [...this._sliderValues.entries()]
-            .map(([label, value]) => `${label} = slider("${label}")`)
-            .join(', ');
-        return `let ${bindings} in ${expression}`;
+    _flushSliderUpdates() {
+        if (this._pendingSliderUpdates && this._pendingSliderUpdates.size && this._workletNode) {
+            this._workletNode.port.postMessage({
+                type: 'update_sliders',
+                values: Object.fromEntries(this._pendingSliderUpdates),
+            });
+            this._pendingSliderUpdates.clear();
+        }
+        this._batchTimerId = null;
     }
 
     _getSliderValues() {
