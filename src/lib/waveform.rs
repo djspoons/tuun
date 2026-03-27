@@ -1,115 +1,99 @@
 use std::fmt;
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Operator {
+    /// Computes the sum of two samples.
     Add,
+    /// Computes the difference of two samples.
     Subtract,
+    /// Computes the product of two samples.
     Multiply,
+    /// Computes the ratio of two samples or yields zero if the second sample is zero.
     Divide,
+    /// Computes the sum of two samples or, in the case where only one sample is defined,
+    /// returns that sample.
     Merge,
 }
 
 /// Waveform is a compact representation of a sequence of samples.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Waveform<MarkId, State = ()> {
-    /*
-     * Const produces a stream of samples where each sample is the same constant value.
-     */
+    /// Produces a stream of samples where each sample is the same constant value.
     Const(f32),
-    /*
-     * Time generates a stream based on the elapsed time from the start of the waveform, in seconds.
-     */
+    /// Generates a stream based on the elapsed time from the start of the waveform, in seconds.
     Time(State),
-    /*
-     * Noise generates random samples.
-     */
+    /// Generates random samples.
     Noise,
-    /*
-     * Fixed generates the same, finite, sequence of samples.
-     */
+    /// Generates a finite sequence of samples.
     Fixed(Vec<f32>, State),
-    /*
-     * Fin generates a finite waveform, truncating the underlying waveform. The length is determined
-     * by the first point at which the `length` waveform is >= 0.0. For example, `Fin(Const(0.0), _)`
-     * is 0 seconds in length and `Fin(Subtract(Time, Const(2.0)), _)` is 2 seconds in length.
-     */
+    /// Generates a finite waveform, truncating the underlying waveform. The length is determined
+    /// by the first point at which the `length` waveform is >= 0.0. For example, `Fin(Const(0.0), _)`
+    /// is 0 seconds in length and `Fin(Subtract(Time, Const(2.0)), _)` is 2 seconds in length.
     Fin {
         length: Box<Waveform<MarkId, State>>,
         waveform: Box<Waveform<MarkId, State>>,
     },
-    /*
-     * Append concatenates two waveforms, generating all samples from the first waveform and
-     * then all samples from the second (regardless of the offset of the first).
-     */
+    /// Concatenates two waveforms, generating all samples from the first waveform and
+    /// then all samples from the second.
     Append(Box<Waveform<MarkId, State>>, Box<Waveform<MarkId, State>>),
-    /*
-     * Sine computes the sine with the given frequency and phase (both in radians). Or put another way,
-     * it computes the sine of angle that changes according to the rate of the first parameter and the
-     * value of the second. Note that Sine is used both as the basis for periodic waveforms and also in
-     * cases when it does not depend on Time (in which case its frequency will be 0), for example, as
-     * a parameter of a Filter.
-     */
+    /// Computes the sine with the given frequency and phase (both in radians). Equivalently, computes
+    /// the sine of angle that changes according to the rate of the first parameter and the value of the
+    /// second. Note that Sine is used both as the basis for periodic waveforms and also in cases when
+    /// it does not depend on Time (in which case its frequency will be 0), for example, as a parameter
+    /// of a Filter.
     Sine {
         frequency: Box<Waveform<MarkId, State>>,
         phase: Box<Waveform<MarkId, State>>,
         state: State,
     },
-    /*
-     * Filter implements an impulse response filter with feed-forward and feedback coefficients. Assumes that the first
-     * feedback coefficient (a_0) is 1.0. If the filter has no feedback coefficients, then the filter has a finite
-     * response -- that is, it is a convolution.
-     */
-    // TODO maybe add a_0 back in?
+    /// Implements an impulse response filter with feed-forward and feedback coefficients. Assumes that
+    /// the first feedback coefficient (a_0) is 1.0. If the filter has no feedback coefficients, then the
+    /// filter has a finite response -- that is, it is a convolution.
     Filter {
         waveform: Box<Waveform<MarkId, State>>,
         feed_forward: Vec<Waveform<MarkId, State>>, // b_0, b_1, ...
         feedback: Vec<Waveform<MarkId, State>>,     // a_1, a_2, ...
         state: State,
     },
+    /// Implements a point-wise transformation of two waveforms by computing the given operation one
+    /// sample at a time.
     BinaryPointOp(
         Operator,
         Box<Waveform<MarkId, State>>,
         Box<Waveform<MarkId, State>>,
     ),
-    /*
-     * Reset generates a repeating waveform that restarts the given waveform whenever the trigger
-     * waveform flips from negative values to positive values. Its length and offset are determined
-     * by the trigger waveform.
-     */
+    /// Generates a repeating waveform that restarts the given waveform whenever the trigger waveform
+    /// flips from negative values to positive values. Its length is determined by the trigger waveform.
     Reset {
         trigger: Box<Waveform<MarkId, State>>,
         waveform: Box<Waveform<MarkId, State>>,
         state: State,
     },
-    /*
-     * Alt generates a waveform by alternating between two waveforms based on the sign of
-     * the trigger waveform.
-     */
+    /// Generates a waveform by alternating between two waveforms based on the sign of the trigger
+    /// waveform. Its length is determined by the trigger waveform.
     Alt {
         trigger: Box<Waveform<MarkId, State>>,
         positive_waveform: Box<Waveform<MarkId, State>>,
         negative_waveform: Box<Waveform<MarkId, State>>,
     },
-    /*
-     * Marked waveforms generate the same samples as the inner waveform and are used to signal that a certain
-     * event will occur or has occurred. Each status update will include a list of marked waveforms, along with
-     * their start times and durations.
-     */
+    /// Generates the same samples as the inner waveform. Tracker status updates will include a list of
+    /// marked waveforms, along with their start times and durations, and so marked waveforms can be
+    /// used to signal that a certain event will occur or has occurred. Marked waveforms can also be
+    /// used with Command::Modify to create dynamically changing waveforms.
     Marked {
         id: MarkId,
         waveform: Box<Waveform<MarkId, State>>,
     },
-    /* Captured waveforms generate the same samples as the inner waveform and also write them to a file
-     * beginning with the given file stem.
-     */
+    /// Generate the same samples as the inner waveform and also writes them to a file whose name begins
+    /// with the given file stem.
     Captured {
         file_stem: String,
         waveform: Box<Waveform<MarkId, State>>,
     },
 }
 
-impl<MarkId: fmt::Display, State> fmt::Display for Waveform<MarkId, State> {
+impl<MarkId: Display, State> Display for Waveform<MarkId, State> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use Waveform::*;
         match self {
@@ -185,7 +169,7 @@ impl<MarkId: fmt::Display, State> fmt::Display for Waveform<MarkId, State> {
     }
 }
 
-// TODO: should use a mut&?
+/// Replaces the state of `waveform` and every component with `state`.
 pub fn initialize_state<M, S, T>(waveform: Waveform<M, S>, state: T) -> Waveform<M, T>
 where
     T: Clone,
@@ -263,10 +247,10 @@ where
     }
 }
 
-// TODO: should use a mut&?
-pub fn remove_state<M, S>(w: Waveform<M, S>) -> Waveform<M> {
+/// Replaces the state of `waveform` and every component with the default (unit) state.
+pub fn remove_state<M, S>(waveform: Waveform<M, S>) -> Waveform<M> {
     use Waveform::*;
-    match w {
+    match waveform {
         Const(value) => Const(value),
         Time(_) => Time(()),
         Noise => Noise,
@@ -327,6 +311,7 @@ pub fn remove_state<M, S>(w: Waveform<M, S>) -> Waveform<M> {
     }
 }
 
+/// Sets the state of `waveform` and every component to `new_state`.
 pub fn set_state<M, S>(waveform: &mut Waveform<M, S>, new_state: S)
 where
     S: Clone,
@@ -400,11 +385,12 @@ where
     }
 }
 
-// Replace the contents of any Marked waveform in `waveform` with the given mark_id with a copy of `new_waveform.`
+/// Replaces the contents of any Marked waveform in `waveform` with the given mark_id with a copy of
+/// `new_waveform.`
 pub fn substitute<M, S>(waveform: &mut Waveform<M, S>, mark_id: &M, new_waveform: &Waveform<M, S>)
 where
     S: Clone,
-    M: Clone + PartialEq + fmt::Display,
+    M: Clone + PartialEq + Display,
 {
     use Waveform::*;
     match waveform {
