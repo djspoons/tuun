@@ -14,7 +14,7 @@ pub enum State {
     Initial,
     // The position in the current waveform as the number of samples since the beginning of the waveform.
     Position(usize),
-    // TODO consider a shared vec plus a slice for Fixed? how to represent a negative position? and direction?
+    // TODO consider a shared vec plus a slice for Fixed?
     // Shared(Rc<Vec<f32>>, &[f32]),
     // Previously generated samples as input and/or output to the waveform (for example, for Filter)
     Samples {
@@ -69,11 +69,12 @@ impl<'a> Generator<'a> {
     /// generate will pick up where this one left off.
     ///
     /// Returns the number of samples generated. If that is less than the length of `out`, that indicates
-    /// the waveform has finished and will not generate any more samples.
+    /// the waveform has finished and will not generate any more samples. The value of any sample in `out`
+    /// at or after the returned length is undefined.
     ///
-    /// The output `out` should be initialized with zeros. Waveforms should be initialized with
-    /// `initialize_state` before the first call to `generate`. The returned waveform supports being
-    /// "re-initialized" -- it will generate the same samples each time it's initialized.
+    /// Waveforms should be initialized with `initialize_state` before the first call to `generate`. The
+    /// returned waveform supports being "re-initialized" -- it will generate the same samples each time
+    /// it's initialized.
     pub fn generate<M: Debug + Display>(
         &self,
         waveform: &mut Waveform<M>,
@@ -181,8 +182,6 @@ impl<'a> Generator<'a> {
                     // Move the accumulator according to the frequency and change in phase offset.
                     *accumulator = (*accumulator + phase_inc).rem_euclid(f64::consts::TAU);
                 }
-                // If the phase offset waveform was shorter than the frequency waveform, restore that part of `out`.
-                out[ph_len..f_len].fill(0.0);
                 ph_len
             }
             Sine { .. } => unreachable!("Sine waveform has non-Initial, non-Phase state"),
@@ -193,9 +192,8 @@ impl<'a> Generator<'a> {
                 state: state @ Initial,
             } => {
                 // Generate the input samples so that they can be used in the feed-forward part of the filter.
-                // TODO we could reverse the order of elements in input and output
-                // so that they line up with how they are used.
-
+                // TODO we could reverse the order of elements in input and output so that they line up with
+                // how they are used.
                 let ff_count = feed_forward.len();
                 assert!(ff_count >= 1);
                 let mut input = vec![0.0; ff_count - 1];
@@ -206,7 +204,6 @@ impl<'a> Generator<'a> {
                 // Fill the previous output samples with zeros to match the number of feedback coefficients.
                 let fb_count = feedback.len();
                 let output = VecDeque::from(vec![0.0; fb_count]);
-
                 /*
                 println!(
                     "Started generate for Filter with {} feed-forward and {} feedback coefficients",
@@ -234,6 +231,10 @@ impl<'a> Generator<'a> {
                 // First, generate samples from the inner waveform, if possible.
                 let inner_len = self.generate(inner, out);
                 let out_len = out.len().min(inner_len + input.len());
+                // We may read past the end of inner_len, so make sure those samples are initialized.
+                let extra_samples_read = out.len() - inner_len;
+                out[inner_len..inner_len + extra_samples_read].fill(0.0);
+
                 let ff_count = feed_forward.len();
                 let input_padding = if input.len() == ff_count - 1 {
                     0
@@ -247,8 +248,6 @@ impl<'a> Generator<'a> {
                 // Add the padding.
                 input.resize(input.len() + input_padding, 0.0);
                 assert_eq!(ff_count - 1, input.len());
-
-                // TODO Also... I think this is the only place were we depend on `out` being zero-initialized. Maybe just fill here?
 
                 // The saved output should already be the correct size.
                 let fb_count = feedback.len();
@@ -314,8 +313,7 @@ impl<'a> Generator<'a> {
                 // `input` and `output` still contain the last few samples (`ff_count - 1` and
                 // `fb_count` respectively). But if `input` was padded with any zeros or if we
                 // copied any zeros from `out`, we don't want to save those.
-                input.truncate(input.len() - (input_padding + (out.len() - inner_len)));
-
+                input.truncate(input.len() - (input_padding + extra_samples_read));
                 out_len
             }
             Filter { .. } => unreachable!("Filter waveform has non-Initial, non-Samples state"),
@@ -366,7 +364,7 @@ impl<'a> Generator<'a> {
                     // Overwrite the trigger values up to inner_desired.
                     let inner_len =
                         self.generate(inner, &mut out[generated..generated + inner_desired]);
-                    // If the inner waveform stopped, fill with zeros.
+                    // If the inner waveform ended early, fill with zeros.
                     out[generated + inner_len..generated + inner_desired].fill(0.0);
                     if reset_inner_position {
                         waveform::set_state(inner, State::Initial);
@@ -454,8 +452,9 @@ impl<'a> Generator<'a> {
         match b {
             // Check to see if we can avoid generating the right-hand side and instead just apply the
             // op directly.
-            // TODO could also check f against the identity of op and skip the loop here
             waveform::Waveform::Const(f) => {
+                // Make sure that any element where we apply `op` is initialized.
+                out[a_len..len].fill(0.0);
                 for x in out[..len].iter_mut() {
                     *x = op_fn(*x, *f);
                 }
@@ -463,31 +462,20 @@ impl<'a> Generator<'a> {
                 len
             }
             _ => {
-                // TODO fill-related: some places we depend on zeros here... maybe? (when extending but a is shorter?)
                 let mut b_out = vec![0.0; len];
                 let b_len = self.generate(b, &mut b_out);
-                let len = if extend_to_longer { len } else { b_len };
+                // Now we know both lengths, so determine the output length.
+                let len = if extend_to_longer {
+                    a_len.max(b_len)
+                } else {
+                    a_len.min(b_len)
+                };
+                // Make sure that any element where we apply `op` is initialized.
+                out[a_len..len].fill(0.0);
                 for (i, x) in out[..len].iter_mut().enumerate() {
                     *x = op_fn(*x, b_out[i]);
                 }
-                // Cases:
-                //   extend_to_longer == true
-                //     a_len > b_len: return a_len.max(b_len)
-                //     a_len <= b_len: return a_len.max(b_len)
-                //   extend_to_longer == false, then b_len <= a_len and len == b_len
-                //     a_len > b_len: fill 0.0 between b_len and a_len, return len == b_len
-                //     a_len <= b_len: trivial since only generated b to a_len, so b_len == a_len == len
-                //
-                if a_len > len {
-                    // `b` was shorter so go back and clear any extra samples from `a`.
-                    // TODO do we need to clear? Maybe let someone else do that?
-                    out[len..a_len].fill(0.0);
-                }
-                if extend_to_longer {
-                    a_len.max(b_len)
-                } else {
-                    len
-                }
+                len
             }
         }
     }
@@ -1137,12 +1125,14 @@ mod tests {
 
     fn run_tests(waveform: &Waveform, expected: &[f32]) {
         let g = new_test_generator(1);
+        // We initialize output vectors with infinity to make sure that nothing depends on
+        // them being initialized to 0.0.
 
         // Check that `waveform` would generate at least as many samples as `expected`.
         check_length(&g, &waveform, 0, expected.len(), expected.len());
         for size in [1, 2, 4, 8] {
             let mut w = initialize_state(waveform.clone());
-            let mut out = vec![0.0; expected.len()];
+            let mut out = vec![f32::INFINITY; expected.len()];
             for n in 0..out.len() / size + 1 {
                 let end = out.len().min((n + 1) * size);
                 let len = g.generate(&mut w, &mut out[n * size..end]);
@@ -1159,7 +1149,7 @@ mod tests {
         check_length(&g, &optimized_waveform, 0, expected.len(), expected.len());
         for size in [1, 2, 4, 8] {
             let mut w = initialize_state(optimized_waveform.clone());
-            let mut out = vec![0.0; expected.len()];
+            let mut out = vec![f32::INFINITY; expected.len()];
             for n in 0..out.len() / size + 1 {
                 let end = out.len().min((n + 1) * size);
                 let len = g.generate(&mut w, &mut out[n * size..end]);
@@ -1176,7 +1166,7 @@ mod tests {
         check_length(&g, &precomputed_waveform, 0, expected.len(), expected.len());
         for size in [1, 2, 4, 8] {
             let mut w = initialize_state(precomputed_waveform.clone());
-            let mut out = vec![0.0; expected.len()];
+            let mut out = vec![f32::INFINITY; expected.len()];
             for n in 0..out.len() / size + 1 {
                 let end = out.len().min((n + 1) * size);
                 let len = g.generate(&mut w, &mut out[n * size..end]);

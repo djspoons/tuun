@@ -216,8 +216,9 @@ impl Wasm {
         };
 
         let g = generator::Generator::new(self.sample_rate);
-        // XXX do we need to zero it here?
         let len = g.generate(waveform, out);
+        // Web audio expects the whole buffer to be filled.
+        out[len..].fill(0.0);
         len == out.len()
     }
 

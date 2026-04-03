@@ -239,7 +239,6 @@ where
             match (optimize(*a), optimize(*b)) {
                 (Fixed(a, _), _) if a.len() == 0 => Fixed(vec![], ()),
                 (_, Fixed(b, _)) if b.len() == 0 => Fixed(vec![], ()),
-                (Const(1.0), b) => b,
                 (a, Const(1.0)) => a,
                 (Const(a), Const(b)) => Const(a * b),
                 (Fixed(a, _), Const(b)) => Fixed(a.into_iter().map(|x| x * b).collect(), ()),
