@@ -40,19 +40,15 @@ class TuunProcessor extends AudioWorkletProcessor {
 
     process(inputs, outputs) {
         const output = outputs[0][0];
-
         if (!this.playing) {
             output.fill(0);
             return true;
         }
 
         try {
-            const samples = this.tuun.generate(output.length);
+            const more = this.tuun.process(output);
 
-            output.set(samples.subarray(0, Math.min(samples.length, output.length)));
-
-            if (samples.length < output.length) {
-                output.fill(0, samples.length);
+            if (!more) {
                 this.tuun.stop();
                 this.playing = false;
                 this.port.postMessage({ type: 'ended' });

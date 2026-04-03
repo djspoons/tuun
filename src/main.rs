@@ -1349,9 +1349,7 @@ fn play_waveform_helper(
                     }
                     if should_precompute && args.precompute {
                         let generator = generator::Generator::new(args.sample_rate);
-                        waveform = waveform::remove_state(
-                            generator.precompute(generator::initialize_state(waveform)),
-                        );
+                        waveform = waveform::remove_state(generator.precompute(waveform));
                         println!("precompute returned: {}", &waveform);
                     }
                     return WaveformOrMode::Waveform(waveform);

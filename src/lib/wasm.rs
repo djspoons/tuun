@@ -193,31 +193,32 @@ impl Wasm {
 
     /// Generates audio samples from the current waveform. Updates the internal
     /// state of the waveform so that the next call to `generate()` will continue
-    /// from the point at which this call left off. Returns an empty vector if
-    /// not playing.
+    /// from the point at which this call left off.
     ///
     /// # Arguments
-    /// * `desired` - The number of samples to generate
+    /// * `out` - A buffer to fill with samples
     ///
     /// # Returns
-    /// A Float32Array of audio samples
+    /// A boolean indicating whether or not the current waveform will generate any
+    /// more samples
     ///
     /// # Examples
     /// ```javascript
     /// tuun.parse("$440", "{}");
-    /// const samples = tuun.generate(4096);
-    /// // samples is a Float32Array that can be used with Web Audio API
+    /// const done = tuun.process(output);
     /// ```
-    pub fn generate(&mut self, desired: usize) -> Vec<f32> {
-        self.buffer_duration = Duration::from_secs_f32(desired as f32 / self.sample_rate as f32);
+    pub fn process(&mut self, out: &mut [f32]) -> bool {
+        self.buffer_duration = Duration::from_secs_f32(out.len() as f32 / self.sample_rate as f32);
 
         let waveform = match &mut self.waveform {
             Some(w) => w,
-            None => return vec![0.0; desired],
+            None => return false,
         };
 
         let g = generator::Generator::new(self.sample_rate);
-        g.generate(waveform, desired)
+        // XXX do we need to zero it here?
+        let len = g.generate(waveform, out);
+        len == out.len()
     }
 
     /// Returns whether a waveform is currently playing.
@@ -289,10 +290,11 @@ mod tests {
             tuun.parse(expr, "{}")
                 .unwrap_or_else(|e| panic!("Failed to parse '{}': {}", expr, e));
 
-            let samples = tuun.generate(100);
-            assert_eq!(samples.len(), 100, "Expected 100 samples for '{}'", expr);
+            let mut out = vec![0.0; 100];
+            let more = tuun.process(&mut out);
+            assert!(more, "Expected at least 100 samples for '{}'", expr);
 
-            for (i, &sample) in samples.iter().enumerate() {
+            for (i, &sample) in out.iter().enumerate() {
                 assert!(
                     sample >= -1.0 && sample <= 1.0,
                     "Sample {} out of range for '{}': {}",
@@ -345,10 +347,11 @@ mod tests {
             tuun.parse(expr, "{}")
                 .unwrap_or_else(|e| panic!("Failed to parse '{}': {}", expr, e));
 
-            let samples = tuun.generate(100);
-            assert_eq!(samples.len(), 100, "Expected 100 samples for '{}'", expr);
+            let mut out = vec![0.0; 100];
+            let more = tuun.process(&mut out);
+            assert!(more, "Expected at least 100 samples for '{}'", expr);
 
-            for (i, &sample) in samples.iter().enumerate() {
+            for (i, &sample) in out.iter().enumerate() {
                 assert!(
                     sample >= -1.0 && sample <= 1.0,
                     "Sample {} out of range for '{}': {}",

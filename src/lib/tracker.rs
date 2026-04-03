@@ -497,7 +497,8 @@ where
                             let mut generator = generator::Generator::new(self.sample_rate);
                             let capture_state = RefCell::new(&mut capture_state);
                             generator.capture_state = Some(capture_state);
-                            _ = generator.generate(&mut waveform, delta_samples);
+                            let mut tmp = vec![0.0; delta_samples];
+                            _ = generator.generate(&mut waveform, &mut tmp);
                         }
                     }
                     self.active_waveforms.push(ActiveWaveform {
@@ -563,33 +564,30 @@ where
             let mut i = 0;
             while i < self.active_waveforms.len() {
                 let active = &mut self.active_waveforms[i];
-                let tmp: Vec<f32>;
+                let mut tmp = vec![0.0; segment_length];
+                let len;
                 {
                     let mut generator = generator::Generator::new(self.sample_rate);
                     let capture_state = RefCell::new(&mut active.capture_state);
                     generator.capture_state = Some(capture_state);
-                    let out = generator.generate(&mut active.waveform, segment_length);
-                    tmp = out;
+                    len = generator.generate(&mut active.waveform, &mut tmp);
                 }
-                if tmp.len() > segment_length {
+                if len > segment_length {
                     panic!(
                         "Generated more samples than desired: {} > {} for waveform id {:?}: {:?}",
-                        tmp.len(),
-                        segment_length,
-                        active.id,
-                        active.waveform
+                        len, segment_length, active.id, active.waveform
                     );
                 }
                 if i == 0 {
                     // If this is the first, just overwrite the buffer
-                    (out[filled..filled + tmp.len()]).copy_from_slice(&tmp);
+                    (out[filled..filled + len]).copy_from_slice(&tmp[..len]);
                 } else {
                     // If this is not the first waveform, then we need to add the samples to the out buffer
-                    for (j, &x) in tmp.iter().enumerate() {
+                    for (j, &x) in tmp[..len].iter().enumerate() {
                         out[filled + j] += x;
                     }
                 }
-                if tmp.len() < segment_length {
+                if len < segment_length {
                     // If we didn't generate enough samples, then remove this waveform from the active list
                     /*
                     println!(

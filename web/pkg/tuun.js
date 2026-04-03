@@ -83,6 +83,11 @@ function getDataViewMemory0() {
     return cachedDataViewMemory0;
 }
 
+function getArrayU8FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
+}
+
 function takeFromExternrefTable0(idx) {
     const value = wasm.__wbindgen_export_3.get(idx);
     wasm.__externref_table_dealloc(idx);
@@ -98,9 +103,11 @@ function getFloat32ArrayMemory0() {
     return cachedFloat32ArrayMemory0;
 }
 
-function getArrayF32FromWasm0(ptr, len) {
-    ptr = ptr >>> 0;
-    return getFloat32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
+function passArrayF32ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 4, 4) >>> 0;
+    getFloat32ArrayMemory0().set(arg, ptr / 4);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
 }
 /**
  * Initializes the WASM module.
@@ -195,29 +202,28 @@ export class Tuun {
     /**
      * Generates audio samples from the current waveform. Updates the internal
      * state of the waveform so that the next call to `generate()` will continue
-     * from the point at which this call left off. Returns an empty vector if
-     * not playing.
+     * from the point at which this call left off.
      *
      * # Arguments
-     * * `desired` - The number of samples to generate
+     * * `out` - A buffer to fill with samples
      *
      * # Returns
-     * A Float32Array of audio samples
+     * A boolean indicating whether or not the current waveform will generate any
+     * more samples
      *
      * # Examples
      * ```javascript
      * tuun.parse("$440", "{}");
-     * const samples = tuun.generate(4096);
-     * // samples is a Float32Array that can be used with Web Audio API
+     * const done = tuun.process(output);
      * ```
-     * @param {number} desired
-     * @returns {Float32Array}
+     * @param {Float32Array} out
+     * @returns {boolean}
      */
-    generate(desired) {
-        const ret = wasm.tuun_generate(this.__wbg_ptr, desired);
-        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
-        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
-        return v1;
+    process(out) {
+        var ptr0 = passArrayF32ToWasm0(out, wasm.__wbindgen_malloc);
+        var len0 = WASM_VECTOR_LEN;
+        const ret = wasm.tuun_process(this.__wbg_ptr, ptr0, len0, out);
+        return ret !== 0;
     }
     /**
      * Returns whether a waveform is currently playing.
@@ -292,6 +298,9 @@ function __wbg_get_imports() {
         const len1 = WASM_VECTOR_LEN;
         getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
         getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
+    };
+    imports.wbg.__wbindgen_copy_to_typed_array = function(arg0, arg1, arg2) {
+        new Uint8Array(arg2.buffer, arg2.byteOffset, arg2.byteLength).set(getArrayU8FromWasm0(arg0, arg1));
     };
     imports.wbg.__wbindgen_init_externref_table = function() {
         const table = wasm.__wbindgen_export_3;

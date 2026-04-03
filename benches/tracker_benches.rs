@@ -20,8 +20,9 @@ fn bench_filter(c: &mut Criterion) {
                 state: (),
             };
             let mut w1 = generator::initialize_state(w1);
+            let mut out = vec![0.0; 1024];
             for _ in 0..43 {
-                let _ = generator.generate(&mut w1, 1024);
+                let _ = generator.generate(&mut w1, &mut out);
             }
         });
     });
@@ -45,8 +46,9 @@ fn bench_filter(c: &mut Criterion) {
                 state: (),
             };
             let mut w2 = generator::initialize_state(w2);
+            let mut out = vec![0.0; 1024];
             for _ in 0..43 {
-                let _ = generator.generate(&mut w2, 1024);
+                let _ = generator.generate(&mut w2, &mut out);
             }
         });
     });
@@ -67,9 +69,10 @@ fn bench_marks(c: &mut Criterion) {
                 .reduce(|result, w| waveform::Waveform::Append(Box::new(result), Box::new(w)))
                 .unwrap();
             let mut w = generator::initialize_state(w);
+            let mut out = vec![0.0; 1024];
             for _ in 0..3438 {
                 // Approx. the length of the waveform
-                let _ = generator.generate(&mut w, 1024);
+                let _ = generator.generate(&mut w, &mut out);
             }
         });
     });
@@ -118,9 +121,10 @@ fn bench_large(c: &mut Criterion) {
                             if let parser::Expr::Waveform(waveform) = expr {
                                 let generator = generator::Generator::new(44100);
                                 let mut w = generator::initialize_state(waveform);
+                                let mut out = vec![0.0; 1024];
 
                                 for _ in 0..43 {
-                                    let _ = generator.generate(&mut w, 1024);
+                                    let _ = generator.generate(&mut w, &mut out);
                                 }
                             } else {
                                 panic!("Expected waveform");
