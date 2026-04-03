@@ -215,7 +215,7 @@ impl Wasm {
             None => return false,
         };
 
-        let g = generator::Generator::new(self.sample_rate);
+        let mut g = generator::Generator::new(self.sample_rate);
         // XXX do we need to zero it here?
         let len = g.generate(waveform, out);
         len == out.len()

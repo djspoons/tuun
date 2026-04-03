@@ -179,6 +179,7 @@ pub struct Renderer {
 
 pub struct Metrics {
     pub tracker_load: Metric<f32>,
+    pub allocations_per_sample: Metric<f32>,
 }
 
 const FONT_PATH: &'static str = "/Library/Fonts/Arial Unicode.ttf";
@@ -726,54 +727,27 @@ impl Renderer {
         let metrics_width = 200;
         let x = (self.width - metrics_width - 20) as i32;
         let y = self.height as i32 / 2;
-        let points: Vec<f32> = metrics.tracker_load.iter().collect();
-        if points.len() > 0 {
-            let last_value_texture = make_texture(
-                &font,
-                Color::RGB(0x00, 0xFF, 0x00),
-                &texture_creator,
-                format!("{:.2}", points.last().unwrap()).as_str(),
-            );
-            let TextureQuery {
-                width: last_value_width,
-                height: last_value_height,
-                ..
-            } = last_value_texture.query();
-            self.canvas
-                .copy(
-                    &last_value_texture,
-                    None,
-                    Some(sdl2::rect::Rect::new(
-                        x,
-                        y,
-                        last_value_width,
-                        last_value_height,
-                    )),
-                )
-                .unwrap();
+        self.draw_metric(
+            ttf_context,
+            &texture_creator,
+            x,
+            y,
+            metrics_width,
+            metrics_height,
+            &mut metrics.tracker_load,
+        );
 
-            let mut last_y = y + metrics_height as i32 - (points[0] * metrics_height as f32) as i32;
-            for (i, &load) in points.iter().enumerate() {
-                if i == points.len() - 1 && load == 0.0 {
-                    continue; // Skip the last point if it's zero
-                }
-                let value = y + metrics_height as i32 - (load * metrics_height as f32) as i32;
-                if load < 0.7 {
-                    self.canvas.set_draw_color(Color::RGB(0x00, 0xFF, 0x00));
-                } else if load < 0.9 {
-                    self.canvas.set_draw_color(Color::RGB(0xFF, 0xDE, 0x21));
-                } else {
-                    self.canvas.set_draw_color(Color::RGB(0xFF, 0x00, 0x00));
-                }
-                self.canvas
-                    .draw_line(
-                        (x + (200 / points.len() as i32) * i as i32, last_y),
-                        (x + (200 / points.len() as i32) * ((i + 1) as i32), value),
-                    )
-                    .unwrap();
-                last_y = value;
-            }
-        }
+        let x = (self.width - 2 * metrics_width - 20) as i32;
+        let y = self.height as i32 / 2;
+        self.draw_metric(
+            ttf_context,
+            &texture_creator,
+            x,
+            y,
+            metrics_width,
+            metrics_height,
+            &mut metrics.allocations_per_sample,
+        );
 
         self.canvas.present();
     }
@@ -805,6 +779,68 @@ impl Renderer {
                 )),
             )
             .unwrap();
+    }
+
+    fn draw_metric(
+        self: &mut Renderer,
+        ttf_context: &Sdl2TtfContext,
+        texture_creator: &TextureCreator<WindowContext>,
+        x: i32,
+        y: i32,
+        _width: u32,
+        height: u32,
+        metric: &mut Metric<f32>,
+    ) {
+        let font = ttf_context.load_font(FONT_PATH, 48).unwrap();
+        let points: Vec<f32> = metric.iter().collect();
+        if points.len() > 0 {
+            let last_value_texture = make_texture(
+                &font,
+                Color::RGB(0x00, 0xFF, 0x00),
+                texture_creator,
+                format!("{:.2}", points.last().unwrap()).as_str(),
+            );
+            let TextureQuery {
+                width: last_value_width,
+                height: last_value_height,
+                ..
+            } = last_value_texture.query();
+            self.canvas
+                .copy(
+                    &last_value_texture,
+                    None,
+                    Some(sdl2::rect::Rect::new(
+                        x,
+                        y,
+                        last_value_width,
+                        last_value_height,
+                    )),
+                )
+                .unwrap();
+
+            let mut last_y = y + height as i32 - (points[0] * height as f32) as i32;
+            for (i, &point) in points.iter().enumerate() {
+                if i == points.len() - 1 && point == 0.0 {
+                    continue; // Skip the last point if it's zero
+                }
+                let value = y + height as i32 - (point * height as f32) as i32;
+                // TODO these thresholds don't make sense for arbitrary metrics
+                if point < 0.7 {
+                    self.canvas.set_draw_color(Color::RGB(0x00, 0xFF, 0x00));
+                } else if point < 0.9 {
+                    self.canvas.set_draw_color(Color::RGB(0xFF, 0xDE, 0x21));
+                } else {
+                    self.canvas.set_draw_color(Color::RGB(0xFF, 0x00, 0x00));
+                }
+                self.canvas
+                    .draw_line(
+                        (x + (200 / points.len() as i32) * i as i32, last_y),
+                        (x + (200 / points.len() as i32) * ((i + 1) as i32), value),
+                    )
+                    .unwrap();
+                last_y = value;
+            }
+        }
     }
 }
 

@@ -439,9 +439,11 @@ pub fn main() {
         marks: Vec::new(),
         buffer: None,
         tracker_load: None,
+        allocations_per_sample: None,
     };
     let mut metrics = renderer::Metrics {
-        tracker_load: Metric::new(std::time::Duration::from_secs(10), 100),
+        tracker_load: Metric::new(Duration::from_secs(10), 100),
+        allocations_per_sample: Metric::new(Duration::from_secs(10), 100),
     };
 
     const BUFFER_REFRESH_INTERVAL: Duration = Duration::from_millis(200);
@@ -480,6 +482,9 @@ pub fn main() {
                     if let Some(ratio) = tracker_status.tracker_load {
                         metrics.tracker_load.set(ratio);
                     }
+                    if let Some(allocations) = tracker_status.allocations_per_sample {
+                        metrics.allocations_per_sample.set(allocations);
+                    }
                     status = tracker_status;
                     statuses_received += 1;
                 }
@@ -491,6 +496,9 @@ pub fn main() {
                         Ok(tracker_status) => {
                             if let Some(ratio) = tracker_status.tracker_load {
                                 metrics.tracker_load.set(ratio);
+                            }
+                            if let Some(allocations) = tracker_status.allocations_per_sample {
+                                metrics.allocations_per_sample.set(allocations);
                             }
                             status = tracker_status;
                             statuses_received += 1;
@@ -1348,7 +1356,7 @@ fn play_waveform_helper(
                         println!("optimizer::optimize returned: {}", &waveform);
                     }
                     if should_precompute && args.precompute {
-                        let generator = generator::Generator::new(args.sample_rate);
+                        let mut generator = generator::Generator::new(args.sample_rate);
                         waveform = waveform::remove_state(generator.precompute(waveform));
                         println!("precompute returned: {}", &waveform);
                     }
