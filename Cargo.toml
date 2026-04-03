@@ -22,6 +22,10 @@ name = "web_checker"
 path = "src/misc/web_checker.rs"
 required-features = ["clap"]
 
+[[bin]]
+name = "midi_test"
+path = "src/misc/midi_test.rs"
+
 [features]
 default = ["native"]
 native = ["sdl2", "clap"]
@@ -39,6 +43,9 @@ realfft = "3.5.0"
 wasm-bindgen = { version = "0.2", optional = true }
 js-sys = { version = "0.3", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
+midly = "0.5.3"
+midir = "0.10.3"
+thiserror = "2.0.18"
 
 [dependencies.sdl2]
 version = "0.37.0"
