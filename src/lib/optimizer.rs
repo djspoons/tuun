@@ -190,6 +190,7 @@ where
             ))),
         )),
         BinaryPointOp(Operator::Merge, a, b) => {
+            use Waveform::Marked;
             match (optimize(*a), optimize(*b)) {
                 // Merge yields the longer of the two inputs.
                 (Fixed(a, _), b) if a.len() == 0 => b,
@@ -206,7 +207,6 @@ where
                 )),
                 // Combine merge of Fin and an Append who first argument is Fin -- this occurs for expressions of
                 // the form `w | fin(t) | seq(t)`.
-                // TODO this should apply when the w is Marked(n, w') too
                 (
                     Fin {
                         length: a_length,
@@ -231,6 +231,37 @@ where
                             waveform: a,
                         }),
                         Box::new(Append(b, c)),
+                    ),
+                },
+                // Same as above, but when w is Marked(n, w'). There's a lot of overlap
+                // with the previous case!
+                (Marked { id, waveform: a }, Append(b, c)) => match (*a, *b) {
+                    (
+                        Fin {
+                            length: a_length,
+                            waveform: a,
+                        },
+                        Fin {
+                            length: b_length,
+                            waveform: b,
+                        },
+                    ) if first_root(&a_length) == first_root(&b_length) => optimize(Append(
+                        Box::new(Marked {
+                            id,
+                            waveform: Box::new(Fin {
+                                length: a_length,
+                                waveform: Box::new(BinaryPointOp(Operator::Merge, a, b)),
+                            }),
+                        }),
+                        c,
+                    )),
+                    (a, b) => BinaryPointOp(
+                        Operator::Merge,
+                        Box::new(Marked {
+                            id,
+                            waveform: Box::new(a),
+                        }),
+                        Box::new(Append(Box::new(b), c)),
                     ),
                 },
                 (a, b) => BinaryPointOp(Operator::Merge, Box::new(a), Box::new(b)),

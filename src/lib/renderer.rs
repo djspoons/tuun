@@ -11,8 +11,8 @@ use sdl2::video::WindowContext;
 use realfft::RealFftPlanner;
 use realfft::num_complex::{Complex, ComplexFloat};
 
-use crate::generator;
 use crate::metric::Metric;
+use crate::optimizer;
 use crate::parser;
 use crate::slider;
 use crate::tracker;
@@ -852,7 +852,6 @@ pub fn duration_from_beats(tempo: u32, beats: u64) -> Duration {
 pub fn beats_waveform(
     tempo: u32,
     beats_per_measure: u32,
-    sample_rate: i32,
     context: &Vec<(String, parser::Expr<MarkId>)>,
 ) -> waveform::Waveform<MarkId> {
     let seconds_per_beat = duration_from_beats(tempo, 1);
@@ -869,12 +868,11 @@ pub fn beats_waveform(
         Ok(expr) => expr,
         Err(errors) => panic!("Error parsing beats waveform: {:?}", errors),
     };
-    let mut generator = generator::Generator::new(sample_rate);
     match parser::evaluate(&context, expr) {
         Ok(parser::Expr::Seq { waveform, .. }) => match *waveform {
             parser::Expr::Waveform(waveform) => waveform::Waveform::<MarkId>::Marked {
                 id: MarkId::TopLevel,
-                waveform: Box::new(generator.precompute(waveform)),
+                waveform: Box::new(optimizer::optimize(waveform)),
             },
             expr => panic!("Error creating beats waveform with seq, got {}", expr),
         },

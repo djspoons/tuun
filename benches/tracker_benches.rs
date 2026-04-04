@@ -63,7 +63,7 @@ fn bench_marks(c: &mut Criterion) {
             let mut generator = generator::Generator::new(SAMPLE_RATE);
             let mut ws = Vec::new();
             for _ in 0..40 {
-                ws.push(renderer::beats_waveform(120, 4, SAMPLE_RATE, &context));
+                ws.push(renderer::beats_waveform(120, 4, &context));
             }
             let w = ws
                 .into_iter()

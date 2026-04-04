@@ -527,12 +527,7 @@ fn start_beats(
     command_sender
         .send(Command::Play {
             id: WaveformId::Beats(false),
-            waveform: renderer::beats_waveform(
-                args.tempo,
-                args.beats_per_measure,
-                args.sample_rate,
-                context,
-            ),
+            waveform: renderer::beats_waveform(args.tempo, args.beats_per_measure, context),
             start: Instant::now(),
             repeat_every: Some(
                 renderer::duration_from_beats(args.tempo, args.beats_per_measure as u64) * 2,
@@ -553,7 +548,6 @@ fn start_beats(
                                 waveform: renderer::beats_waveform(
                                     args.tempo,
                                     args.beats_per_measure,
-                                    args.sample_rate,
                                     context,
                                 ),
                                 start: mark.start + mark.duration,
