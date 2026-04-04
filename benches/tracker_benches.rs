@@ -59,10 +59,11 @@ fn bench_marks(c: &mut Criterion) {
         b.iter(|| {
             let mut context = vec![];
             builtins::add_prelude(&mut context);
-            let mut generator = generator::Generator::new(44100);
+            const SAMPLE_RATE: i32 = 44100;
+            let mut generator = generator::Generator::new(SAMPLE_RATE);
             let mut ws = Vec::new();
             for _ in 0..40 {
-                ws.push(renderer::beats_waveform(120, 4, &context));
+                ws.push(renderer::beats_waveform(120, 4, SAMPLE_RATE, &context));
             }
             let w = ws
                 .into_iter()

@@ -468,10 +468,8 @@ where
 
         // Keep track of any active waveforms that finish generating
         let mut finished = Vec::new();
+        out.fill(0.0);
 
-        for x in out.iter_mut() {
-            *x = 0.0;
-        }
         let mut filled = 0; // How much of the out buffer we've filled so far
         while filled < out.len() {
             // Check to see if any pending waveform starts at or before segment_start. If so, promote
@@ -568,7 +566,6 @@ where
                 segment_start +=
                     Duration::from_secs_f32(segment_length as f32 / self.sample_rate as f32);
                 segment_length = out.len() - filled;
-                // Don't change high_water_mark
                 continue;
             }
 
@@ -583,6 +580,7 @@ where
                     let capture_state = RefCell::new(&mut active.capture_state);
                     generator.capture_state = Some(capture_state);
                     len = generator.generate(&mut active.waveform, &mut tmp);
+                    println!("First ten samples for {:?}: {:?}", &active.id, &tmp[..10]);
                     allocations += generator.allocations;
                 }
                 if len > segment_length {

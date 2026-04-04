@@ -206,6 +206,7 @@ where
                 )),
                 // Combine merge of Fin and an Append who first argument is Fin -- this occurs for expressions of
                 // the form `w | fin(t) | seq(t)`.
+                // TODO this should apply when the w is Marked(n, w') too
                 (
                     Fin {
                         length: a_length,
