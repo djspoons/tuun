@@ -63,6 +63,8 @@ where
     pub buffer: Option<Vec<f32>>,
     // The current tracker load, the ratio of sample frequency to samples generated per second
     pub tracker_load: Option<f32>,
+    // The number of samples allocated internally as part of generating one sample (on average)
+    pub allocations_per_sample: Option<f32>,
 }
 
 struct ActiveWaveform<I, M>
@@ -198,7 +200,7 @@ where
 }
 
 fn process_marked<I, M>(
-    generator: &generator::Generator,
+    generator: &mut generator::Generator,
     sample_rate: f32,
     waveform_id: &I,
     start: Instant,
@@ -303,15 +305,17 @@ where
             buffer_start,
             marks: Vec::new(),
             tracker_load: None,
+            allocations_per_sample: None,
             buffer: None,
         };
 
         // Now generate!
         let generate_start = Instant::now();
-        let finished = self.generate(buffer_start, out);
+        let (finished, allocations) = self.generate(buffer_start, out);
         status_to_send.tracker_load = Some(
             self.sample_rate as f32 / (out.len() as f32 / generate_start.elapsed().as_secs_f32()),
         );
+        status_to_send.allocations_per_sample = Some(allocations as f32 / self.sample_rate as f32);
 
         // Copy the marks from finished waveforms into the status
         for active in finished {
@@ -364,7 +368,7 @@ where
                 let mut marks = Vec::new();
                 let waveform = generator::initialize_state(waveform);
                 process_marked(
-                    &self.generator,
+                    &mut self.generator,
                     self.sample_rate as f32,
                     &id,
                     start,
@@ -397,7 +401,7 @@ where
                         // Recompute the marks
                         active.marks.clear();
                         process_marked(
-                            &self.generator,
+                            &mut self.generator,
                             self.sample_rate as f32,
                             &active.id,
                             active.start,
@@ -416,7 +420,7 @@ where
                         // Recompute the marks
                         pending.marks.clear();
                         process_marked(
-                            &self.generator,
+                            &mut self.generator,
                             self.sample_rate as f32,
                             &pending.id,
                             pending.start,
@@ -452,17 +456,20 @@ where
 
     // Generate from pending waveforms and active waveforms, filling the out buffer.
     // Returns the set of active waveforms that finished generating.
-    fn generate(&mut self, buffer_start: Instant, out: &mut [f32]) -> Vec<ActiveWaveform<I, M>> {
+    fn generate(
+        &mut self,
+        buffer_start: Instant,
+        out: &mut [f32],
+    ) -> (Vec<ActiveWaveform<I, M>>, usize) {
+        let mut allocations: usize = 0;
         // We'll generate in segments based on the set of active waveforms at a given time
         let mut segment_start = buffer_start;
         let mut segment_length = out.len();
 
         // Keep track of any active waveforms that finish generating
         let mut finished = Vec::new();
+        out.fill(0.0);
 
-        for x in out.iter_mut() {
-            *x = 0.0;
-        }
         let mut filled = 0; // How much of the out buffer we've filled so far
         while filled < out.len() {
             // Check to see if any pending waveform starts at or before segment_start. If so, promote
@@ -498,7 +505,9 @@ where
                             let capture_state = RefCell::new(&mut capture_state);
                             generator.capture_state = Some(capture_state);
                             let mut tmp = vec![0.0; delta_samples];
+                            allocations += delta_samples;
                             _ = generator.generate(&mut waveform, &mut tmp);
+                            allocations += generator.allocations;
                         }
                     }
                     self.active_waveforms.push(ActiveWaveform {
@@ -526,7 +535,7 @@ where
                         pending.marks = Vec::new();
                         let waveform = generator::initialize_state(pending.waveform);
                         process_marked(
-                            &self.generator,
+                            &mut self.generator,
                             self.sample_rate as f32,
                             &pending.id,
                             pending.start,
@@ -557,20 +566,21 @@ where
                 segment_start +=
                     Duration::from_secs_f32(segment_length as f32 / self.sample_rate as f32);
                 segment_length = out.len() - filled;
-                // Don't change high_water_mark
                 continue;
             }
 
             let mut i = 0;
+            let mut tmp = vec![0.0; segment_length];
+            allocations += segment_length;
             while i < self.active_waveforms.len() {
                 let active = &mut self.active_waveforms[i];
-                let mut tmp = vec![0.0; segment_length];
                 let len;
                 {
                     let mut generator = generator::Generator::new(self.sample_rate);
                     let capture_state = RefCell::new(&mut active.capture_state);
                     generator.capture_state = Some(capture_state);
                     len = generator.generate(&mut active.waveform, &mut tmp);
+                    allocations += generator.allocations;
                 }
                 if len > segment_length {
                     panic!(
@@ -611,6 +621,6 @@ where
                 Duration::from_secs_f32(segment_length as f32 / self.sample_rate as f32);
             segment_length = out.len() - filled;
         }
-        return finished;
+        return (finished, allocations);
     }
 }

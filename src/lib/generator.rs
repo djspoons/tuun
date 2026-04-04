@@ -44,6 +44,8 @@ pub struct Generator<'a> {
     sample_rate: i32,
     pub capture_state:
         Option<RefCell<&'a mut HashMap<String, hound::WavWriter<BufWriter<std::fs::File>>>>>,
+    // Total number of samples allocated as part of generation
+    pub allocations: usize,
 }
 
 // TODO add metrics for waveform expr depth and total ops
@@ -62,6 +64,7 @@ impl<'a> Generator<'a> {
         Generator {
             sample_rate,
             capture_state: None,
+            allocations: 0,
         }
     }
 
@@ -76,7 +79,7 @@ impl<'a> Generator<'a> {
     /// returned waveform supports being "re-initialized" -- it will generate the same samples each time
     /// it's initialized.
     pub fn generate<M: Debug + Display>(
-        &self,
+        &mut self,
         waveform: &mut Waveform<M>,
         out: &mut [f32],
     ) -> usize {
@@ -172,6 +175,7 @@ impl<'a> Generator<'a> {
                 let f_len = self.generate(frequency, out);
                 // Instantaneous phase offset.
                 let mut ph_out = vec![0.0; f_len];
+                self.allocations += f_len;
                 let ph_len = self.generate(phase, &mut ph_out);
                 for (i, &phase_offset) in ph_out.iter().enumerate() {
                     let sample = (*accumulator + phase_offset as f64).sin() as f32;
@@ -197,6 +201,7 @@ impl<'a> Generator<'a> {
                 let ff_count = feed_forward.len();
                 assert!(ff_count >= 1);
                 let mut input = vec![0.0; ff_count - 1];
+                self.allocations += ff_count - 1;
                 let inner_len = self.generate(inner, &mut input);
                 // Remove any unset elements from input.
                 input.truncate(inner_len);
@@ -204,6 +209,7 @@ impl<'a> Generator<'a> {
                 // Fill the previous output samples with zeros to match the number of feedback coefficients.
                 let fb_count = feedback.len();
                 let output = VecDeque::from(vec![0.0; fb_count]);
+                self.allocations += fb_count;
                 /*
                 println!(
                     "Started generate for Filter with {} feed-forward and {} feedback coefficients",
@@ -273,6 +279,7 @@ impl<'a> Generator<'a> {
                                 recompute_coefficients = true;
                             }
                             let mut ff_out = vec![0.0; 1];
+                            self.allocations += 1;
                             _ = self.generate(w, &mut ff_out);
                             ff_outs.push(ff_out[0]);
                         }
@@ -282,6 +289,7 @@ impl<'a> Generator<'a> {
                                 recompute_coefficients = true;
                             }
                             let mut fb_out = vec![0.0; 1];
+                            self.allocations += 1;
                             _ = self.generate(w, &mut fb_out);
                             fb_outs.push(fb_out[0]);
                         }
@@ -384,8 +392,10 @@ impl<'a> Generator<'a> {
                 // though maybe we also need to advance them (is length() good enough?)
                 // TODO maybe consider consts here specially?
                 let mut positive_out = vec![0.0; t_len];
+                self.allocations += t_len;
                 let _ = self.generate(positive_waveform, &mut positive_out);
                 let mut negative_out = vec![0.0; t_len];
+                self.allocations += t_len;
                 let _ = self.generate(negative_waveform, &mut negative_out);
                 for (i, x) in out[..t_len].iter_mut().enumerate() {
                     if *x >= 0.0 {
@@ -438,7 +448,7 @@ impl<'a> Generator<'a> {
     // is applied to each pair of samples. If `extend_to_longer` is true, the shorter waveform will
     // be extended with zeros to match the length of the longer one.
     fn generate_binary_op<M: Debug + Display>(
-        &self,
+        &mut self,
         op_fn: fn(f32, f32) -> f32,
         a: &mut Waveform<M>,
         b: &mut Waveform<M>,
@@ -463,6 +473,7 @@ impl<'a> Generator<'a> {
             }
             _ => {
                 let mut b_out = vec![0.0; len];
+                self.allocations += len;
                 let b_len = self.generate(b, &mut b_out);
                 // Now we know both lengths, so determine the output length.
                 let len = if extend_to_longer {
@@ -484,7 +495,7 @@ impl<'a> Generator<'a> {
     // smaller, while modifying `waveform` so that it has been advanced to that point.
     // Note that for waveforms that maintain state (other than position), the state is passed
     // through unchanged. This discontinuity may result in pops or clicks for audible waveforms.
-    pub fn length<M: Debug + Display>(&self, waveform: &mut Waveform<M>, max: usize) -> usize {
+    pub fn length<M: Debug + Display>(&mut self, waveform: &mut Waveform<M>, max: usize) -> usize {
         use State::*;
         use waveform::Operator;
         use waveform::Waveform::*;
@@ -542,6 +553,7 @@ impl<'a> Generator<'a> {
                             length
                         );
                         let mut length_out = vec![0.0; 1];
+                        self.allocations += 1;
                         for i in 0..max {
                             let length_len = self.generate(length, &mut length_out);
                             if length_len == 0 {
@@ -723,7 +735,7 @@ impl<'a> Generator<'a> {
     ///
     /// Notably, infinite waveforms and waveforms that depend on or have dynamic behavior (Marked,
     /// Captured) cannot be replaced.
-    pub fn precompute<M>(&self, waveform: waveform::Waveform<M>) -> waveform::Waveform<M>
+    pub fn precompute<M>(&mut self, waveform: waveform::Waveform<M>) -> waveform::Waveform<M>
     where
         M: Clone + Debug + Display,
     {
@@ -752,7 +764,7 @@ impl<'a> Generator<'a> {
 
         // generate_fixed generates `waveform` up to some large number of samples. It should only be used on waveforms
         // that are pre-computable.
-        fn generate_fixed<M>(g: &Generator, mut waveform: Waveform<M>) -> Waveform<M>
+        fn generate_fixed<M>(g: &mut Generator, mut waveform: Waveform<M>) -> Waveform<M>
         where
             M: Debug + Display,
         {
@@ -774,7 +786,7 @@ impl<'a> Generator<'a> {
             waveform::Waveform::Fixed(out, State::Initial)
         }
 
-        fn precompute_internal<M>(g: &Generator, waveform: Waveform<M>) -> Result<M>
+        fn precompute_internal<M>(g: &mut Generator, waveform: Waveform<M>) -> Result<M>
         where
             M: Debug + Display,
         {
@@ -786,7 +798,7 @@ impl<'a> Generator<'a> {
             // do_one_dynamic takes a waveform and determines if it can be pre-computed. If so, it applies `wf` and
             // then wraps the result in NPC(Dynamic).
             fn do_one_dynamic<M, F: FnOnce(Waveform<M>) -> Waveform<M>>(
-                g: &Generator,
+                g: &mut Generator,
                 a: Waveform<M>,
                 wf: F,
             ) -> Result<M>
@@ -803,7 +815,7 @@ impl<'a> Generator<'a> {
             // pre-computable, then the result is wrapped in PC. If at least one is not pre-computable, then the result
             // is wrapped in NPC, with the reason determined by the reason(s) for the two waveforms.
             fn do_two<M, F: FnOnce(Waveform<M>, Waveform<M>) -> Waveform<M>>(
-                g: &Generator,
+                g: &mut Generator,
                 a: Waveform<M>,
                 b: Waveform<M>,
                 wf: F,
@@ -833,7 +845,7 @@ impl<'a> Generator<'a> {
             // The result is wrapped in PC if all three are pre-computable, and NPC otherwise, with the reason
             // determined by the reason(s) for the three waveforms.
             fn do_three<M, F: FnOnce(Waveform<M>, Waveform<M>, Waveform<M>) -> Waveform<M>>(
-                g: &Generator,
+                g: &mut Generator,
                 a: Waveform<M>,
                 b: Waveform<M>,
                 c: Waveform<M>,
@@ -998,7 +1010,7 @@ impl<'a> Generator<'a> {
 
                     // If `reason` is Some then we will be returning NPC for the Filter, so generate
                     // samples for any pre-computable sub-waveforms.
-                    let extract = |r: Result<M>| match (r, &reason) {
+                    let mut extract = |r: Result<M>| match (r, &reason) {
                         (PC(w), Some(_)) => generate_fixed(g, w),
                         (PC(w), None) => w,
                         (NPC(_, w), _) => w,
@@ -1103,7 +1115,7 @@ mod tests {
 
     // Verifies that `waveform` would generate `expected` samples using a call to `length`.
     fn check_length(
-        g: &Generator,
+        g: &mut Generator,
         waveform: &Waveform,
         position: usize,
         expected: usize,
@@ -1124,12 +1136,12 @@ mod tests {
     }
 
     fn run_tests(waveform: &Waveform, expected: &[f32]) {
-        let g = new_test_generator(1);
+        let mut g = new_test_generator(1);
         // We initialize output vectors with infinity to make sure that nothing depends on
         // them being initialized to 0.0.
 
         // Check that `waveform` would generate at least as many samples as `expected`.
-        check_length(&g, &waveform, 0, expected.len(), expected.len());
+        check_length(&mut g, &waveform, 0, expected.len(), expected.len());
         for size in [1, 2, 4, 8] {
             let mut w = initialize_state(waveform.clone());
             let mut out = vec![f32::INFINITY; expected.len()];
@@ -1146,7 +1158,13 @@ mod tests {
         }
 
         let optimized_waveform = optimizer::optimize(waveform.clone());
-        check_length(&g, &optimized_waveform, 0, expected.len(), expected.len());
+        check_length(
+            &mut g,
+            &optimized_waveform,
+            0,
+            expected.len(),
+            expected.len(),
+        );
         for size in [1, 2, 4, 8] {
             let mut w = initialize_state(optimized_waveform.clone());
             let mut out = vec![f32::INFINITY; expected.len()];
@@ -1163,7 +1181,13 @@ mod tests {
         }
 
         let precomputed_waveform = g.precompute(optimized_waveform);
-        check_length(&g, &precomputed_waveform, 0, expected.len(), expected.len());
+        check_length(
+            &mut g,
+            &precomputed_waveform,
+            0,
+            expected.len(),
+            expected.len(),
+        );
         for size in [1, 2, 4, 8] {
             let mut w = initialize_state(precomputed_waveform.clone());
             let mut out = vec![f32::INFINITY; expected.len()];
@@ -1191,7 +1215,7 @@ mod tests {
         let w = Fixed(vec![1.0, 2.0, 3.0, 4.0, 5.0], ());
         run_tests(&w, &vec![1.0, 2.0, 3.0, 4.0, 5.0]);
 
-        let g = new_test_generator(1);
+        let mut g = new_test_generator(1);
         let mut w = initialize_state(w);
         // Advance past the end of the waveform
         let mut out = vec![0.0; 6];
@@ -1214,7 +1238,7 @@ mod tests {
         });
     }
 
-    fn run_sin_test<M>(g: &Generator, waveform: &mut super::Waveform<M>, expected: Vec<f32>)
+    fn run_sin_test<M>(g: &mut Generator, waveform: &mut super::Waveform<M>, expected: Vec<f32>)
     where
         M: Debug + Display,
     {
@@ -1235,14 +1259,14 @@ mod tests {
     #[test]
     fn test_sine() {
         let sample_frequency = 44100.0;
-        let g = new_test_generator(sample_frequency as i32);
+        let mut g = new_test_generator(sample_frequency as i32);
 
         // As simple as possible
         let mut w = initialize_state(*sin_waveform(1.0, 0.0));
         let expected = (0..100)
             .map(|x: i32| (f64::consts::TAU * x as f64 / sample_frequency).sin() as f32)
             .collect();
-        run_sin_test(&g, &mut w, expected);
+        run_sin_test(&mut g, &mut w, expected);
 
         // Non-constant frequency: f = time + 10 Hz
         let mut w = initialize_state(Waveform::Sine {
@@ -1264,7 +1288,7 @@ mod tests {
             phase.sin() as f32
         };
         let expected = (0..100).map(f_is_t_plus_ten).collect();
-        run_sin_test(&g, &mut w, expected);
+        run_sin_test(&mut g, &mut w, expected);
 
         // Non-zero phase offset
         let mut w = initialize_state(*sin_waveform(0.25, f32::consts::PI));
@@ -1274,7 +1298,7 @@ mod tests {
                     as f32
             })
             .collect();
-        run_sin_test(&g, &mut w, expected);
+        run_sin_test(&mut g, &mut w, expected);
     }
 
     #[test]
@@ -1338,15 +1362,15 @@ mod tests {
 
     #[test]
     fn test_append() {
-        let g = new_test_generator(1);
+        let mut g = new_test_generator(1);
         let w = Append(
             Box::new(Fixed(vec![1.0; 3], ())),
             Box::new(Fixed(vec![2.0; 3], ())),
         );
 
-        check_length(&g, &w, 0, 6, MAX_LENGTH);
-        check_length(&g, &w, 2, 4, MAX_LENGTH);
-        check_length(&g, &w, 4, 2, MAX_LENGTH);
+        check_length(&mut g, &w, 0, 6, MAX_LENGTH);
+        check_length(&mut g, &w, 2, 4, MAX_LENGTH);
+        check_length(&mut g, &w, 4, 2, MAX_LENGTH);
         run_tests(&w, &vec![1.0, 1.0, 1.0, 2.0, 2.0, 2.0]);
         match g.precompute(w) {
             Fixed(_, _) => (), // Already checked the result above
@@ -1407,7 +1431,7 @@ mod tests {
 
     #[test]
     fn test_dot_product() {
-        let g = new_test_generator(1);
+        let mut g = new_test_generator(1);
 
         // Multiply yields a result as long as the shorter of the two inputs.
 
@@ -1509,7 +1533,7 @@ mod tests {
 
     #[test]
     fn test_filter() {
-        let g = new_test_generator(1);
+        let mut g = new_test_generator(1);
 
         // FIRs
         let w = Filter {
@@ -1541,7 +1565,7 @@ mod tests {
             feedback: vec![],
             state: (),
         };
-        check_length(&g, &w, 0, 3, 5);
+        check_length(&mut g, &w, 0, 3, 5);
 
         let w = Filter {
             waveform: Box::new(Fin {
@@ -1556,8 +1580,8 @@ mod tests {
             feedback: vec![],
             state: (),
         };
-        let g = new_test_generator(1);
-        check_length(&g, &w, 0, 8, MAX_LENGTH);
+        let mut g = new_test_generator(1);
+        check_length(&mut g, &w, 0, 8, MAX_LENGTH);
         run_tests(&w, &vec![20.0, 30.0, 40.0, 50.0, 44.0, 36.0, 26.0, 14.0]);
 
         let w = Filter {
@@ -1639,7 +1663,7 @@ mod tests {
             length: Box::new(w1.clone()),
             waveform: Box::new(Time(())),
         };
-        let g = new_test_generator(1);
+        let mut g = new_test_generator(1);
         let position = g.greater_or_equals_at(&initialize_state(w1.clone()), 0.0, 10);
         let mut out = vec![0.0; 10];
         let len = g.generate(&mut initialize_state(w2), &mut out);

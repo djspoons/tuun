@@ -12,7 +12,7 @@ fn bench_filter(c: &mut Criterion) {
 
     c.bench_function("filter_1_1", |b| {
         b.iter(|| {
-            let generator = generator::Generator::new(44100);
+            let mut generator = generator::Generator::new(44100);
             let w1: Waveform = Filter {
                 waveform: Box::new(Time(())),
                 feed_forward: vec![Fixed(vec![0.5], ())],
@@ -29,7 +29,7 @@ fn bench_filter(c: &mut Criterion) {
 
     c.bench_function("filter_4_3", |b| {
         b.iter(|| {
-            let generator = generator::Generator::new(44100);
+            let mut generator = generator::Generator::new(44100);
             let w2: Waveform = Filter {
                 waveform: Box::new(Time(())),
                 feed_forward: vec![
@@ -59,10 +59,11 @@ fn bench_marks(c: &mut Criterion) {
         b.iter(|| {
             let mut context = vec![];
             builtins::add_prelude(&mut context);
-            let generator = generator::Generator::new(44100);
+            const SAMPLE_RATE: i32 = 44100;
+            let mut generator = generator::Generator::new(SAMPLE_RATE);
             let mut ws = Vec::new();
             for _ in 0..40 {
-                ws.push(renderer::beats_waveform(120, 4, &context));
+                ws.push(renderer::beats_waveform(120, 4, SAMPLE_RATE, &context));
             }
             let w = ws
                 .into_iter()
@@ -119,7 +120,7 @@ fn bench_large(c: &mut Criterion) {
                         Ok(expr) => {
                             //println!("Evaluate returned: {:}", &expr);
                             if let parser::Expr::Waveform(waveform) = expr {
-                                let generator = generator::Generator::new(44100);
+                                let mut generator = generator::Generator::new(44100);
                                 let mut w = generator::initialize_state(waveform);
                                 let mut out = vec![0.0; 1024];
 
