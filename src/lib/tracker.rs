@@ -454,8 +454,9 @@ where
         }
     }
 
-    // Generate from pending waveforms and active waveforms, filling the out buffer.
-    // Returns the set of active waveforms that finished generating.
+    /// Generate from pending waveforms and active waveforms, filling the out buffer.
+    ///
+    /// Returns the set of active waveforms that finished generating and the number of samples allocated.
     fn generate(
         &mut self,
         buffer_start: Instant,
