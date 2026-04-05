@@ -3,6 +3,8 @@ use crate::waveform;
 use waveform::Operator;
 use waveform::Waveform::{Append, BinaryPointOp, Const, Fin, Time};
 
+// This file defines types and functions related to sliders that are platform-independent.
+
 #[derive(Debug, Clone)]
 pub struct SliderConfig {
     pub label: String,

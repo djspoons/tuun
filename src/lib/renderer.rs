@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::time::Duration;
 use std::time::Instant;
@@ -38,6 +39,16 @@ impl WaveformId {
             _ => false,
         }
     }
+}
+
+// These two functions allow for explicit conversion from index to id.
+
+pub fn index_from_id(id: ProgramId) -> usize {
+    return (id - 1) as usize;
+}
+
+pub fn id_from_index(index: usize) -> ProgramId {
+    return (index + 1) as ProgramId;
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -85,7 +96,28 @@ pub enum Mode {
     MoveSliders {
         active_program_index: usize, // Don't forget this
     },
+    // The following are transient modes that are used to indicate an action should be
+    // taken. They are used either when the action requires significant computation or
+    // modifies the context.
+    Play {
+        active_program_index: usize,
+        cursor_position: usize,
+        program: Program,
+        // After how many measures should this program repeat (if any)
+        repeat_after_measures: Option<u32>,
+    },
+    LoadContext {
+        active_program_index: usize,
+    },
+    LoadPrograms {
+        active_program_index: usize,
+    },
     Exit,
+}
+
+pub enum WaveformOrMode {
+    Waveform(waveform::Waveform<MarkId>),
+    Mode(Mode),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -135,6 +167,15 @@ impl fmt::Display for SliderDisplay {
             self.label, self.axis, self.actual_value
         )
     }
+}
+
+pub enum SliderEvent {
+    UpdateSlider {
+        id: WaveformId,
+        slider: String,
+        value: f32,
+    },
+    SetInitialValues(HashMap<(WaveformId, String), f32>),
 }
 
 fn make_texture<'a>(
@@ -462,7 +503,10 @@ impl Renderer {
                             .unwrap();
                     }
                 }
-                Mode::Exit => (),
+                Mode::Play { .. }
+                | Mode::LoadContext { .. }
+                | Mode::LoadPrograms { .. }
+                | Mode::Exit => (),
             }
             y += self.line_height as i32;
         }
@@ -486,7 +530,10 @@ impl Renderer {
                 active_program_index,
                 ..
             } => programs[*active_program_index].sliders.slider_display(),
-            Mode::Exit => Vec::new(),
+            Mode::Play { .. }
+            | Mode::LoadContext { .. }
+            | Mode::LoadPrograms { .. }
+            | Mode::Exit => Vec::new(),
         };
         // First slider: horizontal indicator at top
         if let Some(s) = slider_display.get(0) {
@@ -662,7 +709,10 @@ impl Renderer {
                         .join(", ")
                 }
             }
-            Mode::Exit => "",
+            Mode::Play { .. }
+            | Mode::LoadContext { .. }
+            | Mode::LoadPrograms { .. }
+            | Mode::Exit => "",
         };
 
         if !message.is_empty() && message != self.last_message {
@@ -903,4 +953,72 @@ pub fn is_active_program(
             && w.mark_id == MarkId::TopLevel
             && w.start <= now
     })
+}
+
+pub fn play_waveform_helper(
+    context: &Vec<(String, parser::Expr<MarkId>)>,
+    active_program_index: usize,
+    cursor_position: usize,
+    program: &Program,
+) -> WaveformOrMode {
+    match parser::parse_program(&program.text) {
+        Ok(expr) => {
+            println!("Parser returned: {}", &expr);
+            let expr = slider::prepend_slider_bindings(
+                &program.sliders.configs,
+                &program.sliders.normalized_values,
+                MarkId::Slider,
+                expr,
+            );
+            match parser::evaluate(context, expr) {
+                Ok(expr) => {
+                    println!("parser::evaluate returned: {}", &expr);
+                    use parser::Expr;
+                    let mut waveform = match expr {
+                        Expr::Waveform(waveform) => waveform,
+                        Expr::Seq { waveform, .. } => match *waveform {
+                            Expr::Waveform(waveform) => waveform,
+                            _ => panic!("Got non-Waveform in seq after evaluate"),
+                        },
+                        _ => {
+                            println!("Expression is not a waveform, cannot play: {:#?}", expr);
+                            return WaveformOrMode::Mode(Mode::Edit {
+                                active_program_index,
+                                cursor_position,
+                                errors: vec![parser::Error::new(
+                                    "Expression is not a waveform".to_string(),
+                                )],
+                                message: format!("Not a waveform: {}", expr),
+                            });
+                        }
+                    };
+                    waveform = optimizer::optimize(waveform);
+                    println!("optimizer::optimize returned: {}", &waveform);
+                    return WaveformOrMode::Waveform(waveform);
+                }
+                Err(error) => {
+                    // If there are errors, we stay in edit mode
+                    println!("Errors while evaluating input: {:?}", error);
+                    let message = format!("Error: {}", error.to_string());
+                    return WaveformOrMode::Mode(Mode::Edit {
+                        active_program_index,
+                        cursor_position,
+                        errors: vec![error],
+                        message: message,
+                    });
+                }
+            }
+        }
+        Err(errors) => {
+            // If there are errors, we stay in edit mode
+            println!("Errors while parsing input: {:?}", errors);
+            let message = format!("Error: {}", errors[0].to_string());
+            return WaveformOrMode::Mode(Mode::Edit {
+                active_program_index,
+                cursor_position,
+                errors,
+                message,
+            });
+        }
+    }
 }
