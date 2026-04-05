@@ -1,24 +1,28 @@
+use std::sync::mpsc;
+
 use midir::{Ignore, MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
-//use midly::live::LiveEvent;
-//use midly::MidiMessage;
+use midly::MidiMessage;
+use midly::live::LiveEvent;
 
 use thiserror::Error;
 
 pub struct Launchkey {
     daw_output_conn: MidiOutputConnection,
     daw_input_conn: MidiInputConnection<()>,
+
+    pub events: mpsc::Receiver<Event>,
 }
 
 pub enum Event {
     NextTrack,
     PreviousTrack,
-    MixerEncoderChange {
-        parameter: u8, // 0-15 used
-        change: f32,   // ?
-    },
     PluginEncoderChange {
         parameter: u8, // 0-15 used
-        change: f32,   // ?
+        value: f32,    // ?
+    },
+    MixerEncoderChange {
+        parameter: u8, // 0-15 used
+        value: f32,    // ?
     },
 }
 
@@ -53,6 +57,8 @@ impl Launchkey {
             ));
         }
 
+        let (sender, receiver) = mpsc::channel();
+
         // Second, set up the output channels for both "MIDI" and "DAW".
         let mut midi_input = MidiInput::new("tuun reading input")?;
         midi_input.ignore(Ignore::Time);
@@ -64,7 +70,11 @@ impl Launchkey {
             daw_input_conn = midi_input.connect(
                 daw_input_port,
                 "tuun-daw-input-port",
-                |_stamp, _message, _| { /* XXX */ },
+                move |_stamp, message, _| {
+                    if let Some(event) = decode(message) {
+                        sender.send(event);
+                    }
+                },
                 (),
             )?;
         } else {
@@ -72,12 +82,39 @@ impl Launchkey {
                 "couldn't find Launchkey DAW Out port".to_string(),
             ));
         }
-        // XXX set up MIDI port too
+        // TODO set up MIDI port too
 
         Ok(Launchkey {
             daw_output_conn,
             daw_input_conn,
+            events: receiver,
         })
+    }
+}
+
+fn decode(message: &[u8]) -> Option<Event> {
+    let event = LiveEvent::parse(message).unwrap();
+    match event {
+        LiveEvent::Midi {
+            channel: _channel,
+            message,
+        } => match message {
+            MidiMessage::Controller { controller, value } => {
+                match (controller.as_int(), value.as_int()) {
+                    (0x66, 0x7F) => Some(Event::NextTrack),
+                    (0x67, 0x7F) => Some(Event::PreviousTrack),
+                    (controller, value) if controller >= 0x15 && controller <= 0x1C => {
+                        Some(Event::PluginEncoderChange {
+                            parameter: controller - 0x15,
+                            value: value as f32 / 127.0,
+                        })
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -93,6 +130,7 @@ impl Drop for Launchkey {
 }
 
 impl Launchkey {
+    // XXX
     pub fn dummy(&self) {
         _ = self.daw_input_conn;
     }

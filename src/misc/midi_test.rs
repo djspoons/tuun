@@ -87,7 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             );
                         }
                         message => {
-                            println!("Other message: {:?}", message);
+                            println!("Other message (on channel {}): {:?}", channel, message);
                         }
                     },
                     _ => {}
