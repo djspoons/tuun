@@ -128,6 +128,7 @@ pub struct ProgramSliders {
 }
 
 impl ProgramSliders {
+    // TODO this method only works for mouse-based sliders
     pub fn slider_display(&self) -> Vec<SliderDisplay> {
         self.configs
             .iter()
@@ -136,7 +137,11 @@ impl ProgramSliders {
                 let norm = self.normalized_values[j];
                 SliderDisplay {
                     label: config.label.clone(),
-                    axis: if j == 0 { "X" } else { "Y" },
+                    axis: if j == 0 {
+                        "X".to_string()
+                    } else {
+                        "Y".to_string()
+                    },
                     normalized_value: norm,
                     actual_value: config.min + norm * (config.max - config.min),
                 }
@@ -154,7 +159,7 @@ pub struct Program {
 
 pub struct SliderDisplay {
     pub label: String,
-    pub axis: &'static str, // "X" or "Y"
+    pub axis: String, // "X" or "Y" or an index
     pub normalized_value: f32,
     pub actual_value: f32,
 }

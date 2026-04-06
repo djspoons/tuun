@@ -32,13 +32,10 @@ impl<'a> InputHandler<'a> {
         }
     }
 
-    // thoughts...
-    // status is only around for is_active/is_pending and next_measure_start
-
     pub fn handle_event(
         &self,
-        context: &Vec<(String, parser::Expr<MarkId>)>,
         event: sdl2::event::Event,
+        context: &Vec<(String, parser::Expr<MarkId>)>,
         mode: renderer::Mode,
         status: &tracker::Status<WaveformId, MarkId>,
         programs: &mut Vec<Program>,
@@ -222,7 +219,7 @@ impl<'a> InputHandler<'a> {
                             ..
                         },
                         Some(Scancode::LAlt) | Some(Scancode::RAlt),
-                    ) => Mode::MoveSliders {
+                    ) if self.handle_mouse_events => Mode::MoveSliders {
                         active_program_index,
                     },
                     (

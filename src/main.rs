@@ -12,7 +12,9 @@ use sdl2::ttf::Sdl2TtfContext;
 
 use tuun::builtins;
 use tuun::generator;
+use tuun::launchkey;
 use tuun::metric;
+use tuun::midi_input;
 use tuun::parser;
 use tuun::renderer;
 use tuun::sdl2_input;
@@ -340,16 +342,6 @@ pub fn main() {
         .unwrap();
     device.resume();
 
-    let ttf_context: Sdl2TtfContext = sdl2::ttf::init().unwrap();
-    let mut renderer = Renderer::new(
-        &sdl_context,
-        &ttf_context,
-        args.tempo,
-        args.beats_per_measure,
-    );
-    renderer.video_subsystem.text_input().start();
-    let mut event_pump = sdl_context.event_pump().unwrap();
-
     start_beats(&command_sender, &status_receiver, &args, &context);
 
     // Spawn a thread that batches slider updates, sending them approximately once per audio buffer
@@ -394,7 +386,7 @@ pub fn main() {
                     Ok(SliderEvent::SetInitialValues(values)) => {
                         // What to do with these new values for waveforms that are playing? Especially ones
                         // where the sliders are moving? Maybe think of something better in the future once
-                        // We understand better what "load_programs" does to currently playing waveforms.
+                        // we understand better what "load_programs" does to currently playing waveforms.
                         last_slider_values = values;
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => break,
@@ -423,13 +415,40 @@ pub fn main() {
         }
     });
 
+    let launchkey = launchkey::Launchkey::new();
+    if let Err(e) = &launchkey {
+        println!(
+            "Couldn't find Launchkey... falling back on mouse slider controls ({})",
+            e
+        );
+    }
+
+    let ttf_context: Sdl2TtfContext = sdl2::ttf::init().unwrap();
+    let mut renderer = Renderer::new(
+        &sdl_context,
+        &ttf_context,
+        args.tempo,
+        args.beats_per_measure,
+    );
+    renderer.video_subsystem.text_input().start();
+    let mut event_pump = sdl_context.event_pump().unwrap();
+
     let sdl2_handler = sdl2_input::InputHandler::new(
-        true,
+        launchkey.is_err(),
         renderer.width,
         renderer.height,
         &command_sender,
         &slider_sender,
     );
+
+    let mut midi_handler = if let Ok(launchkey) = launchkey {
+        Some(midi_input::InputHandler::new(
+            launchkey,
+            slider_sender.clone(),
+        ))
+    } else {
+        None
+    };
 
     let mut status = tracker::Status {
         buffer_start: Instant::now(),
@@ -449,7 +468,7 @@ pub fn main() {
     loop {
         for event in event_pump.poll_iter() {
             //println!("Event: {:?} with mode {:?}", event, mode);
-            mode = sdl2_handler.handle_event(&context, event, mode, &status, &mut programs);
+            mode = sdl2_handler.handle_event(event, &context, mode, &status, &mut programs);
             mode = match mode {
                 Mode::Exit => {
                     return;
@@ -485,6 +504,36 @@ pub fn main() {
                     }
                 }
                 _ => mode,
+            }
+        }
+
+        if let Some(midi_handler) = &mut midi_handler {
+            // TODO this is a little like calling "render" but on the MIDI device. Generalize?
+            if let Mode::Select {
+                active_program_index,
+                ..
+            } = mode
+            {
+                // This might be a new program, in which case we need to update any device state.
+
+                midi_handler.update_slider_state(&programs[active_program_index]);
+            }
+
+            loop {
+                match midi_handler.events().try_recv() {
+                    Ok(event) => {
+                        // TODO handle modes like Play
+                        mode =
+                            midi_handler.handle_event(event, &context, mode, &status, &mut programs)
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {
+                        break;
+                    }
+                    Err(e) => {
+                        println!("Got error receiving from Launchkey: {}", e);
+                        break;
+                    }
+                }
             }
         }
 
