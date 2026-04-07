@@ -1,4 +1,4 @@
-import { initSync, Tuun } from './pkg/tuun.js';
+import { initSync, Tuun, parseSliders } from './pkg/tuun.js';
 
 // ─── Shared Runtime (singleton across all <tuun-synth> instances) ─
 
@@ -11,6 +11,17 @@ class TuunRuntime {
         this._initPromise = null;
         this._sampleRate = null;
         this._tempo = null;
+
+        // Start loading the WASM module immediately so parseSliders is available early
+        this._wasmReady = this._loadWasm();
+    }
+
+    async _loadWasm() {
+        const wasmUrl = new URL('./pkg/tuun_bg.wasm', import.meta.url);
+        const resp = await fetch(wasmUrl);
+        const bytes = await resp.arrayBuffer();
+        this.wasmModule = await WebAssembly.compile(bytes);
+        initSync({ module: this.wasmModule });
     }
 
     async ensureInitialized(sampleRate = 44100, tempo = 120) {
@@ -31,13 +42,7 @@ class TuunRuntime {
     }
 
     async _doInit(sampleRate, tempo) {
-        if (!this.wasmModule) {
-            const wasmUrl = new URL('./pkg/tuun_bg.wasm', import.meta.url);
-            const resp = await fetch(wasmUrl);
-            const bytes = await resp.arrayBuffer();
-            this.wasmModule = await WebAssembly.compile(bytes);
-            initSync({ module: this.wasmModule });
-        }
+        await this._wasmReady;
 
         if (this.audioContext) {
             this.stopActive();
@@ -335,11 +340,12 @@ class TuunSynthElement extends HTMLElement {
         this._sliderValues = new Map();
     }
 
-    connectedCallback() {
+    async connectedCallback() {
         const script = this.querySelector('script[type="text/tuun"]');
         const bodyText = script ? script.textContent : this.textContent;
         this._originalExpression = this._dedent(bodyText) || this.getAttribute('expression') || '';
         this._expanded = !this.getAttribute('description') || this.hasAttribute('expanded');
+        await runtime._wasmReady;
         this._sliders = this._parseSliders();
         this._sliderValues = new Map(this._sliders.map(s => [s.label, s.value]));
         this._render();
@@ -713,26 +719,19 @@ class TuunSynthElement extends HTMLElement {
     }
 
     _parseSliders() {
-        // Format: JSON array of "label:min:max:value" strings
-        // min, max, value are optional (defaults: 0, 1, (min+max)/2)
-        // e.g. '["fader"]' or '["Q:0.1:1:0.707","cutoff:200:10000:2000"]'
-        // The label must be a valid Tuun identifier.
         const attr = this.getAttribute('sliders');
         if (!attr) return [];
-        let arr;
-        try { arr = JSON.parse(attr); } catch { return []; }
-        if (!Array.isArray(arr)) return [];
-
-        return arr.map((s, i) => {
-            const parts = String(s).split(':');
-            const label = parts[0].replace(/^[^a-zA-Z]+/, '').replace(/[^a-zA-Z0-9_#]/g, '') || `slider${i+1}`;
-            const min = parts.length > 1 ? Number(parts[1]) : 0;
-            const max = parts.length > 2 ? Number(parts[2]) : 1;
-            const value = parts.length > 3 ? Number(parts[3]) : (min + max) / 2;
-            const intDigits = Math.max(1, String(Math.floor(Math.abs(max))).length);
-            const decimals = Math.max(0, 3 - intDigits);
-            return { label, min, max, value, decimals };
-        });
+        try {
+            const sliders = JSON.parse(parseSliders(attr));
+            return sliders.map(s => {
+                const intDigits = Math.max(1, String(Math.floor(Math.abs(s.max))).length);
+                const decimals = Math.max(0, 3 - intDigits);
+                return { label: s.label, min: s.min, max: s.max, value: s.initial_value, decimals };
+            });
+        } catch (e) {
+            console.warn('Failed to parse sliders:', e);
+            return [];
+        }
     }
 
     _flushSliderUpdates() {

@@ -110,6 +110,37 @@ function passArrayF32ToWasm0(arg, malloc) {
     return ptr;
 }
 /**
+ * Parses a slider config string like `["volume:0.5:0:1", "cutoff:2000:200:8000"]`
+ * and returns a JSON array of slider objects.
+ *
+ * Each object has: `{ label, initial_value, min, max }`
+ *
+ * Returns an error string if parsing fails.
+ * @param {string} input
+ * @returns {string}
+ */
+export function parseSliders(input) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(input, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.parseSliders(ptr0, len0);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
  * Initializes the WASM module.
  * This is called automatically when you import the module.
  */
