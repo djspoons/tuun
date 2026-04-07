@@ -665,36 +665,39 @@ pub enum Annotation {
     Sliders(Vec<Slider>),
 }
 
-/// Parses a single slider config string like `"label:min:max:initial"`.
-/// Only the label is required; min defaults to 0, max to 1, initial to midpoint.
+/// Parses a single linear slider like `"label:initial:min:max"`.
 fn parse_linear_slider(input: LocatedSpan) -> IResult<Slider> {
-    #[rustfmt::skip]
     let label_char = |c: char| c != ':' && c != '"' && c != ',' && c != ']' && !c.is_whitespace();
-    let (rest, label) = expect(take_while1(label_char), "expected slider label").parse(input)?;
-    let (rest, min) = opt(preceded(
-        char(':'),
-        expect(float, "expected minimum slider value"),
-    ))
-    .parse(rest)?;
-    let (rest, max) = opt(preceded(
-        char(':'),
-        expect(float, "expected maximum slider value"),
-    ))
-    .parse(rest)?;
-    let (rest, initial) = opt(preceded(
-        char(':'),
-        expect(float, "expected initial slider value"),
-    ))
-    .parse(rest)?;
+    #[rustfmt::skip]
+    let (rest, (label, (initial_value_span, initial_value), min, max)) = (
+        expect(take_while1(label_char), "expected slider label"),
+        preceded(
+            expect(char(':'), "expected ':'"),
+            (peek(recognize(float)), expect(float, "expected initial slider value"))),
+        preceded(
+            expect(char(':'), "expected ':'"),
+            expect(float, "expected minimum slider value")),
+        preceded(
+            expect(char(':'), "expected ':'"),
+            expect(float, "expected maximum slider value")),
+    ).parse(input)?;
 
-    let min = min.unwrap_or(Some(0.0)).unwrap_or(0.0);
-    const MIN_GAP: f32 = 0.01;
-    let max = f32::max(max.unwrap_or(Some(1.0)).unwrap_or(1.0), min + MIN_GAP);
-    let value = (min + max) / 2.0;
-    let initial_value = initial
-        .unwrap_or(Some(value))
-        .unwrap_or(value)
-        .clamp(min, max);
+    let initial_value = initial_value.unwrap_or_default();
+    let min = min.unwrap_or_default();
+    let max = max.unwrap_or_default();
+    if min > initial_value || max < initial_value {
+        initial_value_span.extra.report_error(Error::new_from_span(
+            &initial_value_span,
+            format!(
+                "initial value {} is not between min {} and max {}",
+                initial_value, min, max
+            ),
+        ));
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            initial_value_span,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
     Ok((
         rest,
         Slider {
@@ -708,7 +711,7 @@ fn parse_linear_slider(input: LocatedSpan) -> IResult<Slider> {
     ))
 }
 
-/// Parses a quoted slider config entry like `"label:min:max:initial"`.
+/// Parses a quoted slider config entry like `"label:initial:min:max"`.
 fn parse_slider(input: LocatedSpan) -> IResult<Slider> {
     #[rustfmt::skip]
     let (rest, value) =
@@ -721,7 +724,7 @@ fn parse_slider(input: LocatedSpan) -> IResult<Slider> {
 }
 
 /// Parses a bracket-delimited, comma-separated list of slider configs.
-/// Example: `["volume:0:1:0.5", "cutoff:200:8000:2000"]`
+/// Example: `["volume:0.5:0:1", "cutoff:2000:200:8000"]`
 pub fn parse_sliders(input: &str) -> Result<Vec<Slider>, Vec<Error>> {
     let errors = RefCell::new(Vec::new());
     let span = LocatedSpan::new_extra(input, ParseState(&errors));
@@ -1210,25 +1213,25 @@ mod tests {
         assert_eq!(configs.len(), 0);
 
         // Single slider with all fields
-        let result = parse_sliders(r#"["volume:0:1:0.5"]"#);
+        let result = parse_sliders(r#"["volume:0.75:0:1"]"#);
         assert!(result.is_ok());
         let configs = result.unwrap();
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].label, "volume");
         match configs[0].function {
             SliderFunction::Linear {
+                initial_value,
                 min,
                 max,
-                initial_value,
             } => {
+                assert_eq!(initial_value, 0.75);
                 assert_eq!(min, 0.0);
                 assert_eq!(max, 1.0);
-                assert_eq!(initial_value, 0.5);
             }
         }
 
         // Multiple sliders
-        let result = parse_sliders(r#"["volume:0:1:0.5", "cutoff:200:8000:2000"]"#);
+        let result = parse_sliders(r#"["volume:0.5:0:1", "cutoff:2000:200:8000"]"#);
         assert!(result.is_ok());
         let configs = result.unwrap();
 
@@ -1237,71 +1240,27 @@ mod tests {
         assert_eq!(configs[1].label, "cutoff");
         match configs[1].function {
             SliderFunction::Linear {
+                initial_value,
                 min,
                 max,
-                initial_value,
             } => {
+                assert_eq!(initial_value, 2000.0);
                 assert_eq!(min, 200.0);
                 assert_eq!(max, 8000.0);
-                assert_eq!(initial_value, 2000.0);
-            }
-        }
-
-        // Defaults: label only
-        let result = parse_sliders(r#"["gain"]"#);
-        assert!(result.is_ok());
-        let configs = result.unwrap();
-        assert_eq!(configs.len(), 1);
-        assert_eq!(configs[0].label, "gain");
-        match configs[0].function {
-            SliderFunction::Linear {
-                min,
-                max,
-                initial_value,
-            } => {
-                assert_eq!(min, 0.0);
-                assert!(max >= 1.0);
-                assert!((initial_value - 0.505).abs() < 0.01);
-            }
-        }
-
-        // Label with min and max but no initial (defaults to midpoint)
-        let result = parse_sliders(r#"["freq:100:1000"]"#);
-        assert!(result.is_ok());
-        let configs = result.unwrap();
-        assert_eq!(configs.len(), 1);
-        match configs[0].function {
-            SliderFunction::Linear {
-                min,
-                max,
-                initial_value,
-            } => {
-                assert_eq!(min, 100.0);
-                assert_eq!(max, 1000.0);
-                assert_eq!(initial_value, 550.0);
-            }
-        }
-
-        // Max clamped to min + MIN_GAP when max <= min
-        let result = parse_sliders(r#"["x:5:5"]"#);
-        assert!(result.is_ok());
-        let configs = result.unwrap();
-        assert_eq!(configs.len(), 1);
-        match configs[0].function {
-            SliderFunction::Linear { min, max, .. } => {
-                assert_eq!(min, 5.0);
-                assert!(max > min);
             }
         }
 
         let result = parse_sliders("not a list");
+        assert!(result.is_err());
+
+        let result = parse_sliders(r#"["gain:-0.5:0:1"]"#);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_parse_annotation() {
         // Valid pragma
-        let result = parse_annotation(r#"  //#{sliders=["volume:0:1:0.5"]}  "#);
+        let result = parse_annotation(r#"  //#{sliders=["volume:0.75:0:1"]}  "#);
         assert!(result.is_ok());
         let configs = result.unwrap();
         assert_eq!(configs.len(), 1);

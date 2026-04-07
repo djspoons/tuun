@@ -501,8 +501,8 @@ impl<'a> InputHandler<'a> {
                                                     let actual =
                                                         min + ps.normalized_values[j] * (max - min);
                                                     format!(
-                                                        "\"{}:{}:{}:{}\"",
-                                                        c.label, min, max, actual
+                                                        "\"{}:{:.3}:{:.3}:{:.3}\"",
+                                                        c.label, actual, min, max
                                                     )
                                                 }
                                             })

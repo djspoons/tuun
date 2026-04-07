@@ -1,6 +1,15 @@
 /* tslint:disable */
 /* eslint-disable */
 /**
+ * Parses a slider config string like `["volume:0.5:0:1", "cutoff:2000:200:8000"]`
+ * and returns a JSON array of slider objects.
+ *
+ * Each object has: `{ label, initial_value, min, max }`
+ *
+ * Returns an error string if parsing fails.
+ */
+export function parseSliders(input: string): string;
+/**
  * Initializes the WASM module.
  * This is called automatically when you import the module.
  */
@@ -85,6 +94,7 @@ export interface InitOutput {
   readonly tuun_process: (a: number, b: number, c: number, d: any) => number;
   readonly tuun_is_playing: (a: number) => number;
   readonly tuun_sample_rate: (a: number) => number;
+  readonly parseSliders: (a: number, b: number) => [number, number, number, number];
   readonly main: () => void;
   readonly __wbindgen_free: (a: number, b: number, c: number) => void;
   readonly __wbindgen_malloc: (a: number, b: number) => number;

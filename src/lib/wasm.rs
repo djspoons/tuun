@@ -264,6 +264,40 @@ fn parse_json(json: &str) -> Result<HashMap<String, f32>, String> {
     Ok(result)
 }
 
+/// Parses a slider config string like `["volume:0.5:0:1", "cutoff:2000:200:8000"]`
+/// and returns a JSON array of slider objects.
+///
+/// Each object has: `{ label, initial_value, min, max }`
+///
+/// Returns an error string if parsing fails.
+#[wasm_bindgen(js_name = "parseSliders")]
+pub fn parse_sliders(input: &str) -> Result<String, String> {
+    let sliders = parser::parse_sliders(input).map_err(|errors| {
+        errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("; ")
+    })?;
+
+    // Manually build JSON since we don't have serde
+    let entries: Vec<String> = sliders
+        .iter()
+        .map(|s| {
+            let parser::SliderFunction::Linear {
+                initial_value,
+                min,
+                max,
+            } = s.function;
+            format!(
+                r#"{{"label":"{}","initial_value":{},"min":{},"max":{}}}"#,
+                s.label, initial_value, min, max
+            )
+        })
+        .collect();
+    Ok(format!("[{}]", entries.join(",")))
+}
+
 /// Initializes the WASM module.
 /// This is called automatically when you import the module.
 #[wasm_bindgen(start)]
