@@ -95,7 +95,7 @@ Determining feedback coefficients can be a subtle art, and Tuun's library includ
 
 <div class="container">
   <tuun-synth
-    sliders='["frequency:100:10000:1000"]'>
+    sliders='["frequency:1000:100:10000"]'>
     let
       // RBJ Cookbook low-pass filter
       lpf = fn(Q, fc) =>

@@ -188,7 +188,7 @@ Sine(w_c + I * w_m * Sine(w_m, PI / 2), 0)
 
 The following is an example of an FM tone where the index of modulation `I` is controlled by the slider below. Notice how the number of harmonics generally increases as `I` increases, and some harmonics fade in and out over time.
 <div class="container">
-  <tuun-synth description="FM synthesis tone (index of modulation)" sliders='["index:0:10"]'>
+  <tuun-synth description="FM synthesis tone (index of modulation)" sliders='["index:0:0:10"]'>
     let
       fc = 440,
       I = index,
@@ -202,7 +202,7 @@ The following is an example of an FM tone where the index of modulation `I` is c
 Though phase offset is difficult to perceive audibly in general, the choice of the phase offset *in the modulator* can have significant effects on the relative strength of the sideband frequencies. (See "The Effect of Modulator Phase on Timbres in FM Synthesis." John A. Bate, in _Computer Music Journal_, Vol. 14 (1990) for a discussion of this and other variations of FM synthesis.) In the following, the index of modulation `I` is held constant while the modulator phase varies over time.
 
 <div class="container">
-  <tuun-synth description="FM synthesis tone (modulator phase)" sliders='["phi:0:1.57:1.57"]'>
+  <tuun-synth description="FM synthesis tone (modulator phase)" sliders='["phi:1.57:0:1.57"]'>
     let
       fc = 440,
       I = 5,
@@ -228,7 +228,7 @@ An example of a modulator with a non-zero DC offset is a pulse wave. FM will acc
 First, FM with pulse modulator: `Sine(w_c + I * w_m * pulse(0.5, w_m), 0)`
 
 <div class="container">
-  <tuun-synth description="FM synthesis tone with pulse modulator (with pure tone)" sliders='["pure_tone_amplitude:0:1:0"]'>
+  <tuun-synth description="FM synthesis tone with pulse modulator (with pure tone)" sliders='["pure_tone_amplitude:0:0:1"]'>
     <script type="text/tuun">
       let
         fc = 440,
@@ -245,7 +245,7 @@ First, FM with pulse modulator: `Sine(w_c + I * w_m * pulse(0.5, w_m), 0)`
 Second, PM with pulse modulator: `Sine(w_c, I * pulse(0.5, w_m))`
 
 <div class="container">
-  <tuun-synth description="PM synthesis tone with pulse modulator (with pure tone)" sliders='["pure_tone_amplitude:0:1:0"]'>
+  <tuun-synth description="PM synthesis tone with pulse modulator (with pure tone)" sliders='["pure_tone_amplitude:0:0:1"]'>
     <script type="text/tuun">
       let
         fc = 440,

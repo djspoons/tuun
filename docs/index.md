@@ -7,7 +7,7 @@ Many of the pages below include embedded synthesizer elements, but if you'd like
 <div class="container">
   <tuun-synth description="Tuun Playground"
     controls
-    sliders='["X:0:1:0.5","Y:0:1:0.5"]'
+    sliders='["X:0.5:0:1","Y:0.5:0:1"]'
     expanded />
 </div>
 
