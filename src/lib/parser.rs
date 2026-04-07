@@ -6,7 +6,7 @@ use std::{cell::RefCell, rc::Rc};
 use nom::{
     Parser,
     branch::alt,
-    bytes::complete::{tag, take_while},
+    bytes::complete::{tag, take_while, take_while1},
     character::complete::{alpha1, alphanumeric1, char, multispace0, multispace1},
     combinator::{all_consuming, map, not, opt, peek, recognize, verify},
     multi::{many0, separated_list0},
@@ -592,7 +592,7 @@ fn translate_parse_result<T>(result: IResult<T>) -> Result<T, Vec<Error>> {
             return Ok(a);
         }
         Err(nom::Err::Error(e)) => {
-            println!("Error on parsing input: {:?}", e);
+            //println!("Error on parsing input: {:?}", e);
             return Err(vec![Error::new_from_span(
                 &e.input,
                 "unable to parse input".to_string(),
@@ -663,6 +663,91 @@ pub enum SliderFunction {
 #[derive(Debug, Clone)]
 pub enum Annotation {
     Sliders(Vec<Slider>),
+}
+
+/// Parses a single slider config string like `"label:min:max:initial"`.
+/// Only the label is required; min defaults to 0, max to 1, initial to midpoint.
+fn parse_linear_slider(input: LocatedSpan) -> IResult<Slider> {
+    #[rustfmt::skip]
+    let label_char = |c: char| c != ':' && c != '"' && c != ',' && c != ']' && !c.is_whitespace();
+    let (rest, label) = expect(take_while1(label_char), "expected slider label").parse(input)?;
+    let (rest, min) = opt(preceded(
+        char(':'),
+        expect(float, "expected minimum slider value"),
+    ))
+    .parse(rest)?;
+    let (rest, max) = opt(preceded(
+        char(':'),
+        expect(float, "expected maximum slider value"),
+    ))
+    .parse(rest)?;
+    let (rest, initial) = opt(preceded(
+        char(':'),
+        expect(float, "expected initial slider value"),
+    ))
+    .parse(rest)?;
+
+    let min = min.unwrap_or(Some(0.0)).unwrap_or(0.0);
+    const MIN_GAP: f32 = 0.01;
+    let max = f32::max(max.unwrap_or(Some(1.0)).unwrap_or(1.0), min + MIN_GAP);
+    let value = (min + max) / 2.0;
+    let initial_value = initial
+        .unwrap_or(Some(value))
+        .unwrap_or(value)
+        .clamp(min, max);
+    Ok((
+        rest,
+        Slider {
+            label: label.unwrap().fragment().to_string(),
+            function: SliderFunction::Linear {
+                initial_value,
+                min,
+                max,
+            },
+        },
+    ))
+}
+
+/// Parses a quoted slider config entry like `"label:min:max:initial"`.
+fn parse_slider(input: LocatedSpan) -> IResult<Slider> {
+    #[rustfmt::skip]
+    let (rest, value) =
+        delimited(
+            char('"'),
+            parse_linear_slider,
+            char('"')
+        ).parse(input)?;
+    return Ok((rest, value));
+}
+
+/// Parses a bracket-delimited, comma-separated list of slider configs.
+/// Example: `["volume:0:1:0.5", "cutoff:200:8000:2000"]`
+pub fn parse_sliders(input: &str) -> Result<Vec<Slider>, Vec<Error>> {
+    let errors = RefCell::new(Vec::new());
+    let span = LocatedSpan::new_extra(input, ParseState(&errors));
+
+    let result = delimited(
+        char('['),
+        separated_list0(char(','), ws(parse_slider)),
+        char(']'),
+    )
+    .parse(span);
+    if errors.borrow().len() > 0 {
+        return Err(errors.into_inner());
+    }
+    translate_parse_result(result)
+}
+
+fn trim_annotation(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    let rest = trimmed.strip_prefix("//#{")?.strip_suffix('}')?;
+    Some(rest.strip_prefix("sliders=")?.trim())
+}
+
+/// Parses a slider pragma line like `//#{sliders=[...]}`.
+pub fn parse_annotation(line: &str) -> Result<Vec<Slider>, Vec<Error>> {
+    let rest = trim_annotation(line).unwrap_or("");
+    parse_sliders(rest)
 }
 
 /// Extends the context with a binding for each identifier in the pattern that is bound to
@@ -957,7 +1042,6 @@ where
     }
 }
 
-// TODO rename evaluate?
 pub fn evaluate<M>(context: &Vec<(String, Expr<M>)>, mut expr: Expr<M>) -> Result<Expr<M>, Error>
 where
     M: Clone + fmt::Display + fmt::Debug,
@@ -1115,5 +1199,119 @@ mod tests {
         let expr = result.unwrap();
         let evaluated = evaluate(&context, expr).unwrap();
         assert_eq!(format!("{}", evaluated), "(3, 4, 5)");
+    }
+
+    #[test]
+    fn test_parse_sliders() {
+        // Empty list
+        let result = parse_sliders("[]");
+        assert!(result.is_ok());
+        let configs = result.unwrap();
+        assert_eq!(configs.len(), 0);
+
+        // Single slider with all fields
+        let result = parse_sliders(r#"["volume:0:1:0.5"]"#);
+        assert!(result.is_ok());
+        let configs = result.unwrap();
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].label, "volume");
+        match configs[0].function {
+            SliderFunction::Linear {
+                min,
+                max,
+                initial_value,
+            } => {
+                assert_eq!(min, 0.0);
+                assert_eq!(max, 1.0);
+                assert_eq!(initial_value, 0.5);
+            }
+        }
+
+        // Multiple sliders
+        let result = parse_sliders(r#"["volume:0:1:0.5", "cutoff:200:8000:2000"]"#);
+        assert!(result.is_ok());
+        let configs = result.unwrap();
+
+        assert_eq!(configs.len(), 2);
+        assert_eq!(configs[0].label, "volume");
+        assert_eq!(configs[1].label, "cutoff");
+        match configs[1].function {
+            SliderFunction::Linear {
+                min,
+                max,
+                initial_value,
+            } => {
+                assert_eq!(min, 200.0);
+                assert_eq!(max, 8000.0);
+                assert_eq!(initial_value, 2000.0);
+            }
+        }
+
+        // Defaults: label only
+        let result = parse_sliders(r#"["gain"]"#);
+        assert!(result.is_ok());
+        let configs = result.unwrap();
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].label, "gain");
+        match configs[0].function {
+            SliderFunction::Linear {
+                min,
+                max,
+                initial_value,
+            } => {
+                assert_eq!(min, 0.0);
+                assert!(max >= 1.0);
+                assert!((initial_value - 0.505).abs() < 0.01);
+            }
+        }
+
+        // Label with min and max but no initial (defaults to midpoint)
+        let result = parse_sliders(r#"["freq:100:1000"]"#);
+        assert!(result.is_ok());
+        let configs = result.unwrap();
+        assert_eq!(configs.len(), 1);
+        match configs[0].function {
+            SliderFunction::Linear {
+                min,
+                max,
+                initial_value,
+            } => {
+                assert_eq!(min, 100.0);
+                assert_eq!(max, 1000.0);
+                assert_eq!(initial_value, 550.0);
+            }
+        }
+
+        // Max clamped to min + MIN_GAP when max <= min
+        let result = parse_sliders(r#"["x:5:5"]"#);
+        assert!(result.is_ok());
+        let configs = result.unwrap();
+        assert_eq!(configs.len(), 1);
+        match configs[0].function {
+            SliderFunction::Linear { min, max, .. } => {
+                assert_eq!(min, 5.0);
+                assert!(max > min);
+            }
+        }
+
+        let result = parse_sliders("not a list");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_annotation() {
+        // Valid pragma
+        let result = parse_annotation(r#"  //#{sliders=["volume:0:1:0.5"]}  "#);
+        assert!(result.is_ok());
+        let configs = result.unwrap();
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].label, "volume");
+
+        // Not a pragma
+        assert!(parse_annotation("// regular comment").is_err());
+        assert!(parse_annotation("let x = 1").is_err());
+
+        // Pragma with different key
+        assert!(parse_annotation("//#{other=[]}").is_err());
     }
 }

@@ -210,7 +210,17 @@ fn check_file(
         match parser::parse_program(&expression) {
             Ok(expr) => {
                 let configs = if let Some(configs) = extract_attr(block, "sliders") {
-                    slider::parse_slider_configs(configs)
+                    match parser::parse_sliders(configs) {
+                        Ok(sliders) => sliders,
+                        Err(e) => {
+                            eprintln!(
+                                "  {}:{} [FAIL] \"{}\" slider parsing error: {:?}",
+                                file, line, label, e
+                            );
+                            failed += 1;
+                            continue;
+                        }
+                    }
                 } else {
                     vec![]
                 };

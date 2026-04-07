@@ -169,15 +169,11 @@ fn load_programs(args: &Args, programs: &mut Vec<Program>) -> HashMap<(WaveformI
     if !args.programs_file.is_empty() {
         let mut count = 0;
         let contents = fs::read_to_string(&args.programs_file).unwrap_or_default();
-        let mut pending_slider_configs: Option<Vec<parser::Slider>> = None;
+        let mut pending_sliders: Option<Vec<parser::Slider>> = None;
         for line in contents.lines() {
             // Check for slider pragma before stripping comments
-            if let Some(mut configs) = slider::parse_slider_pragma(line) {
-                if configs.len() > 2 {
-                    eprintln!("Warning: more than 2 sliders specified, using first 2");
-                    configs.truncate(2);
-                }
-                pending_slider_configs = Some(configs);
+            if let Ok(sliders) = parser::parse_annotation(line) {
+                pending_sliders = Some(sliders);
                 continue;
             }
 
@@ -188,7 +184,7 @@ fn load_programs(args: &Args, programs: &mut Vec<Program>) -> HashMap<(WaveformI
             }
             .trim();
             if !line.is_empty() {
-                let sliders = if let Some(configs) = pending_slider_configs.take() {
+                let sliders = if let Some(configs) = pending_sliders.take() {
                     use parser::SliderFunction;
                     let normalized_values = configs
                         .iter()

@@ -6,59 +6,6 @@ use waveform::Waveform::{Append, BinaryPointOp, Const, Fin, Time};
 
 // This file defines types and functions related to sliders that are platform-independent.
 
-pub fn parse_slider_configs(input: &str) -> Vec<parser::Slider> {
-    if !input.starts_with('[') || !input.ends_with(']') {
-        return vec![];
-    }
-    let list_inner = &input[1..input.len() - 1];
-
-    let mut configs = Vec::new();
-    for item in list_inner.split(',') {
-        let item = item.trim().trim_matches('"');
-        if item.is_empty() {
-            continue;
-        }
-        let parts: Vec<&str> = item.split(':').collect();
-        let label = parts[0].to_string();
-        if label.is_empty() {
-            continue;
-        }
-        let min = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-        const MIN_GAP: f32 = 0.01;
-        let max = f32::max(
-            parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(1.0),
-            min + MIN_GAP,
-        );
-        let initial_value = parts
-            .get(3)
-            .and_then(|s| s.parse().ok())
-            .unwrap_or((min + max) / 2.0)
-            .clamp(min, max);
-        configs.push(parser::Slider {
-            label,
-            function: parser::SliderFunction::Linear {
-                initial_value,
-                min,
-                max,
-            },
-        });
-    }
-    configs
-}
-
-pub fn parse_slider_pragma(line: &str) -> Option<Vec<parser::Slider>> {
-    let trimmed = line.trim();
-    if !trimmed.starts_with("//#{") || !trimmed.ends_with('}') {
-        return None;
-    }
-    let inner = &trimmed[4..trimmed.len() - 1]; // strip "//#{" and "}"
-    if !inner.starts_with("sliders=") {
-        return None;
-    }
-    let sliders_value = inner["sliders=".len()..].trim();
-    Some(parse_slider_configs(sliders_value))
-}
-
 pub fn prepend_slider_bindings<M, F>(
     configs: &Vec<parser::Slider>,
     normalized_values: &Vec<f32>,
