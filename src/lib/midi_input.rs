@@ -74,6 +74,7 @@ impl InputHandler {
                 },
                 Event::PluginEncoderChange { index, value },
             ) => {
+                use parser::SliderFunction;
                 let index = index as usize;
                 let program = &mut programs[active_program_index];
                 let ps = &mut program.sliders;
@@ -82,7 +83,9 @@ impl InputHandler {
                     let norm = &mut ps.normalized_values[index];
                     *norm = (value as f32 / 127.0).clamp(0.0, 1.0);
                     let config = &ps.configs[index];
-                    let actual_value = config.min + *norm * (config.max - config.min);
+                    let actual_value = match config.function {
+                        SliderFunction::Linear { min, max, .. } => min + *norm * (max - min),
+                    };
                     self.slider_sender
                         .send(renderer::SliderEvent::UpdateSlider {
                             id: WaveformId::Program(program.id),

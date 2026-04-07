@@ -169,7 +169,7 @@ fn load_programs(args: &Args, programs: &mut Vec<Program>) -> HashMap<(WaveformI
     if !args.programs_file.is_empty() {
         let mut count = 0;
         let contents = fs::read_to_string(&args.programs_file).unwrap_or_default();
-        let mut pending_slider_configs: Option<Vec<slider::SliderConfig>> = None;
+        let mut pending_slider_configs: Option<Vec<parser::Slider>> = None;
         for line in contents.lines() {
             // Check for slider pragma before stripping comments
             if let Some(mut configs) = slider::parse_slider_pragma(line) {
@@ -189,9 +189,16 @@ fn load_programs(args: &Args, programs: &mut Vec<Program>) -> HashMap<(WaveformI
             .trim();
             if !line.is_empty() {
                 let sliders = if let Some(configs) = pending_slider_configs.take() {
+                    use parser::SliderFunction;
                     let normalized_values = configs
                         .iter()
-                        .map(|c| ((c.initial_value - c.min) / (c.max - c.min)).clamp(0.0, 1.0))
+                        .map(|c| match c.function {
+                            SliderFunction::Linear {
+                                initial_value,
+                                min,
+                                max,
+                            } => ((initial_value - min) / (max - min)).clamp(0.0, 1.0),
+                        })
                         .collect();
                     ProgramSliders {
                         configs,
@@ -232,9 +239,12 @@ fn load_programs(args: &Args, programs: &mut Vec<Program>) -> HashMap<(WaveformI
     let mut last_slider_values: HashMap<(WaveformId, String), f32> = HashMap::new();
     for Program { id, sliders, .. } in programs {
         for slider in &sliders.configs {
+            let value = match slider.function {
+                parser::SliderFunction::Linear { initial_value, .. } => initial_value,
+            };
             last_slider_values.insert(
                 (WaveformId::Program(id.clone()), slider.label.clone()),
-                slider.initial_value,
+                value,
             );
         }
     }

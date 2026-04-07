@@ -1,19 +1,12 @@
 use crate::parser;
 use crate::waveform;
+
 use waveform::Operator;
 use waveform::Waveform::{Append, BinaryPointOp, Const, Fin, Time};
 
 // This file defines types and functions related to sliders that are platform-independent.
 
-#[derive(Debug, Clone)]
-pub struct SliderConfig {
-    pub label: String,
-    pub min: f32,
-    pub max: f32,
-    pub initial_value: f32,
-}
-
-pub fn parse_slider_configs(input: &str) -> Vec<SliderConfig> {
+pub fn parse_slider_configs(input: &str) -> Vec<parser::Slider> {
     if !input.starts_with('[') || !input.ends_with(']') {
         return vec![];
     }
@@ -41,17 +34,19 @@ pub fn parse_slider_configs(input: &str) -> Vec<SliderConfig> {
             .and_then(|s| s.parse().ok())
             .unwrap_or((min + max) / 2.0)
             .clamp(min, max);
-        configs.push(SliderConfig {
+        configs.push(parser::Slider {
             label,
-            min,
-            max,
-            initial_value,
+            function: parser::SliderFunction::Linear {
+                initial_value,
+                min,
+                max,
+            },
         });
     }
     configs
 }
 
-pub fn parse_slider_pragma(line: &str) -> Option<Vec<SliderConfig>> {
+pub fn parse_slider_pragma(line: &str) -> Option<Vec<parser::Slider>> {
     let trimmed = line.trim();
     if !trimmed.starts_with("//#{") || !trimmed.ends_with('}') {
         return None;
@@ -65,7 +60,7 @@ pub fn parse_slider_pragma(line: &str) -> Option<Vec<SliderConfig>> {
 }
 
 pub fn prepend_slider_bindings<M, F>(
-    configs: &Vec<SliderConfig>,
+    configs: &Vec<parser::Slider>,
     normalized_values: &Vec<f32>,
     mark_id: F,
     expr: parser::Expr<M>,
@@ -76,15 +71,18 @@ where
     if configs.is_empty() {
         return expr;
     }
+    use parser::SliderFunction;
     let bindings = configs
         .iter()
         .zip(normalized_values)
         .map(|(config, normalized_value)| {
-            let value = config.min + normalized_value * (config.max - config.min);
+            let value = match config.function {
+                SliderFunction::Linear { min, max, .. } => min + normalized_value * (max - min),
+            };
             (
-                parser::Pattern::Identifier(config.label.to_string()),
+                parser::Pattern::Identifier(config.label.clone()),
                 parser::Expr::Waveform(waveform::Waveform::Marked {
-                    id: mark_id(config.label.to_string()),
+                    id: mark_id(config.label.clone()),
                     waveform: Box::new(waveform::Waveform::Const(value)),
                 }),
             )

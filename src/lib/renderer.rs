@@ -122,7 +122,7 @@ pub enum WaveformOrMode {
 
 #[derive(Debug, Clone, Default)]
 pub struct ProgramSliders {
-    pub configs: Vec<slider::SliderConfig>,
+    pub configs: Vec<parser::Slider>,
     /// Normalized values in 0.0..1.0, parallel to configs
     pub normalized_values: Vec<f32>,
 }
@@ -130,6 +130,7 @@ pub struct ProgramSliders {
 impl ProgramSliders {
     // TODO this method only works for mouse-based sliders
     pub fn slider_display(&self) -> Vec<SliderDisplay> {
+        use parser::SliderFunction;
         self.configs
             .iter()
             .enumerate()
@@ -143,7 +144,9 @@ impl ProgramSliders {
                         "Y".to_string()
                     },
                     normalized_value: norm,
-                    actual_value: config.min + norm * (config.max - config.min),
+                    actual_value: match config.function {
+                        SliderFunction::Linear { min, max, .. } => min + norm * (max - min),
+                    },
                 }
             })
             .collect()

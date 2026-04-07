@@ -645,6 +645,26 @@ pub fn parse_context<M>(input: &str) -> Result<Vec<(Pattern, Expr<M>)>, Vec<Erro
     translate_parse_result(result)
 }
 
+#[derive(Debug, Clone)]
+pub struct Slider {
+    pub label: String,
+    pub function: SliderFunction,
+}
+
+#[derive(Debug, Clone)]
+pub enum SliderFunction {
+    Linear {
+        initial_value: f32, // In the output range
+        min: f32,
+        max: f32,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum Annotation {
+    Sliders(Vec<Slider>),
+}
+
 /// Extends the context with a binding for each identifier in the pattern that is bound to
 /// itself.
 fn extend_with_trivial_context<M>(context: &mut Vec<(String, Expr<M>)>, pattern: &Pattern) {

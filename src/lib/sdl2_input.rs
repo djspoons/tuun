@@ -493,13 +493,18 @@ impl<'a> InputHandler<'a> {
                                             .configs
                                             .iter()
                                             .enumerate()
-                                            .map(|(j, c)| {
-                                                let actual = c.min
-                                                    + ps.normalized_values[j] * (c.max - c.min);
-                                                format!(
-                                                    "\"{}:{}:{}:{}\"",
-                                                    c.label, c.min, c.max, actual
-                                                )
+                                            .map(|(j, c)| match c.function {
+                                                parser::SliderFunction::Linear {
+                                                    min, max, ..
+                                                } => {
+                                                    // Use the current value as the new initial value.
+                                                    let actual =
+                                                        min + ps.normalized_values[j] * (max - min);
+                                                    format!(
+                                                        "\"{}:{}:{}:{}\"",
+                                                        c.label, min, max, actual
+                                                    )
+                                                }
                                             })
                                             .collect();
                                         writeln!(
@@ -576,6 +581,7 @@ impl<'a> InputHandler<'a> {
                     active_program_index,
                     ..
                 } => {
+                    use parser::SliderFunction;
                     let program = &mut programs[active_program_index];
                     let ps = &mut program.sliders;
                     // First slider maps to mouse X axis
@@ -583,7 +589,9 @@ impl<'a> InputHandler<'a> {
                         let norm = &mut ps.normalized_values[0];
                         *norm = (*norm + xrel as f32 / self.display_width as f32).clamp(0.0, 1.0);
                         let config = &ps.configs[0];
-                        let actual_value = config.min + *norm * (config.max - config.min);
+                        let actual_value = match config.function {
+                            SliderFunction::Linear { min, max, .. } => min + *norm * (max - min),
+                        };
                         self.slider_sender
                             .send(SliderEvent::UpdateSlider {
                                 id: WaveformId::Program(program.id),
@@ -597,7 +605,9 @@ impl<'a> InputHandler<'a> {
                         let norm = &mut ps.normalized_values[1];
                         *norm = (*norm - yrel as f32 / self.display_height as f32).clamp(0.0, 1.0);
                         let config = &ps.configs[1];
-                        let actual_value = config.min + *norm * (config.max - config.min);
+                        let actual_value = match config.function {
+                            SliderFunction::Linear { min, max, .. } => min + *norm * (max - min),
+                        };
                         self.slider_sender
                             .send(SliderEvent::UpdateSlider {
                                 id: WaveformId::Program(program.id),
