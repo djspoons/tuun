@@ -481,8 +481,10 @@ impl<'a> Generator<'a> {
                 } else {
                     a_len.min(b_len)
                 };
-                // Make sure that any element where we apply `op` is initialized.
-                out[a_len..len].fill(0.0);
+                // Make sure that any element where we will apply `op` is initialized.
+                if a_len < len {
+                    out[a_len..len].fill(0.0);
+                }
                 for (i, x) in out[..len].iter_mut().enumerate() {
                     *x = op_fn(*x, b_out[i]);
                 }
@@ -1402,6 +1404,12 @@ mod tests {
             Operator::Add,
             Box::new(Fixed(vec![1.0, 2.0], ())),
             Box::new(Fixed(vec![10.0, 20.0, 30.0], ())),
+        );
+        run_tests(&w, &vec![11.0, 22.0]);
+        let w = BinaryPointOp(
+            Operator::Add,
+            Box::new(Fixed(vec![1.0, 2.0, 3.0], ())),
+            Box::new(Fixed(vec![10.0, 20.0], ())),
         );
         run_tests(&w, &vec![11.0, 22.0]);
 
