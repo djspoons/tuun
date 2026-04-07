@@ -1,6 +1,15 @@
 /* tslint:disable */
 /* eslint-disable */
 /**
+ * Parses a slider config string like `["volume:0.5:0:1", "cutoff:2000:200:8000"]`
+ * and returns a JSON array of slider objects.
+ *
+ * Each object has: `{ label, initial_value, min, max }`
+ *
+ * Returns an error string if parsing fails.
+ */
+export function parseSliders(input: string): string;
+/**
  * Initializes the WASM module.
  * This is called automatically when you import the module.
  */
@@ -47,23 +56,22 @@ export class Tuun {
   /**
    * Generates audio samples from the current waveform. Updates the internal
    * state of the waveform so that the next call to `generate()` will continue
-   * from the point at which this call left off. Returns an empty vector if
-   * not playing.
+   * from the point at which this call left off.
    *
    * # Arguments
-   * * `desired` - The number of samples to generate
+   * * `out` - A buffer to fill with samples
    *
    * # Returns
-   * A Float32Array of audio samples
+   * A boolean indicating whether or not the current waveform will generate any
+   * more samples
    *
    * # Examples
    * ```javascript
    * tuun.parse("$440", "{}");
-   * const samples = tuun.generate(4096);
-   * // samples is a Float32Array that can be used with Web Audio API
+   * const done = tuun.process(output);
    * ```
    */
-  generate(desired: number): Float32Array;
+  process(out: Float32Array): boolean;
   /**
    * Returns whether a waveform is currently playing.
    */
@@ -83,9 +91,10 @@ export interface InitOutput {
   readonly tuun_parse: (a: number, b: number, c: number, d: number, e: number) => [number, number];
   readonly tuun_stop: (a: number) => void;
   readonly tuun_update_slider: (a: number, b: number, c: number, d: number) => void;
-  readonly tuun_generate: (a: number, b: number) => [number, number];
+  readonly tuun_process: (a: number, b: number, c: number, d: any) => number;
   readonly tuun_is_playing: (a: number) => number;
   readonly tuun_sample_rate: (a: number) => number;
+  readonly parseSliders: (a: number, b: number) => [number, number, number, number];
   readonly main: () => void;
   readonly __wbindgen_free: (a: number, b: number, c: number) => void;
   readonly __wbindgen_malloc: (a: number, b: number) => number;
