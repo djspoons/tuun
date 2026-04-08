@@ -29,7 +29,7 @@
         <tuun-synth
             description="Low-pass filter example"
             expression="square(220) | lpf(Q, cutoff)"
-            sliders='["Q:0.707:0.1:1","cutoff:2000:200:10000"]'
+            sliders='["Q:0.707:0.1:1","cutoff:0.5886:fn(x) => 200 * pow(50, x)"]'
             controls
             expanded>
         </tuun-synth>
