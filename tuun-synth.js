@@ -1,4 +1,4 @@
-import { initSync, Tuun, parseSliders } from './pkg/tuun.js';
+import { initSync, Tuun, parseSliders, evaluateSlider } from './pkg/tuun.js';
 
 // ─── Shared Runtime (singleton across all <tuun-synth> instances) ─
 
@@ -347,7 +347,7 @@ class TuunSynthElement extends HTMLElement {
         this._expanded = !this.getAttribute('description') || this.hasAttribute('expanded');
         await runtime._wasmReady;
         this._sliders = this._parseSliders();
-        this._sliderValues = new Map(this._sliders.map(s => [s.label, s.value]));
+        this._sliderValues = new Map(this._sliders.map(s => [s.label, s.displayValue ?? s.value]));
         this._render();
         this._bindEvents();
     }
@@ -378,7 +378,7 @@ class TuunSynthElement extends HTMLElement {
             if (ctrl) ctrl.classList.toggle('hidden', !this.hasAttribute('controls'));
         } else if (name === 'sliders') {
             this._sliders = this._parseSliders();
-            this._sliderValues = new Map(this._sliders.map(s => [s.label, s.value]));
+            this._sliderValues = new Map(this._sliders.map(s => [s.label, s.displayValue ?? s.value]));
             this._render();
             this._bindEvents();
         }
@@ -491,18 +491,23 @@ class TuunSynthElement extends HTMLElement {
         this.shadowRoot.querySelectorAll('input[type="range"]').forEach(input => {
             input.addEventListener('input', () => {
                 const label = input.dataset.label;
-                const val = parseFloat(input.value);
+                const rawVal = parseFloat(input.value);
                 const decimals = parseInt(input.dataset.decimals);
-                this._sliderValues.set(label, val);
+                const fnSource = input.dataset.fn;
+
+                // For user-defined sliders, convert normalized (0-1) to actual value
+                const actualVal = fnSource ? evaluateSlider(fnSource, rawVal) : rawVal;
+
+                this._sliderValues.set(label, actualVal);
                 if (this._isPlaying && this._workletNode) {
                     if (!this._pendingSliderUpdates) this._pendingSliderUpdates = new Map();
-                    this._pendingSliderUpdates.set(label, val);
+                    this._pendingSliderUpdates.set(label, actualVal);
                     if (!this._batchTimerId) {
                         this._batchTimerId = setTimeout(() => this._flushSliderUpdates(), 46);
                     }
                 }
                 const span = input.nextElementSibling;
-                if (span) span.textContent = val.toFixed(decimals);
+                if (span) span.textContent = actualVal.toFixed(decimals);
             });
         });
 
@@ -709,12 +714,16 @@ class TuunSynthElement extends HTMLElement {
 
     _renderSliders() {
         if (!this._sliders.length) return '';
-        const rows = this._sliders.map(s => `
+        const rows = this._sliders.map(s => {
+            const displayVal = (s.displayValue ?? s.value).toFixed(s.decimals);
+            const fnAttr = s.functionSource ? ` data-fn="${this._escapeHtml(s.functionSource)}"` : '';
+            return `
             <div class="slider-row">
                 <label>${this._escapeHtml(s.label)}</label>
-                <input type="range" min="${s.min}" max="${s.max}" step="any" value="${s.value}" data-label="${this._escapeHtml(s.label)}" data-decimals="${s.decimals}">
-                <span class="slider-value">${Number(s.value).toFixed(s.decimals)}</span>
-            </div>`).join('');
+                <input type="range" min="${s.min}" max="${s.max}" step="any" value="${s.value}" data-label="${this._escapeHtml(s.label)}" data-decimals="${s.decimals}"${fnAttr}>
+                <span class="slider-value">${displayVal}</span>
+            </div>`;
+        }).join('');
         return `<div class="sliders">${rows}</div>`;
     }
 
@@ -724,9 +733,20 @@ class TuunSynthElement extends HTMLElement {
         try {
             const sliders = JSON.parse(parseSliders(attr));
             return sliders.map(s => {
+                if (s.type === 'user-defined') {
+                    const maxVal = Math.max(Math.abs(s.value_at_0), Math.abs(s.value_at_1));
+                    const intDigits = Math.max(1, String(Math.floor(maxVal)).length);
+                    const decimals = Math.max(0, 3 - intDigits);
+                    return {
+                        type: 'user-defined', label: s.label,
+                        min: 0, max: 1, value: s.normalized_initial_value_value,
+                        displayValue: s.initial_value, decimals,
+                        functionSource: s.function_source,
+                    };
+                }
                 const intDigits = Math.max(1, String(Math.floor(Math.abs(s.max))).length);
                 const decimals = Math.max(0, 3 - intDigits);
-                return { label: s.label, min: s.min, max: s.max, value: s.initial_value, decimals };
+                return { type: 'linear', label: s.label, min: s.min, max: s.max, value: s.initial_value, decimals };
             });
         } catch (e) {
             console.warn('Failed to parse sliders:', e);

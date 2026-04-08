@@ -110,10 +110,11 @@ function passArrayF32ToWasm0(arg, malloc) {
     return ptr;
 }
 /**
- * Parses a slider config string like `["volume:0.5:0:1", "cutoff:2000:200:8000"]`
+ * Parses a slider config string like `["volume:0.5:0:1", "freq:0.5:fn(x) => 100 * pow(100, x)"]`
  * and returns a JSON array of slider objects.
  *
- * Each object has: `{ label, initial_value, min, max }`
+ * Linear sliders: `{ type: "linear", label, initial_value, min, max }`
+ * User-defined sliders: `{ type: "user-defined", label, normalized_initial_value, function_source, initial_value, value_at_0, value_at_1 }`
  *
  * Returns an error string if parsing fails.
  * @param {string} input
@@ -138,6 +139,24 @@ export function parseSliders(input) {
     } finally {
         wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
     }
+}
+
+/**
+ * Evaluates a user-defined slider function at a given normalized value.
+ *
+ * For example, `evaluateSlider("fn(x) => 100 * pow(100, x)", 0.5)` returns ~1000.
+ * @param {string} function_source
+ * @param {number} normalized_value
+ * @returns {number}
+ */
+export function evaluateSlider(function_source, normalized_value) {
+    const ptr0 = passStringToWasm0(function_source, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.evaluateSlider(ptr0, len0, normalized_value);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ret[0];
 }
 
 /**
