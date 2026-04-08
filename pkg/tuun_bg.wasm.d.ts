@@ -10,6 +10,7 @@ export const tuun_process: (a: number, b: number, c: number, d: any) => number;
 export const tuun_is_playing: (a: number) => number;
 export const tuun_sample_rate: (a: number) => number;
 export const parseSliders: (a: number, b: number) => [number, number, number, number];
+export const evaluateSlider: (a: number, b: number, c: number) => [number, number, number];
 export const main: () => void;
 export const __wbindgen_free: (a: number, b: number, c: number) => void;
 export const __wbindgen_malloc: (a: number, b: number) => number;

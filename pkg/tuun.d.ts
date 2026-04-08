@@ -1,14 +1,21 @@
 /* tslint:disable */
 /* eslint-disable */
 /**
- * Parses a slider config string like `["volume:0.5:0:1", "cutoff:2000:200:8000"]`
+ * Parses a slider config string like `["volume:0.5:0:1", "freq:0.5:fn(x) => 100 * pow(100, x)"]`
  * and returns a JSON array of slider objects.
  *
- * Each object has: `{ label, initial_value, min, max }`
+ * Linear sliders: `{ type: "linear", label, initial_value, min, max }`
+ * User-defined sliders: `{ type: "user-defined", label, normalized_initial_value, function_source, initial_value, value_at_0, value_at_1 }`
  *
  * Returns an error string if parsing fails.
  */
 export function parseSliders(input: string): string;
+/**
+ * Evaluates a user-defined slider function at a given normalized value.
+ *
+ * For example, `evaluateSlider("fn(x) => 100 * pow(100, x)", 0.5)` returns ~1000.
+ */
+export function evaluateSlider(function_source: string, normalized_value: number): number;
 /**
  * Initializes the WASM module.
  * This is called automatically when you import the module.
@@ -95,6 +102,7 @@ export interface InitOutput {
   readonly tuun_is_playing: (a: number) => number;
   readonly tuun_sample_rate: (a: number) => number;
   readonly parseSliders: (a: number, b: number) => [number, number, number, number];
+  readonly evaluateSlider: (a: number, b: number, c: number) => [number, number, number];
   readonly main: () => void;
   readonly __wbindgen_free: (a: number, b: number, c: number) => void;
   readonly __wbindgen_malloc: (a: number, b: number) => number;
