@@ -84,11 +84,7 @@ struct Args {
     output_dir: String, // Captures waveforms to the specified directory
 }
 
-fn load_context(
-    active_program_index: usize,
-    args: &Args,
-    mut context: &mut Vec<(String, Expr<MarkId>)>,
-) -> Mode {
+fn load_context(args: &Args, mut context: &mut Vec<(String, Expr<MarkId>)>) -> Mode {
     context.clear();
     context.push(("tempo".to_string(), Expr::Float(args.tempo as f32)));
     context.push((
@@ -152,7 +148,6 @@ fn load_context(
     }
 
     Mode::Select {
-        active_program_index,
         message: if errors.len() == 0 {
             format!("Loaded {} bindings from context", bindings)
         } else {
@@ -160,8 +155,6 @@ fn load_context(
         },
     }
 }
-
-const NUM_PROGRAMS: usize = 8;
 
 // Returns the initial values for all sliders
 fn load_programs(args: &Args, programs: &mut Vec<Program>) -> HashMap<(WaveformId, String), f32> {
@@ -171,12 +164,29 @@ fn load_programs(args: &Args, programs: &mut Vec<Program>) -> HashMap<(WaveformI
         let contents = fs::read_to_string(&args.programs_file).unwrap_or_default();
         let mut pending_sliders: Option<Vec<parser::Slider>> = None;
         for line in contents.lines() {
-            // Check for slider pragma before stripping comments
-            // TODO this doesn't report errors when there is something that looks a bit like
-            // a slider config but isn't.
-            if let Ok(sliders) = parser::parse_annotation(line) {
-                pending_sliders = Some(sliders);
-                continue;
+            // Check for annotations before stripping comments
+            let annos = match parser::parse_annotations(line) {
+                Ok(annos) => annos,
+                Err(e) => {
+                    println!("Got errors parsing annotations: {:?}", e);
+                    continue;
+                }
+            };
+            for anno in annos {
+                match anno {
+                    parser::Annotation::Sliders(sliders) => {
+                        pending_sliders = Some(sliders);
+                    }
+                    parser::Annotation::NextBank => {
+                        while programs.len() % renderer::PROGRAMS_PER_BANK != 0 {
+                            programs.push(Program {
+                                text: String::new(),
+                                id: renderer::id_from_index(programs.len()),
+                                sliders: ProgramSliders::default(),
+                            })
+                        }
+                    }
+                }
             }
 
             let line = if let Some(comment_index) = line.find("//") {
@@ -229,8 +239,8 @@ fn load_programs(args: &Args, programs: &mut Vec<Program>) -> HashMap<(WaveformI
             });
         }
     }
-    // Fill up to NUM_PROGRAMS with empty entries if necessary
-    while programs.len() < NUM_PROGRAMS {
+    // Fill up with empty entries if necessary
+    while programs.len() < renderer::NUM_PROGRAM_BANKS * renderer::PROGRAMS_PER_BANK {
         programs.push(Program {
             text: String::new(),
             id: renderer::id_from_index(programs.len()),
@@ -255,7 +265,7 @@ fn load_programs(args: &Args, programs: &mut Vec<Program>) -> HashMap<(WaveformI
 pub fn main() {
     let args = Args::parse();
     let mut context = Vec::new();
-    let mut mode = load_context(0, &args, &mut context);
+    let mut mode = load_context(&args, &mut context);
     let mut programs: Vec<Program> = Vec::new();
     let last_slider_values = load_programs(&args, &mut programs);
 
@@ -288,7 +298,7 @@ pub fn main() {
             duration: Duration::from_secs(4),                   // Doesn't matter
         }];
         // Parse and send commands to play all of the waveforms.
-        for (index, program) in programs.iter().enumerate() {
+        for program in programs.iter() {
             println!("Playing program {}: {}", program.id, program.text);
             let program = Program {
                 text: program.text.to_string(),
@@ -299,7 +309,6 @@ pub fn main() {
                 &context,
                 &status,
                 &args,
-                index,
                 program.text.len(),
                 &program,
                 &command_sender,
@@ -476,16 +485,23 @@ pub fn main() {
     const BUFFER_REFRESH_INTERVAL: Duration = Duration::from_millis(200);
     let mut next_buffer_refresh = Instant::now();
     command_sender.send(Command::SendCurrentBuffer).unwrap();
+    let mut active_program_index = 0;
     loop {
         for event in event_pump.poll_iter() {
             //println!("Event: {:?} with mode {:?}", event, mode);
-            mode = sdl2_handler.handle_event(event, &context, mode, &status, &mut programs);
+            mode = sdl2_handler.handle_event(
+                event,
+                &context,
+                mode,
+                &mut active_program_index,
+                &status,
+                &mut programs,
+            );
             mode = match mode {
                 Mode::Exit => {
                     return;
                 }
                 Mode::Play {
-                    active_program_index,
                     cursor_position,
                     program,
                     repeat_after_measures,
@@ -493,24 +509,18 @@ pub fn main() {
                     &context,
                     &status,
                     &args,
-                    active_program_index,
                     cursor_position,
                     &program,
                     &command_sender,
                     repeat_after_measures,
                 ),
-                Mode::LoadContext {
-                    active_program_index,
-                } => load_context(active_program_index, &args, &mut context),
-                Mode::LoadPrograms {
-                    active_program_index,
-                } => {
+                Mode::LoadContext {} => load_context(&args, &mut context),
+                Mode::LoadPrograms {} => {
                     let slider_values = load_programs(&args, &mut programs);
                     slider_sender
                         .send(renderer::SliderEvent::SetInitialValues(slider_values))
                         .unwrap();
                     Mode::Select {
-                        active_program_index,
                         message: format!("Loaded programs"),
                     }
                 }
@@ -520,11 +530,7 @@ pub fn main() {
 
         if let Some(midi_handler) = &mut midi_handler {
             // TODO this is a little like calling "render" but on the MIDI device. Generalize?
-            if let Mode::Select {
-                active_program_index,
-                ..
-            } = mode
-            {
+            if let Mode::Select { .. } = mode {
                 // This might be a new program, in which case we need to update any device state.
 
                 midi_handler.update_slider_state(&programs[active_program_index]);
@@ -534,8 +540,14 @@ pub fn main() {
                 match midi_handler.events().try_recv() {
                     Ok(event) => {
                         // TODO handle modes like Play
-                        mode =
-                            midi_handler.handle_event(event, &context, mode, &status, &mut programs)
+                        mode = midi_handler.handle_event(
+                            event,
+                            &context,
+                            mode,
+                            &mut active_program_index,
+                            &status,
+                            &mut programs,
+                        )
                     }
                     Err(mpsc::TryRecvError::Empty) => {
                         break;
@@ -593,7 +605,14 @@ pub fn main() {
         if statuses_received > 1 {
             println!("Received {} statuses", statuses_received);
         }
-        renderer.render(&ttf_context, &programs, &status, &mode, &mut metrics);
+        renderer.render(
+            &ttf_context,
+            &programs,
+            &status,
+            &mode,
+            active_program_index,
+            &mut metrics,
+        );
     }
 }
 
@@ -667,13 +686,12 @@ fn play_waveform(
     context: &Vec<(String, Expr<MarkId>)>,
     status: &tracker::Status<WaveformId, MarkId>,
     args: &Args,
-    active_program_index: usize,
     cursor_position: usize,
     program: &Program,
     command_sender: &std::sync::mpsc::Sender<Command<WaveformId, MarkId>>,
     repeat_after_measures: Option<u32>,
 ) -> Mode {
-    match renderer::play_waveform_helper(&context, active_program_index, cursor_position, program) {
+    match renderer::play_waveform_helper(&context, cursor_position, program) {
         WaveformOrMode::Waveform(mut waveform) => {
             if args.precompute {
                 // TODO probably precompute should happen on another thread
@@ -705,10 +723,7 @@ fn play_waveform(
                 })
                 .unwrap();
 
-            return Mode::Select {
-                active_program_index,
-                message,
-            };
+            return Mode::Select { message };
         }
         WaveformOrMode::Mode(new_mode) => {
             return new_mode;

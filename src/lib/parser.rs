@@ -667,6 +667,7 @@ pub enum SliderFunction {
 #[derive(Debug, Clone)]
 pub enum Annotation {
     Sliders(Vec<Slider>),
+    NextBank,
 }
 
 /// Parses a slider config entry — either linear `"label:initial:min:max"`
@@ -747,34 +748,57 @@ fn parse_slider(input: LocatedSpan) -> IResult<Slider> {
     }
 }
 
+fn parse_sliders_internal(input: LocatedSpan) -> IResult<Vec<Slider>> {
+    let (rest, sliders) = preceded(
+        tag("sliders="),
+        delimited(
+            ws(char('[')),
+            separated_list0(ws(char(',')), parse_slider),
+            ws(char(']')),
+        ),
+    )
+    .parse(input)?;
+    Ok((rest, sliders))
+}
+
 /// Parses a bracket-delimited, comma-separated list of slider configs.
 /// Example: `["volume:0.5:0:1", "cutoff:2000:200:8000"]`
 pub fn parse_sliders(input: &str) -> Result<Vec<Slider>, Vec<Error>> {
     let errors = RefCell::new(Vec::new());
     let span = LocatedSpan::new_extra(input, ParseState(&errors));
-
-    let result = delimited(
-        char('['),
-        separated_list0(char(','), ws(parse_slider)),
-        char(']'),
-    )
-    .parse(span);
+    let result = all_consuming(parse_sliders_internal).parse(span);
     if errors.borrow().len() > 0 {
         return Err(errors.into_inner());
     }
     translate_parse_result(result)
 }
 
-fn trim_annotation(line: &str) -> Option<&str> {
-    let trimmed = line.trim();
-    let rest = trimmed.strip_prefix("//#{")?.strip_suffix('}')?;
-    Some(rest.strip_prefix("sliders=")?.trim())
-}
-
-/// Parses a slider pragma line like `//#{sliders=[...]}`.
-pub fn parse_annotation(line: &str) -> Result<Vec<Slider>, Vec<Error>> {
-    let rest = trim_annotation(line).unwrap_or("");
-    parse_sliders(rest)
+/// Parses annotations like `//#{sliders=[...],next_bank}`.
+pub fn parse_annotations(line: &str) -> Result<Vec<Annotation>, Vec<Error>> {
+    match line.trim().strip_prefix("//#") {
+        Some(input) => {
+            let errors = RefCell::new(Vec::new());
+            let span = LocatedSpan::new_extra(input, ParseState(&errors));
+            #[rustfmt::skip]
+            let result = all_consuming(
+                delimited(
+                    ws(char('{')),
+                    separated_list0(
+                        ws(char(',')),
+                        alt((
+                            parse_sliders_internal.map(Annotation::Sliders),
+                            tag("next_bank").map(|_| Annotation::NextBank),
+                        ))),
+                    ws(char('}')),
+                )
+            ).parse(span);
+            if errors.borrow().len() > 0 {
+                return Err(errors.into_inner());
+            }
+            translate_parse_result(result)
+        }
+        None => Ok(Vec::new()),
+    }
 }
 
 /// Extends the context with a binding for each identifier in the pattern that is bound to
@@ -1231,13 +1255,13 @@ mod tests {
     #[test]
     fn test_parse_sliders() {
         // Empty list
-        let result = parse_sliders("[]");
+        let result = parse_sliders("sliders=[]");
         assert!(result.is_ok());
         let configs = result.unwrap();
         assert_eq!(configs.len(), 0);
 
         // Single slider
-        let result = parse_sliders(r#"["volume:0.75:0:1"]"#);
+        let result = parse_sliders(r#"sliders=["volume:0.75:0:1"]"#);
         assert!(result.is_ok());
         let configs = result.unwrap();
         assert_eq!(configs.len(), 1);
@@ -1256,7 +1280,7 @@ mod tests {
         }
 
         // Multiple sliders
-        let result = parse_sliders(r#"["volume:0.5:0:1", "cutoff:2000:200:8000"]"#);
+        let result = parse_sliders(r#"sliders=[ "volume:0.5:0:1" , "cutoff:2000:200:8000" ]"#);
         assert!(result.is_ok());
         let configs = result.unwrap();
 
@@ -1277,7 +1301,8 @@ mod tests {
         }
 
         // Mixed linear and user-defined sliders
-        let result = parse_sliders(r#"["volume:0.5:0:1", "freq:0.5:fn(x) => 100 * pow(100, x)"]"#);
+        let result =
+            parse_sliders(r#"sliders=["volume:0.5:0:1", "freq:0.5:fn(x) => 100 * pow(100, x)"]"#);
         assert!(result.is_ok());
         let configs = result.unwrap();
         assert_eq!(configs.len(), 2);
@@ -1297,24 +1322,33 @@ mod tests {
         let result = parse_sliders("not a list");
         assert!(result.is_err());
 
-        let result = parse_sliders(r#"["gain:-0.5:0:1"]"#);
+        let result = parse_sliders(r#"sliders=["gain:-0.5:0:1"]"#);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_parse_annotation() {
-        // Valid pragma
-        let result = parse_annotation(r#"  //#{sliders=["volume:0.75:0:1"]}  "#);
+    fn test_parse_annotations() {
+        // Valid annotation
+        let result = parse_annotations(r#"  //#{sliders=["volume:0.75:0:1"]}  "#);
         assert!(result.is_ok());
-        let configs = result.unwrap();
-        assert_eq!(configs.len(), 1);
-        assert_eq!(configs[0].label, "volume");
+        let annos = result.unwrap();
+        assert_eq!(annos.len(), 1);
+        let result = parse_annotations(r#"  //#{sliders=["volume:0.75:0:1"],next_bank}"#);
+        assert!(result.is_ok());
+        let annos = result.unwrap();
+        assert_eq!(annos.len(), 2);
 
-        // Not a pragma
-        assert!(parse_annotation("// regular comment").is_err());
-        assert!(parse_annotation("let x = 1").is_err());
+        // Not an annotation
+        let result = parse_annotations("// regular comment");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 0);
+        let result = parse_annotations("let x = 1");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 0);
 
-        // Pragma with different key
-        assert!(parse_annotation("//#{other=[]}").is_err());
+        // Missing closing bracket
+        assert!(parse_annotations("//#{next_bank").is_err());
+        // Bad key
+        assert!(parse_annotations("//#{bad_key=[]}").is_err());
     }
 }

@@ -3,7 +3,7 @@ use std::sync::mpsc::Receiver;
 
 use crate::launchkey;
 use crate::parser;
-use crate::renderer::{self, MarkId, Program, WaveformId};
+use crate::renderer::{self, MarkId, PROGRAMS_PER_BANK, Program, WaveformId};
 use crate::slider;
 use crate::tracker;
 
@@ -33,50 +33,50 @@ impl InputHandler {
         event: launchkey::Event,
         _context: &Vec<(String, parser::Expr<MarkId>)>,
         mode: renderer::Mode,
+        active_program_index: &mut usize,
         _status: &tracker::Status<WaveformId, MarkId>,
         programs: &mut Vec<Program>,
     ) -> renderer::Mode {
         use launchkey::Event;
         use renderer::Mode;
         match (mode, event) {
-            (
+            (Mode::Select { .. }, Event::NextTrack) => {
+                *active_program_index = (*active_program_index + 1) % programs.len();
+                self.update_slider_state(&programs[*active_program_index]);
                 Mode::Select {
-                    active_program_index,
-                    ..
-                },
-                Event::NextTrack,
-            ) => {
-                let active_program_index = (active_program_index + 1) % programs.len();
-                self.update_slider_state(&programs[active_program_index]);
+                    message: String::new(),
+                }
+            }
+            (Mode::Select { .. }, Event::PreviousTrack) => {
+                *active_program_index =
+                    (*active_program_index + programs.len() - 1) % programs.len();
+                self.update_slider_state(&programs[*active_program_index]);
                 Mode::Select {
-                    active_program_index,
+                    message: String::new(),
+                }
+            }
+            (Mode::Select { .. }, Event::NextTrackBank) => {
+                *active_program_index =
+                    (*active_program_index + PROGRAMS_PER_BANK) % programs.len();
+                self.update_slider_state(&programs[*active_program_index]);
+                Mode::Select {
+                    message: String::new(),
+                }
+            }
+            (Mode::Select { .. }, Event::PreviousTrackBank) => {
+                *active_program_index =
+                    (*active_program_index + programs.len() - PROGRAMS_PER_BANK) % programs.len();
+                self.update_slider_state(&programs[*active_program_index]);
+                Mode::Select {
                     message: String::new(),
                 }
             }
             (
-                Mode::Select {
-                    active_program_index,
-                    ..
-                },
-                Event::PreviousTrack,
-            ) => {
-                let active_program_index =
-                    (active_program_index + programs.len() - 1) % programs.len();
-                self.update_slider_state(&programs[active_program_index]);
-                Mode::Select {
-                    active_program_index,
-                    message: String::new(),
-                }
-            }
-            (
-                Mode::Select {
-                    active_program_index,
-                    ..
-                },
+                Mode::Select { .. } | Mode::Edit { .. },
                 Event::PluginEncoderChange { index, value },
             ) => {
                 let index = index as usize;
-                let program = &mut programs[active_program_index];
+                let program = &mut programs[*active_program_index];
                 let ps = &mut program.sliders;
                 let message;
                 if index < ps.configs.len() {
@@ -103,10 +103,7 @@ impl InputHandler {
                 } else {
                     message = format!("No slider with index {}", index);
                 }
-                Mode::Select {
-                    active_program_index,
-                    message,
-                }
+                Mode::Select { message }
             }
 
             (mode, event) => {

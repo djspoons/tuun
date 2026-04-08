@@ -3,7 +3,9 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 use crate::parser;
-use crate::renderer::{self, MarkId, Mode, Program, SliderEvent, WaveformId, WaveformOrMode};
+use crate::renderer::{
+    self, MarkId, Mode, PROGRAMS_PER_BANK, Program, SliderEvent, WaveformId, WaveformOrMode,
+};
 use crate::slider;
 use crate::tracker::{self, Command};
 
@@ -38,6 +40,7 @@ impl<'a> InputHandler<'a> {
         event: sdl2::event::Event,
         context: &Vec<(String, parser::Expr<MarkId>)>,
         mode: renderer::Mode,
+        active_program_index: &mut usize,
         status: &tracker::Status<WaveformId, MarkId>,
         programs: &mut Vec<Program>,
     ) -> renderer::Mode {
@@ -59,13 +62,7 @@ impl<'a> InputHandler<'a> {
                             return mode;
                         }
                     }
-                    (
-                        Mode::Select {
-                            active_program_index,
-                            ..
-                        },
-                        Some(Scancode::Return),
-                    ) => {
+                    (Mode::Select { .. }, Some(Scancode::Return)) => {
                         if keymod.contains(Mod::LGUIMOD) || keymod.contains(Mod::RGUIMOD) {
                             let repeat_after_measures = if keymod.contains(Mod::LSHIFTMOD)
                                 || keymod.contains(Mod::RSHIFTMOD)
@@ -75,9 +72,8 @@ impl<'a> InputHandler<'a> {
                                 1
                             };
                             return Mode::Play {
-                                active_program_index,
-                                cursor_position: programs[active_program_index].text.len(),
-                                program: programs[active_program_index].clone(),
+                                cursor_position: programs[*active_program_index].text.len(),
+                                program: programs[*active_program_index].clone(),
                                 repeat_after_measures: Some(repeat_after_measures),
                             };
                         }
@@ -86,39 +82,38 @@ impl<'a> InputHandler<'a> {
                         if renderer::is_pending_program(
                             &status,
                             Instant::now(),
-                            programs[active_program_index].id,
+                            programs[*active_program_index].id,
                         ) {
                             // If it is, send a command to remove it.
                             self.command_sender
                                 .send(Command::RemovePending {
-                                    id: WaveformId::Program(programs[active_program_index].id),
+                                    id: WaveformId::Program(programs[*active_program_index].id),
                                 })
                                 .unwrap();
                         }
                         let mut mode = edit_mode_from_program(
-                            active_program_index,
-                            programs[active_program_index].text.len(),
-                            &programs[active_program_index].text,
+                            programs[*active_program_index].text.len(),
+                            &programs[*active_program_index].text,
                         );
                         mode = match mode {
                             Mode::Edit {
-                                active_program_index,
                                 cursor_position,
                                 message,
                                 errors,
                             } => {
                                 if !errors.is_empty() {
                                     Mode::Edit {
-                                        active_program_index,
                                         cursor_position,
                                         message: format!("Error: {}", errors[0].to_string()),
                                         errors,
                                     }
-                                } else if !programs[active_program_index].sliders.configs.is_empty()
+                                } else if !programs[*active_program_index]
+                                    .sliders
+                                    .configs
+                                    .is_empty()
                                 {
-                                    let ps = &programs[active_program_index].sliders;
+                                    let ps = &programs[*active_program_index].sliders;
                                     Mode::Edit {
-                                        active_program_index,
                                         cursor_position,
                                         message: format!(
                                             "{}",
@@ -132,7 +127,6 @@ impl<'a> InputHandler<'a> {
                                     }
                                 } else {
                                     Mode::Edit {
-                                        active_program_index,
                                         cursor_position,
                                         errors,
                                         message,
@@ -143,13 +137,7 @@ impl<'a> InputHandler<'a> {
                         };
                         mode
                     }
-                    (
-                        Mode::Select {
-                            active_program_index,
-                            ..
-                        },
-                        Some(Scancode::Escape),
-                    ) => {
+                    (Mode::Select { .. }, Some(Scancode::Escape)) => {
                         let mut message = String::new();
 
                         if keymod.contains(Mod::LGUIMOD)
@@ -157,77 +145,59 @@ impl<'a> InputHandler<'a> {
                                 && renderer::is_active_program(
                                     &status,
                                     Instant::now(),
-                                    programs[active_program_index].id,
+                                    programs[*active_program_index].id,
                                 )
                         {
                             // If the program is active, stop it
                             self.command_sender
                                 .send(Command::Stop {
-                                    id: WaveformId::Program(programs[active_program_index].id),
+                                    id: WaveformId::Program(programs[*active_program_index].id),
                                 })
                                 .unwrap();
                             message =
-                                format!("Stopped program {}", programs[active_program_index].id);
+                                format!("Stopped program {}", programs[*active_program_index].id);
                         } else if !keymod.contains(Mod::LGUIMOD)
                             && !keymod.contains(Mod::RGUIMOD)
                             && renderer::is_pending_program(
                                 &status,
                                 Instant::now(),
-                                programs[active_program_index].id,
+                                programs[*active_program_index].id,
                             )
                         {
                             // If it is, send a command to remove it.
                             self.command_sender
                                 .send(Command::RemovePending {
-                                    id: WaveformId::Program(programs[active_program_index].id),
+                                    id: WaveformId::Program(programs[*active_program_index].id),
                                 })
                                 .unwrap();
                             message = format!(
                                 "Removed pending waveform for program {}",
-                                programs[active_program_index].id
+                                programs[*active_program_index].id
                             );
                         }
+                        Mode::Select { message }
+                    }
+                    (Mode::Select { .. }, Some(Scancode::Up)) => {
+                        *active_program_index =
+                            (*active_program_index + programs.len() - 1) % programs.len();
                         Mode::Select {
-                            active_program_index,
-                            message,
+                            message: String::new(),
                         }
                     }
-                    (
+                    (Mode::Select { .. }, Some(Scancode::Down)) => {
+                        *active_program_index = (*active_program_index + 1) % programs.len();
                         Mode::Select {
-                            active_program_index,
-                            ..
-                        },
-                        Some(Scancode::Up),
-                    ) => Mode::Select {
-                        active_program_index: (active_program_index + programs.len() - 1)
-                            % programs.len(),
-                        message: String::new(),
-                    },
-                    (
-                        Mode::Select {
-                            active_program_index,
-                            ..
-                        },
-                        Some(Scancode::Down),
-                    ) => Mode::Select {
-                        active_program_index: (active_program_index + 1) % programs.len(),
-                        message: String::new(),
-                    },
-
-                    (
-                        Mode::Select {
-                            active_program_index,
-                            ..
-                        },
-                        Some(Scancode::LAlt) | Some(Scancode::RAlt),
-                    ) if self.handle_mouse_events => Mode::MoveSliders {
-                        active_program_index,
-                    },
+                            message: String::new(),
+                        }
+                    }
+                    (Mode::Select { .. }, Some(Scancode::LAlt) | Some(Scancode::RAlt))
+                        if self.handle_mouse_events =>
+                    {
+                        Mode::MoveSliders {}
+                    }
                     (
                         Mode::Edit {
-                            active_program_index,
-                            cursor_position,
-                            ..
+                            cursor_position, ..
                         },
                         Some(Scancode::Return),
                     ) => {
@@ -244,23 +214,20 @@ impl<'a> InputHandler<'a> {
                             None
                         };
                         Mode::Play {
-                            active_program_index,
                             cursor_position,
-                            program: programs[active_program_index].clone(),
+                            program: programs[*active_program_index].clone(),
                             repeat_after_measures,
                         }
                     }
                     (
                         Mode::Edit {
-                            active_program_index,
-                            cursor_position,
-                            ..
+                            cursor_position, ..
                         },
                         Some(Scancode::Backspace),
                     ) => {
                         // If the option key is down, clear the last word
                         let mut new_cursor_position = cursor_position;
-                        let mut text = programs[active_program_index].text.clone();
+                        let mut text = programs[*active_program_index].text.clone();
                         if keymod.contains(Mod::LALTMOD) {
                             if let Some(char_index) =
                                 text[..cursor_position].rfind(|e: char| !e.is_whitespace())
@@ -288,17 +255,15 @@ impl<'a> InputHandler<'a> {
                                 new_cursor_position = cursor_position - 1;
                             }
                         }
-                        programs[active_program_index].text = text;
+                        programs[*active_program_index].text = text;
                         let mode = edit_mode_from_program(
-                            active_program_index,
                             new_cursor_position,
-                            &programs[active_program_index].text,
+                            &programs[*active_program_index].text,
                         );
                         mode
                     }
                     (
                         Mode::Edit {
-                            active_program_index,
                             cursor_position,
                             errors,
                             ..
@@ -310,19 +275,18 @@ impl<'a> InputHandler<'a> {
                                 && renderer::is_active_program(
                                     &status,
                                     Instant::now(),
-                                    programs[active_program_index].id,
+                                    programs[*active_program_index].id,
                                 )
                         {
                             // If the program is active, stop it
                             self.command_sender
                                 .send(Command::Stop {
-                                    id: WaveformId::Program(programs[active_program_index].id),
+                                    id: WaveformId::Program(programs[*active_program_index].id),
                                 })
                                 .unwrap();
                             let message =
-                                format!("Stopped program {}", programs[active_program_index].id);
+                                format!("Stopped program {}", programs[*active_program_index].id);
                             return Mode::Edit {
-                                active_program_index,
                                 cursor_position,
                                 errors,
                                 message,
@@ -330,13 +294,11 @@ impl<'a> InputHandler<'a> {
                         }
                         // Otherwise, return to select mode
                         Mode::Select {
-                            active_program_index,
                             message: String::new(),
                         }
                     }
                     (
                         Mode::Edit {
-                            active_program_index,
                             cursor_position,
                             errors,
                             message,
@@ -345,7 +307,7 @@ impl<'a> InputHandler<'a> {
                     ) => {
                         let new_cursor_position;
                         if keymod.contains(Mod::LALTMOD) {
-                            let text = &programs[active_program_index].text;
+                            let text = &programs[*active_program_index].text;
                             if let Some(char_index) =
                                 text[..cursor_position].rfind(|e: char| !e.is_whitespace())
                             {
@@ -363,7 +325,6 @@ impl<'a> InputHandler<'a> {
                             new_cursor_position = cursor_position.saturating_sub(1);
                         }
                         Mode::Edit {
-                            active_program_index,
                             cursor_position: new_cursor_position,
                             errors,
                             message,
@@ -371,7 +332,6 @@ impl<'a> InputHandler<'a> {
                     }
                     (
                         Mode::Edit {
-                            active_program_index,
                             cursor_position,
                             errors,
                             message,
@@ -379,12 +339,11 @@ impl<'a> InputHandler<'a> {
                         Some(Scancode::Right),
                     ) => {
                         // TODO check for LALTMOD and move to next word
-                        let cursor_position = programs[active_program_index]
+                        let cursor_position = programs[*active_program_index]
                             .text
                             .len()
                             .min(cursor_position + 1);
                         Mode::Edit {
-                            active_program_index,
                             cursor_position,
                             errors,
                             message,
@@ -392,7 +351,6 @@ impl<'a> InputHandler<'a> {
                     }
                     (
                         Mode::Edit {
-                            active_program_index,
                             cursor_position: _,
                             errors,
                             message,
@@ -400,7 +358,6 @@ impl<'a> InputHandler<'a> {
                         Some(Scancode::A),
                     ) if keymod.contains(Mod::LCTRLMOD) || keymod.contains(Mod::RCTRLMOD) => {
                         Mode::Edit {
-                            active_program_index,
                             cursor_position: 0,
                             errors,
                             message,
@@ -408,7 +365,6 @@ impl<'a> InputHandler<'a> {
                     }
                     (
                         Mode::Edit {
-                            active_program_index,
                             cursor_position: _,
                             errors,
                             message,
@@ -416,8 +372,7 @@ impl<'a> InputHandler<'a> {
                         Some(Scancode::E),
                     ) if keymod.contains(Mod::LCTRLMOD) || keymod.contains(Mod::RCTRLMOD) => {
                         Mode::Edit {
-                            active_program_index,
-                            cursor_position: programs[active_program_index].text.len(),
+                            cursor_position: programs[*active_program_index].text.len(),
                             errors,
                             message,
                         }
@@ -431,14 +386,10 @@ impl<'a> InputHandler<'a> {
             } => {
                 // Exit move sliders mode when the left alt key is released
                 match mode {
-                    Mode::MoveSliders {
-                        active_program_index,
-                        ..
-                    } => {
+                    Mode::MoveSliders { .. } => {
                         // If we were in move sliders mode, return to select mode
 
                         Mode::Select {
-                            active_program_index,
                             message: String::new(),
                         }
                     }
@@ -447,24 +398,22 @@ impl<'a> InputHandler<'a> {
             }
             Event::TextInput { text, .. } => {
                 match mode {
-                    Mode::Select {
-                        active_program_index,
-                        ..
-                    } => {
-                        // If the text is a number less than programs.len(), update the index
+                    Mode::Select { .. } => {
+                        // If the text is a number less than the number of programs per bank, update the index
                         if let Ok(new_active_program_id) = text.parse::<renderer::ProgramId>() {
                             if new_active_program_id > 0
-                                && new_active_program_id as usize <= programs.len()
+                                && new_active_program_id as usize <= renderer::PROGRAMS_PER_BANK
                             {
+                                let bank_start = *active_program_index
+                                    - (*active_program_index % PROGRAMS_PER_BANK);
+                                *active_program_index = renderer::index_from_id(
+                                    bank_start as i32 + new_active_program_id,
+                                );
                                 return Mode::Select {
-                                    active_program_index: renderer::index_from_id(
-                                        new_active_program_id,
-                                    ),
                                     message: String::new(),
                                 };
                             } else {
                                 return Mode::Select {
-                                    active_program_index,
                                     message: format!(
                                         "Invalid program id: {}",
                                         new_active_program_id
@@ -473,13 +422,9 @@ impl<'a> InputHandler<'a> {
                             }
                         } else if text == "R" {
                             // Reload context
-                            return Mode::LoadContext {
-                                active_program_index,
-                            };
+                            return Mode::LoadContext {};
                         } else if text == "L" {
-                            return Mode::LoadPrograms {
-                                active_program_index,
-                            };
+                            return Mode::LoadPrograms {};
                         } else if text == "S" {
                             // Save programs
                             use std::io::Write;
@@ -532,51 +477,44 @@ impl<'a> InputHandler<'a> {
                                 }
                             }
                             return Mode::Select {
-                                active_program_index,
                                 message: format!("Saved to {}", &filename),
                             };
                         } else if text == "D" {
                             // Dump the current waveform definition to the console
                             match renderer::play_waveform_helper(
                                 &context,
-                                active_program_index,
-                                programs[active_program_index].text.len(),
-                                &programs[active_program_index],
+                                programs[*active_program_index].text.len(),
+                                &programs[*active_program_index],
                             ) {
                                 WaveformOrMode::Waveform(waveform) => {
                                     println!(
                                         "Waveform definition for program {}:",
-                                        programs[active_program_index].id
+                                        programs[*active_program_index].id
                                     );
                                     println!("{:#?}", waveform);
                                 }
                                 _ => (),
                             }
                             return Mode::Select {
-                                active_program_index,
                                 message: format!("Dumped waveform to console"),
                             };
                         } else {
                             return Mode::Select {
-                                active_program_index,
                                 message: format!("Invalid command: {}", text),
                             };
                         }
                     }
                     Mode::Edit {
-                        active_program_index,
-                        cursor_position,
-                        ..
+                        cursor_position, ..
                     } => {
                         let mut new_text =
-                            programs[active_program_index].text[..cursor_position].to_string();
+                            programs[*active_program_index].text[..cursor_position].to_string();
                         new_text.push_str(&text);
-                        new_text.push_str(&programs[active_program_index].text[cursor_position..]);
-                        programs[active_program_index].text = new_text;
+                        new_text.push_str(&programs[*active_program_index].text[cursor_position..]);
+                        programs[*active_program_index].text = new_text;
                         return edit_mode_from_program(
-                            active_program_index,
                             cursor_position + text.len(),
-                            &programs[active_program_index].text,
+                            &programs[*active_program_index].text,
                         );
                     }
                     Mode::MoveSliders { .. }
@@ -589,11 +527,8 @@ impl<'a> InputHandler<'a> {
                 }
             }
             Event::MouseMotion { xrel, yrel, .. } if self.handle_mouse_events => match mode {
-                Mode::MoveSliders {
-                    active_program_index,
-                    ..
-                } => {
-                    let program = &mut programs[active_program_index];
+                Mode::MoveSliders { .. } => {
+                    let program = &mut programs[*active_program_index];
                     let ps = &mut program.sliders;
                     // First slider maps to mouse X axis
                     if xrel != 0 && !ps.configs.is_empty() {
@@ -625,9 +560,7 @@ impl<'a> InputHandler<'a> {
                             })
                             .unwrap();
                     }
-                    return Mode::MoveSliders {
-                        active_program_index,
-                    };
+                    return Mode::MoveSliders {};
                 }
                 _ => {
                     return mode;
@@ -640,13 +573,8 @@ impl<'a> InputHandler<'a> {
     }
 }
 
-fn edit_mode_from_program(
-    active_program_index: usize,
-    cursor_position: usize,
-    program: &str,
-) -> Mode {
+fn edit_mode_from_program(cursor_position: usize, program: &str) -> Mode {
     Mode::Edit {
-        active_program_index,
         cursor_position,
         errors: if program.is_empty() {
             Vec::new()

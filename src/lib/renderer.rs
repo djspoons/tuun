@@ -83,35 +83,26 @@ impl MarkId {
 // `active_program_index` should be the index of the active program in the `programs` array
 pub enum Mode {
     Select {
-        active_program_index: usize,
         message: String,
     },
     Edit {
-        active_program_index: usize,
         // TODO unicode!!
         cursor_position: usize, // Cursor is located before the character this position
         errors: Vec<parser::Error>,
         message: String,
     },
-    MoveSliders {
-        active_program_index: usize, // Don't forget this
-    },
+    MoveSliders {},
     // The following are transient modes that are used to indicate an action should be
     // taken. They are used either when the action requires significant computation or
     // modifies the context.
     Play {
-        active_program_index: usize,
         cursor_position: usize,
         program: Program,
         // After how many measures should this program repeat (if any)
         repeat_after_measures: Option<u32>,
     },
-    LoadContext {
-        active_program_index: usize,
-    },
-    LoadPrograms {
-        active_program_index: usize,
-    },
+    LoadContext {},
+    LoadPrograms {},
     Exit,
 }
 
@@ -157,6 +148,9 @@ pub struct Program {
     pub id: ProgramId,
     pub sliders: ProgramSliders,
 }
+
+pub const PROGRAMS_PER_BANK: usize = 8;
+pub const NUM_PROGRAM_BANKS: usize = 8;
 
 pub struct SliderDisplay {
     pub label: String,
@@ -296,6 +290,7 @@ impl Renderer {
         programs: &[Program],
         status: &tracker::Status<WaveformId, MarkId>,
         mode: &Mode,
+        active_program_index: usize,
         metrics: &mut Metrics,
     ) {
         // TODO so much clean-up
@@ -326,20 +321,19 @@ impl Renderer {
         self.canvas.clear();
 
         let mut y = 10;
-        for (index, program) in programs.iter().enumerate() {
+        let bank_start = active_program_index - (active_program_index % PROGRAMS_PER_BANK);
+        for (i, program) in programs[bank_start..bank_start + PROGRAMS_PER_BANK]
+            .iter()
+            .enumerate()
+        {
+            let index = bank_start + i;
             let color = match (&mode, is_pending_program(&status, now, program.id)) {
                 (_, true) => ACTIVE_COLOR,
-                (
-                    Mode::Edit {
-                        active_program_index,
-                        ..
-                    },
-                    _,
-                ) if index == *active_program_index => EDIT_COLOR,
+                (Mode::Edit { .. }, _) if index == active_program_index => EDIT_COLOR,
                 _ => INACTIVE_COLOR,
             };
             if !is_pending_program(&status, now, program.id) || current_beat % 2 == 1 {
-                let number = char::from_u32(0x31 + index as u32).unwrap().to_string();
+                let number = char::from_u32(0x31 + i as u32).unwrap().to_string();
                 let number_texture = make_texture(&font, color, &texture_creator, &number);
                 let TextureQuery {
                     width: number_width,
@@ -383,7 +377,6 @@ impl Renderer {
 
             match *mode {
                 Mode::Edit {
-                    active_program_index,
                     cursor_position,
                     ref errors,
                     ..
@@ -455,14 +448,7 @@ impl Renderer {
                         }
                     }
                 }
-                Mode::Select {
-                    active_program_index,
-                    ..
-                }
-                | Mode::MoveSliders {
-                    active_program_index,
-                    ..
-                } => {
+                Mode::Select { .. } | Mode::MoveSliders { .. } => {
                     if active_program_index == index {
                         let color = match mode {
                             Mode::MoveSliders { .. } => ACTIVE_COLOR,
@@ -524,23 +510,8 @@ impl Renderer {
             INACTIVE_COLOR
         };
         self.canvas.set_draw_color(slider_color);
-        let slider_display: Vec<SliderDisplay> = match &mode {
-            Mode::MoveSliders {
-                active_program_index,
-            }
-            | Mode::Select {
-                active_program_index,
-                ..
-            }
-            | Mode::Edit {
-                active_program_index,
-                ..
-            } => programs[*active_program_index].sliders.slider_display(),
-            Mode::Play { .. }
-            | Mode::LoadContext { .. }
-            | Mode::LoadPrograms { .. }
-            | Mode::Exit => Vec::new(),
-        };
+        let slider_display: Vec<SliderDisplay> =
+            programs[active_program_index].sliders.slider_display();
         // First slider: horizontal indicator at top
         if let Some(s) = slider_display.get(0) {
             self.canvas
@@ -963,7 +934,6 @@ pub fn is_active_program(
 
 pub fn play_waveform_helper(
     context: &Vec<(String, parser::Expr<MarkId>)>,
-    active_program_index: usize,
     cursor_position: usize,
     program: &Program,
 ) -> WaveformOrMode {
@@ -989,7 +959,6 @@ pub fn play_waveform_helper(
                         _ => {
                             println!("Expression is not a waveform, cannot play: {:#?}", expr);
                             return WaveformOrMode::Mode(Mode::Edit {
-                                active_program_index,
                                 cursor_position,
                                 errors: vec![parser::Error::new(
                                     "Expression is not a waveform".to_string(),
@@ -1007,7 +976,6 @@ pub fn play_waveform_helper(
                     println!("Errors while evaluating input: {:?}", error);
                     let message = format!("Error: {}", error.to_string());
                     return WaveformOrMode::Mode(Mode::Edit {
-                        active_program_index,
                         cursor_position,
                         errors: vec![error],
                         message: message,
@@ -1020,7 +988,6 @@ pub fn play_waveform_helper(
             println!("Errors while parsing input: {:?}", errors);
             let message = format!("Error: {}", errors[0].to_string());
             return WaveformOrMode::Mode(Mode::Edit {
-                active_program_index,
                 cursor_position,
                 errors,
                 message,
