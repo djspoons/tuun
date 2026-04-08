@@ -130,7 +130,6 @@ pub struct ProgramSliders {
 impl ProgramSliders {
     // TODO this method only works for mouse-based sliders
     pub fn slider_display(&self) -> Vec<SliderDisplay> {
-        use parser::SliderFunction;
         self.configs
             .iter()
             .enumerate()
@@ -138,15 +137,14 @@ impl ProgramSliders {
                 let norm = self.normalized_values[j];
                 SliderDisplay {
                     label: config.label.clone(),
+                    // TODO this is wrong for encoders
                     axis: if j == 0 {
                         "X".to_string()
                     } else {
                         "Y".to_string()
                     },
                     normalized_value: norm,
-                    actual_value: match config.function {
-                        SliderFunction::Linear { min, max, .. } => min + norm * (max - min),
-                    },
+                    actual_value: slider::denormalize(&config.function, norm).unwrap_or(0.0),
                 }
             })
             .collect()

@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use crate::parser;
 use crate::renderer::{self, MarkId, Mode, Program, SliderEvent, WaveformId, WaveformOrMode};
+use crate::slider;
 use crate::tracker::{self, Command};
 
 pub struct InputHandler<'a> {
@@ -493,7 +494,7 @@ impl<'a> InputHandler<'a> {
                                             .configs
                                             .iter()
                                             .enumerate()
-                                            .map(|(j, c)| match c.function {
+                                            .map(|(j, c)| match &c.function {
                                                 parser::SliderFunction::Linear {
                                                     min, max, ..
                                                 } => {
@@ -503,6 +504,17 @@ impl<'a> InputHandler<'a> {
                                                     format!(
                                                         "\"{}:{:.3}:{:.3}:{:.3}\"",
                                                         c.label, actual, min, max
+                                                    )
+                                                }
+                                                parser::SliderFunction::UserDefined {
+                                                    function_source,
+                                                    ..
+                                                } => {
+                                                    format!(
+                                                        "\"{}:{:.3}:{}\"",
+                                                        c.label,
+                                                        ps.normalized_values[j],
+                                                        function_source
                                                     )
                                                 }
                                             })
@@ -581,7 +593,6 @@ impl<'a> InputHandler<'a> {
                     active_program_index,
                     ..
                 } => {
-                    use parser::SliderFunction;
                     let program = &mut programs[active_program_index];
                     let ps = &mut program.sliders;
                     // First slider maps to mouse X axis
@@ -589,9 +600,8 @@ impl<'a> InputHandler<'a> {
                         let norm = &mut ps.normalized_values[0];
                         *norm = (*norm + xrel as f32 / self.display_width as f32).clamp(0.0, 1.0);
                         let config = &ps.configs[0];
-                        let actual_value = match config.function {
-                            SliderFunction::Linear { min, max, .. } => min + *norm * (max - min),
-                        };
+                        let actual_value =
+                            slider::denormalize(&config.function, *norm).unwrap_or(0.0);
                         self.slider_sender
                             .send(SliderEvent::UpdateSlider {
                                 id: WaveformId::Program(program.id),
@@ -605,9 +615,8 @@ impl<'a> InputHandler<'a> {
                         let norm = &mut ps.normalized_values[1];
                         *norm = (*norm - yrel as f32 / self.display_height as f32).clamp(0.0, 1.0);
                         let config = &ps.configs[1];
-                        let actual_value = match config.function {
-                            SliderFunction::Linear { min, max, .. } => min + *norm * (max - min),
-                        };
+                        let actual_value =
+                            slider::denormalize(&config.function, *norm).unwrap_or(0.0);
                         self.slider_sender
                             .send(SliderEvent::UpdateSlider {
                                 id: WaveformId::Program(program.id),

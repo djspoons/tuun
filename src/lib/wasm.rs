@@ -264,10 +264,11 @@ fn parse_json(json: &str) -> Result<HashMap<String, f32>, String> {
     Ok(result)
 }
 
-/// Parses a slider config string like `["volume:0.5:0:1", "cutoff:2000:200:8000"]`
+/// Parses a slider config string like `["volume:0.5:0:1", "freq:0.5:fn(x) => 100 * pow(100, x)"]`
 /// and returns a JSON array of slider objects.
 ///
-/// Each object has: `{ label, initial_value, min, max }`
+/// Linear sliders: `{ type: "linear", label, initial_value, min, max }`
+/// User-defined sliders: `{ type: "user-defined", label, normalized_initial_value, function_source, initial_value, value_at_0, value_at_1 }`
 ///
 /// Returns an error string if parsing fails.
 #[wasm_bindgen(js_name = "parseSliders")]
@@ -283,19 +284,47 @@ pub fn parse_sliders(input: &str) -> Result<String, String> {
     // Manually build JSON since we don't have serde
     let entries: Vec<String> = sliders
         .iter()
-        .map(|s| {
-            let parser::SliderFunction::Linear {
+        .map(|s| match &s.function {
+            parser::SliderFunction::Linear {
                 initial_value,
                 min,
                 max,
-            } = s.function;
-            format!(
-                r#"{{"label":"{}","initial_value":{},"min":{},"max":{}}}"#,
-                s.label, initial_value, min, max
-            )
+            } => {
+                format!(
+                    r#"{{"type":"linear","label":"{}","initial_value":{},"min":{},"max":{}}}"#,
+                    s.label, initial_value, min, max
+                )
+            }
+            parser::SliderFunction::UserDefined {
+                normalized_initial_value,
+                function_source,
+            } => {
+                let initial_value = slider::denormalize(&s.function, *normalized_initial_value)
+                    .unwrap_or(0.0);
+                let value_at_0 = slider::denormalize(&s.function, 0.0).unwrap_or(0.0);
+                let value_at_1 = slider::denormalize(&s.function, 1.0).unwrap_or(0.0);
+                format!(
+                    r#"{{"type":"user-defined","label":"{}","normalized_initial_value":{},"function_source":"{}","initial_value":{},"value_at_0":{},"value_at_1":{}}}"#,
+                    s.label, normalized_initial_value,
+                    function_source.replace('\\', "\\\\").replace('"', "\\\""),
+                    initial_value, value_at_0, value_at_1
+                )
+            }
         })
         .collect();
     Ok(format!("[{}]", entries.join(",")))
+}
+
+/// Evaluates a user-defined slider function at a given normalized value.
+///
+/// For example, `evaluateSlider("fn(x) => 100 * pow(100, x)", 0.5)` returns ~1000.
+#[wasm_bindgen(js_name = "evaluateSlider")]
+pub fn evaluate_slider(function_source: &str, normalized_value: f32) -> Result<f32, String> {
+    let function = parser::SliderFunction::UserDefined {
+        normalized_initial_value: 0.0, // unused for evaluation
+        function_source: function_source.to_string(),
+    };
+    slider::denormalize(&function, normalized_value)
 }
 
 /// Initializes the WASM module.

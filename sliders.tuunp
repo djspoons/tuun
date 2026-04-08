@@ -13,7 +13,7 @@ pulse(width, 220)
 pulse($frequency * depth, 220)
 
 // Filters
-//#{sliders=["Q:0.707:0.1:1","cutoff:2000:100:11000"]}
+//#{sliders=["Q:0.707:0.1:1","cutoff:0.637:fn(x) => 100 * pow(110, x)"]}
 square(220) | lpf(Q, cutoff)
 
 // Amplitude envelope
@@ -27,5 +27,5 @@ $220 | ADSR(0.0, 0.0, sustain_level, 0.5, release)
 let over = fn (x) => $(220*x) * (1/x * depth) in $220 + <map(over, [3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 33, 35, 37, 39])>
 
 // Frequency
-//#{sliders=["frequency:200:50:1000"]}
+//#{sliders=["frequency:0.463:fn(x) => 50 * pow(20, x)"]}
 $(frequency)

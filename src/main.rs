@@ -172,6 +172,8 @@ fn load_programs(args: &Args, programs: &mut Vec<Program>) -> HashMap<(WaveformI
         let mut pending_sliders: Option<Vec<parser::Slider>> = None;
         for line in contents.lines() {
             // Check for slider pragma before stripping comments
+            // TODO this doesn't report errors when there is something that looks a bit like
+            // a slider config but isn't.
             if let Ok(sliders) = parser::parse_annotation(line) {
                 pending_sliders = Some(sliders);
                 continue;
@@ -188,12 +190,16 @@ fn load_programs(args: &Args, programs: &mut Vec<Program>) -> HashMap<(WaveformI
                     use parser::SliderFunction;
                     let normalized_values = configs
                         .iter()
-                        .map(|c| match c.function {
+                        .map(|c| match &c.function {
                             SliderFunction::Linear {
                                 initial_value,
                                 min,
                                 max,
                             } => ((initial_value - min) / (max - min)).clamp(0.0, 1.0),
+                            SliderFunction::UserDefined {
+                                normalized_initial_value,
+                                ..
+                            } => normalized_initial_value.clamp(0.0, 1.0),
                         })
                         .collect();
                     ProgramSliders {
@@ -233,13 +239,12 @@ fn load_programs(args: &Args, programs: &mut Vec<Program>) -> HashMap<(WaveformI
     }
     // Copy initial values for each slider for all programs
     let mut last_slider_values: HashMap<(WaveformId, String), f32> = HashMap::new();
-    for Program { id, sliders, .. } in programs {
-        for slider in &sliders.configs {
-            let value = match slider.function {
-                parser::SliderFunction::Linear { initial_value, .. } => initial_value,
-            };
+    for Program { id, sliders, .. } in programs.iter() {
+        for (j, config) in sliders.configs.iter().enumerate() {
+            let value =
+                slider::denormalize(&config.function, sliders.normalized_values[j]).unwrap_or(0.0);
             last_slider_values.insert(
-                (WaveformId::Program(id.clone()), slider.label.clone()),
+                (WaveformId::Program(id.clone()), config.label.clone()),
                 value,
             );
         }
