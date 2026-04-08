@@ -12,6 +12,8 @@ pub mod launchkey;
 #[cfg(feature = "native")]
 pub mod midi_input;
 #[cfg(feature = "native")]
+pub mod play_helper;
+#[cfg(feature = "native")]
 pub mod renderer;
 #[cfg(feature = "native")]
 pub mod sdl2_input;

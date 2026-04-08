@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::time::Duration;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use sdl2::Sdl;
 use sdl2::pixels::Color;
@@ -13,7 +12,6 @@ use realfft::RealFftPlanner;
 use realfft::num_complex::{Complex, ComplexFloat};
 
 use crate::metric::Metric;
-use crate::optimizer;
 use crate::parser;
 use crate::slider;
 use crate::tracker;
@@ -95,12 +93,6 @@ pub enum Mode {
     // The following are transient modes that are used to indicate an action should be
     // taken. They are used either when the action requires significant computation or
     // modifies the context.
-    Play {
-        cursor_position: usize,
-        program: Program,
-        // After how many measures should this program repeat (if any)
-        repeat_after_measures: Option<u32>,
-    },
     LoadContext {},
     LoadPrograms {},
     Exit,
@@ -327,12 +319,17 @@ impl Renderer {
             .enumerate()
         {
             let index = bank_start + i;
-            let color = match (&mode, is_pending_program(&status, now, program.id)) {
+            let color = match (
+                &mode,
+                status.has_pending_mark(now, WaveformId::Program(program.id), MarkId::TopLevel),
+            ) {
                 (_, true) => ACTIVE_COLOR,
                 (Mode::Edit { .. }, _) if index == active_program_index => EDIT_COLOR,
                 _ => INACTIVE_COLOR,
             };
-            if !is_pending_program(&status, now, program.id) || current_beat % 2 == 1 {
+            if !status.has_pending_mark(now, WaveformId::Program(program.id), MarkId::TopLevel)
+                || current_beat % 2 == 1
+            {
                 let number = char::from_u32(0x31 + i as u32).unwrap().to_string();
                 let number_texture = make_texture(&font, color, &texture_creator, &number);
                 let TextureQuery {
@@ -360,7 +357,7 @@ impl Renderer {
                 height: circle_height,
                 ..
             } = circle_texture.query();
-            if is_active_program(status, now, program.id) {
+            if status.has_active_mark(now, WaveformId::Program(program.id), MarkId::TopLevel) {
                 self.canvas
                     .copy(
                         &circle_texture,
@@ -495,10 +492,7 @@ impl Renderer {
                             .unwrap();
                     }
                 }
-                Mode::Play { .. }
-                | Mode::LoadContext { .. }
-                | Mode::LoadPrograms { .. }
-                | Mode::Exit => (),
+                Mode::LoadContext { .. } | Mode::LoadPrograms { .. } | Mode::Exit => (),
             }
             y += self.line_height as i32;
         }
@@ -686,10 +680,7 @@ impl Renderer {
                         .join(", ")
                 }
             }
-            Mode::Play { .. }
-            | Mode::LoadContext { .. }
-            | Mode::LoadPrograms { .. }
-            | Mode::Exit => "",
+            Mode::LoadContext { .. } | Mode::LoadPrograms { .. } | Mode::Exit => "",
         };
 
         if !message.is_empty() && message != self.last_message {
@@ -868,130 +859,6 @@ impl Renderer {
                     .unwrap();
                 last_y = value;
             }
-        }
-    }
-}
-
-pub fn duration_from_beats(tempo: u32, beats: u64) -> Duration {
-    Duration::from_secs_f32(beats as f32 * 60.0 / tempo as f32)
-}
-
-pub fn beats_waveform(
-    tempo: u32,
-    beats_per_measure: u32,
-    context: &Vec<(String, parser::Expr<MarkId>)>,
-) -> waveform::Waveform<MarkId> {
-    let seconds_per_beat = duration_from_beats(tempo, 1);
-    let mut ws = Vec::new();
-    for i in 0..beats_per_measure {
-        ws.push(format!(
-            "0 | fin(time - {}) | seq(time - {}) | mark({})",
-            seconds_per_beat.as_secs_f32(),
-            seconds_per_beat.as_secs_f32(),
-            i + 1
-        ));
-    }
-    let expr = match parser::parse_program(&format!("<[{}]>", ws.join(", "))) {
-        Ok(expr) => expr,
-        Err(errors) => panic!("Error parsing beats waveform: {:?}", errors),
-    };
-    match parser::evaluate(&context, expr) {
-        Ok(parser::Expr::Seq { waveform, .. }) => match *waveform {
-            parser::Expr::Waveform(waveform) => waveform::Waveform::<MarkId>::Marked {
-                id: MarkId::TopLevel,
-                waveform: Box::new(optimizer::optimize(waveform)),
-            },
-            expr => panic!("Error creating beats waveform with seq, got {}", expr),
-        },
-        Ok(expr) => panic!("Error creating beats waveform, got {}", expr),
-        Err(errors) => panic!("Error evaluating beats waveform: {:?}", errors),
-    }
-}
-
-pub fn is_pending_program(
-    status: &tracker::Status<WaveformId, MarkId>,
-    now: Instant,
-    program_id: ProgramId,
-) -> bool {
-    status.marks.iter().any(|w| {
-        w.waveform_id == WaveformId::Program(program_id)
-            && w.mark_id == MarkId::TopLevel
-            && w.start > now
-    })
-}
-
-pub fn is_active_program(
-    status: &tracker::Status<WaveformId, MarkId>,
-    now: Instant,
-    program_id: ProgramId,
-) -> bool {
-    status.marks.iter().any(|w| {
-        w.waveform_id == WaveformId::Program(program_id)
-            && w.mark_id == MarkId::TopLevel
-            && w.start <= now
-    })
-}
-
-pub fn play_waveform_helper(
-    context: &Vec<(String, parser::Expr<MarkId>)>,
-    cursor_position: usize,
-    program: &Program,
-) -> WaveformOrMode {
-    match parser::parse_program(&program.text) {
-        Ok(expr) => {
-            println!("Parser returned: {}", &expr);
-            let expr = slider::prepend_slider_bindings(
-                &program.sliders.configs,
-                &program.sliders.normalized_values,
-                MarkId::Slider,
-                expr,
-            );
-            match parser::evaluate(context, expr) {
-                Ok(expr) => {
-                    println!("parser::evaluate returned: {}", &expr);
-                    use parser::Expr;
-                    let mut waveform = match expr {
-                        Expr::Waveform(waveform) => waveform,
-                        Expr::Seq { waveform, .. } => match *waveform {
-                            Expr::Waveform(waveform) => waveform,
-                            _ => panic!("Got non-Waveform in seq after evaluate"),
-                        },
-                        _ => {
-                            println!("Expression is not a waveform, cannot play: {:#?}", expr);
-                            return WaveformOrMode::Mode(Mode::Edit {
-                                cursor_position,
-                                errors: vec![parser::Error::new(
-                                    "Expression is not a waveform".to_string(),
-                                )],
-                                message: format!("Not a waveform: {}", expr),
-                            });
-                        }
-                    };
-                    waveform = optimizer::optimize(waveform);
-                    println!("optimizer::optimize returned: {}", &waveform);
-                    return WaveformOrMode::Waveform(waveform);
-                }
-                Err(error) => {
-                    // If there are errors, we stay in edit mode
-                    println!("Errors while evaluating input: {:?}", error);
-                    let message = format!("Error: {}", error.to_string());
-                    return WaveformOrMode::Mode(Mode::Edit {
-                        cursor_position,
-                        errors: vec![error],
-                        message: message,
-                    });
-                }
-            }
-        }
-        Err(errors) => {
-            // If there are errors, we stay in edit mode
-            println!("Errors while parsing input: {:?}", errors);
-            let message = format!("Error: {}", errors[0].to_string());
-            return WaveformOrMode::Mode(Mode::Edit {
-                cursor_position,
-                errors,
-                message,
-            });
         }
     }
 }

@@ -3,40 +3,44 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 use crate::parser;
+use crate::play_helper;
 use crate::renderer::{
     self, MarkId, Mode, PROGRAMS_PER_BANK, Program, SliderEvent, WaveformId, WaveformOrMode,
 };
 use crate::slider;
-use crate::tracker::{self, Command};
+use crate::tracker;
 
-pub struct InputHandler<'a> {
+pub struct InputHandler {
     handle_mouse_events: bool,
     display_width: u32,
     display_height: u32,
 
-    command_sender: &'a mpsc::Sender<Command<WaveformId, MarkId>>,
-    slider_sender: &'a mpsc::Sender<SliderEvent>,
+    play_helper: play_helper::PlayHelper,
+    command_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
+    slider_sender: mpsc::Sender<SliderEvent>,
 }
 
-impl<'a> InputHandler<'a> {
+impl<'a> InputHandler {
     pub fn new(
         handle_mouse_events: bool,
         display_width: u32,
         display_height: u32,
-        command_sender: &'a mpsc::Sender<Command<WaveformId, MarkId>>,
-        slider_sender: &'a mpsc::Sender<SliderEvent>,
-    ) -> InputHandler<'a> {
+        play_helper: play_helper::PlayHelper,
+        command_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
+        slider_sender: mpsc::Sender<SliderEvent>,
+    ) -> InputHandler {
         InputHandler {
             handle_mouse_events,
             display_width,
             display_height,
+            play_helper,
             command_sender,
             slider_sender,
         }
     }
 
     pub fn handle_event(
-        &self,
+        &mut self,
         event: sdl2::event::Event,
         context: &Vec<(String, parser::Expr<MarkId>)>,
         mode: renderer::Mode,
@@ -71,22 +75,25 @@ impl<'a> InputHandler<'a> {
                             } else {
                                 1
                             };
-                            return Mode::Play {
-                                cursor_position: programs[*active_program_index].text.len(),
-                                program: programs[*active_program_index].clone(),
-                                repeat_after_measures: Some(repeat_after_measures),
-                            };
+                            self.play_helper.play_waveform(
+                                context,
+                                programs[*active_program_index].text.len(),
+                                &programs[*active_program_index],
+                                status,
+                                true,
+                                Some(repeat_after_measures),
+                            );
                         }
                         // Check to see whether or not the current index is in the tracker's
                         // pending waveforms
-                        if renderer::is_pending_program(
-                            &status,
+                        if status.has_pending_mark(
                             Instant::now(),
-                            programs[*active_program_index].id,
+                            WaveformId::Program(programs[*active_program_index].id),
+                            MarkId::TopLevel,
                         ) {
                             // If it is, send a command to remove it.
                             self.command_sender
-                                .send(Command::RemovePending {
+                                .send(tracker::Command::RemovePending {
                                     id: WaveformId::Program(programs[*active_program_index].id),
                                 })
                                 .unwrap();
@@ -142,15 +149,15 @@ impl<'a> InputHandler<'a> {
 
                         if keymod.contains(Mod::LGUIMOD)
                             || keymod.contains(Mod::RGUIMOD)
-                                && renderer::is_active_program(
-                                    &status,
+                                && status.has_active_mark(
                                     Instant::now(),
-                                    programs[*active_program_index].id,
+                                    WaveformId::Program(programs[*active_program_index].id),
+                                    MarkId::TopLevel,
                                 )
                         {
                             // If the program is active, stop it
                             self.command_sender
-                                .send(Command::Stop {
+                                .send(tracker::Command::Stop {
                                     id: WaveformId::Program(programs[*active_program_index].id),
                                 })
                                 .unwrap();
@@ -158,15 +165,15 @@ impl<'a> InputHandler<'a> {
                                 format!("Stopped program {}", programs[*active_program_index].id);
                         } else if !keymod.contains(Mod::LGUIMOD)
                             && !keymod.contains(Mod::RGUIMOD)
-                            && renderer::is_pending_program(
-                                &status,
+                            && status.has_pending_mark(
                                 Instant::now(),
-                                programs[*active_program_index].id,
+                                WaveformId::Program(programs[*active_program_index].id),
+                                MarkId::TopLevel,
                             )
                         {
                             // If it is, send a command to remove it.
                             self.command_sender
-                                .send(Command::RemovePending {
+                                .send(tracker::Command::RemovePending {
                                     id: WaveformId::Program(programs[*active_program_index].id),
                                 })
                                 .unwrap();
@@ -213,11 +220,14 @@ impl<'a> InputHandler<'a> {
                         } else {
                             None
                         };
-                        Mode::Play {
+                        self.play_helper.play_waveform(
+                            context,
                             cursor_position,
-                            program: programs[*active_program_index].clone(),
+                            &programs[*active_program_index],
+                            status,
+                            true,
                             repeat_after_measures,
-                        }
+                        )
                     }
                     (
                         Mode::Edit {
@@ -272,15 +282,15 @@ impl<'a> InputHandler<'a> {
                     ) => {
                         if keymod.contains(Mod::LGUIMOD)
                             || keymod.contains(Mod::RGUIMOD)
-                                && renderer::is_active_program(
-                                    &status,
+                                && status.has_active_mark(
                                     Instant::now(),
-                                    programs[*active_program_index].id,
+                                    WaveformId::Program(programs[*active_program_index].id),
+                                    MarkId::TopLevel,
                                 )
                         {
                             // If the program is active, stop it
                             self.command_sender
-                                .send(Command::Stop {
+                                .send(tracker::Command::Stop {
                                     id: WaveformId::Program(programs[*active_program_index].id),
                                 })
                                 .unwrap();
@@ -481,7 +491,7 @@ impl<'a> InputHandler<'a> {
                             };
                         } else if text == "D" {
                             // Dump the current waveform definition to the console
-                            match renderer::play_waveform_helper(
+                            match play_helper::prepare_waveform(
                                 &context,
                                 programs[*active_program_index].text.len(),
                                 &programs[*active_program_index],
@@ -518,7 +528,6 @@ impl<'a> InputHandler<'a> {
                         );
                     }
                     Mode::MoveSliders { .. }
-                    | Mode::Play { .. }
                     | Mode::LoadContext { .. }
                     | Mode::LoadPrograms { .. }
                     | Mode::Exit => {

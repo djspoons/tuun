@@ -1,4 +1,3 @@
-use core::panic;
 use std::collections::HashMap;
 use std::fs;
 use std::process;
@@ -16,6 +15,7 @@ use tuun::launchkey;
 use tuun::metric;
 use tuun::midi_input;
 use tuun::parser;
+use tuun::play_helper;
 use tuun::renderer;
 use tuun::sdl2_input;
 use tuun::slider;
@@ -24,7 +24,7 @@ use tuun::waveform;
 
 use metric::Metric;
 use parser::Expr;
-use renderer::{MarkId, Mode, Program, ProgramSliders, Renderer, WaveformId, WaveformOrMode};
+use renderer::{MarkId, Mode, Program, ProgramSliders, Renderer, WaveformId};
 use tracker::Command;
 
 // Additional built-ins
@@ -297,7 +297,10 @@ pub fn main() {
             start: Instant::now() + Duration::from_millis(100), // Some time in the near future
             duration: Duration::from_secs(4),                   // Doesn't matter
         }];
+
         // Parse and send commands to play all of the waveforms.
+        let mut play_helper =
+            play_helper::PlayHelper::new(args.tempo, args.beats_per_measure, command_sender);
         for program in programs.iter() {
             println!("Playing program {}: {}", program.id, program.text);
             let program = Program {
@@ -305,13 +308,12 @@ pub fn main() {
                 id: program.id,
                 sliders: program.sliders.clone(),
             };
-            let mode = play_waveform(
+            let mode = play_helper.play_waveform(
                 &context,
-                &status,
-                &args,
                 program.text.len(),
                 &program,
-                &command_sender,
+                &status,
+                false,
                 None,
             );
             match mode {
@@ -362,7 +364,8 @@ pub fn main() {
         .unwrap();
     device.resume();
 
-    start_beats(&command_sender, &status_receiver, &args, &context);
+    play_helper::PlayHelper::new(args.tempo, args.beats_per_measure, command_sender.clone())
+        .start_beats(&status_receiver, &context);
 
     // Spawn a thread that batches slider updates, sending them approximately once per audio buffer
     let buffer_duration =
@@ -435,6 +438,51 @@ pub fn main() {
         }
     });
 
+    // N.B. We shadow the command sender here so that any uses below will go through here.
+    // This simplifies things a bit, but it means that all commands will wait on a long
+    // pre-computation.
+    let play_command_sender = command_sender;
+    let (command_sender, play_receiver) = mpsc::channel();
+    thread::spawn(move || {
+        loop {
+            match play_receiver.recv() {
+                Ok(Command::Play {
+                    id,
+                    mut waveform,
+                    start,
+                    repeat_every,
+                }) => {
+                    if args.precompute {
+                        // TODO probably precompute should happen on another thread
+                        let mut generator = generator::Generator::new(args.sample_rate);
+                        waveform = waveform::remove_state(generator.precompute(waveform));
+                        println!("precompute returned: {}", &waveform);
+                    }
+
+                    play_command_sender
+                        .send(Command::Play {
+                            // TODO maybe extend the mark to the full measure?
+                            id,
+                            waveform: waveform::Waveform::Marked {
+                                id: MarkId::TopLevel,
+                                waveform: Box::new(waveform),
+                            },
+                            start,
+                            repeat_every,
+                        })
+                        .unwrap();
+                }
+                Ok(cmd) => {
+                    play_command_sender.send(cmd).unwrap();
+                }
+                Err(e) => {
+                    println!("Play thread got error receiving: {}", e);
+                    return;
+                }
+            }
+        }
+    });
+
     let launchkey = launchkey::Launchkey::new();
     if let Err(e) = &launchkey {
         println!(
@@ -453,17 +501,24 @@ pub fn main() {
     renderer.video_subsystem.text_input().start();
     let mut event_pump = sdl_context.event_pump().unwrap();
 
-    let sdl2_handler = sdl2_input::InputHandler::new(
+    let mut sdl2_handler = sdl2_input::InputHandler::new(
         launchkey.is_err(),
         renderer.width,
         renderer.height,
-        &command_sender,
-        &slider_sender,
+        play_helper::PlayHelper::new(args.tempo, args.beats_per_measure, command_sender.clone()),
+        command_sender.clone(),
+        slider_sender.clone(),
     );
 
     let mut midi_handler = if let Ok(launchkey) = launchkey {
         Some(midi_input::InputHandler::new(
             launchkey,
+            play_helper::PlayHelper::new(
+                args.tempo,
+                args.beats_per_measure,
+                command_sender.clone(),
+            ),
+            command_sender.clone(),
             slider_sender.clone(),
         ))
     } else {
@@ -501,19 +556,6 @@ pub fn main() {
                 Mode::Exit => {
                     return;
                 }
-                Mode::Play {
-                    cursor_position,
-                    program,
-                    repeat_after_measures,
-                } => play_waveform(
-                    &context,
-                    &status,
-                    &args,
-                    cursor_position,
-                    &program,
-                    &command_sender,
-                    repeat_after_measures,
-                ),
                 Mode::LoadContext {} => load_context(&args, &mut context),
                 Mode::LoadPrograms {} => {
                     let slider_values = load_programs(&args, &mut programs);
@@ -532,7 +574,6 @@ pub fn main() {
             // TODO this is a little like calling "render" but on the MIDI device. Generalize?
             if let Mode::Select { .. } = mode {
                 // This might be a new program, in which case we need to update any device state.
-
                 midi_handler.update_slider_state(&programs[active_program_index]);
             }
 
@@ -613,120 +654,5 @@ pub fn main() {
             active_program_index,
             &mut metrics,
         );
-    }
-}
-
-fn start_beats(
-    command_sender: &mpsc::Sender<Command<WaveformId, MarkId>>,
-    status_receiver: &mpsc::Receiver<tracker::Status<WaveformId, MarkId>>,
-    args: &Args,
-    context: &Vec<(String, Expr<MarkId>)>,
-) {
-    // Play the odd Beats waveform starting immediately and repeating every two measures
-    command_sender
-        .send(Command::Play {
-            id: WaveformId::Beats(false),
-            waveform: renderer::beats_waveform(args.tempo, args.beats_per_measure, context),
-            start: Instant::now(),
-            repeat_every: Some(
-                renderer::duration_from_beats(args.tempo, args.beats_per_measure as u64) * 2,
-            ),
-        })
-        .unwrap();
-    // We need to wait to start the even Beats until we know when the odd Beats started
-    'start_even_beats: loop {
-        match status_receiver.recv() {
-            Ok(status) => {
-                for mark in status.marks {
-                    if mark.waveform_id == WaveformId::Beats(false)
-                        && mark.mark_id == MarkId::TopLevel
-                    {
-                        command_sender
-                            .send(Command::Play {
-                                id: WaveformId::Beats(true),
-                                waveform: renderer::beats_waveform(
-                                    args.tempo,
-                                    args.beats_per_measure,
-                                    context,
-                                ),
-                                start: mark.start + mark.duration,
-                                repeat_every: Some(
-                                    renderer::duration_from_beats(
-                                        args.tempo,
-                                        args.beats_per_measure as u64,
-                                    ) * 2,
-                                ),
-                            })
-                            .unwrap();
-                        break 'start_even_beats;
-                    }
-                }
-            }
-            Err(_) => {}
-        }
-    }
-}
-
-// Returns the start time of the next measure
-fn next_measure_start(status: &tracker::Status<WaveformId, MarkId>) -> Instant {
-    for mark in &status.marks {
-        match mark.waveform_id {
-            WaveformId::Beats(_)
-                if mark.mark_id == MarkId::TopLevel && mark.start > Instant::now() =>
-            {
-                return mark.start;
-            }
-            _ => (),
-        }
-    }
-    panic!("No next measure found in marks");
-}
-
-fn play_waveform(
-    context: &Vec<(String, Expr<MarkId>)>,
-    status: &tracker::Status<WaveformId, MarkId>,
-    args: &Args,
-    cursor_position: usize,
-    program: &Program,
-    command_sender: &std::sync::mpsc::Sender<Command<WaveformId, MarkId>>,
-    repeat_after_measures: Option<u32>,
-) -> Mode {
-    match renderer::play_waveform_helper(&context, cursor_position, program) {
-        WaveformOrMode::Waveform(mut waveform) => {
-            if args.precompute {
-                // TODO probably precompute should happen on another thread
-                let mut generator = generator::Generator::new(args.sample_rate);
-                waveform = waveform::remove_state(generator.precompute(waveform));
-                println!("precompute returned: {}", &waveform);
-            }
-            let message;
-            let repeat_every;
-            if let Some(measures) = repeat_after_measures {
-                let beats = (measures * args.beats_per_measure) as u64;
-                message = format!("Looping waveform {} every {:?} beats", program.id, beats);
-                repeat_every = Some(renderer::duration_from_beats(args.tempo, beats));
-            } else {
-                // Otherwise, play it once
-                message = format!("Playing waveform {}", program.id);
-                repeat_every = None;
-            }
-            command_sender
-                .send(Command::Play {
-                    // TODO maybe extend the mark to the full measure?
-                    id: WaveformId::Program(program.id),
-                    waveform: waveform::Waveform::Marked {
-                        id: MarkId::TopLevel,
-                        waveform: Box::new(waveform),
-                    },
-                    start: next_measure_start(&status),
-                    repeat_every,
-                })
-                .unwrap();
-
-            return Mode::Select { message };
-        }
-        WaveformOrMode::Mode(new_mode) => {
-            return new_mode;
-        }
     }
 }

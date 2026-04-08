@@ -42,6 +42,12 @@ pub enum Event {
         value: u8,     // ranges from 0-127
     },
     */
+    DAWTopPadPressed {
+        index: u8,
+    },
+    DAWBottomPadPressed {
+        index: u8,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -58,7 +64,14 @@ pub enum Error {
     Other(String),
 }
 
-static ENCODER_OFFSET: u8 = 21;
+const ENCODER_OFFSET: u8 = 21;
+const NUM_ENCODERS: u8 = 8;
+
+const ENCODER_UPDATE_CHANNEL: u8 = 15;
+
+const DAW_PAD_TOP_ROW_OFFSET: u8 = 96;
+const DAW_PAD_BOTTOM_ROW_OFFSET: u8 = 112;
+const NUM_DAW_PADS_PER_ROW: u8 = 8;
 
 impl Launchkey {
     pub fn new() -> Result<Self, Error> {
@@ -134,7 +147,7 @@ impl Launchkey {
 
     pub fn update_encoder_state(&mut self, index: u8, value: u8) {
         let event = LiveEvent::Midi {
-            channel: 15.into(),
+            channel: ENCODER_UPDATE_CHANNEL.into(),
             message: MidiMessage::Controller {
                 controller: (index + ENCODER_OFFSET).into(),
                 value: value.into(),
@@ -144,6 +157,18 @@ impl Launchkey {
         event.write(&mut buf).unwrap();
         //println!("Sending event {:?} as {:?}", &event, &buf);
         if let Err(e) = self.daw_output_conn.send(&buf) {
+            println!("launchkey: got error on send: {}", e);
+        }
+    }
+
+    // XXX untested
+    pub fn set_daw_top_pad_color(&mut self, index: u8, red: u8, blue: u8, green: u8) {
+        // TODO 0, 32, 41, 2, 20 seems to be the launchkey "standard sku" prefix
+        let pad_id = index + DAW_PAD_TOP_ROW_OFFSET;
+        if let Err(e) = self
+            .daw_output_conn
+            .send(&[240, 0, 32, 41, 2, 20, 1, 67, pad_id, red, blue, green, 247])
+        {
             println!("launchkey: got error on send: {}", e);
         }
     }
@@ -214,7 +239,8 @@ impl DAWState {
 
                         // Encoders
                         (controller, value)
-                            if controller >= ENCODER_OFFSET && controller < ENCODER_OFFSET + 8 =>
+                            if controller >= ENCODER_OFFSET
+                                && controller < ENCODER_OFFSET + NUM_ENCODERS =>
                         {
                             Some(Event::PluginEncoderChange {
                                 index: controller - ENCODER_OFFSET,
@@ -228,6 +254,34 @@ impl DAWState {
                             );
                             None
                         }
+                    }
+                }
+                MidiMessage::NoteOn { key, vel } => {
+                    println!(
+                        "On channel {}, got note-on for key {} with velocity {}",
+                        channel,
+                        key.as_int(),
+                        vel.as_int()
+                    );
+
+                    if vel > 0 {
+                        if key >= DAW_PAD_TOP_ROW_OFFSET
+                            && key < DAW_PAD_TOP_ROW_OFFSET + NUM_DAW_PADS_PER_ROW
+                        {
+                            Some(Event::DAWTopPadPressed {
+                                index: key.as_int() - DAW_PAD_TOP_ROW_OFFSET,
+                            })
+                        } else if key >= DAW_PAD_BOTTOM_ROW_OFFSET
+                            && key < DAW_PAD_BOTTOM_ROW_OFFSET + NUM_DAW_PADS_PER_ROW
+                        {
+                            Some(Event::DAWBottomPadPressed {
+                                index: key.as_int() - DAW_PAD_BOTTOM_ROW_OFFSET,
+                            })
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
                     }
                 }
                 _ => {

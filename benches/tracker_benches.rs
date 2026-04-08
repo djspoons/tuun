@@ -3,7 +3,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use tuun::builtins;
 use tuun::generator;
 use tuun::parser;
-use tuun::renderer;
+use tuun::play_helper;
 use tuun::waveform;
 
 fn bench_filter(c: &mut Criterion) {
@@ -63,7 +63,7 @@ fn bench_marks(c: &mut Criterion) {
             let mut generator = generator::Generator::new(SAMPLE_RATE);
             let mut ws = Vec::new();
             for _ in 0..40 {
-                ws.push(renderer::beats_waveform(120, 4, &context));
+                ws.push(play_helper::beats_waveform(120, 4, &context));
             }
             let w = ws
                 .into_iter()

@@ -18,8 +18,8 @@ pub enum Command<I, M> {
         // A unique id for this waveform
         id: I,
         waveform: waveform::Waveform<M>,
-        // When the waveform should start playing; if in the past, then play immediately
-        start: Instant,
+        // When the waveform should start playing; if in the past or None, then play immediately
+        start: Option<Instant>,
         // If set, play this waveform in a loop
         repeat_every: Option<Duration>,
     },
@@ -65,6 +65,24 @@ where
     pub tracker_load: Option<f32>,
     // The number of samples allocated internally as part of generating one sample (on average)
     pub allocations_per_sample: Option<f32>,
+}
+
+impl<I, M> Status<I, M>
+where
+    I: Clone + Send + PartialEq,
+    M: Clone + Send + PartialEq,
+{
+    pub fn has_pending_mark(&self, when: Instant, id: I, mark: M) -> bool {
+        self.marks
+            .iter()
+            .any(|w| w.waveform_id == id && w.mark_id == mark && w.start > when)
+    }
+
+    pub fn has_active_mark(&self, when: Instant, id: I, mark: M) -> bool {
+        self.marks
+            .iter()
+            .any(|w| w.waveform_id == id && w.mark_id == mark && w.start <= when)
+    }
 }
 
 struct ActiveWaveform<I, M>
@@ -365,6 +383,7 @@ where
                         id, start, waveform
                     );
                 }
+                let start = start.unwrap_or(Instant::now());
                 let mut marks = Vec::new();
                 let waveform = generator::initialize_state(waveform);
                 process_marked(

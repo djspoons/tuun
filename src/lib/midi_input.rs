@@ -1,8 +1,10 @@
 use std::sync::mpsc;
 use std::sync::mpsc::Receiver;
+use std::time::Instant;
 
 use crate::launchkey;
 use crate::parser;
+use crate::play_helper;
 use crate::renderer::{self, MarkId, PROGRAMS_PER_BANK, Program, WaveformId};
 use crate::slider;
 use crate::tracker;
@@ -10,16 +12,22 @@ use crate::tracker;
 pub struct InputHandler {
     launchkey: launchkey::Launchkey,
 
+    play_helper: play_helper::PlayHelper,
+    command_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
     slider_sender: mpsc::Sender<renderer::SliderEvent>,
 }
 
 impl InputHandler {
     pub fn new(
         launchkey: launchkey::Launchkey,
+        play_helper: play_helper::PlayHelper,
+        command_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
         slider_sender: mpsc::Sender<renderer::SliderEvent>,
     ) -> InputHandler {
         InputHandler {
             launchkey,
+            play_helper,
+            command_sender,
             slider_sender,
         }
     }
@@ -31,14 +39,15 @@ impl InputHandler {
     pub fn handle_event(
         &mut self,
         event: launchkey::Event,
-        _context: &Vec<(String, parser::Expr<MarkId>)>,
+        context: &[(String, parser::Expr<MarkId>)],
         mode: renderer::Mode,
         active_program_index: &mut usize,
-        _status: &tracker::Status<WaveformId, MarkId>,
+        status: &tracker::Status<WaveformId, MarkId>,
         programs: &mut Vec<Program>,
     ) -> renderer::Mode {
         use launchkey::Event;
         use renderer::Mode;
+        let bank_start = *active_program_index - (*active_program_index % PROGRAMS_PER_BANK);
         match (mode, event) {
             (Mode::Select { .. }, Event::NextTrack) => {
                 *active_program_index = (*active_program_index + 1) % programs.len();
@@ -105,9 +114,35 @@ impl InputHandler {
                 }
                 Mode::Select { message }
             }
+            (mode, Event::DAWTopPadPressed { index }) => {
+                let program = &programs[bank_start + index as usize];
+                println!("Got DAW top pad: {}, program_id = {}", index, program.id);
+                if status.has_active_mark(
+                    Instant::now(),
+                    WaveformId::Program(program.id),
+                    MarkId::TopLevel,
+                ) {
+                    self.command_sender
+                        .send(tracker::Command::Stop {
+                            id: WaveformId::Program(program.id),
+                        })
+                        .unwrap();
+                } else {
+                    self.play_helper.play_waveform(
+                        context,
+                        program.text.len(),
+                        &program,
+                        status,
+                        false,
+                        None,
+                    );
+                    // TODO This drops the returned mode, which might contain an error
+                }
+                mode
+            }
 
             (mode, event) => {
-                println!("TODO handle mode/event: {:?}/{:?}", mode, event);
+                println!("TODO handle mode / event: {:?} / {:?}", mode, event);
                 mode
             }
         }

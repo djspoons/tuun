@@ -816,7 +816,7 @@ fn extend_with_trivial_context<M>(context: &mut Vec<(String, Expr<M>)>, pattern:
     }
 }
 
-fn substitute<M>(context: &Vec<(String, Expr<M>)>, expr: Expr<M>) -> Expr<M>
+fn substitute<M>(context: &[(String, Expr<M>)], expr: Expr<M>) -> Expr<M>
 where
     M: Clone,
 {
@@ -831,7 +831,7 @@ where
             waveform: Box::new(substitute(context, *waveform)),
         },
         Function { pattern, body } => {
-            let mut context = context.clone();
+            let mut context = Vec::from(context);
             extend_with_trivial_context(&mut context, &pattern);
             let body = substitute(&context, *body);
             Expr::Function {
@@ -1093,7 +1093,7 @@ where
     }
 }
 
-pub fn evaluate<M>(context: &Vec<(String, Expr<M>)>, mut expr: Expr<M>) -> Result<Expr<M>, Error>
+pub fn evaluate<M>(context: &[(String, Expr<M>)], mut expr: Expr<M>) -> Result<Expr<M>, Error>
 where
     M: Clone + fmt::Display + fmt::Debug,
 {
