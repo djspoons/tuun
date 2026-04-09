@@ -89,11 +89,11 @@ In this example, the two pulse waves are combined and then passed through a low-
 
 ## Phase modulation
 
-As discussed in the [advanced uses of Sine](sine.md#advanced-synthesis), Tuun supports both frequency and phase modulation synthesis. Here, we'll use phase modulation, with `fc` as the frequency of the carrier and `fm` as the frequency of the modulator (both in hertz). Instead of the standard formula...
+As discussed in the [advanced uses of Sine](sine.md#advanced-synthesis), Tuun supports both frequency and phase modulation synthesis. Here, we'll use phase modulation, with `fc` as the frequency of the carrier and `fm` as the frequency of the modulator (both in hertz).
 ```
 sine(2*pi * fc, I * $fm)
 ```
-This will let us change the magnitude of the modulator over time by using a waveform for `I`. Since we know that the sine expression is infinite, the length of the modulator will be determined by `I` as well. That same envelope will also be used to control the magnitude the resulting waveform.
+Here, we will change the magnitude of the modulator over time by using a waveform (rather than a constant) for `I`. Since we know that the sine expression is infinite, the length of the modulator will be determined by `I` as well. That same envelope will also be used to control the magnitude the resulting waveform.
 
 To create a synthesizer instrument using the function below, provide:
  * The maximum value of the index of modulation $I$
