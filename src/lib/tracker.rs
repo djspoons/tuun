@@ -310,15 +310,15 @@ where
     type Channel = f32;
 
     fn callback(&mut self, out: &mut [f32]) {
-        // Check to see if we have any new commands
-        self.empty_command_queue();
-
-        // Assume that the callback is called with far enough in advance of when the samples are
+        // Assume that the callback is called far enough in advance of when the samples are
         // needed that we can use time equal to the length of the buffer. If that's true, then
         // the moment corresponding to the start of the buffer is the current time plus the length
         // of the buffer.
         let buffer_start =
             Instant::now() + Duration::from_secs_f32(out.len() as f32 / self.sample_rate as f32);
+        // Check to see if we have any new commands
+        self.empty_command_queue(buffer_start);
+
         let mut status_to_send = Status {
             buffer_start,
             marks: Vec::new(),
@@ -364,7 +364,7 @@ where
     M: Clone + Debug + Send + PartialEq + fmt::Display,
 {
     // buffer_start is the time corresponding to the beginning of the current buffer
-    fn process_command(&mut self, command: Command<I, M>) {
+    fn process_command(&mut self, command: Command<I, M>, buffer_start: Instant) {
         match command {
             Command::Play {
                 id,
@@ -383,7 +383,7 @@ where
                         id, start, waveform
                     );
                 }
-                let start = start.unwrap_or(Instant::now());
+                let start = start.unwrap_or(buffer_start);
                 let mut marks = Vec::new();
                 let waveform = generator::initialize_state(waveform);
                 process_marked(
@@ -463,10 +463,10 @@ where
         }
     }
 
-    fn empty_command_queue(&mut self) {
+    fn empty_command_queue(&mut self, buffer_start: Instant) {
         loop {
             match self.command_receiver.try_recv() {
-                Ok(command) => self.process_command(command),
+                Ok(command) => self.process_command(command, buffer_start),
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(e) => println!("Error receiving command: {:?}", e),
             }
@@ -608,26 +608,20 @@ where
                         len, segment_length, active.id, active.waveform
                     );
                 }
-                if i == 0 {
-                    // If this is the first, just overwrite the buffer
-                    (out[filled..filled + len]).copy_from_slice(&tmp[..len]);
-                } else {
-                    // If this is not the first waveform, then we need to add the samples to the out buffer
-                    for (j, &x) in tmp[..len].iter().enumerate() {
-                        out[filled + j] += x;
-                    }
+                // Add the generated samples to the output buffer (which was pre-zeroed)
+                for (j, &x) in tmp[..len].iter().enumerate() {
+                    out[filled + j] += x;
                 }
                 if len < segment_length {
                     // If we didn't generate enough samples, then remove this waveform from the active list
                     /*
                     println!(
-                        "Removing waveform {:?} at position {} and time {:?}",
+                        "Removing waveform {:?} at time {:?} (len = {}, segment_length = {})",
                         active.id,
-                        active.position,
                         segment_start
-                            + Duration::from_secs_f32(
-                                tmp.len() as f32 / self.sample_rate as f32
-                            )
+                            + Duration::from_secs_f32(tmp.len() as f32 / self.sample_rate as f32),
+                        len,
+                        segment_length,
                     );
                     */
                     let active = self.active_waveforms.remove(i);
