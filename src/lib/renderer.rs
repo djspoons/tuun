@@ -288,6 +288,8 @@ impl Renderer {
         // TODO so much clean-up
         let now = Instant::now();
         let mut current_beat = 0;
+        let mut current_beat_start = now;
+        let mut current_beat_duration = Duration::from_secs(1);
         for mark in status.marks.iter() {
             if let WaveformId::Beats(_) = mark.waveform_id {
                 // XXX sometimes this doesn't match anything?
@@ -296,6 +298,8 @@ impl Renderer {
                     && let MarkId::UserDefined(beat) = mark.mark_id
                 {
                     current_beat = beat;
+                    current_beat_start = mark.start;
+                    current_beat_duration = mark.duration;
                 }
             }
         }
@@ -321,43 +325,46 @@ impl Renderer {
             let index = bank_start + i;
             let color = match (
                 &mode,
-                status.has_pending_mark(now, WaveformId::Program(program.id), MarkId::TopLevel),
+                status.has_active_mark(now, WaveformId::Program(program.id), MarkId::TopLevel),
             ) {
                 (_, true) => ACTIVE_COLOR,
                 (Mode::Edit { .. }, _) if index == active_program_index => EDIT_COLOR,
                 _ => INACTIVE_COLOR,
             };
-            if !status.has_pending_mark(now, WaveformId::Program(program.id), MarkId::TopLevel)
-                || current_beat % 2 == 1
-            {
-                let number = char::from_u32(0x31 + i as u32).unwrap().to_string();
-                let number_texture = make_texture(&font, color, &texture_creator, &number);
-                let TextureQuery {
-                    width: number_width,
-                    ..
-                } = number_texture.query();
-                self.canvas
-                    .copy(
-                        &number_texture,
-                        None,
-                        Some(sdl2::rect::Rect::new(
-                            self.prompt_width as i32,
-                            y,
-                            number_width,
-                            self.line_height,
-                        )),
-                    )
-                    .unwrap();
-            }
-            let circle = char::from_u32(0x25EF).unwrap().to_string();
-            let circle_texture =
-                make_texture(&circle_font, ACTIVE_COLOR, &texture_creator, &circle);
-            let TextureQuery {
-                width: circle_width,
-                height: circle_height,
-                ..
-            } = circle_texture.query();
+            let number = char::from_u32(0x31 + i as u32).unwrap().to_string();
+            let mut number_texture = make_texture(&font, color, &texture_creator, &number);
             if status.has_active_mark(now, WaveformId::Program(program.id), MarkId::TopLevel) {
+                let intensity = (now
+                    .duration_since(current_beat_start)
+                    .div_duration_f32(current_beat_duration)
+                    * u8::MAX as f32) as u8;
+                number_texture.set_alpha_mod(u8::MAX - intensity);
+            }
+            let TextureQuery {
+                width: number_width,
+                ..
+            } = number_texture.query();
+            self.canvas
+                .copy(
+                    &number_texture,
+                    None,
+                    Some(sdl2::rect::Rect::new(
+                        self.prompt_width as i32,
+                        y,
+                        number_width,
+                        self.line_height,
+                    )),
+                )
+                .unwrap();
+            if status.has_pending_mark(now, WaveformId::Program(program.id), MarkId::TopLevel) {
+                let circle = char::from_u32(0x25EF).unwrap().to_string();
+                let circle_texture =
+                    make_texture(&circle_font, ACTIVE_COLOR, &texture_creator, &circle);
+                let TextureQuery {
+                    width: circle_width,
+                    height: circle_height,
+                    ..
+                } = circle_texture.query();
                 self.canvas
                     .copy(
                         &circle_texture,
