@@ -273,7 +273,7 @@ fn parse_json(json: &str) -> Result<HashMap<String, f32>, String> {
 /// Returns an error string if parsing fails.
 #[wasm_bindgen(js_name = "parseSliders")]
 pub fn parse_sliders(input: &str) -> Result<String, String> {
-    let sliders = parser::parse_sliders(input).map_err(|errors| {
+    let sliders = parser::parse_sliders(&format!("sliders={}", input)).map_err(|errors| {
         errors
             .iter()
             .map(|e| e.to_string())
