@@ -50,6 +50,29 @@ fn load_context() -> Vec<(String, parser::Expr<renderer::MarkId>)> {
     context
 }
 
+/// Find the closing `>` of an HTML opening tag, skipping over quoted attribute values
+/// that may contain `>` characters (e.g. `sliders='["freq:0.5:fn(x) => 100"]'`).
+fn find_tag_close(html: &str) -> Option<usize> {
+    let mut i = 0;
+    let bytes = html.as_bytes();
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' | b'\'' => {
+                let quote = bytes[i];
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += 1;
+                }
+                // skip closing quote
+                i += 1;
+            }
+            b'>' => return Some(i),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
 /// Extract an attribute value from an HTML tag string.
 /// Tries both double and single quotes.
 fn extract_attr<'a>(html: &'a str, attr_name: &str) -> Option<&'a str> {
@@ -150,8 +173,9 @@ fn check_file(
         let expression = if let Some(expr) = extract_attr(block, "expression") {
             expr.to_string()
         } else {
-            // Find the closing > of the <tuun-synth ...> opening tag
-            let open_end = match block.find('>') {
+            // Find the closing > of the <tuun-synth ...> opening tag,
+            // skipping > chars inside quoted attribute values
+            let open_end = match find_tag_close(block) {
                 Some(pos) => pos,
                 None => {
                     println!(
@@ -210,7 +234,7 @@ fn check_file(
         match parser::parse_program(&expression) {
             Ok(expr) => {
                 let configs = if let Some(configs) = extract_attr(block, "sliders") {
-                    match parser::parse_sliders(configs) {
+                    match parser::parse_sliders(&format!("sliders={}", configs)) {
                         Ok(sliders) => sliders,
                         Err(e) => {
                             eprintln!(
