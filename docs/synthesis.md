@@ -93,14 +93,14 @@ As discussed in the [advanced uses of Sine](sine.md#advanced-synthesis), Tuun su
 ```
 sine(2*pi * fc, I * $fm)
 ```
-As in Chowning's original paper, we will vary the index of modulation over time by using a waveform (rather than a constant) for `I`. Since we know that the sine expression is infinite, the length of the modulator will be determined by `I` as well. That same envelope will also be used to control the magnitude the resulting waveform.
+As in [Chowning's original article on frequency modulation](https://web.eecs.umich.edu/~fessler/course/100/misc/chowning-73-tso.pdf), we will vary the index of modulation over time by using a waveform (rather than a constant) for `I`. Since we know that the sine expression is infinite, the length of the modulator will be determined by `I` as well. That same envelope will also be used to control the magnitude the resulting waveform.
 
 To create a synthesizer instrument using the function below, provide:
  * The maximum value of the index of modulation $I$
  * $D$, which determines the frequency of the modulator
  * Parameters to the envelope: attack duration, decay duration, sustain level, and release duration
 
-This instrument is based on an example from [Chowning's original article on frequency modulation](https://web.eecs.umich.edu/~fessler/course/100/misc/chowning-73-tso.pdf).
+This instrument is based on an example from Chowning's article.
 
 <div class="container">
   <tuun-synth description="Phase modulation synthesis" expanded>
