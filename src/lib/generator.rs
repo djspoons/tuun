@@ -458,6 +458,12 @@ impl<'a> Generator<'a> {
         // This approach may generate lots of samples from `a` that we don't need (in the case that `b`
         // is much shorter.)
         let a_len = self.generate(a, out);
+        if a_len == 0 && extend_to_longer {
+            // Handle the special case where 'a' has already finished to avoid an allocation. This
+            // happens, for example, when implementing a Merge that's created by followed_by.
+            return self.generate(b, out);
+        }
+        // Get an upper bound on how long the result might be.
         let len = if extend_to_longer { out.len() } else { a_len };
         match b {
             // Check to see if we can avoid generating the right-hand side and instead just apply the
@@ -770,10 +776,24 @@ impl<'a> Generator<'a> {
         where
             M: Debug + Display,
         {
-            // Choose a `desired` which is long enough to generate any reasonable waveform, but give some room
-            // for cases like `Filter` that may need to make it longer.
+            if let Waveform::Fixed(_, _) = waveform {
+                println!(
+                    "No need to precompute output for {} (already Fixed)",
+                    &waveform
+                );
+                return waveform;
+            }
+            if let Waveform::Const(_) = waveform {
+                println!(
+                    "Skipping pre-computation for {} (constant waveform)",
+                    &waveform
+                );
+                return waveform;
+            }
 
             println!("Precomputing output for {}", &waveform);
+            // Choose a `desired` which is long enough to generate any reasonable waveform, but give some room
+            // for cases like `Filter` that may need to make it longer.
             // XXX max precompute length?
             let max_len = (g.sample_rate * 10) as usize;
             let mut out = vec![0.0; max_len];
