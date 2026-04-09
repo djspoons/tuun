@@ -93,11 +93,7 @@ As discussed in the [advanced uses of Sine](sine.md#advanced-synthesis), Tuun su
 ```
 sine(2*pi * fc, I * $fm)
 ```
-We'll flip the order of the operands in the multiplication in the phase parameter:
-```
-sine(2*pi * fc, $fm * I)
-```
-This will let us change the magnitude of the modulator over time by using a waveform for `I`. Since we know that the sine expression is infinite and has no offset, the length, offset, and magnitude of the modulator will be determined by `I`. That same envelope will be used for the magnitude the resulting waveform as well.
+This will let us change the magnitude of the modulator over time by using a waveform for `I`. Since we know that the sine expression is infinite, the length of the modulator will be determined by `I` as well. That same envelope will also be used to control the magnitude the resulting waveform.
 
 To create a synthesizer instrument using the function below, provide:
  * The maximum value of the index of modulation $I$
@@ -118,7 +114,7 @@ This instrument is based on an example from [Chowning's original article on freq
             I = I_max | envelope,
             fm = D/2 * fc
           in
-            sine(2*pi * fc, $fm * I) | envelope | seq(time - dur),
+            sine(2*pi * fc, I * $fm) | envelope | seq(time - dur),
         
         brass = pm_synth(5, 1, 0.1, 0.1, 0.7, 0.1),
       in
