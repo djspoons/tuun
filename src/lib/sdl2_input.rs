@@ -66,7 +66,7 @@ impl<'a> InputHandler {
                             return mode;
                         }
                     }
-                    (Mode::Select { .. }, Some(Scancode::Return)) => {
+                    (mode @ Mode::Select { .. }, Some(Scancode::Return)) => {
                         if keymod.contains(Mod::LGUIMOD) || keymod.contains(Mod::RGUIMOD) {
                             let repeat_after_measures = if keymod.contains(Mod::LSHIFTMOD)
                                 || keymod.contains(Mod::RSHIFTMOD)
@@ -83,6 +83,7 @@ impl<'a> InputHandler {
                                 true,
                                 Some(repeat_after_measures),
                             );
+                            return mode;
                         }
                         // Check to see whether or not the current index is in the tracker's
                         // pending waveforms
