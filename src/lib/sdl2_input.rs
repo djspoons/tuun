@@ -198,6 +198,21 @@ impl<'a> InputHandler {
                             message: String::new(),
                         }
                     }
+                    (Mode::Select { .. }, Some(Scancode::Right)) => {
+                        *active_program_index =
+                            (*active_program_index + PROGRAMS_PER_BANK) % programs.len();
+                        Mode::Select {
+                            message: String::new(),
+                        }
+                    }
+                    (Mode::Select { .. }, Some(Scancode::Left)) => {
+                        *active_program_index = (*active_program_index + programs.len()
+                            - PROGRAMS_PER_BANK)
+                            % programs.len();
+                        Mode::Select {
+                            message: String::new(),
+                        }
+                    }
                     (Mode::Select { .. }, Some(Scancode::LAlt) | Some(Scancode::RAlt))
                         if self.handle_mouse_events =>
                     {
