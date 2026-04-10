@@ -20,7 +20,7 @@ square(220) | lpf(Q, cutoff)
 $(frequency)
 
 // Amplitude envelope
-//#{color=rgb(202, 230, 40),sliders=["attack:0.5:0:1","decay:0.5:0:1"]}
+//#{color=rgb(183, 230, 40),sliders=["attack:0.5:0:1","decay:0.5:0:1"],next_bank}
 $220 | ADSR(attack, decay, 0, 0, 0)
 //#{sliders=["sustain_level:0.5:0:1","release:0.5:0:1"]}
 $220 | ADSR(0.0, 0.0, sustain_level, 0.5, release)

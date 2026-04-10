@@ -442,10 +442,16 @@ impl<'a> InputHandler {
                             let datetime = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
                             let filename = format!("programs_{}.tuunp", datetime);
                             let mut file = fs::File::create(&filename).unwrap();
-                            for program in programs.iter() {
+                            for (i, program) in programs.iter().enumerate() {
                                 if !program.text.is_empty() {
                                     let ps = &program.sliders;
                                     let mut anno_parts: Vec<String> = Vec::new();
+                                    if i % renderer::PROGRAMS_PER_BANK == 0
+                                        && i > 0
+                                        && programs[i - 1].text.is_empty()
+                                    {
+                                        anno_parts.push("next_bank".to_string());
+                                    }
                                     if !ps.configs.is_empty() {
                                         let slider_strings: Vec<String> = ps
                                             .configs
