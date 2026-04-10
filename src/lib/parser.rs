@@ -7,10 +7,11 @@ use nom::{
     Parser,
     branch::alt,
     bytes::complete::{tag, take_while, take_while1},
+    character::complete as character,
     character::complete::{alpha1, alphanumeric1, char, multispace0, multispace1},
     combinator::{all_consuming, map, not, opt, peek, recognize, verify},
     multi::{many0, separated_list0},
-    number::complete::float,
+    number::complete as number,
     sequence::{delimited, preceded, terminated},
 };
 
@@ -210,7 +211,7 @@ fn parse_literal<M>(input: LocatedSpan) -> IResult<Expr<M>> {
         // Handle parsing negative floats ourselves
         preceded(
             not(peek(char('-'))),
-            float,
+            number::float,
         ).map(Expr::Float),
         parse_string,
     )).parse(input)?;
@@ -668,6 +669,7 @@ pub enum SliderFunction {
 pub enum Annotation {
     Sliders(Vec<Slider>),
     NextBank,
+    Color(u8, u8, u8),
 }
 
 /// Parses a slider config entry — either linear `"label:initial:min:max"`
@@ -682,7 +684,7 @@ fn parse_slider(input: LocatedSpan) -> IResult<Slider> {
         expect(take_while1(label_char), "expected slider label"),
         preceded(
             expect(char(':'), "expected ':'"),
-            (peek(recognize(float)), expect(float, "expected initial value"))),
+            (peek(recognize(number::float)), expect(number::float, "expected initial value"))),
         expect(char(':'), "expected ':'"),
     ).parse(input)?;
 
@@ -697,10 +699,10 @@ fn parse_slider(input: LocatedSpan) -> IResult<Slider> {
         // Linear: parse min and max
         #[rustfmt::skip]
         let (rest, (min, max)) = (
-            expect(float, "expected minimum slider value"),
+            expect(number::float, "expected minimum slider value"),
             preceded(
                 expect(char(':'), "expected ':'"),
-                expect(float, "expected maximum slider value")),
+                expect(number::float, "expected maximum slider value")),
         ).parse(rest)?;
 
         let min = min.unwrap_or_default();
@@ -773,6 +775,21 @@ pub fn parse_sliders(input: &str) -> Result<Vec<Slider>, Vec<Error>> {
     translate_parse_result(result)
 }
 
+/// Parses `color=rgb(R,G,B)` where R, G, B are integers in [0, 255].
+fn parse_color(input: LocatedSpan) -> IResult<(u8, u8, u8)> {
+    #[rustfmt::skip]
+    let (rest, (_, r, _, g, _, b, _)) = (
+        tag("color=rgb("),
+        ws(character::u8),
+        char(','),
+        ws(character::u8),
+        char(','),
+        ws(character::u8),
+        char(')'),
+    ).parse(input)?;
+    Ok((rest, (r, g, b)))
+}
+
 /// Parses annotations like `//#{sliders=[...],next_bank}`.
 pub fn parse_annotations(line: &str) -> Result<Vec<Annotation>, Vec<Error>> {
     match line.trim().strip_prefix("//#") {
@@ -788,6 +805,7 @@ pub fn parse_annotations(line: &str) -> Result<Vec<Annotation>, Vec<Error>> {
                         alt((
                             parse_sliders_internal.map(Annotation::Sliders),
                             tag("next_bank").map(|_| Annotation::NextBank),
+                            parse_color.map(|(r, g, b)| Annotation::Color(r, g, b)),
                         ))),
                     ws(char('}')),
                 )
@@ -1350,5 +1368,32 @@ mod tests {
         assert!(parse_annotations("//#{next_bank").is_err());
         // Bad key
         assert!(parse_annotations("//#{bad_key=[]}").is_err());
+
+        // Color annotation
+        let result = parse_annotations("//#{color=rgb(255,0,128)}");
+        assert!(result.is_ok());
+        let annos = result.unwrap();
+        assert_eq!(annos.len(), 1);
+        assert!(matches!(annos[0], Annotation::Color(255, 0, 128)));
+
+        // Color with whitespace
+        let result = parse_annotations("//#{color=rgb( 255 , 0 , 128 )}");
+        assert!(result.is_ok());
+        let annos = result.unwrap();
+        assert!(matches!(annos[0], Annotation::Color(255, 0, 128)));
+
+        // Color combined with sliders
+        let result = parse_annotations(r#"//#{sliders=["vol:0.5:0:1"],color=rgb(255,128,0)}"#);
+        assert!(result.is_ok());
+        let annos = result.unwrap();
+        assert_eq!(annos.len(), 2);
+        assert!(matches!(annos[1], Annotation::Color(255, 128, 0)));
+
+        // Color out of range
+        assert!(parse_annotations("//#{color=rgb(256,0,0)}").is_err());
+        // Color missing component
+        assert!(parse_annotations("//#{color=rgb(0,0)}").is_err());
+        // Color non-integer
+        assert!(parse_annotations("//#{color=rgb(1.5,0,0)}").is_err());
     }
 }

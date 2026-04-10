@@ -157,18 +157,24 @@ fn load_context(args: &Args, mut context: &mut Vec<(String, Expr<MarkId>)>) -> M
 }
 
 // Returns the initial values for all sliders
-fn load_programs(args: &Args, programs: &mut Vec<Program>) -> HashMap<(WaveformId, String), f32> {
+fn load_programs(
+    args: &Args,
+    programs: &mut Vec<Program>,
+) -> (HashMap<(WaveformId, String), f32>, Vec<parser::Error>) {
+    let mut errors = Vec::new();
     programs.clear();
     if !args.programs_file.is_empty() {
         let mut count = 0;
         let contents = fs::read_to_string(&args.programs_file).unwrap_or_default();
         let mut pending_sliders: Option<Vec<parser::Slider>> = None;
+        let mut pending_color: Option<(u8, u8, u8)> = None;
         for line in contents.lines() {
             // Check for annotations before stripping comments
             let annos = match parser::parse_annotations(line) {
                 Ok(annos) => annos,
-                Err(e) => {
+                Err(mut e) => {
                     println!("Got errors parsing annotations: {:?}", e);
+                    errors.append(&mut e);
                     continue;
                 }
             };
@@ -177,12 +183,16 @@ fn load_programs(args: &Args, programs: &mut Vec<Program>) -> HashMap<(WaveformI
                     parser::Annotation::Sliders(sliders) => {
                         pending_sliders = Some(sliders);
                     }
+                    parser::Annotation::Color(r, g, b) => {
+                        pending_color = Some((r, g, b));
+                    }
                     parser::Annotation::NextBank => {
                         while programs.len() % renderer::PROGRAMS_PER_BANK != 0 {
                             programs.push(Program {
                                 text: String::new(),
                                 id: renderer::id_from_index(programs.len()),
                                 sliders: ProgramSliders::default(),
+                                color: None,
                             })
                         }
                     }
@@ -223,6 +233,7 @@ fn load_programs(args: &Args, programs: &mut Vec<Program>) -> HashMap<(WaveformI
                     text: line.to_string(),
                     id: renderer::id_from_index(programs.len()),
                     sliders,
+                    color: pending_color.take(),
                 });
                 count += 1;
             }
@@ -236,6 +247,7 @@ fn load_programs(args: &Args, programs: &mut Vec<Program>) -> HashMap<(WaveformI
                 text: program_text.to_string(),
                 id: renderer::id_from_index(programs.len()),
                 sliders: ProgramSliders::default(),
+                color: None,
             });
         }
     }
@@ -245,6 +257,7 @@ fn load_programs(args: &Args, programs: &mut Vec<Program>) -> HashMap<(WaveformI
             text: String::new(),
             id: renderer::id_from_index(programs.len()),
             sliders: ProgramSliders::default(),
+            color: None,
         });
     }
     // Copy initial values for each slider for all programs
@@ -259,7 +272,7 @@ fn load_programs(args: &Args, programs: &mut Vec<Program>) -> HashMap<(WaveformI
             );
         }
     }
-    last_slider_values
+    (last_slider_values, errors)
 }
 
 pub fn main() {
@@ -267,7 +280,12 @@ pub fn main() {
     let mut context = Vec::new();
     let mut mode = load_context(&args, &mut context);
     let mut programs: Vec<Program> = Vec::new();
-    let last_slider_values = load_programs(&args, &mut programs);
+    let (last_slider_values, errors) = load_programs(&args, &mut programs);
+    if errors.len() > 0 {
+        mode = Mode::Select {
+            message: format!("Error loading programs: {}", errors[0].to_string()),
+        };
+    }
 
     let (status_sender, status_receiver) = mpsc::channel();
     let (command_sender, command_receiver) = mpsc::channel();
@@ -307,6 +325,7 @@ pub fn main() {
                 text: program.text.to_string(),
                 id: program.id,
                 sliders: program.sliders.clone(),
+                color: program.color,
             };
             let mode = play_helper.play_waveform(
                 &context,
@@ -558,12 +577,18 @@ pub fn main() {
                 }
                 Mode::LoadContext {} => load_context(&args, &mut context),
                 Mode::LoadPrograms {} => {
-                    let slider_values = load_programs(&args, &mut programs);
+                    let (slider_values, errors) = load_programs(&args, &mut programs);
                     slider_sender
                         .send(renderer::SliderEvent::SetInitialValues(slider_values))
                         .unwrap();
-                    Mode::Select {
-                        message: format!("Loaded programs"),
+                    if errors.len() > 0 {
+                        Mode::Select {
+                            message: format!("Error loading programs: {}", errors[0].to_string()),
+                        }
+                    } else {
+                        Mode::Select {
+                            message: format!("Loaded programs"),
+                        }
                     }
                 }
                 _ => mode,

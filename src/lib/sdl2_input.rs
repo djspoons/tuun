@@ -445,6 +445,7 @@ impl<'a> InputHandler {
                             for program in programs.iter() {
                                 if !program.text.is_empty() {
                                     let ps = &program.sliders;
+                                    let mut anno_parts: Vec<String> = Vec::new();
                                     if !ps.configs.is_empty() {
                                         let slider_strings: Vec<String> = ps
                                             .configs
@@ -475,14 +476,16 @@ impl<'a> InputHandler {
                                                 }
                                             })
                                             .collect();
-                                        writeln!(
-                                            file,
-                                            "//#{}{}{}",
-                                            "{sliders=[",
-                                            slider_strings.join(","),
-                                            "]}"
-                                        )
-                                        .unwrap();
+                                        anno_parts.push(format!(
+                                            "sliders=[{}]",
+                                            slider_strings.join(",")
+                                        ));
+                                    }
+                                    if let Some((r, g, b)) = program.color {
+                                        anno_parts.push(format!("color=rgb({},{},{})", r, g, b));
+                                    }
+                                    if !anno_parts.is_empty() {
+                                        writeln!(file, "//#{{{}}}", anno_parts.join(",")).unwrap();
                                     }
                                     writeln!(file, "{}", program.text).unwrap();
                                 }

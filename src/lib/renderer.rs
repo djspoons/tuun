@@ -139,6 +139,7 @@ pub struct Program {
     pub text: String,
     pub id: ProgramId,
     pub sliders: ProgramSliders,
+    pub color: Option<(u8, u8, u8)>,
 }
 
 pub const PROGRAMS_PER_BANK: usize = 8;
@@ -323,13 +324,17 @@ impl Renderer {
             .enumerate()
         {
             let index = bank_start + i;
+            let program_color = program
+                .color
+                .map(|(r, g, b)| Color::RGB(r, g, b))
+                .unwrap_or(INACTIVE_COLOR);
             let color = match (
                 &mode,
                 status.has_active_mark(now, WaveformId::Program(program.id), MarkId::TopLevel),
             ) {
                 (_, true) => ACTIVE_COLOR,
                 (Mode::Edit { .. }, _) if index == active_program_index => EDIT_COLOR,
-                _ => INACTIVE_COLOR,
+                _ => program_color,
             };
             let number = char::from_u32(0x31 + i as u32).unwrap().to_string();
             let mut number_texture = make_texture(&font, color, &texture_creator, &number);
@@ -388,7 +393,7 @@ impl Renderer {
                     if active_program_index != index && !program.text.is_empty() {
                         let text_texture = make_texture(
                             &font,
-                            INACTIVE_COLOR,
+                            program_color,
                             &texture_creator,
                             program.text.as_str(),
                         );
@@ -476,7 +481,7 @@ impl Renderer {
                     if !program.text.is_empty() {
                         let text_texture = make_texture(
                             &font,
-                            INACTIVE_COLOR,
+                            program_color,
                             &texture_creator,
                             program.text.as_str(),
                         );

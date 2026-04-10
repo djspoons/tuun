@@ -1,30 +1,30 @@
 // Amplitude
-//#{sliders=["amplitude:0.5:0:1"]}
+//#{color=rgb(255, 200, 80),sliders=["amplitude:0.5:0:1"]}
 $220 * amplitude
 
 // Duration (best in 4 beats per measure)
-//#{sliders=["scale:0.5:0:1"]}
+//#{color=rgb(210, 175, 255),sliders=["scale:0.5:0:1"]}
 let w = $220 | fin(time - (scale * duration_from_beats(1))) | seq(time - (duration_from_beats(2))) in <[w, w]>
 
 // Pulse width modulation
-//#{sliders=["width:0.5:0:1"]}
+//#{color=rgb(250, 82, 82),sliders=["width:0.5:0:1"]}
 pulse(width, 220)
-//#{sliders=["frequency:25:1:110","depth:0.5:0:1"]}
+//#{color=rgb(110, 144, 255),sliders=["frequency:25:1:110","depth:0.5:0:1"]}
 pulse($frequency * depth, 220)
 
 // Filters
-//#{sliders=["Q:0.707:0.1:1","cutoff:0.637:fn(x) => 100 * pow(110, x)"]}
+//#{color=rgb(250, 132, 105),sliders=["Q:0.707:0.1:1","cutoff:0.637:fn(x) => 100 * pow(110, x)"]}
 square(220) | lpf(Q, cutoff)
 // Frequency
-//#{sliders=["frequency:0.463:fn(x) => 50 * pow(20, x)"]}
+//#{color=rgb(255, 185, 190),sliders=["frequency:0.463:fn(x) => 50 * pow(20, x)"]}
 $(frequency)
 
 // Amplitude envelope
-//#{sliders=["attack:0.5:0:1","decay:0.5:0:1"],next_page}
+//#{color=rgb(202, 230, 40),sliders=["attack:0.5:0:1","decay:0.5:0:1"]}
 $220 | ADSR(attack, decay, 0, 0, 0)
 //#{sliders=["sustain_level:0.5:0:1","release:0.5:0:1"]}
 $220 | ADSR(0.0, 0.0, sustain_level, 0.5, release)
 
 // Harmonics
-//#{sliders=["depth:0.5:0:1"]}
+//#{color=rgb(255, 200, 80),sliders=["depth:0.5:0:1"]}
 let over = fn (x) => $(220*x) * (1/x * depth) in $220 + {map(over, [3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 33, 35, 37, 39])}
