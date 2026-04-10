@@ -516,6 +516,7 @@ pub fn main() {
         &ttf_context,
         args.tempo,
         args.beats_per_measure,
+        args.sample_rate,
     );
     renderer.video_subsystem.text_input().start();
     let mut event_pump = sdl_context.event_pump().unwrap();

@@ -189,6 +189,7 @@ pub struct Renderer {
 
     tempo: u32,
     beats_per_measure: u32,
+    sample_rate: i32,
 
     pub width: u32,
     pub height: u32,
@@ -214,6 +215,7 @@ impl Renderer {
         ttf_context: &Sdl2TtfContext,
         tempo: u32,
         beats_per_measure: u32,
+        sample_rate: i32,
     ) -> Renderer {
         let video_subsystem = sdl_context.video().unwrap();
         let display_mode = video_subsystem
@@ -255,6 +257,7 @@ impl Renderer {
             canvas,
             tempo,
             beats_per_measure,
+            sample_rate,
             width,
             height,
             prompt_width,
@@ -604,10 +607,19 @@ impl Renderer {
         let marks_total_height = (marks_bottom - programs_bottom).max(0.0);
         let marks_row_height = marks_total_height / PROGRAMS_PER_BANK as f32;
         let marks_y_padding = 6.0;
+        // We "round" some values below by sample_duration as Instant is a lot more precise.
+        // For example, sometimes a program will start just before the measure it's supposed
+        // to start in, so we move its start time slightly to account for this. Not sure I did
+        // that exactly right, but this seems close enough for now.
+        let sample_duration = Duration::from_secs_f64(1.0 / self.sample_rate as f64);
         for even in [false, true] {
-            let mut marks_start = Instant::now() + Duration::from_secs(1000); // TODO something better?
+            // Start with a point far into the future.
+            let mut marks_start = Instant::now()
+                + Duration::from_secs_f32(
+                    (self.tempo as f32 / 60.0) / 4.0 * self.beats_per_measure as f32,
+                ); // TODO something better?
             let mut marks_duration = Duration::from_secs(0);
-            let marks_width = self.width as f32 / 4.0;
+            let marks_width = self.width as f32 / 4.0; // for one measure
             let marks_x_offset = if even {
                 self.width as f32 / 2.0
             } else {
@@ -617,8 +629,12 @@ impl Renderer {
             for mark in status.marks.iter() {
                 if mark.waveform_id == WaveformId::Beats(even) {
                     if mark.mark_id == MarkId::TopLevel {
-                        marks_start = marks_start.min(mark.start);
-                        marks_duration = mark.duration;
+                        // We want to find the oldest even/odd beats in the marks.
+                        if mark.start < marks_start {
+                            marks_start = mark.start;
+                            // Make the duration shorter by one sample to avoid spurious overlaps due to rounding.
+                            marks_duration = mark.duration - sample_duration;
+                        }
                     }
                 }
             }
@@ -626,16 +642,17 @@ impl Renderer {
                 // Reverse so we draw earlier ones last
                 let program_index = match &mark.waveform_id {
                     WaveformId::Program(id) => index_from_id(*id),
-                    _ => continue, // Skip beats
+                    _ => continue,
                 };
                 // Only draw Mark(1)
                 if mark.mark_id != MarkId::UserDefined(1) {
                     continue;
                 }
-                if mark.start > marks_start + marks_duration
-                    || mark.start + mark.duration < marks_start
+                // Skip marks that don't start during this measure.
+                if mark.start < marks_start - sample_duration
+                    || mark.start >= marks_start + marks_duration
                 {
-                    continue; // Skip marks that don't start during the Beats waveform
+                    continue;
                 }
                 let row = program_index % PROGRAMS_PER_BANK;
                 let mut program_color = programs[program_index]
@@ -643,7 +660,7 @@ impl Renderer {
                     .map(|(r, g, b)| Color::RGB(r, g, b))
                     .unwrap_or(INACTIVE_COLOR);
                 program_color.a = 128;
-                if mark.start > now || mark.start + mark.duration < now {
+                if now < mark.start || now >= mark.start + mark.duration {
                     program_color.r /= 2;
                     program_color.g /= 2;
                     program_color.b /= 2;
