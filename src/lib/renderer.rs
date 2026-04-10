@@ -66,17 +66,6 @@ impl fmt::Display for MarkId {
     }
 }
 
-impl MarkId {
-    /// Returns a 0-based index for color and position calculations, or None if not applicable.
-    fn color_index(&self) -> Option<usize> {
-        match self {
-            MarkId::TopLevel => None,
-            MarkId::UserDefined(id) => Some((*id as usize).saturating_sub(1)),
-            MarkId::Slider(_) => None,
-        }
-    }
-}
-
 #[derive(Debug)]
 // `active_program_index` should be the index of the active program in the `programs` array
 pub enum Mode {
@@ -317,6 +306,72 @@ impl Renderer {
         self.canvas.set_draw_color(Color::RGB(0x00, 0x00, 0x00));
         self.canvas.clear();
 
+        // Save the new buffer if present
+        if let Some(buffer) = &status.buffer {
+            self.samples = buffer.clone();
+            let mut planner = RealFftPlanner::<f32>::new();
+            let fft = planner.plan_fft_forward(self.samples.len());
+            let mut input = fft.make_input_vec();
+            for (i, f) in self.samples.iter().enumerate() {
+                input[i] = *f;
+            }
+            self.spectrum = fft.make_output_vec();
+            if let Err(e) = fft.process(&mut input, &mut self.spectrum) {
+                println!("Error processing FFT: {}", e);
+            }
+        }
+        // Draw the most recent sample buffer
+        if !self.samples.is_empty() {
+            // Draw the waveform
+            let x_scale = self.width as f32 / (self.samples.len() + 1) as f32;
+            let waveform_height = self.height * 3 / 5;
+            if self.samples.len() > 0 {
+                self.canvas.set_draw_color(Color::RGB(0x00, 0xFF, 0x00));
+                let mut last_y = (waveform_height as f32
+                    - ((self.samples[0] + 1.0) * (waveform_height as f32 / 2.4)))
+                    as i32;
+                for (i, f) in self.samples.iter().enumerate() {
+                    let x = (i as f32 * x_scale) as i32;
+                    let y = (waveform_height as f32 - ((f + 1.0) * (waveform_height as f32 / 2.4)))
+                        as i32;
+                    if f.abs() <= 0.95 {
+                        self.canvas.set_draw_color(Color::RGB(0x00, 0xFF, 0x00));
+                    } else if f.abs() <= 1.0 {
+                        self.canvas.set_draw_color(Color::RGB(0xFF, 0xDE, 0x21));
+                    } else {
+                        self.canvas.set_draw_color(Color::RGB(0xFF, 0x00, 0x00));
+                    }
+                    self.canvas
+                        .draw_line((x, last_y as i32), (x + x_scale as i32, y))
+                        .unwrap();
+                    last_y = y;
+                }
+            }
+
+            // Draw the spectrum
+            if !self.spectrum.is_empty() {
+                let spectrum_height = self.height - waveform_height;
+                fn as_scalar(c: &Complex<f32>) -> f32 {
+                    c.abs().log10()
+                }
+                let y_scale_max = -self
+                    .spectrum
+                    .iter()
+                    .map(as_scalar)
+                    .reduce(f32::max)
+                    .unwrap();
+                self.canvas.set_draw_color(Color::RGB(0xFF, 0x00, 0x00));
+                let mut last_y = (waveform_height + 300) as i32; // i.e., 0
+                for (i, c) in self.spectrum.iter().enumerate() {
+                    let x = ((i * 10) as f32 * x_scale) as i32;
+                    let y = (as_scalar(c) / y_scale_max * spectrum_height as f32
+                        + (waveform_height + 300) as f32) as i32;
+                    self.canvas.draw_line((x, last_y), (x + 9, y)).unwrap();
+                    last_y = y;
+                }
+            }
+        }
+
         let mut y = 10;
         let bank_start = active_program_index - (active_program_index % PROGRAMS_PER_BANK);
         for (i, program) in programs[bank_start..bank_start + PROGRAMS_PER_BANK]
@@ -541,81 +596,13 @@ impl Renderer {
                 .unwrap();
         }
 
-        // Save the new buffer if present
-        if let Some(buffer) = &status.buffer {
-            self.samples = buffer.clone();
-            let mut planner = RealFftPlanner::<f32>::new();
-            let fft = planner.plan_fft_forward(self.samples.len());
-            let mut input = fft.make_input_vec();
-            for (i, f) in self.samples.iter().enumerate() {
-                input[i] = *f;
-            }
-            self.spectrum = fft.make_output_vec();
-            if let Err(e) = fft.process(&mut input, &mut self.spectrum) {
-                println!("Error processing FFT: {}", e);
-            }
-        }
-        // Draw the most recent sample buffer
-        if !self.samples.is_empty() {
-            // Draw the waveform
-            let x_scale = self.width as f32 / (self.samples.len() + 1) as f32;
-            let waveform_height = self.height * 3 / 5;
-            if self.samples.len() > 0 {
-                self.canvas.set_draw_color(Color::RGB(0x00, 0xFF, 0x00));
-                let mut last_y = (waveform_height as f32
-                    - ((self.samples[0] + 1.0) * (waveform_height as f32 / 2.4)))
-                    as i32;
-                for (i, f) in self.samples.iter().enumerate() {
-                    let x = (i as f32 * x_scale) as i32;
-                    let y = (waveform_height as f32 - ((f + 1.0) * (waveform_height as f32 / 2.4)))
-                        as i32;
-                    if f.abs() <= 0.95 {
-                        self.canvas.set_draw_color(Color::RGB(0x00, 0xFF, 0x00));
-                    } else if f.abs() <= 1.0 {
-                        self.canvas.set_draw_color(Color::RGB(0xFF, 0xDE, 0x21));
-                    } else {
-                        self.canvas.set_draw_color(Color::RGB(0xFF, 0x00, 0x00));
-                    }
-                    self.canvas
-                        .draw_line((x, last_y as i32), (x + x_scale as i32, y))
-                        .unwrap();
-                    last_y = y;
-                }
-            }
-
-            // Draw the spectrum
-            if !self.spectrum.is_empty() {
-                let spectrum_height = self.height - waveform_height;
-                fn as_scalar(c: &Complex<f32>) -> f32 {
-                    c.abs().log10()
-                }
-                let y_scale_max = -self
-                    .spectrum
-                    .iter()
-                    .map(as_scalar)
-                    .reduce(f32::max)
-                    .unwrap();
-                self.canvas.set_draw_color(Color::RGB(0xFF, 0x00, 0x00));
-                let mut last_y = (waveform_height + 300) as i32; // i.e., 0
-                for (i, c) in self.spectrum.iter().enumerate() {
-                    let x = ((i * 10) as f32 * x_scale) as i32;
-                    let y = (as_scalar(c) / y_scale_max * spectrum_height as f32
-                        + (waveform_height + 300) as f32) as i32;
-                    self.canvas.draw_line((x, last_y), (x + 9, y)).unwrap();
-                    last_y = y;
-                }
-            }
-        }
-
         // Draw the marks
-        let mark_colors = vec![
-            Color::RGB(0xE1, 0x77, 0xF9),
-            Color::RGB(0xAD, 0xD8, 0xFF),
-            Color::RGB(0xAC, 0xD8, 0xAA),
-            Color::RGB(0xFF, 0xAD, 0xC3),
-            Color::RGB(0xFF, 0xDC, 0x85),
-        ];
-        let marks_row_height = self.height as f32 / 4.0 / mark_colors.len() as f32;
+        let programs_bottom = (20 + PROGRAMS_PER_BANK as i32 * self.line_height as i32) as f32;
+        let beat_font = ttf_context.load_font(FONT_PATH, 64).unwrap();
+        let beat_height = beat_font.size_of("0").unwrap().1 as f32;
+        let marks_bottom = self.height as f32 - beat_height - 10.0;
+        let marks_total_height = (marks_bottom - programs_bottom).max(0.0);
+        let marks_row_height = marks_total_height / PROGRAMS_PER_BANK as f32;
         let marks_y_padding = 6.0;
         for even in [false, true] {
             let mut marks_start = Instant::now() + Duration::from_secs(1000); // TODO something better?
@@ -637,32 +624,35 @@ impl Renderer {
             }
             for mark in status.marks.iter().rev() {
                 // Reverse so we draw earlier ones last
-                if mark.waveform_id.is_beats() {
-                    continue; // Skip beats
-                }
-                let color_idx = match mark.mark_id.color_index() {
-                    None => continue, // Skip if not user-defined
-                    Some(idx) => idx,
+                let program_index = match &mark.waveform_id {
+                    WaveformId::Program(id) => index_from_id(*id),
+                    _ => continue, // Skip beats
                 };
+                // Only draw Mark(1)
+                if mark.mark_id != MarkId::UserDefined(1) {
+                    continue;
+                }
                 if mark.start > marks_start + marks_duration
                     || mark.start + mark.duration < marks_start
                 {
                     continue; // Skip marks that don't start during the Beats waveform
                 }
-                if mark.start < now && mark.start + mark.duration >= now {
-                    self.canvas
-                        .set_draw_color(mark_colors[color_idx % mark_colors.len()]);
-                } else {
-                    let mut color = mark_colors[color_idx % mark_colors.len()];
-                    color.r = color.r / 2;
-                    color.g = color.g / 2;
-                    color.b = color.b / 2;
-                    self.canvas.set_draw_color(color);
+                let row = program_index % PROGRAMS_PER_BANK;
+                let mut program_color = programs[program_index]
+                    .color
+                    .map(|(r, g, b)| Color::RGB(r, g, b))
+                    .unwrap_or(INACTIVE_COLOR);
+                program_color.a = 128;
+                if mark.start > now || mark.start + mark.duration < now {
+                    program_color.r /= 2;
+                    program_color.g /= 2;
+                    program_color.b /= 2;
                 }
+                self.canvas.set_draw_color(program_color);
                 let x = (mark.start - marks_start).as_secs_f32() / marks_duration.as_secs_f32()
                     * marks_width
                     + marks_x_offset;
-                let y = color_idx as f32 * marks_row_height + 2.0 * self.height as f32 / 3.0;
+                let y = row as f32 * marks_row_height + programs_bottom;
                 let width =
                     mark.duration.as_secs_f32() / marks_duration.as_secs_f32() * marks_width;
                 let height = marks_row_height - marks_y_padding;
@@ -724,7 +714,6 @@ impl Renderer {
         }
 
         // Draw the current beat
-        let beat_font = ttf_context.load_font(FONT_PATH, 64).unwrap();
         let beat_texture = make_texture(
             &beat_font,
             ACTIVE_COLOR,
@@ -823,11 +812,12 @@ impl Renderer {
         metric: &mut Metric<f32>,
     ) {
         let font = ttf_context.load_font(FONT_PATH, 48).unwrap();
+        let default_color = Color::RGBA(0, 255, 0, 128);
         let points: Vec<f32> = metric.iter().collect();
         if points.len() > 0 {
             let last_value_texture = make_texture(
                 &font,
-                Color::RGB(0x00, 0xFF, 0x00),
+                default_color,
                 texture_creator,
                 format!("{:.2}", points.last().unwrap()).as_str(),
             );
@@ -857,11 +847,11 @@ impl Renderer {
                 let value = y + height as i32 - (point * height as f32) as i32;
                 // TODO these thresholds don't make sense for arbitrary metrics
                 if point < 0.7 {
-                    self.canvas.set_draw_color(Color::RGB(0x00, 0xFF, 0x00));
+                    self.canvas.set_draw_color(default_color);
                 } else if point < 0.9 {
-                    self.canvas.set_draw_color(Color::RGB(0xFF, 0xDE, 0x21));
+                    self.canvas.set_draw_color(Color::RGBA(127, 222, 33, 128));
                 } else {
-                    self.canvas.set_draw_color(Color::RGB(0xFF, 0x00, 0x00));
+                    self.canvas.set_draw_color(Color::RGBA(127, 0, 0, 128));
                 }
                 self.canvas
                     .draw_line(
