@@ -114,9 +114,9 @@ impl InputHandler {
                 }
                 Mode::Select { message }
             }
+
             (mode, Event::DAWTopPadPressed { index }) => {
                 let program = &programs[bank_start + index as usize];
-                println!("Got DAW top pad: {}, program_id = {}", index, program.id);
                 if status.has_active_mark(
                     Instant::now(),
                     WaveformId::Program(program.id),
@@ -140,6 +140,31 @@ impl InputHandler {
                 }
                 mode
             }
+            (mode, Event::DAWBottomPadPressed { index }) => {
+                let program = &programs[bank_start + index as usize];
+                if status.has_pending_mark(
+                    Instant::now(),
+                    WaveformId::Program(program.id),
+                    MarkId::TopLevel,
+                ) {
+                    self.command_sender
+                        .send(tracker::Command::RemovePending {
+                            id: WaveformId::Program(program.id),
+                        })
+                        .unwrap();
+                } else {
+                    self.play_helper.play_waveform(
+                        context,
+                        program.text.len(),
+                        &program,
+                        status,
+                        true,
+                        None,
+                    );
+                    // TODO This drops the returned mode, which might contain an error
+                }
+                mode
+            }
 
             (mode, event) => {
                 println!("TODO handle mode / event: {:?} / {:?}", mode, event);
@@ -153,6 +178,78 @@ impl InputHandler {
         for (i, value) in program.sliders.normalized_values.iter().enumerate() {
             self.launchkey
                 .update_encoder_state((i as u8).into(), ((127.0 * value) as u8).into());
+        }
+    }
+
+    pub fn update_state(
+        &mut self,
+        programs: &[renderer::Program],
+        status: &tracker::Status<WaveformId, MarkId>,
+        _mode: &renderer::Mode,
+        active_program_index: usize,
+    ) {
+        // TODO update slider state
+        let now = Instant::now();
+        let (_current_beat, current_beat_start, current_beat_duration) =
+            renderer::current_beat_info(now, status);
+        let bank_start = active_program_index - (active_program_index % PROGRAMS_PER_BANK);
+        for (i, program) in programs[bank_start..bank_start + renderer::PROGRAMS_PER_BANK]
+            .iter()
+            .enumerate()
+        {
+            // Top row is based on active waveforms
+            if status.has_active_mark(now, WaveformId::Program(program.id), MarkId::TopLevel) {
+                const U7_MAX: u8 = u8::MAX / 2;
+                let intensity = (now
+                    .duration_since(current_beat_start)
+                    .div_duration_f32(current_beat_duration)
+                    * U7_MAX as f32) as u8;
+                self.launchkey.set_daw_top_pad_color(
+                    i as u8,
+                    0,
+                    U7_MAX.saturating_sub(intensity),
+                    0,
+                );
+            } else if !program.text.is_empty() {
+                match program.color {
+                    Some(color) => {
+                        self.launchkey.set_daw_top_pad_color(
+                            i as u8,
+                            color.0 / 2,
+                            color.1 / 2,
+                            color.2 / 2,
+                        );
+                    }
+                    None => {
+                        self.launchkey.set_daw_top_pad_color(i as u8, 0, 127, 127);
+                    }
+                }
+            } else {
+                // empty
+                self.launchkey.set_daw_top_pad_color(i as u8, 0, 0, 0);
+            }
+            // Bottom row is based on pending waveforms
+            if status.has_pending_mark(now, WaveformId::Program(program.id), MarkId::TopLevel) {
+                self.launchkey.set_daw_bottom_pad_color(i as u8, 0, 127, 0);
+            } else if !program.text.is_empty() {
+                match program.color {
+                    Some(color) => {
+                        self.launchkey.set_daw_bottom_pad_color(
+                            i as u8,
+                            color.0 / 2,
+                            color.1 / 2,
+                            color.2 / 2,
+                        );
+                    }
+                    None => {
+                        self.launchkey
+                            .set_daw_bottom_pad_color(i as u8, 0, 127, 127);
+                    }
+                }
+            } else {
+                // empty
+                self.launchkey.set_daw_bottom_pad_color(i as u8, 0, 0, 0);
+            }
         }
     }
 }

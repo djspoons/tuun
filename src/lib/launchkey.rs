@@ -3,6 +3,7 @@ use std::sync::mpsc;
 use midir::{Ignore, MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
 use midly::MidiMessage;
 use midly::live::LiveEvent;
+use midly::num::u7;
 
 use thiserror::Error;
 
@@ -72,6 +73,10 @@ const ENCODER_UPDATE_CHANNEL: u8 = 15;
 const DAW_PAD_TOP_ROW_OFFSET: u8 = 96;
 const DAW_PAD_BOTTOM_ROW_OFFSET: u8 = 112;
 const NUM_DAW_PADS_PER_ROW: u8 = 8;
+
+// For SysEx messages
+const STANDARD_SKU_PREFIX: [u8; 5] = [0, 32, 41, 2, 20];
+const PAD_RGB_COLOR: [u8; 2] = [1, 67];
 
 impl Launchkey {
     pub fn new() -> Result<Self, Error> {
@@ -145,14 +150,7 @@ impl Launchkey {
         })
     }
 
-    pub fn update_encoder_state(&mut self, index: u8, value: u8) {
-        let event = LiveEvent::Midi {
-            channel: ENCODER_UPDATE_CHANNEL.into(),
-            message: MidiMessage::Controller {
-                controller: (index + ENCODER_OFFSET).into(),
-                value: value.into(),
-            },
-        };
+    fn send_event(&mut self, event: LiveEvent) {
         let mut buf = Vec::new();
         event.write(&mut buf).unwrap();
         //println!("Sending event {:?} as {:?}", &event, &buf);
@@ -161,16 +159,40 @@ impl Launchkey {
         }
     }
 
-    // XXX untested
-    pub fn set_daw_top_pad_color(&mut self, index: u8, red: u8, blue: u8, green: u8) {
-        // TODO 0, 32, 41, 2, 20 seems to be the launchkey "standard sku" prefix
+    pub fn update_encoder_state(&mut self, index: u8, value: u8) {
+        self.send_event(LiveEvent::Midi {
+            channel: ENCODER_UPDATE_CHANNEL.into(),
+            message: MidiMessage::Controller {
+                controller: (index + ENCODER_OFFSET).into(),
+                value: value.into(),
+            },
+        });
+    }
+
+    pub fn set_daw_top_pad_color(&mut self, index: u8, red: u8, green: u8, blue: u8) {
         let pad_id = index + DAW_PAD_TOP_ROW_OFFSET;
-        if let Err(e) = self
-            .daw_output_conn
-            .send(&[240, 0, 32, 41, 2, 20, 1, 67, pad_id, red, blue, green, 247])
-        {
-            println!("launchkey: got error on send: {}", e);
-        }
+        let mut buf = Vec::new();
+        buf.extend(&STANDARD_SKU_PREFIX);
+        buf.extend(&PAD_RGB_COLOR);
+        buf.push(pad_id);
+        buf.push(red.min(127));
+        buf.push(green.min(127));
+        buf.push(blue.min(127));
+        let msg: Vec<u7> = buf.iter().map(|&x| u7::new(x & 0x7F)).collect();
+        self.send_event(LiveEvent::Common(midly::live::SystemCommon::SysEx(&msg)));
+    }
+
+    pub fn set_daw_bottom_pad_color(&mut self, index: u8, red: u8, green: u8, blue: u8) {
+        let pad_id = index + DAW_PAD_BOTTOM_ROW_OFFSET;
+        let mut buf = Vec::new();
+        buf.extend(&STANDARD_SKU_PREFIX);
+        buf.extend(&PAD_RGB_COLOR);
+        buf.push(pad_id);
+        buf.push(red.min(127));
+        buf.push(green.min(127));
+        buf.push(blue.min(127));
+        let msg: Vec<u7> = buf.iter().map(|&x| u7::new(x & 0x7F)).collect();
+        self.send_event(LiveEvent::Common(midly::live::SystemCommon::SysEx(&msg)));
     }
 }
 

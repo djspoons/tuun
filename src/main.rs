@@ -597,7 +597,7 @@ pub fn main() {
         }
 
         if let Some(midi_handler) = &mut midi_handler {
-            // TODO this is a little like calling "render" but on the MIDI device. Generalize?
+            // TODO move this into render?
             if let Mode::Select { .. } = mode {
                 // This might be a new program, in which case we need to update any device state.
                 midi_handler.update_slider_state(&programs[active_program_index]);
@@ -680,5 +680,9 @@ pub fn main() {
             active_program_index,
             &mut metrics,
         );
+
+        if let Some(midi_handler) = &mut midi_handler {
+            midi_handler.update_state(&programs, &status, &mode, active_program_index);
+        }
     }
 }

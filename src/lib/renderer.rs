@@ -280,28 +280,8 @@ impl Renderer {
     ) {
         // TODO so much clean-up
         let now = Instant::now();
-        let mut current_beat = 0;
-        let mut current_beat_start = now;
-        let mut current_beat_duration = Duration::from_secs(1);
-        for mark in status.marks.iter() {
-            if let WaveformId::Beats(_) = mark.waveform_id {
-                // XXX sometimes this doesn't match anything?
-                if mark.start <= status.buffer_start
-                    && mark.start + mark.duration > status.buffer_start
-                    && let MarkId::UserDefined(beat) = mark.mark_id
-                {
-                    current_beat = beat;
-                    current_beat_start = mark.start;
-                    current_beat_duration = mark.duration;
-                }
-            }
-        }
-        if current_beat == 0 {
-            println!(
-                "No current beat found in marks at time {:?}: {:?}",
-                status.buffer_start, status.marks
-            );
-        }
+        let (current_beat, current_beat_start, current_beat_duration) =
+            current_beat_info(now, status);
         let texture_creator = self.canvas.texture_creator();
         let font = ttf_context.load_font(FONT_PATH, 48).unwrap();
         let circle_font = ttf_context.load_font(FONT_PATH, 108).unwrap();
@@ -880,4 +860,33 @@ impl Renderer {
             }
         }
     }
+}
+
+pub fn current_beat_info(
+    now: Instant,
+    status: &tracker::Status<WaveformId, MarkId>,
+) -> (u32, Instant, Duration) {
+    let mut current_beat = 0;
+    let mut current_beat_start = now;
+    let mut current_beat_duration = Duration::from_secs(1);
+    for mark in status.marks.iter() {
+        if let WaveformId::Beats(_) = mark.waveform_id {
+            // XXX sometimes this doesn't match anything?
+            if mark.start <= status.buffer_start
+                && mark.start + mark.duration > status.buffer_start
+                && let MarkId::UserDefined(beat) = mark.mark_id
+            {
+                current_beat = beat;
+                current_beat_start = mark.start;
+                current_beat_duration = mark.duration;
+            }
+        }
+    }
+    if current_beat == 0 {
+        println!(
+            "No current beat found in marks at time {:?}: {:?}",
+            status.buffer_start, status.marks
+        );
+    }
+    (current_beat, current_beat_start, current_beat_duration)
 }
