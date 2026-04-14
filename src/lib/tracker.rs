@@ -168,8 +168,8 @@ where
             Const(_) | Time(_) | Noise | Fixed(_, _) => {
                 return;
             }
+            // TODO think harder about captures for the other sub-waveforms in these cases
             Fin { waveform, .. }
-            | Filter { waveform, .. }
             | Reset {
                 trigger: waveform, ..
             }
@@ -188,6 +188,20 @@ where
             | BinaryPointOp(_, a, b) => {
                 self.process_captured(&*a, out);
                 self.process_captured(&*b, out);
+            }
+            Filter {
+                waveform,
+                feed_forward,
+                feedback,
+                ..
+            } => {
+                self.process_captured(waveform, out);
+                for waveform in feed_forward.iter() {
+                    self.process_captured(waveform, out);
+                }
+                for waveform in feedback.iter() {
+                    self.process_captured(waveform, out);
+                }
             }
             Captured {
                 file_stem,

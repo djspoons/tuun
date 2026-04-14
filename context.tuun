@@ -78,7 +78,7 @@ equal_third = fn(freq) => {[odd_hrm(freq), odd_hrm(step(freq, 4))]},
 
 // Returns a moving average filter with the given order (i.e., with length n+1)
 moving_average = fn(n) =>
-  filter(unfold(fn(x) => fixed([1/(n+1)]), fixed([1/(n+1)]), n+1), []),
+  filter(unfold(fn(x) => 1/(n+1), 1/(n+1), n+1), []),
 
 // RBJ Cookbook
 lpf = fn(Q, fc) =>

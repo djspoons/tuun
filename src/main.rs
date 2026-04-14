@@ -27,26 +27,6 @@ use parser::Expr;
 use renderer::{MarkId, Mode, Program, ProgramSliders, Renderer, WaveformId};
 use tracker::Command;
 
-// Additional built-ins
-
-fn mark(arguments: Vec<Expr<MarkId>>) -> Expr<MarkId> {
-    match &arguments[..] {
-        [Expr::Float(id)] if *id >= 1.0 && id.fract() == 0.0 => {
-            let id = id.round() as u32;
-            Expr::BuiltIn {
-                name: format!("mark({})", id),
-                function: builtins::curry(move |waveform: Box<waveform::Waveform<MarkId>>| {
-                    waveform::Waveform::Marked {
-                        id: MarkId::UserDefined(id),
-                        waveform,
-                    }
-                }),
-            }
-        }
-        _ => Expr::Error("Invalid argument for mark".to_string()),
-    }
-}
-
 #[derive(ClapParser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
@@ -96,7 +76,7 @@ fn load_context(args: &Args, mut context: &mut Vec<(String, Expr<MarkId>)>) -> M
         "mark".to_string(),
         Expr::BuiltIn {
             name: "mark".to_string(),
-            function: parser::BuiltInFn(std::rc::Rc::new(mark)),
+            function: parser::BuiltInFn(std::rc::Rc::new(renderer::mark)),
         },
     ));
 

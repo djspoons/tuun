@@ -151,6 +151,8 @@ where
                     Box::new(Const(a)),
                 )),
                 // Re-associate
+                // TODO I think re-associating the other way would mean a lower water mark for allocations (in
+                // general). Consider long changes like in a big additive case.
                 (BinaryPointOp(Operator::Add, a, b), Const(c)) => BinaryPointOp(
                     Operator::Add,
                     a,

@@ -4,10 +4,12 @@ use tuun::builtins;
 use tuun::generator;
 use tuun::parser;
 use tuun::play_helper;
+use tuun::renderer;
 use tuun::waveform;
 
 fn bench_filter(c: &mut Criterion) {
-    use waveform::Waveform::{Filter, Fixed, Time};
+    use waveform::Operator::{Add, Multiply};
+    use waveform::Waveform::{BinaryPointOp, Const, Filter, Time};
     type Waveform = waveform::Waveform<u32>;
 
     c.bench_function("filter_1_1", |b| {
@@ -15,8 +17,41 @@ fn bench_filter(c: &mut Criterion) {
             let mut generator = generator::Generator::new(44100);
             let w1: Waveform = Filter {
                 waveform: Box::new(Time(())),
-                feed_forward: vec![Fixed(vec![0.5], ())],
-                feedback: vec![Fixed(vec![-0.5], ())],
+                feed_forward: vec![Const(0.5)],
+                feedback: vec![Const(-0.5)],
+                state: (),
+            };
+            let mut w1 = generator::initialize_state(w1);
+            let mut out = vec![0.0; 1024];
+            for _ in 0..43 {
+                let _ = generator.generate(&mut w1, &mut out);
+            }
+        });
+    });
+
+    c.bench_function("filter_1_1_linear", |b| {
+        b.iter(|| {
+            let mut generator = generator::Generator::new(44100);
+            let w1: Waveform = Filter {
+                waveform: Box::new(Time(())),
+                feed_forward: vec![BinaryPointOp(
+                    Add,
+                    Box::new(BinaryPointOp(
+                        Multiply,
+                        Box::new(Time(())),
+                        Box::new(Const(-0.5)),
+                    )),
+                    Box::new(Const(0.5)),
+                )],
+                feedback: vec![BinaryPointOp(
+                    Add,
+                    Box::new(BinaryPointOp(
+                        Multiply,
+                        Box::new(Time(())),
+                        Box::new(Const(0.5)),
+                    )),
+                    Box::new(Const(-0.5)),
+                )],
                 state: (),
             };
             let mut w1 = generator::initialize_state(w1);
@@ -33,16 +68,12 @@ fn bench_filter(c: &mut Criterion) {
             let w2: Waveform = Filter {
                 waveform: Box::new(Time(())),
                 feed_forward: vec![
-                    Fixed(vec![0.00107949], ()),
-                    Fixed(vec![0.00323847], ()),
-                    Fixed(vec![0.00323847], ()),
-                    Fixed(vec![0.00107949], ()),
+                    Const(0.00107949),
+                    Const(0.00323847),
+                    Const(0.00323847),
+                    Const(0.00107949),
                 ],
-                feedback: vec![
-                    Fixed(vec![-2.56103158], ()),
-                    Fixed(vec![2.2132402], ()),
-                    Fixed(vec![-0.64357271], ()),
-                ],
+                feedback: vec![Const(-2.56103158), Const(2.2132402), Const(-0.64357271)],
                 state: (),
             };
             let mut w2 = generator::initialize_state(w2);
@@ -59,6 +90,13 @@ fn bench_marks(c: &mut Criterion) {
         b.iter(|| {
             let mut context = vec![];
             builtins::add_prelude(&mut context);
+            context.push((
+                "mark".to_string(),
+                parser::Expr::BuiltIn {
+                    name: "mark".to_string(),
+                    function: parser::BuiltInFn(std::rc::Rc::new(renderer::mark)),
+                },
+            ));
             const SAMPLE_RATE: i32 = 44100;
             let mut generator = generator::Generator::new(SAMPLE_RATE);
             let mut ws = Vec::new();

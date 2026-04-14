@@ -11,6 +11,7 @@ use sdl2::video::WindowContext;
 use realfft::RealFftPlanner;
 use realfft::num_complex::{Complex, ComplexFloat};
 
+use crate::builtins;
 use crate::metric::Metric;
 use crate::parser;
 use crate::slider;
@@ -63,6 +64,25 @@ impl fmt::Display for MarkId {
             MarkId::Slider(name) => write!(f, "slider({:?})", name),
             MarkId::UserDefined(id) => write!(f, "{:?}", id),
         }
+    }
+}
+
+// Additional built-in for use with the above type
+pub fn mark(arguments: Vec<parser::Expr<MarkId>>) -> parser::Expr<MarkId> {
+    match &arguments[..] {
+        [parser::Expr::Float(id)] if *id >= 1.0 && id.fract() == 0.0 => {
+            let id = id.round() as u32;
+            parser::Expr::BuiltIn {
+                name: format!("mark({})", id),
+                function: builtins::curry(move |waveform: Box<waveform::Waveform<MarkId>>| {
+                    waveform::Waveform::Marked {
+                        id: MarkId::UserDefined(id),
+                        waveform,
+                    }
+                }),
+            }
+        }
+        _ => parser::Expr::Error("Invalid argument for mark".to_string()),
     }
 }
 
