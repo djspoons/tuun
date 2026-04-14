@@ -11,6 +11,7 @@ use crate::tracker;
 
 pub struct InputHandler {
     launchkey: launchkey::Launchkey,
+    repeat_after_measures: Option<u32>,
 
     play_helper: play_helper::PlayHelper,
     command_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
@@ -26,6 +27,7 @@ impl InputHandler {
     ) -> InputHandler {
         InputHandler {
             launchkey,
+            repeat_after_measures: None,
             play_helper,
             command_sender,
             slider_sender,
@@ -49,14 +51,14 @@ impl InputHandler {
         use renderer::Mode;
         let bank_start = *active_program_index - (*active_program_index % PROGRAMS_PER_BANK);
         match (mode, event) {
-            (Mode::Select { .. }, Event::NextTrack) => {
+            (Mode::Select { .. }, Event::NextTrackDown) => {
                 *active_program_index = (*active_program_index + 1) % programs.len();
                 self.update_slider_state(&programs[*active_program_index]);
                 Mode::Select {
                     message: String::new(),
                 }
             }
-            (Mode::Select { .. }, Event::PreviousTrack) => {
+            (Mode::Select { .. }, Event::PreviousTrackDown) => {
                 *active_program_index =
                     (*active_program_index + programs.len() - 1) % programs.len();
                 self.update_slider_state(&programs[*active_program_index]);
@@ -64,7 +66,7 @@ impl InputHandler {
                     message: String::new(),
                 }
             }
-            (Mode::Select { .. }, Event::NextTrackBank) => {
+            (Mode::Select { .. }, Event::NextTrackBankDown) => {
                 *active_program_index =
                     (*active_program_index + PROGRAMS_PER_BANK) % programs.len();
                 self.update_slider_state(&programs[*active_program_index]);
@@ -72,7 +74,7 @@ impl InputHandler {
                     message: String::new(),
                 }
             }
-            (Mode::Select { .. }, Event::PreviousTrackBank) => {
+            (Mode::Select { .. }, Event::PreviousTrackBankDown) => {
                 *active_program_index =
                     (*active_program_index + programs.len() - PROGRAMS_PER_BANK) % programs.len();
                 self.update_slider_state(&programs[*active_program_index]);
@@ -115,7 +117,7 @@ impl InputHandler {
                 Mode::Select { message }
             }
 
-            (mode, Event::DAWTopPadPressed { index }) => {
+            (mode, Event::DAWTopPadDown { index }) => {
                 let program = &programs[bank_start + index as usize];
                 if status.has_active_mark(
                     Instant::now(),
@@ -127,6 +129,7 @@ impl InputHandler {
                             id: WaveformId::Program(program.id),
                         })
                         .unwrap();
+                    mode_with_message(mode, format!("Stopped program {}", program.id))
                 } else {
                     self.play_helper.play_waveform(
                         context,
@@ -135,12 +138,10 @@ impl InputHandler {
                         status,
                         false,
                         None,
-                    );
-                    // TODO This drops the returned mode, which might contain an error
+                    )
                 }
-                mode
             }
-            (mode, Event::DAWBottomPadPressed { index }) => {
+            (mode, Event::DAWBottomPadDown { index }) => {
                 let program = &programs[bank_start + index as usize];
                 if status.has_pending_mark(
                     Instant::now(),
@@ -152,6 +153,10 @@ impl InputHandler {
                             id: WaveformId::Program(program.id),
                         })
                         .unwrap();
+                    mode_with_message(
+                        mode,
+                        format!("Removed pending waveform for program {}", program.id),
+                    )
                 } else {
                     self.play_helper.play_waveform(
                         context,
@@ -159,9 +164,21 @@ impl InputHandler {
                         &program,
                         status,
                         true,
-                        None,
-                    );
-                    // TODO This drops the returned mode, which might contain an error
+                        self.repeat_after_measures,
+                    )
+                }
+            }
+            (mode, Event::PadFunctionDown) => {
+                match self.repeat_after_measures {
+                    None => {
+                        self.repeat_after_measures = Some(1);
+                    }
+                    Some(1) => {
+                        self.repeat_after_measures = Some(2);
+                    }
+                    Some(_) => {
+                        self.repeat_after_measures = None;
+                    }
                 }
                 mode
             }
@@ -189,6 +206,28 @@ impl InputHandler {
         active_program_index: usize,
     ) {
         // TODO update slider state
+
+        match self.repeat_after_measures {
+            None => {
+                self.launchkey
+                    .set_pad_function_color(launchkey::Color::BrightGreen);
+            }
+            Some(1) => {
+                self.launchkey
+                    .set_pad_function_color(launchkey::Color::YellowGreen);
+            }
+            Some(2) => {
+                self.launchkey
+                    .set_pad_function_color(launchkey::Color::GoldenOrange);
+            }
+            i => {
+                println!(
+                    "midi_input::InputHandler: unexpected repeat_after_measures: {:?}",
+                    i
+                );
+            }
+        }
+
         let now = Instant::now();
         let (_current_beat, current_beat_start, current_beat_duration) =
             renderer::current_beat_info(now, status);
@@ -251,5 +290,22 @@ impl InputHandler {
                 self.launchkey.set_daw_bottom_pad_color(i as u8, 0, 0, 0);
             }
         }
+    }
+}
+
+fn mode_with_message(mode: renderer::Mode, message: String) -> renderer::Mode {
+    use renderer::Mode;
+    match mode {
+        Mode::Edit {
+            cursor_position,
+            errors,
+            message,
+        } => Mode::Edit {
+            cursor_position,
+            errors,
+            message,
+        },
+        Mode::Select { .. } => Mode::Select { message },
+        _ => mode,
     }
 }
