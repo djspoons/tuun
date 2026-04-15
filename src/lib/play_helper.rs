@@ -73,6 +73,37 @@ impl PlayHelper {
         }
     }
 
+    pub fn stop_waveform(&mut self, id: WaveformId) {
+        use waveform::{Operator, Waveform::*};
+        const STOP_DURATION_SECS: f32 = 0.05;
+        self.command_sender
+            .send(tracker::Command::Modify {
+                id,
+                mark_id: MarkId::TopLevel,
+                waveform: Fin {
+                    length: Box::new(BinaryPointOp(
+                        Operator::Subtract,
+                        Box::new(Time(())),
+                        Box::new(Const(STOP_DURATION_SECS)),
+                    )),
+                    waveform: Box::new(BinaryPointOp(
+                        Operator::Multiply,
+                        Box::new(BinaryPointOp(
+                            Operator::Subtract,
+                            Box::new(Const(1.0)),
+                            Box::new(BinaryPointOp(
+                                Operator::Multiply,
+                                Box::new(Time(())),
+                                Box::new(Const(1.0 / STOP_DURATION_SECS)),
+                            )),
+                        )),
+                        Box::new(Placeholder),
+                    )),
+                },
+            })
+            .unwrap();
+    }
+
     pub fn start_beats(
         &self,
         status_receiver: &mpsc::Receiver<tracker::Status<WaveformId, MarkId>>,

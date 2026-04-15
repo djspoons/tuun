@@ -416,6 +416,7 @@ where
             file_stem,
             waveform: Box::new(optimize(*waveform)),
         },
+        Placeholder => Placeholder,
     }
 }
 

@@ -342,6 +342,9 @@ impl<'a> Generator<'a> {
                 }
                 len
             }
+            Placeholder => {
+                panic!("Should reach Placeholder waveform in generate()");
+            }
         }
     }
 
@@ -698,6 +701,9 @@ impl<'a> Generator<'a> {
             Captured { waveform, .. } => {
                 let len = self.length(waveform, max);
                 len
+            }
+            Placeholder => {
+                panic!("Should reach Placeholder waveform in length()");
             }
         }
     }
@@ -1124,6 +1130,9 @@ impl<'a> Generator<'a> {
                     waveform: Box::new(waveform),
                     file_stem,
                 }),
+                Placeholder => {
+                    panic!("Should reach Placeholder waveform in length()");
+                }
             }
         }
 

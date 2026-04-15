@@ -91,6 +91,8 @@ pub enum Waveform<MarkId, State = ()> {
         file_stem: String,
         waveform: Box<Waveform<MarkId, State>>,
     },
+    /// Cannot be used to generate samples but may be used as part of operations on waveforms (like Modify)
+    Placeholder,
 }
 
 impl<MarkId: Display, State> Display for Waveform<MarkId, State> {
@@ -165,6 +167,7 @@ impl<MarkId: Display, State> Display for Waveform<MarkId, State> {
             } => {
                 write!(f, "Captured({}, {})", file_stem, waveform)
             }
+            Placeholder => write!(f, "Placeholder"),
         }
     }
 }
@@ -244,6 +247,7 @@ where
             file_stem,
             waveform: Box::new(initialize_state(*waveform, state)),
         },
+        Placeholder => Placeholder,
     }
 }
 
@@ -308,6 +312,7 @@ pub fn remove_state<M, S>(waveform: Waveform<M, S>) -> Waveform<M> {
             file_stem,
             waveform: Box::new(remove_state(*waveform)),
         },
+        Placeholder => Placeholder,
     }
 }
 
@@ -382,23 +387,45 @@ where
         Captured { waveform, .. } => {
             set_state(waveform, new_state);
         }
+        Placeholder => (),
     }
 }
 
-/// Replaces the contents of any Marked waveform in `waveform` with the given mark_id with a copy of
-/// `new_waveform.`
-pub fn substitute<M, S>(waveform: &mut Waveform<M, S>, mark_id: &M, new_waveform: &Waveform<M, S>)
-where
-    S: Clone,
-    M: Clone + PartialEq + Display,
+/// Replaces part of `waveform` with a copy of `new_waveform.`
+///
+/// If `mark_id` is Some then it will replace the contents of all Marked waveforms with
+/// a matching id. If `mark_id` is None, then it will replace all Placeholder waveforms.
+pub fn substitute<M, S>(
+    waveform: &mut Waveform<M, S>,
+    mark_id: &Option<M>,
+    new_waveform: &Waveform<M, S>,
+) where
+    S: Clone + Debug,
+    M: Clone + PartialEq + Display + Debug,
 {
     use Waveform::*;
     match waveform {
-        Marked { id, waveform } if id == mark_id => {
-            *waveform = Box::new(new_waveform.clone());
+        Marked { id, waveform } => match mark_id {
+            Some(m_id) => {
+                if id == m_id {
+                    let mut new_waveform = new_waveform.clone();
+                    substitute(&mut new_waveform, &None, &waveform);
+                    *waveform = Box::new(new_waveform);
+                } else {
+                    substitute(waveform, mark_id, new_waveform);
+                }
+            }
+            None => {
+                substitute(waveform, mark_id, new_waveform);
+            }
+        },
+        Placeholder if *mark_id == None => {
+            *waveform = new_waveform.clone();
         }
-        // Recurse into all variants that contain child waveforms
-        Marked { waveform, .. } => substitute(waveform, mark_id, new_waveform),
+        Placeholder => (),
+        // Leaf nodes — nothing to recurse into
+        Const(_) | Time(_) | Noise | Fixed(..) => {}
+
         Fin { length, waveform } => {
             substitute(length, mark_id, new_waveform);
             substitute(waveform, mark_id, new_waveform);
@@ -447,7 +474,5 @@ where
             substitute(negative_waveform, mark_id, new_waveform);
         }
         Captured { waveform, .. } => substitute(waveform, mark_id, new_waveform),
-        // Leaf nodes — nothing to recurse into
-        Const(_) | Time(_) | Noise | Fixed(..) => {}
     }
 }

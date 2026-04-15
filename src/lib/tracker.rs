@@ -30,10 +30,6 @@ pub enum Command<I, M> {
         mark_id: M,
         waveform: waveform::Waveform<M>,
     },
-    Stop {
-        // The id of the waveform to stop
-        id: I,
-    },
     RemovePending {
         // The id of the waveform to remove
         id: I,
@@ -227,6 +223,7 @@ where
                     .expect("Failed to create WAV writer");
                 out.insert(file_stem.clone(), writer);
             }
+            Placeholder => (),
         }
     }
 }
@@ -313,6 +310,7 @@ fn process_marked<I, M>(
             });
             process_marked(generator, sample_rate, waveform_id, start, &*waveform, out);
         }
+        Placeholder => (),
     }
 }
 
@@ -427,6 +425,7 @@ where
                     mark_id, id, waveform
                 );
                 let waveform = generator::initialize_state(waveform);
+                let mark_id = Some(mark_id);
                 for active in &mut self.active_waveforms {
                     if active.id == id {
                         waveform::substitute(&mut active.waveform, &mark_id, &waveform);
@@ -462,10 +461,6 @@ where
                         );
                     }
                 }
-            }
-            Command::Stop { id } => {
-                println!("Received command to stop waveform {:?}", id);
-                self.active_waveforms.retain(|w| w.id != id);
             }
             Command::RemovePending { id } => {
                 println!("Received command to remove pending waveform {:?}", id);

@@ -157,11 +157,9 @@ impl<'a> InputHandler {
                                 )
                         {
                             // If the program is active, stop it
-                            self.command_sender
-                                .send(tracker::Command::Stop {
-                                    id: WaveformId::Program(programs[*active_program_index].id),
-                                })
-                                .unwrap();
+                            self.play_helper.stop_waveform(WaveformId::Program(
+                                programs[*active_program_index].id,
+                            ));
                             message =
                                 format!("Stopped program {}", programs[*active_program_index].id);
                         } else if !keymod.contains(Mod::LGUIMOD)
@@ -305,11 +303,9 @@ impl<'a> InputHandler {
                                 )
                         {
                             // If the program is active, stop it
-                            self.command_sender
-                                .send(tracker::Command::Stop {
-                                    id: WaveformId::Program(programs[*active_program_index].id),
-                                })
-                                .unwrap();
+                            self.play_helper.stop_waveform(WaveformId::Program(
+                                programs[*active_program_index].id,
+                            ));
                             let message =
                                 format!("Stopped program {}", programs[*active_program_index].id);
                             return Mode::Edit {

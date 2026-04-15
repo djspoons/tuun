@@ -186,7 +186,7 @@ impl Wasm {
 
         let ramp = slider::make_ramp(last_value, value, self.buffer_duration.as_secs_f32());
         let ramp = generator::initialize_state(ramp);
-        waveform::substitute(waveform, &MarkId::Slider(name.to_string()), &ramp);
+        waveform::substitute(waveform, &Some(MarkId::Slider(name.to_string())), &ramp);
 
         self.last_slider_values.insert(name.to_string(), value);
     }

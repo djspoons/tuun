@@ -460,12 +460,8 @@ pub fn main() {
 
                     play_command_sender
                         .send(Command::Play {
-                            // TODO maybe extend the mark to the full measure?
                             id,
-                            waveform: waveform::Waveform::Marked {
-                                id: MarkId::TopLevel,
-                                waveform: Box::new(waveform),
-                            },
+                            waveform,
                             start,
                             repeat_every,
                         })

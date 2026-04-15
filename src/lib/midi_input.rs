@@ -82,10 +82,7 @@ impl InputHandler {
                     message: String::new(),
                 }
             }
-            (
-                Mode::Select { .. } | Mode::Edit { .. },
-                Event::PluginEncoderChange { index, value },
-            ) => {
+            (mode, Event::PluginEncoderChange { index, value }) => {
                 let index = index as usize;
                 let program = &mut programs[*active_program_index];
                 let ps = &mut program.sliders;
@@ -114,7 +111,7 @@ impl InputHandler {
                 } else {
                     message = format!("No slider with index {}", index);
                 }
-                Mode::Select { message }
+                mode_with_message(mode, message)
             }
 
             (mode, Event::DAWTopPadDown { index }) => {
@@ -124,11 +121,8 @@ impl InputHandler {
                     WaveformId::Program(program.id),
                     MarkId::TopLevel,
                 ) {
-                    self.command_sender
-                        .send(tracker::Command::Stop {
-                            id: WaveformId::Program(program.id),
-                        })
-                        .unwrap();
+                    self.play_helper
+                        .stop_waveform(WaveformId::Program(program.id));
                     mode_with_message(mode, format!("Stopped program {}", program.id))
                 } else {
                     self.play_helper.play_waveform(
