@@ -935,6 +935,7 @@ pub fn add_prelude<M: Debug + Clone + Display + PartialEq + 'static>(
     context.push(("false".to_string(), Expr::Bool(false)));
     context.push(("time".to_string(), Expr::Waveform(Waveform::Time(()))));
     context.push(("noise".to_string(), Expr::Waveform(Waveform::Noise)));
+    context.push(("prior".to_string(), Expr::Waveform(Waveform::Prior)));
 
     let builtins: Vec<(&str, fn(Vec<Expr<M>>) -> Expr<M>)> = vec![
         ("+", plus),

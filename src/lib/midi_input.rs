@@ -8,10 +8,19 @@ use crate::play_helper;
 use crate::renderer::{self, MarkId, PROGRAMS_PER_BANK, Program, WaveformId};
 use crate::slider;
 use crate::tracker;
+use crate::waveform;
+
+struct Keys {
+    id: renderer::ProgramId,
+
+    note_on_function: parser::Expr<MarkId>,
+    note_off_function: parser::Expr<MarkId>,
+}
 
 pub struct InputHandler {
     launchkey: launchkey::Launchkey,
     repeat_after_measures: Option<u32>,
+    keys: Option<Keys>,
 
     play_helper: play_helper::PlayHelper,
     command_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
@@ -28,6 +37,7 @@ impl InputHandler {
         InputHandler {
             launchkey,
             repeat_after_measures: None,
+            keys: None,
             play_helper,
             command_sender,
             slider_sender,
@@ -51,6 +61,98 @@ impl InputHandler {
         use renderer::Mode;
         let bank_start = *active_program_index - (*active_program_index % PROGRAMS_PER_BANK);
         match (mode, event) {
+            (mode, Event::NoteOn { key, velocity }) => {
+                if let Some(Keys {
+                    note_on_function, ..
+                }) = &self.keys
+                {
+                    use parser::Expr;
+                    let expr = Expr::Application {
+                        function: Box::new(note_on_function.clone()),
+                        argument: Box::new(Expr::Tuple(vec![
+                            Expr::Float(key as f32),
+                            Expr::Float(velocity as f32),
+                        ])),
+                    };
+                    match parser::evaluate(&[], expr) {
+                        Ok(expr) => match expr {
+                            Expr::Waveform(waveform) => {
+                                self.command_sender
+                                    .send(tracker::Command::Play {
+                                        id: WaveformId::Key(key),
+                                        waveform: waveform::Waveform::Marked {
+                                            id: MarkId::TopLevel,
+                                            waveform: Box::new(waveform),
+                                        },
+                                        start: None,
+                                        repeat_every: None,
+                                    })
+                                    .unwrap();
+                            }
+                            expr => {
+                                return mode_with_message(
+                                    mode,
+                                    format!("Expected waveform for note-on, got: {}", expr),
+                                );
+                            }
+                        },
+                        Err(error) => {
+                            return mode_with_message(
+                                mode,
+                                format!("Error evaluating note-on: {}", error.to_string()),
+                            );
+                        }
+                    }
+                }
+                mode
+            }
+            (mode, Event::NoteOff { key }) => {
+                // In the case of problems with handling this event, just default to stopping the
+                // waveform.
+                if let Some(Keys {
+                    note_off_function, ..
+                }) = &self.keys
+                {
+                    use parser::Expr;
+                    let expr = Expr::Application {
+                        function: Box::new(note_off_function.clone()),
+                        argument: Box::new(Expr::Tuple(vec![Expr::Float(key as f32)])),
+                    };
+                    match parser::evaluate(&[], expr) {
+                        Ok(expr) => match expr {
+                            Expr::Waveform(waveform) => {
+                                self.command_sender
+                                    .send(tracker::Command::Modify {
+                                        id: WaveformId::Key(key),
+                                        mark_id: MarkId::TopLevel,
+                                        waveform,
+                                    })
+                                    .unwrap();
+                            }
+                            expr => {
+                                self.play_helper.stop_waveform(WaveformId::Key(key));
+                                println!("Expected waveform for note-off, got: {}", expr);
+                                return mode_with_message(
+                                    mode,
+                                    format!("Expected waveform for note-off, got: {}", expr),
+                                );
+                            }
+                        },
+                        Err(error) => {
+                            self.play_helper.stop_waveform(WaveformId::Key(key));
+                            println!("Error evaluating note-off: {}", error.to_string());
+                            return mode_with_message(
+                                mode,
+                                format!("Error evaluating note-off: {}", error.to_string()),
+                            );
+                        }
+                    }
+                } else {
+                    self.play_helper.stop_waveform(WaveformId::Key(key));
+                }
+                mode
+            }
+
             (Mode::Select { .. }, Event::NextTrackDown) => {
                 *active_program_index = (*active_program_index + 1) % programs.len();
                 self.update_slider_state(&programs[*active_program_index]);
@@ -177,6 +279,92 @@ impl InputHandler {
                 mode
             }
 
+            (mode, Event::CaptureMIDIDown) => {
+                if self.keys.is_some() {
+                    self.keys = None;
+                    self.launchkey.set_capture_midi_brightness(0);
+                    return mode_with_message(mode, "Uninstalled keys".to_string());
+                }
+                // When installing a MIDI instrument, we expect the program text to evaluate to a pair
+                // of functions:
+                //   (note_on: (midi_note, velocity) -> waveform,
+                //    note_off: (midi_note) -> waveform)
+                // The first will be called whenever a NoteOn event is received, and the resulting
+                // waveform will be played immediately. The second will be called when a NoteOff
+                // event is received, and the resulting waveform will immediately replace the original
+                // waveform. (Note that the note-off waveform may include the "Prior" waveform.)
+                let program = &programs[*active_program_index];
+                match parser::parse_program(&program.text) {
+                    Ok(expr) => {
+                        println!("Parser returned: {}", &expr);
+                        let expr = slider::prepend_slider_bindings(
+                            &program.sliders.configs,
+                            &program.sliders.normalized_values,
+                            MarkId::Slider,
+                            expr,
+                        );
+                        match parser::evaluate(context, expr) {
+                            Ok(expr) => {
+                                println!("parser::evaluate returned: {}", &expr);
+                                use parser::Expr;
+                                match expr {
+                                    Expr::Tuple(mut exprs) => {
+                                        if exprs.len() != 2 {
+                                            let message = format!(
+                                                "Expected two elements for keys program, got: {}",
+                                                &Expr::Tuple(exprs),
+                                            );
+                                            return mode_with_message(mode, message);
+                                        }
+                                        let note_on_function = exprs.remove(0);
+                                        if !test_note_function(&note_on_function, true) {
+                                            return mode_with_message(
+                                                mode,
+                                                "Note-on functional failed test".to_string(),
+                                            );
+                                        }
+                                        let note_off_function = exprs.remove(0);
+                                        if !test_note_function(&note_off_function, false) {
+                                            return mode_with_message(
+                                                mode,
+                                                "Note-off functional failed test".to_string(),
+                                            );
+                                        }
+                                        self.keys = Some(Keys {
+                                            id: program.id,
+                                            note_on_function,
+                                            note_off_function,
+                                        });
+                                        self.launchkey.set_capture_midi_brightness(127);
+                                        mode_with_message(
+                                            mode,
+                                            format!("Installed keys from program {}", program.id),
+                                        )
+                                    }
+                                    _ => {
+                                        let message = format!(
+                                            "Expected tuple for keys program, got: {}",
+                                            expr
+                                        );
+                                        mode_with_message(mode, message)
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                println!("Errors while evaluating input: {:?}", error);
+                                let message = format!("Error: {}", error.to_string());
+                                mode_with_message(mode, message)
+                            }
+                        }
+                    }
+                    Err(errors) => {
+                        // If there are errors, we stay in edit mode
+                        println!("Errors while parsing input: {:?}", errors);
+                        mode_with_message(mode, format!("Error: {}", errors[0].to_string()))
+                    }
+                }
+            }
+
             (mode, event) => {
                 println!("TODO handle mode / event: {:?} / {:?}", mode, event);
                 mode
@@ -231,7 +419,25 @@ impl InputHandler {
             .enumerate()
         {
             // Top row is based on active waveforms
-            if status.has_active_mark(now, WaveformId::Program(program.id), MarkId::TopLevel) {
+            if status.has_active_mark(now, WaveformId::Program(program.id), MarkId::TopLevel)
+                || (if let Some(Keys { id, .. }) = self.keys
+                    && id == program.id
+                {
+                    status
+                        .marks
+                        .iter()
+                        .find(|m| {
+                            if let WaveformId::Key(_) = m.waveform_id {
+                                true
+                            } else {
+                                false
+                            }
+                        })
+                        .is_some()
+                } else {
+                    false
+                })
+            {
                 const U7_MAX: u8 = u8::MAX / 2;
                 let intensity = (now
                     .duration_since(current_beat_start)
@@ -264,6 +470,11 @@ impl InputHandler {
             // Bottom row is based on pending waveforms
             if status.has_pending_mark(now, WaveformId::Program(program.id), MarkId::TopLevel) {
                 self.launchkey.set_daw_bottom_pad_color(i as u8, 0, 127, 0);
+            } else if let Some(Keys { id, .. }) = self.keys
+                && id == program.id
+            {
+                self.launchkey
+                    .set_daw_bottom_pad_color(i as u8, 127, 127, 0);
             } else if !program.text.is_empty() {
                 match program.color {
                     Some(color) => {
@@ -302,4 +513,8 @@ fn mode_with_message(mode: renderer::Mode, message: String) -> renderer::Mode {
         Mode::Select { .. } => Mode::Select { message },
         _ => mode,
     }
+}
+
+fn test_note_function(expr: &parser::Expr<MarkId>, is_note_on: bool) -> bool {
+    true
 }

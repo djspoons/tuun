@@ -29,6 +29,9 @@ pub enum WaveformId {
     // it is an odd or even measure (false == odd).
     Beats(bool),
     Program(ProgramId),
+    /// Identifies a waveform playing in response to striking a key on a MIDI keyboard
+    /// or equivalent controller.
+    Key(u8),
 }
 
 impl WaveformId {

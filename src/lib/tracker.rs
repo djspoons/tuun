@@ -223,7 +223,7 @@ where
                     .expect("Failed to create WAV writer");
                 out.insert(file_stem.clone(), writer);
             }
-            Placeholder => (),
+            Prior => (),
         }
     }
 }
@@ -310,7 +310,7 @@ fn process_marked<I, M>(
             });
             process_marked(generator, sample_rate, waveform_id, start, &*waveform, out);
         }
-        Placeholder => (),
+        Prior => (),
     }
 }
 

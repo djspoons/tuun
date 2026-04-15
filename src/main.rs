@@ -440,8 +440,8 @@ pub fn main() {
     // N.B. We shadow the command sender here so that any uses below will go through here.
     // This simplifies things a bit, but it means that all commands will wait on a long
     // pre-computation.
-    let play_command_sender = command_sender;
-    let (command_sender, play_receiver) = mpsc::channel();
+    let play_command_sender = command_sender.clone();
+    let (precomputing_command_sender, play_receiver) = mpsc::channel();
     thread::spawn(move || {
         loop {
             match play_receiver.recv() {
@@ -501,8 +501,12 @@ pub fn main() {
         launchkey.is_err(),
         renderer.width,
         renderer.height,
-        play_helper::PlayHelper::new(args.tempo, args.beats_per_measure, command_sender.clone()),
-        command_sender.clone(),
+        play_helper::PlayHelper::new(
+            args.tempo,
+            args.beats_per_measure,
+            precomputing_command_sender.clone(),
+        ),
+        precomputing_command_sender.clone(),
         slider_sender.clone(),
     );
 
@@ -645,9 +649,11 @@ pub fn main() {
                 Err(e) => println!("Error receiving status: {:?}", e),
             }
         }
+        /*
         if statuses_received > 1 {
             println!("Received {} statuses", statuses_received);
         }
+        */
         renderer.render(
             &ttf_context,
             &programs,

@@ -27,8 +27,21 @@ struct DAWState {
     sender: mpsc::Sender<Event>,
 }
 
+/// Responsible for decoding and forwarding messages received on the MIDI connection.
+struct MIDIState {
+    sender: mpsc::Sender<Event>,
+}
+
 #[derive(Debug)]
 pub enum Event {
+    NoteOn {
+        key: u8,
+        velocity: u8,
+    },
+    NoteOff {
+        key: u8,
+    },
+
     NextTrackDown,
     PreviousTrackDown,
     NextTrackBankDown,
@@ -51,6 +64,8 @@ pub enum Event {
     },
 
     PadFunctionDown,
+
+    CaptureMIDIDown,
 }
 
 #[derive(Debug, Error)]
@@ -77,6 +92,7 @@ const DAW_PAD_BOTTOM_ROW_OFFSET: u8 = 112;
 const NUM_DAW_PADS_PER_ROW: u8 = 8;
 
 const PAD_FUNCTION_OFFSET: u8 = 105;
+const CAPTURE_MIDI_OFFSET: u8 = 74;
 
 // For SysEx messages
 const STANDARD_SKU_PREFIX: [u8; 5] = [0, 32, 41, 2, 20];
@@ -103,8 +119,10 @@ impl Launchkey {
         let (sender, receiver) = mpsc::channel();
         let mut daw_state = DAWState {
             encoder_mode: EncoderMode::Plugin,
-            sender,
+            sender: sender.clone(),
         };
+        let mut midi_state = MIDIState { sender: sender };
+
         let mut midi_input = MidiInput::new("tuun reading DAW input")?;
         midi_input.ignore(Ignore::Time);
         let daw_input_conn;
@@ -134,9 +152,7 @@ impl Launchkey {
             midi_input_conn = midi_input.connect(
                 midi_input_port,
                 "tuun-midi-input-port",
-                move |_stamp, message, _data| {
-                    println!("Got message on MIDI connection: {:?}", message);
-                },
+                move |stamp, message, data| midi_state.handle_message(stamp, message, data),
                 (),
             )?;
         } else {
@@ -163,6 +179,13 @@ impl Launchkey {
         }
     }
 
+    fn send_sys_ex(&mut self, message: &[u8]) {
+        let message: Vec<u7> = message.iter().map(|&x| u7::new(x & 0x7F)).collect();
+        self.send_event(LiveEvent::Common(midly::live::SystemCommon::SysEx(
+            &message,
+        )));
+    }
+
     pub fn update_encoder_state(&mut self, index: u8, value: u8) {
         self.send_event(LiveEvent::Midi {
             channel: ENCODER_UPDATE_CHANNEL.into(),
@@ -182,8 +205,7 @@ impl Launchkey {
         buf.push(red.min(127));
         buf.push(green.min(127));
         buf.push(blue.min(127));
-        let msg: Vec<u7> = buf.iter().map(|&x| u7::new(x & 0x7F)).collect();
-        self.send_event(LiveEvent::Common(midly::live::SystemCommon::SysEx(&msg)));
+        self.send_sys_ex(&buf);
     }
 
     pub fn set_daw_bottom_pad_color(&mut self, index: u8, red: u8, green: u8, blue: u8) {
@@ -195,8 +217,7 @@ impl Launchkey {
         buf.push(red.min(127));
         buf.push(green.min(127));
         buf.push(blue.min(127));
-        let msg: Vec<u7> = buf.iter().map(|&x| u7::new(x & 0x7F)).collect();
-        self.send_event(LiveEvent::Common(midly::live::SystemCommon::SysEx(&msg)));
+        self.send_sys_ex(&buf);
     }
 
     pub fn set_pad_function_color(&mut self, color: Color) {
@@ -205,6 +226,21 @@ impl Launchkey {
             message: MidiMessage::Controller {
                 controller: PAD_FUNCTION_OFFSET.into(),
                 value: (color as u8).into(),
+            },
+        });
+    }
+
+    pub fn set_capture_midi_brightness(&mut self, brightness: u8) {
+        self.send_event(LiveEvent::Midi {
+            channel: 0.into(),
+            message: MidiMessage::Controller {
+                controller: CAPTURE_MIDI_OFFSET.into(),
+                // XXX Sort of a hack, but not sure how this brightness thing works
+                value: if brightness > 0 {
+                    (Color::White as u8).into()
+                } else {
+                    (Color::Gray as u8).into()
+                }, //(brightness & 0x7f).into(),
             },
         });
     }
@@ -287,6 +323,8 @@ impl DAWState {
                         // Other buttons
                         (PAD_FUNCTION_OFFSET, 127) => Some(Event::PadFunctionDown),
                         (PAD_FUNCTION_OFFSET, 0) => None,
+                        (CAPTURE_MIDI_OFFSET, 127) => Some(Event::CaptureMIDIDown),
+                        (CAPTURE_MIDI_OFFSET, 0) => None,
 
                         _ => {
                             println!(
@@ -324,6 +362,42 @@ impl DAWState {
                     } else {
                         None
                     }
+                }
+                _ => {
+                    println!("Ignoring message {:?} on channel {}", message, channel);
+                    None
+                }
+            },
+            _ => {
+                println!("Ignoring event {:?}", event);
+                None
+            }
+        }
+    }
+}
+
+impl MIDIState {
+    fn handle_message(&mut self, _stamp: u64, message: &[u8], _info: &mut ()) {
+        if let Some(event) = self.decode(message) {
+            match self.sender.send(event) {
+                Ok(()) => (),
+                Err(e) => {
+                    println!("Got error sending event: {}", e);
+                }
+            }
+        }
+    }
+
+    fn decode(&mut self, message: &[u8]) -> Option<Event> {
+        let event = LiveEvent::parse(message).unwrap();
+        match event {
+            LiveEvent::Midi { channel, message } => match message {
+                MidiMessage::NoteOn { key, vel } if vel > 0 => Some(Event::NoteOn {
+                    key: key.into(),
+                    velocity: vel.into(),
+                }),
+                MidiMessage::NoteOn { key, vel } if vel == 0 => {
+                    Some(Event::NoteOff { key: key.into() })
                 }
                 _ => {
                     println!("Ignoring message {:?} on channel {}", message, channel);

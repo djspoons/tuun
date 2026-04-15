@@ -97,7 +97,7 @@ impl PlayHelper {
                                 Box::new(Const(1.0 / STOP_DURATION_SECS)),
                             )),
                         )),
-                        Box::new(Placeholder),
+                        Box::new(Prior),
                     )),
                 },
             })

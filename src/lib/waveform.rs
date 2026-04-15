@@ -91,8 +91,10 @@ pub enum Waveform<MarkId, State = ()> {
         file_stem: String,
         waveform: Box<Waveform<MarkId, State>>,
     },
-    /// Cannot be used to generate samples but may be used as part of operations on waveforms (like Modify)
-    Placeholder,
+    /// Represents a previous version of a waveform.
+    ///
+    /// Cannot be used to generate samples but may be used as part of commands (like Modify).
+    Prior,
 }
 
 impl<MarkId: Display, State> Display for Waveform<MarkId, State> {
@@ -167,7 +169,7 @@ impl<MarkId: Display, State> Display for Waveform<MarkId, State> {
             } => {
                 write!(f, "Captured({}, {})", file_stem, waveform)
             }
-            Placeholder => write!(f, "Placeholder"),
+            Prior => write!(f, "Prior"),
         }
     }
 }
@@ -247,7 +249,7 @@ where
             file_stem,
             waveform: Box::new(initialize_state(*waveform, state)),
         },
-        Placeholder => Placeholder,
+        Prior => Prior,
     }
 }
 
@@ -312,7 +314,7 @@ pub fn remove_state<M, S>(waveform: Waveform<M, S>) -> Waveform<M> {
             file_stem,
             waveform: Box::new(remove_state(*waveform)),
         },
-        Placeholder => Placeholder,
+        Prior => Prior,
     }
 }
 
@@ -387,14 +389,14 @@ where
         Captured { waveform, .. } => {
             set_state(waveform, new_state);
         }
-        Placeholder => (),
+        Prior => (),
     }
 }
 
-/// Replaces part of `waveform` with a copy of `new_waveform.`
+/// Replaces zero or more parts of `waveform` with a copy of `new_waveform.`
 ///
-/// If `mark_id` is Some then it will replace the contents of all Marked waveforms with
-/// a matching id. If `mark_id` is None, then it will replace all Placeholder waveforms.
+/// If `mark_id` is Some then it will replace the contents of all Marked waveforms whose
+/// id matches. If `mark_id` is None, then it will replace all Prior waveforms.
 pub fn substitute<M, S>(
     waveform: &mut Waveform<M, S>,
     mark_id: &Option<M>,
@@ -419,10 +421,10 @@ pub fn substitute<M, S>(
                 substitute(waveform, mark_id, new_waveform);
             }
         },
-        Placeholder if *mark_id == None => {
+        Prior if *mark_id == None => {
             *waveform = new_waveform.clone();
         }
-        Placeholder => (),
+        Prior => (),
         // Leaf nodes — nothing to recurse into
         Const(_) | Time(_) | Noise | Fixed(..) => {}
 

@@ -1,5 +1,6 @@
 use core::panic;
 use std::fmt;
+use std::fmt::{Debug, Display};
 use std::ops::Range;
 use std::{cell::RefCell, rc::Rc};
 
@@ -998,7 +999,7 @@ pub fn extend_context<M>(
     argument: &Expr<M>,
 ) -> Result<(), Error>
 where
-    M: Clone + fmt::Debug,
+    M: Clone + Debug + Display,
 {
     match (pattern, argument) {
         (Pattern::Identifier(name), argument) => {
