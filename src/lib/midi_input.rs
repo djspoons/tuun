@@ -87,7 +87,7 @@ impl InputHandler {
                     let args = vec![
                         parser::Expr::Float(key as f32),
                         // TODO use a marked waveform for velocity
-                        parser::Expr::Float(velocity as f32),
+                        parser::Expr::Float(velocity as f32 / 127.0),
                     ];
                     match apply_note_function_as_waveform(note_on_function, args, "note-on") {
                         Ok(waveform) => {
@@ -484,7 +484,7 @@ fn mode_with_message(mode: renderer::Mode, message: String) -> renderer::Mode {
 fn test_note_function(expr: &parser::Expr<MarkId>, is_note_on: bool) -> Result<(), String> {
     let args = if is_note_on {
         // TODO use a waveform for velocity
-        vec![parser::Expr::Float(60.0), parser::Expr::Float(100.0)]
+        vec![parser::Expr::Float(60.0), parser::Expr::Float(0.7)]
     } else {
         vec![parser::Expr::Float(60.0)]
     };

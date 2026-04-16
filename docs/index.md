@@ -15,6 +15,7 @@ Many of the pages below include embedded synthesizer elements, but if you'd like
 
 * [Language Overview](tuun-langs.md)
 * [Architecture](architecture.md)
+* [Dynamic Waveforms](dynamic.md)
 * [Sine](sine.md)
 * [Filter](filter.md)
 
