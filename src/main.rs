@@ -586,7 +586,7 @@ pub fn main() {
             loop {
                 match midi_handler.events().try_recv() {
                     Ok(event) => {
-                        // TODO handle modes like Play
+                        // TODO handle modes like LoadContext?
                         mode = midi_handler.handle_event(
                             event,
                             &context,
