@@ -612,7 +612,7 @@ impl<'a> Generator<'a> {
                                 return i;
                             }
                             if length_out[0] >= 0.0 {
-                                return i + 1;
+                                return i;
                             }
                         }
                         // Note that `new_length` and `new_inner` are already advanced by `max` samples
@@ -1290,6 +1290,30 @@ mod tests {
         out.fill(0.0);
         let len = g.generate(&mut w, &mut out);
         assert_eq!(len, 0);
+    }
+
+    #[test]
+    fn test_fin() {
+        let w = BinaryPointOp(
+            Operator::Multiply,
+            Box::new(Const(2.0)),
+            Box::new(Append(
+                Box::new(Fin {
+                    length: Box::new(BinaryPointOp(
+                        Operator::Subtract,
+                        Box::new(Time(())),
+                        // It's important that the following waveform be dynamic.
+                        Box::new(waveform::Waveform::Marked {
+                            id: 1,
+                            waveform: Box::new(Const(4.0)),
+                        }),
+                    )),
+                    waveform: Box::new(Const(1.0)),
+                }),
+                Box::new(Fixed(vec![1.0, 0.75, 0.5, 0.25], ())),
+            )),
+        );
+        run_tests(&w, &vec![2.0, 2.0, 2.0, 2.0, 2.0, 1.5, 1.0, 0.5]);
     }
 
     // frequency in Hz, phase in radians
