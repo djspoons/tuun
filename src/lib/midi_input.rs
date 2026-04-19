@@ -11,12 +11,13 @@ use crate::slider;
 use crate::tracker;
 use crate::waveform;
 
+/// Represents a program installed to respond to MIDI note-on/-off events.
 struct Keys {
     id: renderer::ProgramId,
     context: Vec<(String, parser::Expr<MarkId>)>,
-    note_on_function: parser::Expr<MarkId>,
-    note_off_function: parser::Expr<MarkId>,
+    function: parser::Expr<MarkId>,
     sliders: renderer::ProgramSliders,
+    note_off_waveforms: HashMap<u8, waveform::Waveform<MarkId>>, // keys are MIDI note numbers
 }
 
 pub struct InputHandler {
@@ -29,17 +30,17 @@ pub struct InputHandler {
     slider_sender: mpsc::Sender<renderer::SliderEvent>,
 }
 
-/// Applies a note function (either "on" or "off"), expecting a Waveform result.
-fn apply_note_function_as_waveform(
+/// Applies a note function expecting a pair of Waveforms as a result.
+fn apply_note_function_as_waveforms(
     context: &[(String, parser::Expr<MarkId>)],
     expr: &parser::Expr<MarkId>,
     args: Vec<parser::Expr<MarkId>>,
     sliders: &renderer::ProgramSliders,
-    label: &str,
-) -> Result<waveform::Waveform<MarkId>, String> {
+) -> Result<(waveform::Waveform<MarkId>, waveform::Waveform<MarkId>), String> {
+    use parser::Expr::{Tuple, Waveform};
     let expr = parser::Expr::Application {
         function: Box::new(expr.clone()),
-        argument: Box::new(parser::Expr::Tuple(args)),
+        argument: Box::new(Tuple(args)),
     };
     let expr = slider::prepend_slider_bindings(
         &sliders.configs,
@@ -49,9 +50,16 @@ fn apply_note_function_as_waveform(
     );
     let expr = parser::evaluate(context, expr).map_err(|e| e.to_string());
     match expr {
-        Ok(parser::Expr::Waveform(w)) => Ok(w),
-        Ok(expr) => Err(format!("Expected waveform for {}, got: {}", label, expr)),
-        Err(e) => Err(format!("Error evaluating {}: {}", label, e)),
+        Ok(Tuple(mut exprs)) => {
+            if exprs.len() != 2 {}
+            match (exprs.remove(0), exprs.remove(0)) {
+                (Waveform(note_on), Waveform(note_off)) => Ok((note_on, note_off)),
+                (expr, Waveform(_)) => Err(format!("Expected waveform for note-on, got: {}", expr)),
+                (_, expr) => Err(format!("Expected waveform for note-of, got: {}", expr)),
+            }
+        }
+        Ok(expr) => Err(format!("Expected 2 waveforms for note, got: {}", expr)),
+        Err(e) => Err(format!("Error evaluating note: {}", e)),
     }
 }
 
@@ -95,26 +103,22 @@ impl InputHandler {
                 if let Some(Keys {
                     id,
                     context,
-                    note_on_function,
+                    function,
                     sliders,
+                    note_off_waveforms,
                     ..
-                }) = &self.keys
+                }) = &mut self.keys
                 {
                     let args = vec![
                         parser::Expr::Float(key as f32),
-                        // TODO use a marked waveform for velocity
+                        // TODO use a marked waveform for velocity so we can implement after-touch
                         parser::Expr::Float(velocity as f32 / 127.0),
                     ];
-                    match apply_note_function_as_waveform(
-                        context,
-                        note_on_function,
-                        args,
-                        sliders,
-                        "note-on",
-                    ) {
-                        Ok(waveform) => {
+                    match apply_note_function_as_waveforms(context, function, args, sliders) {
+                        Ok((note_on, note_off)) => {
                             // We need to make sure the initial values for this key are set.
                             let ps = &programs[renderer::index_from_id(*id)].sliders;
+                            note_off_waveforms.insert(key, note_off);
                             let mut last_slider_values = HashMap::new();
                             for (j, config) in ps.configs.iter().enumerate() {
                                 let value =
@@ -131,10 +135,7 @@ impl InputHandler {
                             self.command_sender
                                 .send(tracker::Command::Play {
                                     id: WaveformId::Key(key),
-                                    waveform: waveform::Waveform::Marked {
-                                        id: MarkId::TopLevel,
-                                        waveform: Box::new(waveform),
-                                    },
+                                    waveform: play_helper::build_top_level_waveform(note_on),
                                     start: None,
                                     repeat_every: None,
                                 })
@@ -149,32 +150,22 @@ impl InputHandler {
                 // In the case of problems with handling this event, just default to stopping the
                 // waveform.
                 if let Some(Keys {
-                    context,
-                    note_off_function,
-                    sliders,
-                    ..
-                }) = &self.keys
+                    note_off_waveforms, ..
+                }) = &mut self.keys
                 {
-                    let args = vec![parser::Expr::Float(key as f32)];
-                    match apply_note_function_as_waveform(
-                        context,
-                        note_off_function,
-                        args,
-                        sliders,
-                        "note-off",
-                    ) {
-                        Ok(waveform) => {
+                    match note_off_waveforms.remove(&key) {
+                        Some(waveform) => {
                             self.command_sender
                                 .send(tracker::Command::Modify {
                                     id: WaveformId::Key(key),
-                                    mark_id: MarkId::TopLevel,
+                                    mark_id: MarkId::Level,
                                     waveform,
                                 })
                                 .unwrap();
                         }
-                        Err(message) => {
+                        None => {
+                            println!("Missing note-off waveform for MIDI note: {}", key);
                             self.play_helper.stop_waveform(WaveformId::Key(key));
-                            return mode_with_message(mode, message);
                         }
                     }
                 } else {
@@ -349,14 +340,13 @@ impl InputHandler {
                     self.launchkey.set_capture_midi_brightness(0);
                     return mode_with_message(mode, "Uninstalled keys".to_string());
                 }
-                // When installing a MIDI instrument, we expect the program text to evaluate to a pair
-                // of functions:
-                //   (note_on: (midi_note, velocity) -> waveform,
-                //    note_off: (midi_note) -> waveform)
-                // The first will be called whenever a NoteOn event is received, and the resulting
-                // waveform will be played immediately. The second will be called when a NoteOff
-                // event is received, and the resulting waveform will immediately replace the original
-                // waveform. (Note that the note-off waveform may include the "Prior" waveform.)
+                // When installing a MIDI instrument, we expect the program text to evaluate to a
+                // function which returns a pair of waveforms:
+                //   program: (midi_note, velocity) -> (waveform, waveform)
+                // The function is called whenever a note-on event is received, and the first
+                // waveform will be played immediately. The second will be used when a NoteOff
+                // event is received, and that waveform will immediately replace the `Level` mark
+                // in the original waveform.
                 let program = &programs[*active_program_index];
                 let expr = match parser::parse_program(&program.text) {
                     Ok(expr) => expr,
@@ -367,33 +357,33 @@ impl InputHandler {
                         );
                     }
                 };
-                let mut exprs = match expr {
-                    parser::Expr::Tuple(exprs) if exprs.len() == 2 => exprs,
+                let function = match expr {
+                    parser::Expr::Function { .. } => expr,
                     other => {
                         return mode_with_message(
                             mode,
-                            format!("Expected (note_on, note_off) tuple, got: {}", other),
+                            format!("Expected note function, got: {}", other),
                         );
                     }
                 };
-                let note_on_function = exprs.remove(0);
-                let note_off_function = exprs.remove(0);
+                // Attempt to apply the function to see if it works correctly.
                 if let Err(message) =
-                    test_note_function(context, &note_on_function, &program.sliders, true)
-                {
-                    return mode_with_message(mode, message);
-                }
-                if let Err(message) =
-                    test_note_function(context, &note_off_function, &program.sliders, false)
+                    // TODO use a waveform for velocity
+                    apply_note_function_as_waveforms(
+                        context,
+                        &function,
+                        vec![parser::Expr::Float(60.0), parser::Expr::Float(0.7)],
+                        &program.sliders,
+                    )
                 {
                     return mode_with_message(mode, message);
                 }
                 self.keys = Some(Keys {
                     id: program.id,
                     context: Vec::from(context),
-                    note_on_function,
-                    note_off_function,
+                    function,
                     sliders: program.sliders.clone(),
+                    note_off_waveforms: HashMap::new(),
                 });
                 self.launchkey.set_capture_midi_brightness(127);
                 mode_with_message(mode, format!("Installed keys from program {}", program.id))
@@ -547,21 +537,4 @@ fn mode_with_message(mode: renderer::Mode, message: String) -> renderer::Mode {
         Mode::Select { .. } => Mode::Select { message },
         _ => mode,
     }
-}
-
-fn test_note_function(
-    context: &[(String, parser::Expr<MarkId>)],
-    expr: &parser::Expr<MarkId>,
-    sliders: &renderer::ProgramSliders,
-    is_note_on: bool,
-) -> Result<(), String> {
-    let args = if is_note_on {
-        // TODO use a waveform for velocity
-        vec![parser::Expr::Float(60.0), parser::Expr::Float(0.7)]
-    } else {
-        vec![parser::Expr::Float(60.0)]
-    };
-    let label = if is_note_on { "note-on" } else { "note-off" };
-    apply_note_function_as_waveform(context, expr, args, sliders, label)?;
-    Ok(())
 }

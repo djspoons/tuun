@@ -132,10 +132,9 @@ There are three combinators for describing periodic waveforms:
  * `Alt(trigger, a, b)` - generates samples from `a` when `trigger` is positive and from `b` otherwise
  * `Reset(trigger, a)` - restarts the second waveform each time the `trigger` switches from negative to positive
 
-And finally, three combinators that are used to dynamically interact with waveforms through a user interface. Marked waveforms are used to provide feedback to the user (for example, indicating when parts of a waveform start and stop). Marked waveforms, along with the "prior" placeholder, are also used as part of [dynamically updating](dynamic.md) waveforms during playback. The captured waveform provides a way to save samples from part or all of a waveform persistently.
+And finally, two combinators that are used to dynamically interact with waveforms through a user interface. Marked waveforms are used to provide feedback to the user (for example, indicating when parts of a waveform start and stop). Marked waveforms are also used as part of [dynamically updating](dynamic.md) waveforms during playback. The captured waveform provides a way to save samples from part or all of a waveform persistently.
 
- * `Marked(id, a)` - generates samples from `a`
- * `Prior` - does not generate samples but acts as a placeholder during waveform modification
+ * `Marked(id, a)` - generates samples from `a`, reports on playback, may be replaced during playback
  * `Captured(file_stem, a)` - generates samples from `a` and also saves them to a file.
 
 Since these last waveforms do not directly affect sample generation, we'll elide them for the remainder of this document.

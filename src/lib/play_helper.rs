@@ -57,12 +57,9 @@ impl PlayHelper {
                 };
                 self.command_sender
                     .send(tracker::Command::Play {
-                        // TODO maybe extend the mark to the full measure?
+                        // TODO maybe extend the top-level mark to the full measure?
                         id: WaveformId::Program(program.id),
-                        waveform: waveform::Waveform::Marked {
-                            id: MarkId::TopLevel,
-                            waveform: Box::new(waveform),
-                        },
+                        waveform: build_top_level_waveform(waveform),
                         start,
                         repeat_every,
                     })
@@ -79,7 +76,7 @@ impl PlayHelper {
         self.command_sender
             .send(tracker::Command::Modify {
                 id,
-                mark_id: MarkId::TopLevel,
+                mark_id: MarkId::Level,
                 waveform: Fin {
                     length: Box::new(BinaryPointOp(
                         Operator::Subtract,
@@ -87,17 +84,13 @@ impl PlayHelper {
                         Box::new(Const(STOP_DURATION_SECS)),
                     )),
                     waveform: Box::new(BinaryPointOp(
-                        Operator::Multiply,
+                        Operator::Subtract,
+                        Box::new(Const(1.0)),
                         Box::new(BinaryPointOp(
-                            Operator::Subtract,
-                            Box::new(Const(1.0)),
-                            Box::new(BinaryPointOp(
-                                Operator::Multiply,
-                                Box::new(Time(())),
-                                Box::new(Const(1.0 / STOP_DURATION_SECS)),
-                            )),
+                            Operator::Multiply,
+                            Box::new(Time(())),
+                            Box::new(Const(1.0 / STOP_DURATION_SECS)),
                         )),
-                        Box::new(Prior),
                     )),
                 },
             })
@@ -220,6 +213,23 @@ pub fn prepare_waveform(
                 message,
             });
         }
+    }
+}
+
+pub fn build_top_level_waveform(
+    waveform: waveform::Waveform<MarkId>,
+) -> waveform::Waveform<MarkId> {
+    use waveform::Waveform::{BinaryPointOp, Const, Marked};
+    Marked {
+        id: MarkId::TopLevel,
+        waveform: Box::new(BinaryPointOp(
+            waveform::Operator::Multiply,
+            Box::new(waveform),
+            Box::new(Marked {
+                id: MarkId::Level,
+                waveform: Box::new(Const(1.0)),
+            }),
+        )),
     }
 }
 
