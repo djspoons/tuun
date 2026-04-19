@@ -390,6 +390,11 @@ pub fn main() {
                         // This occurs when the set of programs is reloaded.
                         last_slider_values = values;
                     }
+                    Ok(SliderEvent::UpdateInitialValues(values)) => {
+                        values.into_iter().for_each(|(k, v)| {
+                            last_slider_values.insert(k, v);
+                        });
+                    }
                     Err(_) => return, // channel closed, exit thread
                 };
             }
@@ -411,6 +416,11 @@ pub fn main() {
                         // we understand better what "load_programs" does to currently playing waveforms.
                         last_slider_values = values;
                     }
+                    Ok(SliderEvent::UpdateInitialValues(values)) => {
+                        values.into_iter().for_each(|(k, v)| {
+                            last_slider_values.insert(k, v);
+                        });
+                    }
                     Err(mpsc::RecvTimeoutError::Timeout) => break,
                     Err(mpsc::RecvTimeoutError::Disconnected) => return,
                 }
@@ -418,6 +428,8 @@ pub fn main() {
 
             // Flush: send one Modify command per changed slider
             for ((id, slider), value) in pending.drain() {
+                // TODO: this unwrap can fail if programs are reloaded while a MIDI note is active.
+                // Should we just default to some value? Or maybe better to not to clear?
                 let last_value = last_slider_values
                     .get_mut(&(id.clone(), slider.clone()))
                     .unwrap();

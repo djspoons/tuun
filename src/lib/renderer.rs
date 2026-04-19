@@ -181,6 +181,7 @@ pub enum SliderEvent {
         value: f32,
     },
     SetInitialValues(HashMap<(WaveformId, String), f32>),
+    UpdateInitialValues(HashMap<(WaveformId, String), f32>),
 }
 
 fn make_texture<'a>(

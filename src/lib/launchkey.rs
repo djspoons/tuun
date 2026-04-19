@@ -94,9 +94,26 @@ const NUM_DAW_PADS_PER_ROW: u8 = 8;
 const PAD_FUNCTION_OFFSET: u8 = 105;
 const CAPTURE_MIDI_OFFSET: u8 = 74;
 
+const DAW_MODE_DISPLAY_TARGET: u8 = 34;
+
+#[repr(u8)]
+enum DisplayArrangement {
+    NameAndText = 1,
+    //TitleNameAndText = 2,
+    //TitleAndEncoderNames = 3,
+    //NameAndNumber = 4,
+}
+
+const DISPLAY_CONFIG_DISPLAY_ON_CHANGE: u8 = 1 << 6;
+const DISPLAY_CONFIG_DISPLAY_ON_TOUCH: u8 = 1 << 5;
+const DISPLAY_CONFIG_DISPLAY_ON_CHANGE_OR_TOUCH: u8 =
+    DISPLAY_CONFIG_DISPLAY_ON_CHANGE | DISPLAY_CONFIG_DISPLAY_ON_TOUCH;
+
 // For SysEx messages
 const STANDARD_SKU_PREFIX: [u8; 5] = [0, 32, 41, 2, 20];
 const PAD_RGB_COLOR: [u8; 2] = [1, 67];
+const CONFIGURE_DISPLAY: [u8; 1] = [4];
+const SET_DISPLAY_TEXT_FIELD: [u8; 1] = [6];
 
 impl Launchkey {
     pub fn new() -> Result<Self, Error> {
@@ -244,6 +261,57 @@ impl Launchkey {
             },
         });
     }
+
+    pub fn set_daw_mode_display(&mut self, name: &String) {
+        let mut buf = Vec::new();
+        buf.extend(&STANDARD_SKU_PREFIX);
+        buf.extend(&CONFIGURE_DISPLAY);
+        buf.push(DAW_MODE_DISPLAY_TARGET);
+        buf.push(DisplayArrangement::NameAndText as u8);
+        self.send_sys_ex(&buf);
+
+        buf.clear();
+        buf.extend(&STANDARD_SKU_PREFIX);
+        buf.extend(&SET_DISPLAY_TEXT_FIELD);
+        buf.push(DAW_MODE_DISPLAY_TARGET);
+        buf.push(0); // field
+        buf.extend(string_to_ascii(name));
+        self.send_sys_ex(&buf);
+    }
+
+    pub fn set_encoder_display(&mut self, index: u8, name: &str, value: &str) {
+        let target = ENCODER_OFFSET + index;
+
+        let mut buf = Vec::new();
+        buf.extend(&STANDARD_SKU_PREFIX);
+        buf.extend(&CONFIGURE_DISPLAY);
+        buf.push(target);
+        buf.push(DisplayArrangement::NameAndText as u8 | DISPLAY_CONFIG_DISPLAY_ON_CHANGE_OR_TOUCH);
+        self.send_sys_ex(&buf);
+
+        buf.clear();
+        buf.extend(&STANDARD_SKU_PREFIX);
+        buf.extend(&SET_DISPLAY_TEXT_FIELD);
+        buf.push(target);
+        buf.push(0); // field 0: name
+        buf.extend(string_to_ascii(name));
+        self.send_sys_ex(&buf);
+
+        buf.clear();
+        buf.extend(&STANDARD_SKU_PREFIX);
+        buf.extend(&SET_DISPLAY_TEXT_FIELD);
+        buf.push(target);
+        buf.push(1); // field 1: value
+        buf.extend(string_to_ascii(value));
+        self.send_sys_ex(&buf);
+    }
+}
+
+fn string_to_ascii(str: &str) -> Vec<u8> {
+    str.chars()
+        .filter(|c| c.is_ascii())
+        .map(|c| c as u8)
+        .collect()
 }
 
 impl Drop for Launchkey {

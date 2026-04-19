@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::mpsc;
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
@@ -12,9 +13,10 @@ use crate::waveform;
 
 struct Keys {
     id: renderer::ProgramId,
-
+    context: Vec<(String, parser::Expr<MarkId>)>,
     note_on_function: parser::Expr<MarkId>,
     note_off_function: parser::Expr<MarkId>,
+    sliders: renderer::ProgramSliders,
 }
 
 pub struct InputHandler {
@@ -29,15 +31,23 @@ pub struct InputHandler {
 
 /// Applies a note function (either "on" or "off"), expecting a Waveform result.
 fn apply_note_function_as_waveform(
-    function: &parser::Expr<MarkId>,
+    context: &[(String, parser::Expr<MarkId>)],
+    expr: &parser::Expr<MarkId>,
     args: Vec<parser::Expr<MarkId>>,
+    sliders: &renderer::ProgramSliders,
     label: &str,
 ) -> Result<waveform::Waveform<MarkId>, String> {
     let expr = parser::Expr::Application {
-        function: Box::new(function.clone()),
+        function: Box::new(expr.clone()),
         argument: Box::new(parser::Expr::Tuple(args)),
     };
-    let expr = parser::evaluate(&[], expr).map_err(|e| e.to_string());
+    let expr = slider::prepend_slider_bindings(
+        &sliders.configs,
+        &sliders.normalized_values,
+        MarkId::Slider,
+        expr,
+    );
+    let expr = parser::evaluate(context, expr).map_err(|e| e.to_string());
     match expr {
         Ok(parser::Expr::Waveform(w)) => Ok(w),
         Ok(expr) => Err(format!("Expected waveform for {}, got: {}", label, expr)),
@@ -47,11 +57,13 @@ fn apply_note_function_as_waveform(
 
 impl InputHandler {
     pub fn new(
-        launchkey: launchkey::Launchkey,
+        mut launchkey: launchkey::Launchkey,
         play_helper: play_helper::PlayHelper,
         command_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
         slider_sender: mpsc::Sender<renderer::SliderEvent>,
     ) -> InputHandler {
+        // There's only one supported DAW mode at the moment.
+        launchkey.set_daw_mode_display(&"Clip Launcher".to_string());
         InputHandler {
             launchkey,
             repeat_after_measures: None,
@@ -81,7 +93,11 @@ impl InputHandler {
         match (mode, event) {
             (mode, Event::NoteOn { key, velocity }) => {
                 if let Some(Keys {
-                    note_on_function, ..
+                    id,
+                    context,
+                    note_on_function,
+                    sliders,
+                    ..
                 }) = &self.keys
                 {
                     let args = vec![
@@ -89,8 +105,29 @@ impl InputHandler {
                         // TODO use a marked waveform for velocity
                         parser::Expr::Float(velocity as f32 / 127.0),
                     ];
-                    match apply_note_function_as_waveform(note_on_function, args, "note-on") {
+                    match apply_note_function_as_waveform(
+                        context,
+                        note_on_function,
+                        args,
+                        sliders,
+                        "note-on",
+                    ) {
                         Ok(waveform) => {
+                            // We need to make sure the initial values for this key are set.
+                            let ps = &programs[renderer::index_from_id(*id)].sliders;
+                            let mut last_slider_values = HashMap::new();
+                            for (j, config) in ps.configs.iter().enumerate() {
+                                let value =
+                                    slider::denormalize(&config.function, ps.normalized_values[j])
+                                        .unwrap_or(0.0);
+                                last_slider_values
+                                    .insert((WaveformId::Key(key), config.label.clone()), value);
+                            }
+                            self.slider_sender
+                                .send(renderer::SliderEvent::UpdateInitialValues(
+                                    last_slider_values,
+                                ))
+                                .unwrap();
                             self.command_sender
                                 .send(tracker::Command::Play {
                                     id: WaveformId::Key(key),
@@ -112,11 +149,20 @@ impl InputHandler {
                 // In the case of problems with handling this event, just default to stopping the
                 // waveform.
                 if let Some(Keys {
-                    note_off_function, ..
+                    context,
+                    note_off_function,
+                    sliders,
+                    ..
                 }) = &self.keys
                 {
                     let args = vec![parser::Expr::Float(key as f32)];
-                    match apply_note_function_as_waveform(note_off_function, args, "note-off") {
+                    match apply_note_function_as_waveform(
+                        context,
+                        note_off_function,
+                        args,
+                        sliders,
+                        "note-off",
+                    ) {
                         Ok(waveform) => {
                             self.command_sender
                                 .send(tracker::Command::Modify {
@@ -172,32 +218,50 @@ impl InputHandler {
                 let index = index as usize;
                 let program = &mut programs[*active_program_index];
                 let ps = &mut program.sliders;
-                let message;
                 if index < ps.configs.len() {
                     let norm = &mut ps.normalized_values[index];
                     *norm = (value as f32 / 127.0).clamp(0.0, 1.0);
                     let config = &ps.configs[index];
                     let actual_value = slider::denormalize(&config.function, *norm).unwrap_or(0.0);
-                    self.slider_sender
-                        .send(renderer::SliderEvent::UpdateSlider {
-                            id: WaveformId::Program(program.id),
-                            slider: config.label.clone(),
-                            value: actual_value,
-                        })
-                        .unwrap();
-                    message = format!(
-                        "{}",
-                        renderer::SliderDisplay {
-                            label: config.label.clone(),
-                            axis: index.to_string(),
-                            normalized_value: *norm,
-                            actual_value,
+                    // Now send to all the relevant ids: both clips and keys.
+                    let mut waveform_ids = vec![];
+                    if let Some(Keys { id, sliders, .. }) = &mut self.keys
+                        && *id == program.id
+                    {
+                        for mark in &status.marks {
+                            if let WaveformId::Key(_) = mark.waveform_id {
+                                waveform_ids.push(mark.waveform_id.clone());
+                            }
                         }
-                    );
+                        // Also update the value that we copied into the installed keys.
+                        sliders.normalized_values[index] = *norm;
+                    } else {
+                        waveform_ids.push(WaveformId::Program(program.id));
+                    }
+                    for id in waveform_ids {
+                        self.slider_sender
+                            .send(renderer::SliderEvent::UpdateSlider {
+                                id,
+                                slider: config.label.clone(),
+                                value: actual_value,
+                            })
+                            .unwrap();
+                    }
+                    mode_with_message(
+                        mode,
+                        format!(
+                            "{}",
+                            renderer::SliderDisplay {
+                                label: config.label.clone(),
+                                axis: index.to_string(),
+                                normalized_value: *norm,
+                                actual_value,
+                            }
+                        ),
+                    )
                 } else {
-                    message = format!("No slider with index {}", index);
+                    mode_with_message(mode, format!("No slider with index {}", index))
                 }
-                mode_with_message(mode, message)
             }
 
             (mode, Event::DAWTopPadDown { index }) => {
@@ -210,6 +274,11 @@ impl InputHandler {
                     self.play_helper
                         .stop_waveform(WaveformId::Program(program.id));
                     mode_with_message(mode, format!("Stopped program {}", program.id))
+                } else if let Some(Keys { id, .. }) = self.keys
+                    && id == program.id
+                {
+                    // Do nothing if it's the installed keys
+                    mode
                 } else {
                     match self.play_helper.play_waveform(
                         context,
@@ -240,6 +309,11 @@ impl InputHandler {
                         mode,
                         format!("Removed pending waveform for program {}", program.id),
                     )
+                } else if let Some(Keys { id, .. }) = self.keys
+                    && id == program.id
+                {
+                    // Do nothing if it's the installed keys
+                    mode
                 } else {
                     match self.play_helper.play_waveform(
                         context,
@@ -293,18 +367,6 @@ impl InputHandler {
                         );
                     }
                 };
-                let expr = slider::prepend_slider_bindings(
-                    &program.sliders.configs,
-                    &program.sliders.normalized_values,
-                    MarkId::Slider,
-                    expr,
-                );
-                let expr = match parser::evaluate(context, expr) {
-                    Ok(expr) => expr,
-                    Err(error) => {
-                        return mode_with_message(mode, format!("Error: {}", error.to_string()));
-                    }
-                };
                 let mut exprs = match expr {
                     parser::Expr::Tuple(exprs) if exprs.len() == 2 => exprs,
                     other => {
@@ -316,16 +378,22 @@ impl InputHandler {
                 };
                 let note_on_function = exprs.remove(0);
                 let note_off_function = exprs.remove(0);
-                if let Err(message) = test_note_function(&note_on_function, true) {
+                if let Err(message) =
+                    test_note_function(context, &note_on_function, &program.sliders, true)
+                {
                     return mode_with_message(mode, message);
                 }
-                if let Err(message) = test_note_function(&note_off_function, false) {
+                if let Err(message) =
+                    test_note_function(context, &note_off_function, &program.sliders, false)
+                {
                     return mode_with_message(mode, message);
                 }
                 self.keys = Some(Keys {
                     id: program.id,
+                    context: Vec::from(context),
                     note_on_function,
                     note_off_function,
+                    sliders: program.sliders.clone(),
                 });
                 self.launchkey.set_capture_midi_brightness(127);
                 mode_with_message(mode, format!("Installed keys from program {}", program.id))
@@ -341,6 +409,13 @@ impl InputHandler {
     /// Updates the state of the MIDI device based on the sliders of the given program.
     pub fn update_slider_state(&mut self, program: &Program) {
         for (i, value) in program.sliders.normalized_values.iter().enumerate() {
+            let config = &program.sliders.configs[i];
+            let actual_value = slider::denormalize(&config.function, *value).unwrap_or(0.0);
+            self.launchkey.set_encoder_display(
+                i as u8,
+                &config.label,
+                &format!("{:.3}", actual_value),
+            );
             self.launchkey
                 .update_encoder_state((i as u8).into(), ((127.0 * value) as u8).into());
         }
@@ -384,6 +459,12 @@ impl InputHandler {
             .iter()
             .enumerate()
         {
+            const U7_MAX: u8 = u8::MAX / 2;
+            // 7-bit color values for the current program.
+            let (red, blue, green) = match program.color {
+                Some(color) => (color.0 / 2, color.1 / 2, color.2 / 2),
+                None => (0, 127, 127),
+            };
             // Top row is based on active waveforms
             if status.has_active_mark(now, WaveformId::Program(program.id), MarkId::TopLevel)
                 || (if let Some(Keys { id, .. }) = self.keys
@@ -404,31 +485,22 @@ impl InputHandler {
                     false
                 })
             {
-                const U7_MAX: u8 = u8::MAX / 2;
-                let intensity = (now
-                    .duration_since(current_beat_start)
-                    .div_duration_f32(current_beat_duration)
-                    * U7_MAX as f32) as u8;
-                self.launchkey.set_daw_top_pad_color(
-                    i as u8,
-                    0,
-                    U7_MAX.saturating_sub(intensity),
-                    0,
+                // Based on time since beginning of the current beat.
+                let intensity = U7_MAX.saturating_sub(
+                    (now.duration_since(current_beat_start)
+                        .div_duration_f32(current_beat_duration)
+                        * U7_MAX as f32) as u8,
                 );
+                self.launchkey
+                    .set_daw_top_pad_color(i as u8, 0, intensity, 0);
+            } else if let Some(Keys { id, .. }) = self.keys
+                && id == program.id
+            {
+                // If it's the installed keys program, don't color the top pad (unless it's playing).
+                self.launchkey.set_daw_top_pad_color(i as u8, 0, 0, 0);
             } else if !program.text.is_empty() {
-                match program.color {
-                    Some(color) => {
-                        self.launchkey.set_daw_top_pad_color(
-                            i as u8,
-                            color.0 / 2,
-                            color.1 / 2,
-                            color.2 / 2,
-                        );
-                    }
-                    None => {
-                        self.launchkey.set_daw_top_pad_color(i as u8, 0, 127, 127);
-                    }
-                }
+                self.launchkey
+                    .set_daw_top_pad_color(i as u8, red, blue, green);
             } else {
                 // empty
                 self.launchkey.set_daw_top_pad_color(i as u8, 0, 0, 0);
@@ -439,23 +511,19 @@ impl InputHandler {
             } else if let Some(Keys { id, .. }) = self.keys
                 && id == program.id
             {
-                self.launchkey
-                    .set_daw_bottom_pad_color(i as u8, 127, 127, 127);
+                // If it's the installed keys program, pulse the configured color.
+                let intensity = now
+                    .duration_since(current_beat_start)
+                    .div_duration_f32(current_beat_duration);
+                self.launchkey.set_daw_bottom_pad_color(
+                    i as u8,
+                    red.saturating_sub((intensity * red as f32) as u8),
+                    green.saturating_sub((intensity * green as f32) as u8),
+                    blue.saturating_sub((intensity * blue as f32) as u8),
+                );
             } else if !program.text.is_empty() {
-                match program.color {
-                    Some(color) => {
-                        self.launchkey.set_daw_bottom_pad_color(
-                            i as u8,
-                            color.0 / 2,
-                            color.1 / 2,
-                            color.2 / 2,
-                        );
-                    }
-                    None => {
-                        self.launchkey
-                            .set_daw_bottom_pad_color(i as u8, 0, 127, 127);
-                    }
-                }
+                self.launchkey
+                    .set_daw_bottom_pad_color(i as u8, red, blue, green);
             } else {
                 // empty
                 self.launchkey.set_daw_bottom_pad_color(i as u8, 0, 0, 0);
@@ -481,7 +549,12 @@ fn mode_with_message(mode: renderer::Mode, message: String) -> renderer::Mode {
     }
 }
 
-fn test_note_function(expr: &parser::Expr<MarkId>, is_note_on: bool) -> Result<(), String> {
+fn test_note_function(
+    context: &[(String, parser::Expr<MarkId>)],
+    expr: &parser::Expr<MarkId>,
+    sliders: &renderer::ProgramSliders,
+    is_note_on: bool,
+) -> Result<(), String> {
     let args = if is_note_on {
         // TODO use a waveform for velocity
         vec![parser::Expr::Float(60.0), parser::Expr::Float(0.7)]
@@ -489,6 +562,6 @@ fn test_note_function(expr: &parser::Expr<MarkId>, is_note_on: bool) -> Result<(
         vec![parser::Expr::Float(60.0)]
     };
     let label = if is_note_on { "note-on" } else { "note-off" };
-    apply_note_function_as_waveform(expr, args, label)?;
+    apply_note_function_as_waveform(context, expr, args, sliders, label)?;
     Ok(())
 }
