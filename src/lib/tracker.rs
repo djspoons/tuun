@@ -223,7 +223,6 @@ where
                     .expect("Failed to create WAV writer");
                 out.insert(file_stem.clone(), writer);
             }
-            Prior => (),
         }
     }
 }
@@ -310,7 +309,6 @@ fn process_marked<I, M>(
             });
             process_marked(generator, sample_rate, waveform_id, start, &*waveform, out);
         }
-        Prior => (),
     }
 }
 
@@ -425,7 +423,6 @@ where
                     mark_id, id, waveform
                 );
                 let waveform = generator::initialize_state(waveform);
-                let mark_id = Some(mark_id);
                 for active in &mut self.active_waveforms {
                     if active.id == id {
                         waveform::substitute(&mut active.waveform, &mark_id, &waveform);

@@ -416,7 +416,6 @@ where
             file_stem,
             waveform: Box::new(optimize(*waveform)),
         },
-        Prior => Prior,
     }
 }
 
