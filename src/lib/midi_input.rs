@@ -17,6 +17,7 @@ struct Keys {
     context: Vec<(String, parser::Expr<MarkId>)>,
     function: parser::Expr<MarkId>,
     sliders: renderer::ProgramSliders,
+    level_db: f32,
     note_off_waveforms: HashMap<u8, waveform::Waveform<MarkId>>, // keys are MIDI note numbers
 }
 
@@ -24,10 +25,23 @@ pub struct InputHandler {
     launchkey: launchkey::Launchkey,
     repeat_after_measures: Option<u32>,
     keys: Option<Keys>,
+    encoder_mode: launchkey::EncoderMode,
 
     play_helper: play_helper::PlayHelper,
     command_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
     slider_sender: mpsc::Sender<renderer::SliderEvent>,
+}
+
+/// Converts a level in dB to a MIDI encoder value (0-127).
+/// Inverse of the mapping in MixerEncoderChange: 0 = -inf, 1-127 = -60..+6 dB.
+fn level_db_to_encoder(level_db: f32) -> u8 {
+    if level_db == f32::NEG_INFINITY || level_db < -60.0 {
+        0
+    } else {
+        ((level_db + 60.0) / 66.0 * 126.0 + 1.0)
+            .round()
+            .clamp(0.0, 127.0) as u8
+    }
 }
 
 /// Applies a note function expecting a pair of Waveforms as a result.
@@ -76,6 +90,7 @@ impl InputHandler {
             launchkey,
             repeat_after_measures: None,
             keys: None,
+            encoder_mode: launchkey::EncoderMode::Plugin,
             play_helper,
             command_sender,
             slider_sender,
@@ -105,8 +120,8 @@ impl InputHandler {
                     context,
                     function,
                     sliders,
+                    level_db,
                     note_off_waveforms,
-                    ..
                 }) = &mut self.keys
                 {
                     let args = vec![
@@ -135,7 +150,9 @@ impl InputHandler {
                             self.command_sender
                                 .send(tracker::Command::Play {
                                     id: WaveformId::Key(key),
-                                    waveform: play_helper::build_top_level_waveform(note_on),
+                                    waveform: play_helper::build_top_level_waveform(
+                                        note_on, *level_db,
+                                    ),
                                     start: None,
                                     repeat_every: None,
                                 })
@@ -154,12 +171,12 @@ impl InputHandler {
                 }) = &mut self.keys
                 {
                     match note_off_waveforms.remove(&key) {
-                        Some(waveform) => {
+                        Some(note_off) => {
                             self.command_sender
                                 .send(tracker::Command::Modify {
                                     id: WaveformId::Key(key),
-                                    mark_id: MarkId::Level,
-                                    waveform,
+                                    mark_id: MarkId::Terminator,
+                                    waveform: note_off,
                                 })
                                 .unwrap();
                         }
@@ -176,7 +193,8 @@ impl InputHandler {
 
             (Mode::Select { .. }, Event::NextTrackDown) => {
                 *active_program_index = (*active_program_index + 1) % programs.len();
-                self.update_slider_state(&programs[*active_program_index]);
+                // TODO do we need to update encoder state here as well as in render? Same for other navigation.
+                self.update_encoder_state_for_programs(programs, *active_program_index);
                 Mode::Select {
                     message: String::new(),
                 }
@@ -184,7 +202,7 @@ impl InputHandler {
             (Mode::Select { .. }, Event::PreviousTrackDown) => {
                 *active_program_index =
                     (*active_program_index + programs.len() - 1) % programs.len();
-                self.update_slider_state(&programs[*active_program_index]);
+                self.update_encoder_state_for_programs(programs, *active_program_index);
                 Mode::Select {
                     message: String::new(),
                 }
@@ -192,7 +210,7 @@ impl InputHandler {
             (Mode::Select { .. }, Event::NextTrackBankDown) => {
                 *active_program_index =
                     (*active_program_index + PROGRAMS_PER_BANK) % programs.len();
-                self.update_slider_state(&programs[*active_program_index]);
+                self.update_encoder_state_for_programs(programs, *active_program_index);
                 Mode::Select {
                     message: String::new(),
                 }
@@ -200,7 +218,7 @@ impl InputHandler {
             (Mode::Select { .. }, Event::PreviousTrackBankDown) => {
                 *active_program_index =
                     (*active_program_index + programs.len() - PROGRAMS_PER_BANK) % programs.len();
-                self.update_slider_state(&programs[*active_program_index]);
+                self.update_encoder_state_for_programs(programs, *active_program_index);
                 Mode::Select {
                     message: String::new(),
                 }
@@ -215,7 +233,7 @@ impl InputHandler {
                     let config = &ps.configs[index];
                     let actual_value = slider::denormalize(&config.function, *norm).unwrap_or(0.0);
                     // Now send to all the relevant ids: both clips and keys.
-                    let mut waveform_ids = vec![];
+                    let mut waveform_ids = vec![WaveformId::Program(program.id)];
                     if let Some(Keys { id, sliders, .. }) = &mut self.keys
                         && *id == program.id
                     {
@@ -226,8 +244,6 @@ impl InputHandler {
                         }
                         // Also update the value that we copied into the installed keys.
                         sliders.normalized_values[index] = *norm;
-                    } else {
-                        waveform_ids.push(WaveformId::Program(program.id));
                     }
                     for id in waveform_ids {
                         self.slider_sender
@@ -383,10 +399,64 @@ impl InputHandler {
                     context: Vec::from(context),
                     function,
                     sliders: program.sliders.clone(),
+                    level_db: program.level_db,
                     note_off_waveforms: HashMap::new(),
                 });
                 self.launchkey.set_capture_midi_brightness(127);
                 mode_with_message(mode, format!("Installed keys from program {}", program.id))
+            }
+
+            (mode, Event::EncoderModeChanged(new_mode)) => {
+                self.encoder_mode = new_mode;
+                self.update_encoder_state_for_programs(programs, *active_program_index);
+                mode
+            }
+            (mode, Event::MixerEncoderChange { index, value }) => {
+                let index = index as usize;
+                if index >= programs.len() {
+                    return mode;
+                }
+                let program = &mut programs[bank_start + index];
+                // Map 0 = -inf, 1-127 linearly to -60..+6 dB
+                let new_level_db = if value == 0 {
+                    f32::NEG_INFINITY
+                } else {
+                    -60.0 + (value as f32 - 1.0) / 126.0 * 66.0
+                };
+                program.level_db = new_level_db;
+                let amplitude = play_helper::db_to_amplitude(new_level_db);
+                // Send to all the relevant ids: both clips and (if keys are installed for this
+                // program) any active key waveforms.
+                let mut waveform_ids = vec![WaveformId::Program(program.id)];
+                if let Some(Keys { id, level_db, .. }) = &mut self.keys
+                    && *id == program.id
+                {
+                    *level_db = new_level_db;
+                    for mark in &status.marks {
+                        if let WaveformId::Key(_) = mark.waveform_id {
+                            waveform_ids.push(mark.waveform_id.clone());
+                        }
+                    }
+                }
+                // XXX Should we do something like what we do for plugin-mode / sliders here?
+                for id in waveform_ids {
+                    self.command_sender
+                        .send(tracker::Command::Modify {
+                            id,
+                            mark_id: MarkId::Amplitude,
+                            waveform: waveform::Waveform::Const(amplitude),
+                        })
+                        .unwrap();
+                }
+                self.launchkey.set_encoder_display(
+                    index as u8,
+                    "level",
+                    &format!("{:.1} dB", new_level_db),
+                );
+                mode_with_message(
+                    mode,
+                    format!("level({}) = {:.1} dB", program.id, new_level_db),
+                )
             }
 
             (mode, event) => {
@@ -396,18 +466,36 @@ impl InputHandler {
         }
     }
 
-    /// Updates the state of the MIDI device based on the sliders of the given program.
-    pub fn update_slider_state(&mut self, program: &Program) {
-        for (i, value) in program.sliders.normalized_values.iter().enumerate() {
-            let config = &program.sliders.configs[i];
-            let actual_value = slider::denormalize(&config.function, *value).unwrap_or(0.0);
-            self.launchkey.set_encoder_display(
-                i as u8,
-                &config.label,
-                &format!("{:.3}", actual_value),
-            );
-            self.launchkey
-                .update_encoder_state((i as u8).into(), ((127.0 * value) as u8).into());
+    /// Updates encoder state on the MIDI device based on the current mode.
+    /// In Plugin mode, sends slider values. In Mixer mode, sends level values.
+    pub fn update_encoder_state_for_programs(
+        &mut self,
+        programs: &[Program],
+        active_program_index: usize,
+    ) {
+        let bank_start = active_program_index - (active_program_index % PROGRAMS_PER_BANK);
+        match self.encoder_mode {
+            launchkey::EncoderMode::Plugin => {
+                let program = &programs[active_program_index];
+                for (i, value) in program.sliders.normalized_values.iter().enumerate() {
+                    let config = &program.sliders.configs[i];
+                    let actual_value = slider::denormalize(&config.function, *value).unwrap_or(0.0);
+                    self.launchkey.set_encoder_display(
+                        i as u8,
+                        &config.label,
+                        &format!("{:.3}", actual_value),
+                    );
+                    self.launchkey
+                        .update_encoder_state((i as u8).into(), ((127.0 * value) as u8).into());
+                }
+            }
+            launchkey::EncoderMode::Mixer => {
+                for i in 0..PROGRAMS_PER_BANK {
+                    let program = &programs[bank_start + i];
+                    let encoder_value = level_db_to_encoder(program.level_db);
+                    self.launchkey.update_encoder_state(i as u8, encoder_value);
+                }
+            }
         }
     }
 

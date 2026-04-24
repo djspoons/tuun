@@ -8,6 +8,10 @@ use crate::slider;
 use crate::tracker;
 use crate::waveform;
 
+pub fn db_to_amplitude(db: f32) -> f32 {
+    10.0_f32.powf(db / 20.0)
+}
+
 pub struct PlayHelper {
     tempo: u32,
     beats_per_measure: u32,
@@ -59,7 +63,7 @@ impl PlayHelper {
                     .send(tracker::Command::Play {
                         // TODO maybe extend the top-level mark to the full measure?
                         id: WaveformId::Program(program.id),
-                        waveform: build_top_level_waveform(waveform),
+                        waveform: build_top_level_waveform(waveform, program.level_db),
                         start,
                         repeat_every,
                     })
@@ -76,7 +80,7 @@ impl PlayHelper {
         self.command_sender
             .send(tracker::Command::Modify {
                 id,
-                mark_id: MarkId::Level,
+                mark_id: MarkId::Terminator,
                 waveform: Fin {
                     length: Box::new(BinaryPointOp(
                         Operator::Subtract,
@@ -218,15 +222,23 @@ pub fn prepare_waveform(
 
 pub fn build_top_level_waveform(
     waveform: waveform::Waveform<MarkId>,
+    level_db: f32,
 ) -> waveform::Waveform<MarkId> {
     use waveform::Waveform::{BinaryPointOp, Const, Marked};
     Marked {
         id: MarkId::TopLevel,
         waveform: Box::new(BinaryPointOp(
             waveform::Operator::Multiply,
-            Box::new(waveform),
+            Box::new(BinaryPointOp(
+                waveform::Operator::Multiply,
+                Box::new(waveform),
+                Box::new(Marked {
+                    id: MarkId::Amplitude,
+                    waveform: Box::new(Const(db_to_amplitude(level_db))),
+                }),
+            )),
             Box::new(Marked {
-                id: MarkId::Level,
+                id: MarkId::Terminator,
                 waveform: Box::new(Const(1.0)),
             }),
         )),

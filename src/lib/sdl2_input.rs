@@ -157,11 +157,10 @@ impl<'a> InputHandler {
                                 )
                         {
                             // If the program is active, stop it
-                            self.play_helper.stop_waveform(WaveformId::Program(
-                                programs[*active_program_index].id,
-                            ));
-                            message =
-                                format!("Stopped program {}", programs[*active_program_index].id);
+                            let program = &programs[*active_program_index];
+                            self.play_helper
+                                .stop_waveform(WaveformId::Program(program.id));
+                            message = format!("Stopped program {}", program.id);
                         } else if !keymod.contains(Mod::LGUIMOD)
                             && !keymod.contains(Mod::RGUIMOD)
                             && status.has_pending_mark(
@@ -303,11 +302,10 @@ impl<'a> InputHandler {
                                 )
                         {
                             // If the program is active, stop it
-                            self.play_helper.stop_waveform(WaveformId::Program(
-                                programs[*active_program_index].id,
-                            ));
-                            let message =
-                                format!("Stopped program {}", programs[*active_program_index].id);
+                            let program = &programs[*active_program_index];
+                            self.play_helper
+                                .stop_waveform(WaveformId::Program(program.id));
+                            let message = format!("Stopped program {}", program.id);
                             return Mode::Edit {
                                 cursor_position,
                                 errors,
@@ -500,6 +498,9 @@ impl<'a> InputHandler {
                                     }
                                     if let Some((r, g, b)) = program.color {
                                         anno_parts.push(format!("color=rgb({},{},{})", r, g, b));
+                                    }
+                                    if program.level_db != 0.0 {
+                                        anno_parts.push(format!("level_db={}", program.level_db));
                                     }
                                     if !anno_parts.is_empty() {
                                         writeln!(file, "//#{{{}}}", anno_parts.join(",")).unwrap();

@@ -57,7 +57,8 @@ pub fn id_from_index(index: usize) -> ProgramId {
 pub enum MarkId {
     TopLevel, // a mark for the whole Program
     Slider(String),
-    Level, // use to set top-level level and to terminate Programs
+    Amplitude,  // use to set top-level amplitude
+    Terminator, // used to stop programs
     UserDefined(u32),
 }
 
@@ -66,7 +67,8 @@ impl fmt::Display for MarkId {
         match self {
             MarkId::TopLevel => write!(f, "top-level"),
             MarkId::Slider(name) => write!(f, "slider({:?})", name),
-            MarkId::Level => write!(f, "Level"),
+            MarkId::Amplitude => write!(f, "amplitude"),
+            MarkId::Terminator => write!(f, "terminator"),
             MarkId::UserDefined(id) => write!(f, "{:?}", id),
         }
     }
@@ -154,6 +156,7 @@ pub struct Program {
     pub id: ProgramId,
     pub sliders: ProgramSliders,
     pub color: Option<(u8, u8, u8)>,
+    pub level_db: f32,
 }
 
 pub const PROGRAMS_PER_BANK: usize = 8;

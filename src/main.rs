@@ -36,7 +36,7 @@ struct Args {
     beats_per_measure: u32,
     #[arg(long, default_value_t = 44100)]
     sample_rate: i32,
-    #[arg(long, default_value_t = 2048)]
+    #[arg(long, default_value_t = 1024)]
     buffer_size: u16,
     #[arg(short = 'C', long = "context_file", number_of_values = 1)]
     context_files: Vec<String>,
@@ -148,6 +148,7 @@ fn load_programs(
         let contents = fs::read_to_string(&args.programs_file).unwrap_or_default();
         let mut pending_sliders: Option<Vec<parser::Slider>> = None;
         let mut pending_color: Option<(u8, u8, u8)> = None;
+        let mut pending_level_db: f32 = 0.0;
         for line in contents.lines() {
             // Check for annotations before stripping comments
             let annos = match parser::parse_annotations(line) {
@@ -166,6 +167,9 @@ fn load_programs(
                     parser::Annotation::Color(r, g, b) => {
                         pending_color = Some((r, g, b));
                     }
+                    parser::Annotation::Level(v) => {
+                        pending_level_db = v;
+                    }
                     parser::Annotation::NextBank => {
                         while programs.len() % renderer::PROGRAMS_PER_BANK != 0 {
                             programs.push(Program {
@@ -173,6 +177,7 @@ fn load_programs(
                                 id: renderer::id_from_index(programs.len()),
                                 sliders: ProgramSliders::default(),
                                 color: None,
+                                level_db: 0.0,
                             })
                         }
                     }
@@ -209,11 +214,13 @@ fn load_programs(
                 } else {
                     ProgramSliders::default()
                 };
+                let level_db = std::mem::replace(&mut pending_level_db, 0.0);
                 programs.push(Program {
                     text: line.to_string(),
                     id: renderer::id_from_index(programs.len()),
                     sliders,
                     color: pending_color.take(),
+                    level_db,
                 });
                 count += 1;
             }
@@ -228,6 +235,7 @@ fn load_programs(
                 id: renderer::id_from_index(programs.len()),
                 sliders: ProgramSliders::default(),
                 color: None,
+                level_db: 0.0,
             });
         }
     }
@@ -238,6 +246,7 @@ fn load_programs(
             id: renderer::id_from_index(programs.len()),
             sliders: ProgramSliders::default(),
             color: None,
+            level_db: 0.0,
         });
     }
     // Copy initial values for each slider for all programs
@@ -306,6 +315,7 @@ pub fn main() {
                 id: program.id,
                 sliders: program.sliders.clone(),
                 color: program.color,
+                level_db: program.level_db,
             };
             let mode = play_helper.play_waveform(
                 &context,
@@ -592,7 +602,7 @@ pub fn main() {
             // TODO move this into render?
             if let Mode::Select { .. } = mode {
                 // This might be a new program, in which case we need to update any device state.
-                midi_handler.update_slider_state(&programs[active_program_index]);
+                midi_handler.update_encoder_state_for_programs(&programs, active_program_index);
             }
 
             loop {

@@ -671,6 +671,7 @@ pub enum Annotation {
     Sliders(Vec<Slider>),
     NextBank,
     Color(u8, u8, u8),
+    Level(f32),
 }
 
 /// Parses a slider config entry — either linear `"label:initial:min:max"`
@@ -791,6 +792,12 @@ fn parse_color(input: LocatedSpan) -> IResult<(u8, u8, u8)> {
     Ok((rest, (r, g, b)))
 }
 
+/// Parses `level_db=<float>` (e.g. `level_db=-6.0`).
+fn parse_level(input: LocatedSpan) -> IResult<f32> {
+    let (rest, (_, value)) = (tag("level_db="), number::float).parse(input)?;
+    Ok((rest, value))
+}
+
 /// Parses annotations like `//#{sliders=[...],next_bank}`.
 pub fn parse_annotations(line: &str) -> Result<Vec<Annotation>, Vec<Error>> {
     match line.trim().strip_prefix("//#") {
@@ -807,6 +814,7 @@ pub fn parse_annotations(line: &str) -> Result<Vec<Annotation>, Vec<Error>> {
                             parse_sliders_internal.map(Annotation::Sliders),
                             tag("next_bank").map(|_| Annotation::NextBank),
                             parse_color.map(|(r, g, b)| Annotation::Color(r, g, b)),
+                            parse_level.map(Annotation::Level),
                         ))),
                     ws(char('}')),
                 )
@@ -1396,5 +1404,25 @@ mod tests {
         assert!(parse_annotations("//#{color=rgb(0,0)}").is_err());
         // Color non-integer
         assert!(parse_annotations("//#{color=rgb(1.5,0,0)}").is_err());
+
+        // Level annotation
+        let result = parse_annotations("//#{level_db=-6.0}");
+        assert!(result.is_ok());
+        let annos = result.unwrap();
+        assert_eq!(annos.len(), 1);
+        assert!(matches!(annos[0], Annotation::Level(v) if (v - -6.0).abs() < 0.01));
+
+        // Level with other annotations
+        let result = parse_annotations(r#"//#{level_db=-3.0,color=rgb(255,0,0)}"#);
+        assert!(result.is_ok());
+        let annos = result.unwrap();
+        assert_eq!(annos.len(), 2);
+        assert!(matches!(annos[0], Annotation::Level(v) if (v - -3.0).abs() < 0.01));
+
+        // Positive level
+        let result = parse_annotations("//#{level_db=6.0}");
+        assert!(result.is_ok());
+        let annos = result.unwrap();
+        assert!(matches!(annos[0], Annotation::Level(v) if (v - 6.0).abs() < 0.01));
     }
 }

@@ -15,7 +15,8 @@ pub struct Launchkey {
     pub events: mpsc::Receiver<Event>,
 }
 
-enum EncoderMode {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum EncoderMode {
     Plugin,
     Mixer,
 }
@@ -50,18 +51,18 @@ pub enum Event {
         index: u8,
         value: u8, // ranges from 0-127
     },
-    /*
     MixerEncoderChange {
         index: u8,
-        value: u8,     // ranges from 0-127
+        value: u8, // ranges from 0-127
     },
-    */
     DAWTopPadDown {
         index: u8,
     },
     DAWBottomPadDown {
         index: u8,
     },
+
+    EncoderModeChanged(EncoderMode),
 
     PadFunctionDown,
 
@@ -90,6 +91,9 @@ const ENCODER_UPDATE_CHANNEL: u8 = 15;
 const DAW_PAD_TOP_ROW_OFFSET: u8 = 96;
 const DAW_PAD_BOTTOM_ROW_OFFSET: u8 = 112;
 const NUM_DAW_PADS_PER_ROW: u8 = 8;
+
+const ENCODER_MODE_CC: u8 = 0x1E; // CC 30 on channel 7
+const ENCODER_MODE_CHANNEL: u8 = 6; // channel 7 (0-indexed)
 
 const PAD_FUNCTION_OFFSET: u8 = 105;
 const CAPTURE_MIDI_OFFSET: u8 = 74;
@@ -334,17 +338,7 @@ impl Launchkey {
 }
 
 impl DAWState {
-    pub fn dummy(&self) {
-        _ = EncoderMode::Mixer;
-        _ = self.encoder_mode;
-    }
-}
-
-impl DAWState {
     fn handle_message(&mut self, _stamp: u64, message: &[u8], _info: &mut ()) {
-        // XXX
-        self.dummy();
-
         if let Some(event) = self.decode(message) {
             match self.sender.send(event) {
                 Ok(()) => (),
@@ -366,6 +360,26 @@ impl DAWState {
                         controller.as_int(),
                         value.as_int()
                     );
+                    let ch = channel.as_int();
+                    // Encoder mode changes are on channel 7 (index 6), CC 30
+                    if ch == ENCODER_MODE_CHANNEL && controller.as_int() == ENCODER_MODE_CC {
+                        return match value.as_int() {
+                            1 => {
+                                println!("Encoder mode changed to Mixer");
+                                self.encoder_mode = EncoderMode::Mixer;
+                                Some(Event::EncoderModeChanged(EncoderMode::Mixer))
+                            }
+                            2 => {
+                                println!("Encoder mode changed to Plugin");
+                                self.encoder_mode = EncoderMode::Plugin;
+                                Some(Event::EncoderModeChanged(EncoderMode::Plugin))
+                            }
+                            other => {
+                                println!("Ignoring encoder mode change to {}", other);
+                                None
+                            }
+                        };
+                    }
                     match (controller.as_int(), value.as_int()) {
                         // Navigation
                         (102, 127) => Some(Event::NextTrackDown),
@@ -377,15 +391,20 @@ impl DAWState {
                         (109, 127) => Some(Event::PreviousTrackBankDown),
                         (109, 0) => None,
 
-                        // Encoders
+                        // Encoders — routed based on current mode
                         (controller, value)
                             if controller >= ENCODER_OFFSET
                                 && controller < ENCODER_OFFSET + NUM_ENCODERS =>
                         {
-                            Some(Event::PluginEncoderChange {
-                                index: controller - ENCODER_OFFSET,
-                                value,
-                            })
+                            let index = controller - ENCODER_OFFSET;
+                            match self.encoder_mode {
+                                EncoderMode::Plugin => {
+                                    Some(Event::PluginEncoderChange { index, value })
+                                }
+                                EncoderMode::Mixer => {
+                                    Some(Event::MixerEncoderChange { index, value })
+                                }
+                            }
                         }
 
                         // Other buttons
