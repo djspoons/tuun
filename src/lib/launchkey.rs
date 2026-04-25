@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::mpsc;
 
 use midir::{Ignore, MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
@@ -24,6 +25,8 @@ pub enum EncoderMode {
 /// Responsible for decoding and forwarding messages received on the DAW connection.
 struct DAWState {
     encoder_mode: EncoderMode,
+    /// 14-bit MSB stash, keyed by encoder index (0-7). Cleared on LSB pairing.
+    encoder_msbs: HashMap<u8, u8>,
 
     sender: mpsc::Sender<Event>,
 }
@@ -49,11 +52,11 @@ pub enum Event {
     PreviousTrackBankDown,
     PluginEncoderChange {
         index: u8,
-        value: u8, // ranges from 0-127
+        value: u16, // ranges from 0-16383 (14-bit)
     },
     MixerEncoderChange {
         index: u8,
-        value: u8, // ranges from 0-127
+        value: u16, // ranges from 0-16383 (14-bit)
     },
     DAWTopPadDown {
         index: u8,
@@ -68,6 +71,9 @@ pub enum Event {
 
     CaptureMIDIDown,
 }
+
+/// Maximum 14-bit MIDI value (0x3FFF = 16383).
+pub const ENCODER_MAX: u16 = 0x3FFF;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -84,7 +90,14 @@ pub enum Error {
 }
 
 const ENCODER_OFFSET: u8 = 21;
+/// In 14-bit mode, the LSB for encoder N is at CC (ENCODER_OFFSET + 32 + N) = 53..60.
+const ENCODER_LSB_OFFSET: u8 = 53;
 const NUM_ENCODERS: u8 = 8;
+
+/// Channel-7 (index 6) CC for "DAW 14-bits Analogue output" feature toggle.
+const FEATURE_14BIT_ANALOGUE: u8 = 68;
+/// Channel-7 (index 6) feature-control channel — used for many feature toggles.
+const FEATURE_CONTROL_CHANNEL: u8 = 6;
 
 const ENCODER_UPDATE_CHANNEL: u8 = 15;
 
@@ -92,7 +105,7 @@ const DAW_PAD_TOP_ROW_OFFSET: u8 = 96;
 const DAW_PAD_BOTTOM_ROW_OFFSET: u8 = 112;
 const NUM_DAW_PADS_PER_ROW: u8 = 8;
 
-const ENCODER_MODE_CC: u8 = 0x1E; // CC 30 on channel 7
+const ENCODER_MODE_CC: u8 = 30; // on channel 7
 const ENCODER_MODE_CHANNEL: u8 = 6; // channel 7 (0-indexed)
 
 const PAD_FUNCTION_OFFSET: u8 = 105;
@@ -129,7 +142,11 @@ impl Launchkey {
                 == "Launchkey MK4 37 DAW In".to_string()
         }) {
             daw_output_conn = midi_output.connect(daw_output_port, "tuun-daw-output-port")?;
-            daw_output_conn.send(&[159, 12, 127])?;
+            // Enter DAW mode
+            daw_output_conn.send(&[0x9F, 0x0C, 0x7F])?;
+            // Enable 14-bit Analogue output for higher-resolution encoder values.
+            // TODO use MidiMessage::Controller
+            daw_output_conn.send(&[0xB0 | FEATURE_CONTROL_CHANNEL, FEATURE_14BIT_ANALOGUE, 127])?;
         } else {
             return Err(Error::Other(
                 "couldn't find Launchkey DAW In port".to_string(),
@@ -140,6 +157,7 @@ impl Launchkey {
         let (sender, receiver) = mpsc::channel();
         let mut daw_state = DAWState {
             encoder_mode: EncoderMode::Plugin,
+            encoder_msbs: HashMap::new(),
             sender: sender.clone(),
         };
         let mut midi_state = MIDIState { sender: sender };
@@ -207,12 +225,23 @@ impl Launchkey {
         )));
     }
 
-    pub fn update_encoder_state(&mut self, index: u8, value: u8) {
+    /// Sends a 14-bit (0..=16383) value to the encoder at `index` as an MSB+LSB pair.
+    pub fn update_encoder_state(&mut self, index: u8, value: u16) {
+        let value = value.min(0x3FFF);
+        let msb = (value >> 7) as u8;
+        let lsb = (value & 0x7F) as u8;
         self.send_event(LiveEvent::Midi {
             channel: ENCODER_UPDATE_CHANNEL.into(),
             message: MidiMessage::Controller {
                 controller: (index + ENCODER_OFFSET).into(),
-                value: value.into(),
+                value: msb.into(),
+            },
+        });
+        self.send_event(LiveEvent::Midi {
+            channel: ENCODER_UPDATE_CHANNEL.into(),
+            message: MidiMessage::Controller {
+                controller: (index + ENCODER_LSB_OFFSET).into(),
+                value: lsb.into(),
             },
         });
     }
@@ -320,11 +349,17 @@ fn string_to_ascii(str: &str) -> Vec<u8> {
 
 impl Drop for Launchkey {
     fn drop(&mut self) {
-        match self.daw_output_conn.send(&[159, 12, 0]) {
-            Err(e) => {
-                println!("launchkey: failed to exit from DAW mode: {}", e);
-            }
-            _ => (),
+        // Disable 14-bit Analogue output before leaving DAW mode.
+        // TODO use MidiMessage::Controller
+        if let Err(e) =
+            self.daw_output_conn
+                .send(&[0xB0 | FEATURE_CONTROL_CHANNEL, FEATURE_14BIT_ANALOGUE, 0])
+        {
+            println!("launchkey: failed to disable 14-bit analogue: {}", e);
+        }
+        // Exit DAW mode.
+        if let Err(e) = self.daw_output_conn.send(&[0x9F, 0x0C, 0x00]) {
+            println!("launchkey: failed to exit from DAW mode: {}", e);
         }
     }
 }
@@ -391,19 +426,32 @@ impl DAWState {
                         (109, 127) => Some(Event::PreviousTrackBankDown),
                         (109, 0) => None,
 
-                        // Encoders — routed based on current mode
+                        // Encoders — 14-bit mode: stash MSB (cc 21-28), emit on LSB (cc 53-60) routed based
+                        // on current mode
                         (controller, value)
                             if controller >= ENCODER_OFFSET
                                 && controller < ENCODER_OFFSET + NUM_ENCODERS =>
                         {
                             let index = controller - ENCODER_OFFSET;
+                            self.encoder_msbs.insert(index, value);
+                            None
+                        }
+                        (controller, value)
+                            if controller >= ENCODER_LSB_OFFSET
+                                && controller < ENCODER_LSB_OFFSET + NUM_ENCODERS =>
+                        {
+                            let index = controller - ENCODER_LSB_OFFSET;
+                            let msb = self.encoder_msbs.remove(&index).unwrap_or(0);
+                            let combined: u16 = ((msb as u16) << 7) | (value as u16);
                             match self.encoder_mode {
-                                EncoderMode::Plugin => {
-                                    Some(Event::PluginEncoderChange { index, value })
-                                }
-                                EncoderMode::Mixer => {
-                                    Some(Event::MixerEncoderChange { index, value })
-                                }
+                                EncoderMode::Plugin => Some(Event::PluginEncoderChange {
+                                    index,
+                                    value: combined,
+                                }),
+                                EncoderMode::Mixer => Some(Event::MixerEncoderChange {
+                                    index,
+                                    value: combined,
+                                }),
                             }
                         }
 

@@ -563,6 +563,9 @@ pub fn main() {
     let mut next_buffer_refresh = Instant::now();
     command_sender.send(Command::SendCurrentBuffer).unwrap();
     let mut active_program_index = 0;
+    // Track which program we last pushed to the MIDI controller so we don't
+    // overwrite the user's encoder turns on every loop iteration.
+    let mut last_synced_program_index: Option<usize> = None;
     loop {
         for event in event_pump.poll_iter() {
             //println!("Event: {:?} with mode {:?}", event, mode);
@@ -584,6 +587,7 @@ pub fn main() {
                     slider_sender
                         .send(renderer::SliderEvent::SetInitialValues(slider_values))
                         .unwrap();
+                    last_synced_program_index = None;
                     if errors.len() > 0 {
                         Mode::Select {
                             message: format!("Error loading programs: {}", errors[0].to_string()),
@@ -599,10 +603,14 @@ pub fn main() {
         }
 
         if let Some(midi_handler) = &mut midi_handler {
-            // TODO move this into render?
+            // Only push encoder state when the active program changes (or after
+            // LoadPrograms). Otherwise we'd overwrite the user's encoder turns
+            // on every loop iteration.
             if let Mode::Select { .. } = mode {
-                // This might be a new program, in which case we need to update any device state.
-                midi_handler.update_encoder_state_for_programs(&programs, active_program_index);
+                if last_synced_program_index != Some(active_program_index) {
+                    midi_handler.update_encoder_state_for_programs(&programs, active_program_index);
+                    last_synced_program_index = Some(active_program_index);
+                }
             }
 
             loop {

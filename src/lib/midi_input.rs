@@ -32,15 +32,25 @@ pub struct InputHandler {
     slider_sender: mpsc::Sender<renderer::SliderEvent>,
 }
 
-/// Converts a level in dB to a MIDI encoder value (0-127).
-/// Inverse of the mapping in MixerEncoderChange: 0 = -inf, 1-127 = -60..+6 dB.
-fn level_db_to_encoder(level_db: f32) -> u8 {
+/// Converts a level in dB to a 14-bit MIDI encoder value (0-16383).
+/// Inverse of the mapping in MixerEncoderChange: 0 = -inf, 1..=16383 -> -60..+6 dB.
+fn level_db_to_encoder(level_db: f32) -> u16 {
     if level_db == f32::NEG_INFINITY || level_db < -60.0 {
         0
     } else {
-        ((level_db + 60.0) / 66.0 * 126.0 + 1.0)
+        ((level_db + 60.0) / 66.0 * (launchkey::ENCODER_MAX - 1) as f32 + 1.0)
             .round()
-            .clamp(0.0, 127.0) as u8
+            .clamp(0.0, launchkey::ENCODER_MAX as f32) as u16
+    }
+}
+
+/// Converts a 14-bit MIDI encoder value (0-16383) to a level in dB.
+/// 0 = -inf, 1..=16383 -> -60..+6 dB.
+fn encoder_to_level_db(value: u16) -> f32 {
+    if value == 0 {
+        f32::NEG_INFINITY
+    } else {
+        -60.0 + (value as f32 - 1.0) / (launchkey::ENCODER_MAX - 1) as f32 * 66.0
     }
 }
 
@@ -229,7 +239,7 @@ impl InputHandler {
                 let ps = &mut program.sliders;
                 if index < ps.configs.len() {
                     let norm = &mut ps.normalized_values[index];
-                    *norm = (value as f32 / 127.0).clamp(0.0, 1.0);
+                    *norm = (value as f32 / launchkey::ENCODER_MAX as f32).clamp(0.0, 1.0);
                     let config = &ps.configs[index];
                     let actual_value = slider::denormalize(&config.function, *norm).unwrap_or(0.0);
                     // Now send to all the relevant ids: both clips and keys.
@@ -417,12 +427,7 @@ impl InputHandler {
                     return mode;
                 }
                 let program = &mut programs[bank_start + index];
-                // Map 0 = -inf, 1-127 linearly to -60..+6 dB
-                let new_level_db = if value == 0 {
-                    f32::NEG_INFINITY
-                } else {
-                    -60.0 + (value as f32 - 1.0) / 126.0 * 66.0
-                };
+                let new_level_db = encoder_to_level_db(value);
                 program.level_db = new_level_db;
                 let amplitude = play_helper::db_to_amplitude(new_level_db);
                 // Send to all the relevant ids: both clips and (if keys are installed for this
@@ -485,8 +490,10 @@ impl InputHandler {
                         &config.label,
                         &format!("{:.3}", actual_value),
                     );
-                    self.launchkey
-                        .update_encoder_state((i as u8).into(), ((127.0 * value) as u8).into());
+                    self.launchkey.update_encoder_state(
+                        i as u8,
+                        (launchkey::ENCODER_MAX as f32 * value) as u16,
+                    );
                 }
             }
             launchkey::EncoderMode::Mixer => {
