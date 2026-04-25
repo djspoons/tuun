@@ -166,9 +166,6 @@ where
             }
             // TODO think harder about captures for the other sub-waveforms in these cases
             Fin { waveform, .. }
-            | Reset {
-                trigger: waveform, ..
-            }
             | Alt {
                 trigger: waveform, ..
             }
@@ -184,6 +181,14 @@ where
             | BinaryPointOp(_, a, b) => {
                 self.process_captured(&*a, out);
                 self.process_captured(&*b, out);
+            }
+            | Reset {
+                trigger,
+                waveform,
+                ..
+            } => {
+                self.process_captured(trigger, out);
+                self.process_captured(waveform, out);
             }
             Filter {
                 waveform,
