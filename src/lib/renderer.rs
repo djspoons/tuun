@@ -60,6 +60,9 @@ pub enum MarkId {
     Amplitude,  // use to set top-level amplitude
     Terminator, // used to stop programs
     UserDefined(u32),
+    // TODO consider replacing "UserDefined" with cases that better describe the cases
+    //VisualizeTiming, // How mark(1) is currently used
+    //ShowSample(String), // For debugging filter params, etc.
 }
 
 impl fmt::Display for MarkId {
