@@ -99,5 +99,6 @@ pub fn make_ramp<M>(
             )),
         }),
         Box::new(Const(new_value)),
+        (),
     )
 }

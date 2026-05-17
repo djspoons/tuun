@@ -105,7 +105,7 @@ fn bench_marks(c: &mut Criterion) {
             }
             let w = ws
                 .into_iter()
-                .reduce(|result, w| waveform::Waveform::Append(Box::new(result), Box::new(w)))
+                .reduce(|result, w| waveform::Waveform::Append(Box::new(result), Box::new(w), ()))
                 .unwrap();
             let mut w = generator::initialize_state(w);
             let mut out = vec![0.0; 1024];

@@ -94,14 +94,14 @@ where
                 },
             }
         }
-        Append(a, b) => {
+        Append(a, b, state) => {
             let a = optimize(*a);
             let b = optimize(*b);
             match (a, b) {
                 (Fixed(a, _), b) if a.len() == 0 => b,
                 (a, Fixed(b, _)) if b.len() == 0 => a,
                 (Fixed(a, _), Fixed(b, _)) => Fixed([a, b].concat(), ()),
-                (a, b) => Append(Box::new(a), Box::new(b)),
+                (a, b) => Append(Box::new(a), Box::new(b), state),
             }
         }
         // Check to see if we can compute the sine function:
@@ -214,7 +214,7 @@ where
                         length: a_length,
                         waveform: a,
                     },
-                    Append(b, c),
+                    Append(b, c, ()),
                 ) => match *b {
                     Fin {
                         length: b_length,
@@ -225,6 +225,7 @@ where
                             waveform: Box::new(BinaryPointOp(Operator::Merge, a, b)),
                         }),
                         c,
+                        (),
                     )),
                     _ => BinaryPointOp(
                         Operator::Merge,
@@ -232,12 +233,12 @@ where
                             length: a_length,
                             waveform: a,
                         }),
-                        Box::new(Append(b, c)),
+                        Box::new(Append(b, c, ())),
                     ),
                 },
                 // Same as above, but when w is Marked(n, w'). There's a lot of overlap
                 // with the previous case!
-                (Marked { id, waveform: a }, Append(b, c)) => match (*a, *b) {
+                (Marked { id, waveform: a }, Append(b, c, ())) => match (*a, *b) {
                     (
                         Fin {
                             length: a_length,
@@ -256,6 +257,7 @@ where
                             }),
                         }),
                         c,
+                        (),
                     )),
                     (a, b) => BinaryPointOp(
                         Operator::Merge,
@@ -263,7 +265,7 @@ where
                             id,
                             waveform: Box::new(a),
                         }),
-                        Box::new(Append(Box::new(b), c)),
+                        Box::new(Append(Box::new(b), c, ())),
                     ),
                 },
                 (a, b) => BinaryPointOp(Operator::Merge, Box::new(a), Box::new(b)),

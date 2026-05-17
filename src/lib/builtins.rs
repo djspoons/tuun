@@ -234,6 +234,7 @@ where
                     waveform: Box::new(Waveform::Const(0.0)),
                 }),
                 Box::new(Waveform::Const(b)),
+                (),
             )),
         )),
         Expr::Waveform(b) => Expr::Waveform(Waveform::BinaryPointOp(
@@ -245,6 +246,7 @@ where
                     waveform: Box::new(Waveform::Const(0.0)),
                 }),
                 Box::new(b),
+                (),
             )),
         )),
         Seq {
@@ -273,6 +275,7 @@ where
                             waveform: Box::new(Waveform::Const(0.0)),
                         }),
                         Box::new(b),
+                        (),
                     )),
                 ))),
             }
@@ -546,7 +549,7 @@ where
             let mut result = a.clone();
             for b in rest {
                 if let Expr::Waveform(b) = b {
-                    result = Waveform::Append(Box::new(result), Box::new(b.clone()));
+                    result = Waveform::Append(Box::new(result), Box::new(b.clone()), ());
                 } else {
                     return Error("Expected more waveforms as arguments for append".to_string());
                 }

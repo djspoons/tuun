@@ -36,7 +36,11 @@ pub enum Waveform<MarkId, State = ()> {
     },
     /// Concatenates two waveforms, generating all samples from the first waveform and
     /// then all samples from the second.
-    Append(Box<Waveform<MarkId, State>>, Box<Waveform<MarkId, State>>),
+    Append(
+        Box<Waveform<MarkId, State>>,
+        Box<Waveform<MarkId, State>>,
+        State,
+    ),
     /// Computes the sine with the given frequency and phase (both in radians). Equivalently, computes
     /// the sine of angle that changes according to the rate of the first parameter and the value of the
     /// second. Note that Sine is used both as the basis for periodic waveforms and also in cases when
@@ -119,7 +123,7 @@ impl<MarkId: Display, State> Display for Waveform<MarkId, State> {
             Fin { length, waveform } => {
                 write!(f, "Fin({}, {})", length, waveform)
             }
-            Append(a, b) => write!(f, "Append({}, {})", a, b),
+            Append(a, b, _) => write!(f, "Append({}, {})", a, b),
             Sine {
                 frequency, phase, ..
             } => write!(f, "Sine({}, {})", frequency, phase),
@@ -184,9 +188,10 @@ where
             length: Box::new(initialize_state(*length, state.clone())),
             waveform: Box::new(initialize_state(*waveform, state)),
         },
-        Append(a, b) => Append(
+        Append(a, b, _) => Append(
             Box::new(initialize_state(*a, state.clone())),
-            Box::new(initialize_state(*b, state)),
+            Box::new(initialize_state(*b, state.clone())),
+            state,
         ),
         Sine {
             frequency, phase, ..
@@ -259,7 +264,7 @@ pub fn remove_state<M, S>(waveform: Waveform<M, S>) -> Waveform<M> {
             length: Box::new(remove_state(*length)),
             waveform: Box::new(remove_state(*waveform)),
         },
-        Append(a, b) => Append(Box::new(remove_state(*a)), Box::new(remove_state(*b))),
+        Append(a, b, _) => Append(Box::new(remove_state(*a)), Box::new(remove_state(*b)), ()),
         Sine {
             frequency, phase, ..
         } => Sine {
@@ -326,9 +331,10 @@ where
             set_state(length, new_state.clone());
             set_state(waveform, new_state);
         }
-        Append(a, b) => {
+        Append(a, b, state) => {
             set_state(a, new_state.clone());
-            set_state(b, new_state);
+            set_state(b, new_state.clone());
+            *state = new_state;
         }
         Sine {
             frequency,
@@ -409,7 +415,7 @@ where
             substitute(length, mark_id, new_waveform);
             substitute(waveform, mark_id, new_waveform);
         }
-        Append(a, b) => {
+        Append(a, b, _) => {
             substitute(a, mark_id, new_waveform);
             substitute(b, mark_id, new_waveform);
         }

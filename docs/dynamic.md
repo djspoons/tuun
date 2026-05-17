@@ -161,9 +161,9 @@ Modify {
 
 Handling MIDI note-on and note-off events is similar. Each MIDI instrument in Tuun is defined by a function that returns a pair of waveforms:
 ```
-(key, velocity) -> (waveform: note_on, waveform: note_off)
+(key, velocity) -> (waveform, waveform) // (note_on, note_off)
 ```
-When a note-on event is received from a controller, the note (or key) number and the velocity (as a value between 0.0 and 1.0) are passed to this function. The first waveform is played immediately. This waveform may be infinite or finite. In either case, when a note-off event is received, the second waveform (`note_off`) is substituted for the `Level` mark, just as in the case of stopping a waveform above. As in the case of stopping, a simple `Fixed([])` would work, but other waveforms can be used to produce instrument-specific results.
+When a note-on event is received from a controller, the note (or key) number and the velocity (as a value between 0.0 and 1.0) are passed to this function. The first waveform is played immediately. This waveform may be infinite or finite. In either case, when a note-off event is received, the second waveform (`note_off`) is substituted for the `Level` mark, just as in the case of stopping a waveform above. As in the case of stopping, a simple `Fixed([])` would be sufficient to stop playback, but other waveforms can be used to produce instrument-specific results.
 
 The following example of a MIDI instrument (based on parameters from [Jim Woodhouse's Euphonics site](https://euphonics.org/3-3-marimbas-and-xylophones/)) has a long (but finite) sustain when keys are held.
 

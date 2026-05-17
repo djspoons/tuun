@@ -177,15 +177,13 @@ where
                 phase: b,
                 ..
             }
-            | Append(a, b)
+            | Append(a, b, _)
             | BinaryPointOp(_, a, b) => {
                 self.process_captured(&*a, out);
                 self.process_captured(&*b, out);
             }
-            | Reset {
-                trigger,
-                waveform,
-                ..
+            Reset {
+                trigger, waveform, ..
             } => {
                 self.process_captured(trigger, out);
                 self.process_captured(waveform, out);
@@ -288,7 +286,7 @@ fn process_marked<I, M>(
                 out,
             );
         }
-        Append(a, b) => {
+        Append(a, b, _) => {
             process_marked(generator, sample_rate, waveform_id, start, &*a, out);
             let a_len = generator.length(
                 &mut a.clone(),
@@ -431,7 +429,7 @@ where
                 for active in &mut self.active_waveforms {
                     if active.id == id {
                         waveform::substitute(&mut active.waveform, &mark_id, &waveform);
-                        println!("  new waveform is: {}", active.waveform);
+                        println!("  new active waveform is: {}", active.waveform);
                         // Recompute the marks
                         active.marks.clear();
                         process_marked(
@@ -450,7 +448,7 @@ where
                 for pending in &mut self.pending_waveforms {
                     if pending.id == id {
                         waveform::substitute(&mut pending.waveform, &mark_id, &waveform);
-                        println!("  new waveform is: {}", pending.waveform);
+                        println!("  new pending waveform is: {}", pending.waveform);
                         // Recompute the marks
                         pending.marks.clear();
                         process_marked(
