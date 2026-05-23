@@ -66,14 +66,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     stdout().flush()?;
     let mut input = String::new();
     stdin().read_line(&mut input)?;
+    input = input.trim().to_string();
     if input.is_empty() || input == "Y" || input == "y" {
         // Enable DAW 14-bit Analogue output (CC 0x44 on channel 7 = status B6h)
         println!("\nEnabling 14-bit analogue output...");
         send_and_log(&mut out_conn, "14-bit analogue on", &[0xB6, 0x44, 0x7F]);
-        thread::sleep(Duration::from_millis(200));
-    } else {
-        println!("\nDisabling 14-bit analogue output...");
-        send_and_log(&mut out_conn, "14-bit analogue off", &[0xB6, 0x44, 0x00]);
         thread::sleep(Duration::from_millis(200));
     }
 
