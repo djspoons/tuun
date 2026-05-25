@@ -3,5 +3,11 @@
     "allow": [
       "Bash(./build-wasm.sh)"
     ]
+  },
+  "hooks": {
+    "PostToolUse": [{
+      "matcher": "Edit|Write",
+      "hooks": [{"type": "command", "command": "cargo fmt"}]
+    }]
   }
 }
