@@ -8,6 +8,10 @@ pub mod waveform;
 
 // Native-only modules (SDL2-dependent)
 #[cfg(feature = "native")]
+pub mod actions;
+#[cfg(feature = "native")]
+pub mod effects;
+#[cfg(feature = "native")]
 pub mod launchkey;
 #[cfg(feature = "native")]
 pub mod midi_input;

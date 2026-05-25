@@ -9,7 +9,9 @@ use clap::Parser as ClapParser;
 use sdl2::audio::AudioSpecDesired;
 use sdl2::ttf::Sdl2TtfContext;
 
+use tuun::actions;
 use tuun::builtins;
+use tuun::effects;
 use tuun::generator;
 use tuun::launchkey;
 use tuun::metric;
@@ -373,8 +375,72 @@ pub fn main() {
         .unwrap();
     device.resume();
 
-    play_helper::PlayHelper::new(args.tempo, args.beats_per_measure, command_sender.clone())
-        .start_beats(&status_receiver, &context);
+    // Spin up the precompute thread so PlayHelpers can route their
+    // commands through it. The thread precomputes `Command::Play` and
+    // passes everything else through unchanged.
+    //
+    // What goes through (the two PlayHelpers wired to the returned
+    // sender below: `start_beats` and `effect_play_helper`):
+    //   - Command::Play from `play_waveform` / `start_beats`  → precomputed
+    //   - Command::Modify from `stop_waveform` (Effect::StopProgram,
+    //     PlayNoteOff fallback) → passed through, but still queued behind
+    //     any in-flight precompute on this thread
+    //
+    // What bypasses entirely (uses `command_sender` directly):
+    //   - The slider thread's Modify ramps
+    //   - The effect runner's ModifyWaveform / ModifyActiveKeysAmplitude /
+    //     RemovePending
+    //   - Effect::PlayNoteOn — yes, this is a Command::Play but it
+    //     deliberately skips precompute to keep keystroke latency low
+    let precomputing_command_sender = {
+        let play_command_sender = command_sender.clone();
+        let (tx, play_receiver) = mpsc::channel();
+        let precompute = args.precompute;
+        let sample_rate = args.sample_rate;
+        thread::spawn(move || {
+            loop {
+                match play_receiver.recv() {
+                    Ok(Command::Play {
+                        id,
+                        mut waveform,
+                        start,
+                        repeat_every,
+                    }) => {
+                        if precompute {
+                            // TODO probably precompute should happen on another thread
+                            let mut generator = generator::Generator::new(sample_rate);
+                            waveform = waveform::remove_state(generator.precompute(waveform));
+                            println!("precompute returned: {}", &waveform);
+                        }
+
+                        play_command_sender
+                            .send(Command::Play {
+                                id,
+                                waveform,
+                                start,
+                                repeat_every,
+                            })
+                            .unwrap();
+                    }
+                    Ok(cmd) => {
+                        play_command_sender.send(cmd).unwrap();
+                    }
+                    Err(e) => {
+                        println!("Play thread got error receiving: {}", e);
+                        return;
+                    }
+                }
+            }
+        });
+        tx
+    };
+
+    play_helper::PlayHelper::new(
+        args.tempo,
+        args.beats_per_measure,
+        precomputing_command_sender.clone(),
+    )
+    .start_beats(&status_receiver, &context);
 
     // Spawn a thread that batches slider updates, sending them approximately once per audio buffer
     let buffer_duration =
@@ -459,47 +525,6 @@ pub fn main() {
         }
     });
 
-    // N.B. We shadow the command sender here so that any uses below will go through here.
-    // This simplifies things a bit, but it means that all commands will wait on a long
-    // pre-computation.
-    let play_command_sender = command_sender.clone();
-    let (precomputing_command_sender, play_receiver) = mpsc::channel();
-    thread::spawn(move || {
-        loop {
-            match play_receiver.recv() {
-                Ok(Command::Play {
-                    id,
-                    mut waveform,
-                    start,
-                    repeat_every,
-                }) => {
-                    if args.precompute {
-                        // TODO probably precompute should happen on another thread
-                        let mut generator = generator::Generator::new(args.sample_rate);
-                        waveform = waveform::remove_state(generator.precompute(waveform));
-                        println!("precompute returned: {}", &waveform);
-                    }
-
-                    play_command_sender
-                        .send(Command::Play {
-                            id,
-                            waveform,
-                            start,
-                            repeat_every,
-                        })
-                        .unwrap();
-                }
-                Ok(cmd) => {
-                    play_command_sender.send(cmd).unwrap();
-                }
-                Err(e) => {
-                    println!("Play thread got error receiving: {}", e);
-                    return;
-                }
-            }
-        }
-    });
-
     let launchkey = launchkey::Launchkey::new();
     if let Err(e) = &launchkey {
         println!(
@@ -519,33 +544,28 @@ pub fn main() {
     renderer.video_subsystem.text_input().start();
     let mut event_pump = sdl_context.event_pump().unwrap();
 
-    let mut sdl2_handler = sdl2_input::InputHandler::new(
-        launchkey.is_err(),
-        renderer.width,
-        renderer.height,
-        play_helper::PlayHelper::new(
-            args.tempo,
-            args.beats_per_measure,
-            precomputing_command_sender.clone(),
-        ),
-        precomputing_command_sender.clone(),
-        slider_sender.clone(),
-    );
+    let sdl2_handler =
+        sdl2_input::InputHandler::new(launchkey.is_err(), renderer.width, renderer.height);
 
-    let mut midi_handler = if let Ok(launchkey) = launchkey {
-        Some(midi_input::InputHandler::new(
-            launchkey,
-            play_helper::PlayHelper::new(
-                args.tempo,
-                args.beats_per_measure,
-                command_sender.clone(),
-            ),
-            command_sender.clone(),
-            slider_sender.clone(),
-        ))
+    // Own the launchkey directly in main. midi_input is now a set of free
+    // functions; there's no handler struct.
+    let mut launchkey = if let Ok(mut lk) = launchkey {
+        lk.set_daw_mode_display(&"Clip Launcher".to_string());
+        Some(lk)
     } else {
         None
     };
+    let mut effect_runner =
+        effects::EffectRunner::new(command_sender.clone(), slider_sender.clone());
+    // A PlayHelper owned by the effect runner's "World" — used to dispatch
+    // Effect::PlayProgram and friends without going through the per-handler
+    // PlayHelpers. Routes through the precompute thread so `--precompute`
+    // actually takes effect on interactive playback.
+    let mut effect_play_helper = play_helper::PlayHelper::new(
+        args.tempo,
+        args.beats_per_measure,
+        precomputing_command_sender,
+    );
 
     let mut status = tracker::Status {
         buffer_start: Instant::now(),
@@ -562,32 +582,64 @@ pub fn main() {
     const BUFFER_REFRESH_INTERVAL: Duration = Duration::from_millis(200);
     let mut next_buffer_refresh = Instant::now();
     command_sender.send(Command::SendCurrentBuffer).unwrap();
-    let mut active_program_index = 0;
-    // Track which program we last pushed to the MIDI controller so we don't
-    // overwrite the user's encoder turns on every loop iteration.
-    let mut last_synced_program_index: Option<usize> = None;
+    // All internal app state; modified by the reducer.
+    let mut state = actions::AppState {
+        programs,
+        active_program_index: 0,
+        mode,
+        keys: None,
+        repeat_after_measures: None,
+    };
     loop {
         for event in event_pump.poll_iter() {
-            //println!("Event: {:?} with mode {:?}", event, mode);
-            mode = sdl2_handler.handle_event(
-                event,
-                &context,
-                mode,
-                &mut active_program_index,
-                &status,
-                &mut programs,
+            let sdl_actions = sdl2_handler.classify(&event, &state, &status);
+            if let Some(actions) = sdl_actions {
+                let mut world = effects::World {
+                    launchkey: launchkey.as_mut(),
+                    status: &status,
+                    context: &context,
+                    play_helper: &mut effect_play_helper,
+                };
+                effect_runner.dispatch(&mut state, &mut world, actions);
+            } else {
+                // classify() should cover every SDL event we care about.
+                println!("Unhandled SDL event: {:?}", event);
+            }
+            // Handle transient modes (Exit / LoadContext / LoadPrograms)
+            // that the reducer set on state.mode.
+            let take_mode = std::mem::replace(
+                &mut state.mode,
+                Mode::Select {
+                    message: String::new(),
+                },
             );
-            mode = match mode {
+            state.mode = match take_mode {
                 Mode::Exit => {
                     return;
                 }
                 Mode::LoadContext {} => load_context(&args, &mut context),
                 Mode::LoadPrograms {} => {
-                    let (slider_values, errors) = load_programs(&args, &mut programs);
+                    let (slider_values, errors) = load_programs(&args, &mut state.programs);
                     slider_sender
                         .send(renderer::SliderEvent::SetInitialValues(slider_values))
                         .unwrap();
-                    last_synced_program_index = None;
+                    // Programs (and so the encoder values) just changed; push
+                    // the controller's encoders to match by dispatching
+                    // `Effect::SyncEncoders` through the runner — same path
+                    // the Action/Effect pipeline uses elsewhere.
+                    let mut world = effects::World {
+                        launchkey: launchkey.as_mut(),
+                        status: &status,
+                        context: &context,
+                        play_helper: &mut effect_play_helper,
+                    };
+                    effect_runner.run_all(
+                        &mut state,
+                        &mut world,
+                        vec![actions::Effect::SyncEncoders],
+                    );
+                    // run_all auto-folds any message it produced; the
+                    // explicit Mode::Select below overrides it anyway.
                     if errors.len() > 0 {
                         Mode::Select {
                             message: format!("Error loading programs: {}", errors[0].to_string()),
@@ -598,33 +650,33 @@ pub fn main() {
                         }
                     }
                 }
-                _ => mode,
+                other => other,
             }
         }
 
-        if let Some(midi_handler) = &mut midi_handler {
-            // Only push encoder state when the active program changes (or after
-            // LoadPrograms). Otherwise we'd overwrite the user's encoder turns
-            // on every loop iteration.
-            if let Mode::Select { .. } = mode {
-                if last_synced_program_index != Some(active_program_index) {
-                    midi_handler.update_encoder_state_for_programs(&programs, active_program_index);
-                    last_synced_program_index = Some(active_program_index);
-                }
-            }
-
+        if let Some(launchkey) = launchkey.as_mut() {
             loop {
-                match midi_handler.events().try_recv() {
+                match launchkey.events.try_recv() {
                     Ok(event) => {
-                        // TODO handle modes like LoadContext?
-                        mode = midi_handler.handle_event(
-                            event,
-                            &context,
-                            mode,
-                            &mut active_program_index,
-                            &status,
-                            &mut programs,
-                        )
+                        let actions = midi_input::classify(&event, &state, &status);
+                        if let Some(actions) = actions {
+                            let mut world = effects::World {
+                                launchkey: Some(launchkey),
+                                status: &status,
+                                context: &context,
+                                play_helper: &mut effect_play_helper,
+                            };
+                            effect_runner.dispatch(&mut state, &mut world, actions);
+                            // NB: transient mode handling (Exit /
+                            // LoadContext / LoadPrograms) only fires after
+                            // SDL events. Today no MIDI event produces
+                            // those modes; if that changes, this loop
+                            // needs its own transient-mode pass.
+                        } else {
+                            // classify() should be exhaustive for launchkey
+                            // events.
+                            println!("Unhandled launchkey event: {:?}", event);
+                        }
                     }
                     Err(mpsc::TryRecvError::Empty) => {
                         break;
@@ -686,15 +738,15 @@ pub fn main() {
         */
         renderer.render(
             &ttf_context,
-            &programs,
+            &state.programs,
             &status,
-            &mode,
-            active_program_index,
+            &state.mode,
+            state.active_program_index,
             &mut metrics,
         );
 
-        if let Some(midi_handler) = &mut midi_handler {
-            midi_handler.update_state(&programs, &status, &mode, active_program_index);
+        if let Some(launchkey) = launchkey.as_mut() {
+            midi_input::update_launchkey_state(&state, &status, launchkey);
         }
     }
 }
