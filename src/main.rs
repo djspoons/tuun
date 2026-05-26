@@ -376,7 +376,7 @@ pub fn main() {
     device.resume();
 
     // Spin up the precompute thread so PlayHelpers can route their
-    // commands through it. The thread precomputes `Command::Play` and
+    // commands through it. The thread pre-computes `Command::Play` and
     // passes everything else through unchanged.
     //
     // What goes through (the two PlayHelpers wired to the returned

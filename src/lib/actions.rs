@@ -76,6 +76,10 @@ pub enum Action {
     EnterSelectMode,
     EnterMoveSlidersMode,
     ExitMoveSlidersMode,
+    /// Enter computer-keyboard piano mode. Caller (the classifier) is
+    /// responsible for only emitting this when `state.keys.is_some()` —
+    /// the reducer accepts unconditionally.
+    EnterKeysMode,
     RequestLoadContext,
     RequestLoadPrograms,
     RequestExit,
@@ -339,6 +343,12 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
                     message: String::new(),
                 };
             }
+            vec![]
+        }
+        Action::EnterKeysMode => {
+            state.mode = Mode::Keys {
+                message: "Piano keys enabled".to_string(),
+            };
             vec![]
         }
         Action::RequestLoadContext => {

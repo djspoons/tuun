@@ -109,6 +109,11 @@ pub enum Mode {
         message: String,
     },
     MoveSliders {},
+    /// Computer-keyboard piano: lower QWERTY row plays white keys, row above
+    /// plays sharps. Only reachable when `state.keys` is installed.
+    Keys {
+        message: String,
+    },
     // The following are transient modes that are used to indicate an action should be
     // taken. They are used either when the action requires significant computation or
     // modifies the context.
@@ -527,7 +532,7 @@ impl Renderer {
                         }
                     }
                 }
-                Mode::Select { .. } | Mode::MoveSliders { .. } => {
+                Mode::Select { .. } | Mode::MoveSliders { .. } | Mode::Keys { .. } => {
                     if active_program_index == index {
                         let color = match mode {
                             Mode::MoveSliders { .. } => ACTIVE_COLOR,
@@ -700,6 +705,7 @@ impl Renderer {
         let mut message = match mode {
             Mode::Edit { message, .. } => message,
             Mode::Select { message, .. } => message,
+            Mode::Keys { message, .. } => message,
             Mode::MoveSliders { .. } => {
                 if slider_display.is_empty() {
                     &"No sliders configured".to_string()

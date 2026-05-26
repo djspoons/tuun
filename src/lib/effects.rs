@@ -98,7 +98,9 @@ impl EffectRunner {
         }
         if let Some(msg) = self.last_message.take() {
             match &mut state.mode {
-                Mode::Select { message } | Mode::Edit { message, .. } => *message = msg,
+                Mode::Select { message } | Mode::Edit { message, .. } | Mode::Keys { message } => {
+                    *message = msg
+                }
                 _ => {}
             }
         }
@@ -286,21 +288,18 @@ impl EffectRunner {
             Effect::PlayNoteOff { key } => {
                 let id = WaveformId::Key(key);
                 if let Some(keys) = state.keys.as_mut() {
-                    match keys.note_off_waveforms.remove(&key) {
-                        Some(note_off) => {
-                            let _ = self.command_sender.send(tracker::Command::Modify {
-                                id,
-                                mark_id: MarkId::Terminator,
-                                waveform: note_off,
-                            });
-                            return;
-                        }
-                        None => {
-                            println!("Missing note-off waveform for MIDI note: {}", key);
-                        }
+                    if let Some(note_off) = keys.note_off_waveforms.remove(&key) {
+                        let _ = self.command_sender.send(tracker::Command::Modify {
+                            id,
+                            mark_id: MarkId::Terminator,
+                            waveform: note_off,
+                        });
+                        return;
                     }
                 }
-                // Default to just stopping the waveform if the code above doesn't match.
+                // No stored note-off (key wasn't NoteOn'd, or keys were
+                // uninstalled mid-note). Send a generic stop ramp; it's a
+                // no-op if there's no matching waveform on the tracker.
                 world.play_helper.stop_waveform(id);
             }
             Effect::SetCaptureMidiBrightness(b) => {

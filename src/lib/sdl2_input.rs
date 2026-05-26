@@ -4,6 +4,40 @@ use crate::actions;
 use crate::renderer::{MarkId, Mode, PROGRAMS_PER_BANK, Program, WaveformId};
 use crate::tracker;
 
+/// Maps a QWERTY scancode to a MIDI note number for Keys (piano) mode.
+/// Lower row plays white keys starting at C4 (MIDI 60); the row above
+/// plays sharps where they correspond to black keys on a piano (so `f`
+/// and `k` — above the E and B positions, which have no black key —
+/// return None).
+///
+///   Lower:  z  x  c  v  b  n  m  ,  .  /
+///   Notes:  C  D  E  F  G  A  B  C  D  E
+///   Upper:  s  d     g  h  j     l  ;
+///   Sharps: C# D#    F# G# A#    C# D#
+fn scancode_to_midi_note(scancode: sdl2::keyboard::Scancode) -> Option<u8> {
+    use sdl2::keyboard::Scancode::*;
+    Some(match scancode {
+        Z => 60,         // C4
+        S => 61,         // C#4
+        X => 62,         // D4
+        D => 63,         // D#4
+        C => 64,         // E4
+        V => 65,         // F4
+        G => 66,         // F#4
+        B => 67,         // G4
+        H => 68,         // G#4
+        N => 69,         // A4
+        J => 70,         // A#4
+        M => 71,         // B4
+        Comma => 72,     // C5
+        L => 73,         // C#5
+        Period => 74,    // D5
+        Semicolon => 75, // D#5
+        Slash => 76,     // E5
+        _ => return None,
+    })
+}
+
 /// Configuration for the SDL2 classifier — display geometry (used by mouse
 /// motion handling) and whether mouse events should be observed at all.
 pub struct InputHandler {
@@ -38,8 +72,11 @@ impl InputHandler {
             // XXX should we use Instant::now() or buffer_start?
             Event::Quit { .. } => Some(vec![Action::RequestExit]),
             Event::KeyDown {
-                scancode, keymod, ..
-            } => self.classify_keydown(*scancode, *keymod, state, status),
+                scancode,
+                keymod,
+                repeat,
+                ..
+            } => self.classify_keydown(*scancode, *keymod, *repeat, state, status),
             Event::KeyUp { scancode, .. } => self.classify_keyup(*scancode, mode),
             Event::TextInput { text, .. } => self.classify_text_input(text, state),
             Event::MouseMotion { xrel, yrel, .. } => {
@@ -57,7 +94,7 @@ impl InputHandler {
                 }
             }
             // Recognized but ignored: window resize / focus / show events
-            // and audio device hotplug don't drive any app state today.
+            // and audio device hot-plug don't drive any app state today.
             Event::Window { .. } | Event::AudioDeviceAdded { .. } => Some(vec![]),
             _ => None,
         }
@@ -67,6 +104,7 @@ impl InputHandler {
         &self,
         scancode: Option<sdl2::keyboard::Scancode>,
         keymod: sdl2::keyboard::Mod,
+        repeat: bool,
         state: &crate::actions::AppState,
         status: &tracker::Status<WaveformId, MarkId>,
     ) -> Option<Vec<actions::Action>> {
@@ -77,6 +115,25 @@ impl InputHandler {
         use sdl2::keyboard::{Mod, Scancode};
         let ctrl = keymod.contains(Mod::LCTRLMOD) || keymod.contains(Mod::RCTRLMOD);
         let gui = keymod.contains(Mod::LGUIMOD) || keymod.contains(Mod::RGUIMOD);
+        // Keys mode: piano keystrokes → NoteOn (suppress on auto-repeat
+        // so a held key doesn't retrigger), Escape exits.
+        if let Mode::Keys { .. } = mode {
+            if let Some(Scancode::Escape) = scancode {
+                return Some(vec![Action::EnterSelectMode]);
+            }
+            if repeat {
+                return Some(vec![]);
+            }
+            if let Some(sc) = scancode {
+                if let Some(midi_note) = scancode_to_midi_note(sc) {
+                    return Some(vec![Action::NoteOn {
+                        key: midi_note,
+                        velocity: 64, // computer keyboard has no velocity; pick mf
+                    }]);
+                }
+            }
+            return Some(vec![]);
+        }
         match (mode, scancode) {
             (_, Some(Scancode::C)) if ctrl => Some(vec![Action::RequestExit]),
             (Mode::Select { .. }, Some(Scancode::Up)) => Some(vec![Action::AdvanceProgram(-1)]),
@@ -208,6 +265,15 @@ impl InputHandler {
     ) -> Option<Vec<actions::Action>> {
         use actions::Action;
         use sdl2::keyboard::Scancode;
+        // NoteOff fires for piano scancodes in any mode, not just Keys.
+        // This avoids stuck notes if the user exits Keys mode while
+        // still holding a key (Escape, click away, etc.). The runner's
+        // PlayNoteOff is a no-op when the key isn't currently playing.
+        if let Some(sc) = scancode {
+            if let Some(midi_note) = scancode_to_midi_note(sc) {
+                return Some(vec![Action::NoteOff { key: midi_note }]);
+            }
+        }
         match (mode, scancode) {
             (Mode::MoveSliders { .. }, Some(Scancode::LAlt) | Some(Scancode::RAlt)) => {
                 Some(vec![Action::ExitMoveSlidersMode])
@@ -229,6 +295,13 @@ impl InputHandler {
                 "L" => Some(vec![Action::RequestLoadPrograms]),
                 "S" => Some(vec![Action::SaveProgramsToFile]),
                 "D" => Some(vec![Action::DumpActiveWaveform]),
+                // Uppercase K: install the active program as the keys
+                // instrument (computer-keyboard analogue of the
+                // launchkey CaptureMIDI button).
+                "K" => Some(vec![Action::InstallKeys(state.active_program_index)]),
+                // Lowercase k: enter Keys (piano) mode — only if keys
+                // are actually installed; otherwise silently no-op.
+                "k" if state.keys.is_some() => Some(vec![Action::EnterKeysMode]),
                 // Digits 1..=8 select a program in the active bank.
                 t if t.len() == 1 => match t.parse::<usize>() {
                     Ok(n) if n >= 1 && n <= PROGRAMS_PER_BANK => {
@@ -280,6 +353,79 @@ mod tests {
     }
 
     #[test]
+    fn keys_mode_lower_row_emits_note_on() {
+        let handler = InputHandler::new(false, 800, 600);
+        let state = test_state(Mode::Keys {
+            message: String::new(),
+        });
+        let status = empty_status();
+        let actions = handler
+            .classify_keydown(Some(Scancode::Z), Mod::NOMOD, false, &state, &status)
+            .expect("Z in Keys mode should produce actions");
+        assert!(
+            matches!(
+                actions[0],
+                Action::NoteOn {
+                    key: 60,
+                    velocity: 64
+                }
+            ),
+            "expected NoteOn(C4=60), got {:?}",
+            actions[0]
+        );
+    }
+
+    #[test]
+    fn keys_mode_suppresses_note_on_for_held_key() {
+        let handler = InputHandler::new(false, 800, 600);
+        let state = test_state(Mode::Keys {
+            message: String::new(),
+        });
+        let status = empty_status();
+        // repeat=true means SDL is auto-repeating a held key. We must
+        // not retrigger NoteOn — the note is already playing.
+        let actions = handler
+            .classify_keydown(Some(Scancode::Z), Mod::NOMOD, true, &state, &status)
+            .expect("Z (repeat) in Keys mode should be classified");
+        assert!(
+            actions.is_empty(),
+            "expected no actions on key repeat, got {:?}",
+            actions
+        );
+    }
+
+    #[test]
+    fn keys_mode_escape_returns_to_select() {
+        let handler = InputHandler::new(false, 800, 600);
+        let state = test_state(Mode::Keys {
+            message: String::new(),
+        });
+        let status = empty_status();
+        let actions = handler
+            .classify_keydown(Some(Scancode::Escape), Mod::NOMOD, false, &state, &status)
+            .expect("Escape in Keys mode should produce actions");
+        assert!(matches!(actions[0], Action::EnterSelectMode));
+    }
+
+    #[test]
+    fn keyup_emits_note_off_even_outside_keys_mode() {
+        // Ensures notes held while exiting Keys mode still get NoteOff
+        // when the key is released back in Select mode.
+        let handler = InputHandler::new(false, 800, 600);
+        let state = test_state(Mode::Select {
+            message: String::new(),
+        });
+        let actions = handler
+            .classify_keyup(Some(Scancode::Z), &state.mode)
+            .expect("Z keyup should be classified");
+        assert!(
+            matches!(actions[0], Action::NoteOff { key: 60 }),
+            "expected NoteOff(60), got {:?}",
+            actions[0]
+        );
+    }
+
+    #[test]
     fn edit_mode_return_asks_runner_to_return_to_select_on_success() {
         // The mode transition out of Edit on success (and the stay-in-Edit
         // behavior on parse error) is driven by `return_to_select_on_success`
@@ -294,7 +440,7 @@ mod tests {
         });
         let status = empty_status();
         let actions = handler
-            .classify_keydown(Some(Scancode::Return), Mod::NOMOD, &state, &status)
+            .classify_keydown(Some(Scancode::Return), Mod::NOMOD, false, &state, &status)
             .expect("Return in Edit mode should produce actions");
         assert_eq!(actions.len(), 1);
         assert!(
