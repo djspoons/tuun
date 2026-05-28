@@ -69,10 +69,6 @@ pub struct World<'a> {
 pub struct EffectRunner {
     pub command_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
     pub slider_sender: mpsc::Sender<renderer::SliderEvent>,
-    /// Set by `Effect::ShowMessage` and the play-helper paths; drained at
-    /// the end of every `run_all` and folded into `state.mode`. Private
-    /// so callers can't accidentally read stale values across batches.
-    last_message: Option<String>,
 }
 
 impl EffectRunner {
@@ -83,26 +79,13 @@ impl EffectRunner {
         Self {
             command_sender,
             slider_sender,
-            last_message: None,
         }
     }
 
-    /// Runs every effect against `state` and `world`, then writes any
-    /// resulting status message into `state.mode`.
-    //
-    // Callers don't see `last_message` — the fold is the runner's job, so there
-    // is one place for the policy to live.
+    /// Runs every effect against `state` and `world` in order.
     pub fn run_all(&mut self, state: &mut AppState, world: &mut World, effects: Vec<Effect>) {
         for effect in effects {
             self.run_one(state, world, effect);
-        }
-        if let Some(msg) = self.last_message.take() {
-            match &mut state.mode {
-                Mode::Select { message } | Mode::Edit { message, .. } | Mode::Keys { message } => {
-                    *message = msg
-                }
-                _ => {}
-            }
         }
     }
 
@@ -135,28 +118,27 @@ impl EffectRunner {
                     Some(p) => p,
                     None => return,
                 };
-                let resulting_mode = world.play_helper.play_waveform(
+                match world.play_helper.play_waveform(
                     world.context,
-                    cursor_position,
                     program,
                     world.status,
                     start_at_next_measure,
                     repeat_after_measures,
-                );
-                if return_to_select_on_success {
-                    // Caller (e.g. SDL2 Edit+Return) wants the mode to
-                    // follow play_waveform's verdict: Select on success,
-                    // Edit (with the error) on parse failure. The mode
-                    // already carries the message, so we don't fold it
-                    // into last_message a second time.
-                    state.mode = resulting_mode;
-                } else if let Mode::Select { message } = resulting_mode {
-                    if !message.is_empty() {
-                        self.last_message = Some(message);
+                ) {
+                    Ok(message) => {
+                        if return_to_select_on_success {
+                            state.mode = Mode::Select;
+                        }
+                        state.message = message;
                     }
-                } else if let Mode::Edit { message, .. } = resulting_mode {
-                    if !message.is_empty() {
-                        self.last_message = Some(message);
+                    Err(parse_err) => {
+                        if return_to_select_on_success {
+                            state.mode = Mode::Edit {
+                                cursor_position,
+                                errors: parse_err.errors,
+                            };
+                        }
+                        state.message = parse_err.message;
                     }
                 }
             }
@@ -200,11 +182,11 @@ impl EffectRunner {
                         expr
                     }
                     Ok(other) => {
-                        self.last_message = Some(format!("Expected note function, got: {}", other));
+                        state.message = format!("Expected note function, got: {}", other);
                         return;
                     }
                     Err(errors) => {
-                        self.last_message = Some(format!("Error: {}", errors[0].to_string()));
+                        state.message = format!("Error: {}", errors[0].to_string());
                         return;
                     }
                 };
@@ -216,7 +198,7 @@ impl EffectRunner {
                     vec![parser::Expr::Float(60.0), parser::Expr::Float(0.7)],
                     &program.sliders,
                 ) {
-                    self.last_message = Some(message);
+                    state.message = message;
                     return;
                 }
                 let new_keys = Keys {
@@ -232,7 +214,7 @@ impl EffectRunner {
                 if let Some(lk) = world.launchkey.as_deref_mut() {
                     lk.set_capture_midi_brightness(127);
                 }
-                self.last_message = Some(format!("Installed keys from program {}", id));
+                state.message = format!("Installed keys from program {}", id);
             }
 
             Effect::PlayNoteOn { key, velocity } => {
@@ -283,7 +265,7 @@ impl EffectRunner {
                         });
                     }
                     Err(message) => {
-                        self.last_message = Some(message);
+                        state.message = message;
                     }
                 }
             }
@@ -337,7 +319,7 @@ impl EffectRunner {
             }
 
             Effect::ShowMessage(msg) => {
-                self.last_message = Some(msg);
+                state.message = msg;
             }
 
             Effect::SetEncoderDisplay { index, name, value } => {
@@ -372,7 +354,7 @@ impl EffectRunner {
                 let mut file = match std::fs::File::create(&filename) {
                     Ok(f) => f,
                     Err(e) => {
-                        self.last_message = Some(format!("Failed to create {}: {}", filename, e));
+                        state.message = format!("Failed to create {}: {}", filename, e);
                         return;
                     }
                 };
@@ -418,20 +400,18 @@ impl EffectRunner {
                     }
                     let _ = writeln!(file, "{}", program.text);
                 }
-                self.last_message = Some(format!("Saved to {}", filename));
+                state.message = format!("Saved to {}", filename);
             }
             Effect::DumpActiveWaveform => {
                 let program = state.active_program();
-                match play_helper::prepare_waveform(world.context, program.text.len(), program) {
-                    renderer::WaveformOrMode::Waveform(waveform) => {
+                match play_helper::prepare_waveform(world.context, program) {
+                    renderer::WaveformOrError::Waveform(waveform) => {
                         println!("Waveform definition for program {}:", program.id);
                         println!("{:#?}", waveform);
-                        self.last_message = Some("Dumped waveform to console".to_string());
+                        state.message = "Dumped waveform to console".to_string();
                     }
-                    renderer::WaveformOrMode::Mode(mode) => {
-                        if let Mode::Edit { message, .. } = mode {
-                            self.last_message = Some(message);
-                        }
+                    renderer::WaveformOrError::Error(err) => {
+                        state.message = err.message;
                     }
                 }
             }
@@ -442,7 +422,6 @@ impl EffectRunner {
 /// Pushes the current bank/program's encoder values to the controller.
 /// Called only via `Effect::SyncEncoders`, never on a tick.
 fn sync_encoders(state: &AppState, launchkey: &mut launchkey::Launchkey) {
-    let bank_start = state.bank_start();
     match launchkey.encoder_mode {
         launchkey::EncoderMode::Plugin => {
             let program = match state.programs.get(state.active_program_index) {
@@ -462,6 +441,7 @@ fn sync_encoders(state: &AppState, launchkey: &mut launchkey::Launchkey) {
             }
         }
         launchkey::EncoderMode::Mixer => {
+            let bank_start = state.bank_start();
             for i in 0..PROGRAMS_PER_BANK {
                 let program = match state.programs.get(bank_start + i) {
                     Some(p) => p,

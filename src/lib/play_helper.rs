@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use crate::optimizer;
 use crate::parser;
-use crate::renderer::{MarkId, Mode, Program, WaveformId, WaveformOrMode};
+use crate::renderer::{MarkId, ParseError, Program, WaveformId, WaveformOrError};
 use crate::slider;
 use crate::tracker;
 use crate::waveform;
@@ -32,17 +32,19 @@ impl PlayHelper {
         }
     }
 
+    /// Parses the program text and, on success, sends a `Command::Play`
+    /// for the resulting waveform. Returns the user-visible message on
+    /// success, or a `ParseError` on failure.
     pub fn play_waveform(
         &mut self,
         context: &[(String, parser::Expr<MarkId>)],
-        cursor_position: usize,
         program: &Program,
         status: &tracker::Status<WaveformId, MarkId>,
         start_at_next_measure: bool,
         repeat_after_measures: Option<u32>,
-    ) -> Mode {
-        match prepare_waveform(context, cursor_position, program) {
-            WaveformOrMode::Waveform(waveform) => {
+    ) -> Result<String, ParseError> {
+        match prepare_waveform(context, program) {
+            WaveformOrError::Waveform(waveform) => {
                 let message;
                 let repeat_every;
                 if let Some(measures) = repeat_after_measures {
@@ -68,9 +70,9 @@ impl PlayHelper {
                         repeat_every,
                     })
                     .unwrap();
-                Mode::Select { message }
+                Ok(message)
             }
-            WaveformOrMode::Mode(mode) => mode,
+            WaveformOrError::Error(err) => Err(err),
         }
     }
 
@@ -154,13 +156,12 @@ impl PlayHelper {
 
 /// Prepares waveform for playing by parsing and evaluating the given program.
 ///
-/// Returns a waveform if the program parses and evaluates successfully; otherwise
-/// returns a mode that contains any errors.
+/// Returns a waveform if the program parses and evaluates successfully;
+/// otherwise returns a `ParseError`.
 pub fn prepare_waveform(
     context: &[(String, parser::Expr<MarkId>)],
-    cursor_position: usize,
     program: &Program,
-) -> WaveformOrMode {
+) -> WaveformOrError {
     match parser::parse_program(&program.text) {
         Ok(expr) => {
             println!("Parser returned: {}", &expr);
@@ -182,40 +183,32 @@ pub fn prepare_waveform(
                         },
                         _ => {
                             println!("Expression is not a waveform, cannot play: {:#?}", expr);
-                            return WaveformOrMode::Mode(Mode::Edit {
-                                cursor_position,
+                            return WaveformOrError::Error(ParseError {
+                                message: format!("Not a waveform: {}", expr),
                                 errors: vec![parser::Error::new(
                                     "Expression is not a waveform".to_string(),
                                 )],
-                                message: format!("Not a waveform: {}", expr),
                             });
                         }
                     };
                     waveform = optimizer::optimize(waveform);
                     println!("optimizer::optimize returned: {}", &waveform);
-                    return WaveformOrMode::Waveform(waveform);
+                    return WaveformOrError::Waveform(waveform);
                 }
                 Err(error) => {
-                    // If there are errors, we stay in edit mode
                     println!("Errors while evaluating input: {:?}", error);
                     let message = format!("Error: {}", error.to_string());
-                    return WaveformOrMode::Mode(Mode::Edit {
-                        cursor_position,
+                    return WaveformOrError::Error(ParseError {
+                        message,
                         errors: vec![error],
-                        message: message,
                     });
                 }
             }
         }
         Err(errors) => {
-            // If there are errors, we stay in edit mode
             println!("Errors while parsing input: {:?}", errors);
             let message = format!("Error: {}", errors[0].to_string());
-            return WaveformOrMode::Mode(Mode::Edit {
-                cursor_position,
-                errors,
-                message,
-            });
+            return WaveformOrError::Error(ParseError { message, errors });
         }
     }
 }

@@ -80,7 +80,7 @@ impl InputHandler {
             Event::KeyUp { scancode, .. } => self.classify_keyup(*scancode, mode),
             Event::TextInput { text, .. } => self.classify_text_input(text, state),
             Event::MouseMotion { xrel, yrel, .. } => {
-                if self.handle_mouse_events && matches!(mode, Mode::MoveSliders { .. }) {
+                if self.handle_mouse_events && matches!(mode, Mode::MoveSliders) {
                     let dx = *xrel as f32 / self.display_width as f32;
                     let dy = -(*yrel as f32) / self.display_height as f32;
                     Some(vec![
@@ -117,7 +117,7 @@ impl InputHandler {
         let gui = keymod.contains(Mod::LGUIMOD) || keymod.contains(Mod::RGUIMOD);
         // Keys mode: piano keystrokes → NoteOn (suppress on auto-repeat
         // so a held key doesn't retrigger), Escape exits.
-        if let Mode::Keys { .. } = mode {
+        if let Mode::Keys = mode {
             if let Some(Scancode::Escape) = scancode {
                 return Some(vec![Action::EnterSelectMode]);
             }
@@ -136,20 +136,20 @@ impl InputHandler {
         }
         match (mode, scancode) {
             (_, Some(Scancode::C)) if ctrl => Some(vec![Action::RequestExit]),
-            (Mode::Select { .. }, Some(Scancode::Up)) => Some(vec![Action::AdvanceProgram(-1)]),
-            (Mode::Select { .. }, Some(Scancode::Down)) => Some(vec![Action::AdvanceProgram(1)]),
-            (Mode::Select { .. }, Some(Scancode::Right)) => {
+            (Mode::Select, Some(Scancode::Up)) => Some(vec![Action::AdvanceProgram(-1)]),
+            (Mode::Select, Some(Scancode::Down)) => Some(vec![Action::AdvanceProgram(1)]),
+            (Mode::Select, Some(Scancode::Right)) => {
                 Some(vec![Action::AdvanceProgram(PROGRAMS_PER_BANK as i32)])
             }
-            (Mode::Select { .. }, Some(Scancode::Left)) => {
+            (Mode::Select, Some(Scancode::Left)) => {
                 Some(vec![Action::AdvanceProgram(-(PROGRAMS_PER_BANK as i32))])
             }
-            (Mode::Select { .. }, Some(Scancode::LAlt) | Some(Scancode::RAlt))
+            (Mode::Select, Some(Scancode::LAlt) | Some(Scancode::RAlt))
                 if self.handle_mouse_events =>
             {
                 Some(vec![Action::EnterMoveSlidersMode])
             }
-            (Mode::Select { .. }, Some(Scancode::Escape)) => {
+            (Mode::Select, Some(Scancode::Escape)) => {
                 let program = &programs[active_program_index];
                 let id = WaveformId::Program(program.id);
                 let now = Instant::now();
@@ -161,7 +161,7 @@ impl InputHandler {
                     Some(vec![])
                 }
             }
-            (Mode::Select { .. }, Some(Scancode::Return)) => {
+            (Mode::Select, Some(Scancode::Return)) => {
                 if gui {
                     // Cmd+Return: play with repeat (Shift=2, otherwise 1).
                     let measures =
@@ -275,7 +275,7 @@ impl InputHandler {
             }
         }
         match (mode, scancode) {
-            (Mode::MoveSliders { .. }, Some(Scancode::LAlt) | Some(Scancode::RAlt)) => {
+            (Mode::MoveSliders, Some(Scancode::LAlt) | Some(Scancode::RAlt)) => {
                 Some(vec![Action::ExitMoveSlidersMode])
             }
             // Recognized but no binding — see classify_keydown above.
@@ -290,7 +290,7 @@ impl InputHandler {
     ) -> Option<Vec<actions::Action>> {
         use actions::Action;
         match state.mode {
-            Mode::Select { .. } => match text {
+            Mode::Select => match text {
                 "R" => Some(vec![Action::RequestLoadContext]),
                 "L" => Some(vec![Action::RequestLoadPrograms]),
                 "S" => Some(vec![Action::SaveProgramsToFile]),
@@ -339,6 +339,7 @@ mod tests {
             mode,
             keys: None,
             repeat_after_measures: None,
+            message: String::new(),
         }
     }
 
@@ -355,9 +356,7 @@ mod tests {
     #[test]
     fn keys_mode_lower_row_emits_note_on() {
         let handler = InputHandler::new(false, 800, 600);
-        let state = test_state(Mode::Keys {
-            message: String::new(),
-        });
+        let state = test_state(Mode::Keys);
         let status = empty_status();
         let actions = handler
             .classify_keydown(Some(Scancode::Z), Mod::NOMOD, false, &state, &status)
@@ -378,9 +377,7 @@ mod tests {
     #[test]
     fn keys_mode_suppresses_note_on_for_held_key() {
         let handler = InputHandler::new(false, 800, 600);
-        let state = test_state(Mode::Keys {
-            message: String::new(),
-        });
+        let state = test_state(Mode::Keys);
         let status = empty_status();
         // repeat=true means SDL is auto-repeating a held key. We must
         // not retrigger NoteOn — the note is already playing.
@@ -397,9 +394,7 @@ mod tests {
     #[test]
     fn keys_mode_escape_returns_to_select() {
         let handler = InputHandler::new(false, 800, 600);
-        let state = test_state(Mode::Keys {
-            message: String::new(),
-        });
+        let state = test_state(Mode::Keys);
         let status = empty_status();
         let actions = handler
             .classify_keydown(Some(Scancode::Escape), Mod::NOMOD, false, &state, &status)
@@ -412,9 +407,7 @@ mod tests {
         // Ensures notes held while exiting Keys mode still get NoteOff
         // when the key is released back in Select mode.
         let handler = InputHandler::new(false, 800, 600);
-        let state = test_state(Mode::Select {
-            message: String::new(),
-        });
+        let state = test_state(Mode::Select);
         let actions = handler
             .classify_keyup(Some(Scancode::Z), &state.mode)
             .expect("Z keyup should be classified");
@@ -436,7 +429,6 @@ mod tests {
         let state = test_state(Mode::Edit {
             cursor_position: 4,
             errors: vec![],
-            message: String::new(),
         });
         let status = empty_status();
         let actions = handler

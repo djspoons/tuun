@@ -66,7 +66,9 @@ struct Args {
     output_dir: String, // Captures waveforms to the specified directory
 }
 
-fn load_context(args: &Args, mut context: &mut Vec<(String, Expr<MarkId>)>) -> Mode {
+/// Loads context files into `context`; returns a status message (caller
+/// is responsible for setting `Mode::Select`).
+fn load_context(args: &Args, mut context: &mut Vec<(String, Expr<MarkId>)>) -> String {
     context.clear();
     context.push(("tempo".to_string(), Expr::Float(args.tempo as f32)));
     context.push((
@@ -129,12 +131,10 @@ fn load_context(args: &Args, mut context: &mut Vec<(String, Expr<MarkId>)>) -> M
         }
     }
 
-    Mode::Select {
-        message: if errors.len() == 0 {
-            format!("Loaded {} bindings from context", bindings)
-        } else {
-            format!("Error loading context: {}", errors[0].to_string())
-        },
+    if errors.len() == 0 {
+        format!("Loaded {} bindings from context", bindings)
+    } else {
+        format!("Error loading context: {}", errors[0].to_string())
     }
 }
 
@@ -269,14 +269,13 @@ fn load_programs(
 pub fn main() {
     let args = Args::parse();
     let mut context = Vec::new();
-    let mut mode = load_context(&args, &mut context);
+    let mut message = load_context(&args, &mut context);
     let mut programs: Vec<Program> = Vec::new();
     let (last_slider_values, errors) = load_programs(&args, &mut programs);
     if errors.len() > 0 {
-        mode = Mode::Select {
-            message: format!("Error loading programs: {}", errors[0].to_string()),
-        };
+        message = format!("Error loading programs: {}", errors[0].to_string());
     }
+    let mode = Mode::Select;
 
     let (status_sender, status_receiver) = mpsc::channel();
     let (command_sender, command_receiver) = mpsc::channel();
@@ -319,21 +318,12 @@ pub fn main() {
                 color: program.color,
                 level_db: program.level_db,
             };
-            let mode = play_helper.play_waveform(
-                &context,
-                program.text.len(),
-                &program,
-                &status,
-                false,
-                None,
-            );
-            match mode {
-                // If mode is Edit, there was an error; print it and exit.
-                Mode::Edit { message, .. } => {
-                    println!("{}", message);
+            match play_helper.play_waveform(&context, &program, &status, false, None) {
+                Ok(_) => (),
+                Err(err) => {
+                    println!("{}", err.message);
                     process::exit(1);
                 }
-                _ => (),
             }
         }
         // Call the tracker's callback until all of the waveforms have finished playing
@@ -589,6 +579,7 @@ pub fn main() {
         mode,
         keys: None,
         repeat_after_measures: None,
+        message,
     };
     loop {
         for event in event_pump.poll_iter() {
@@ -607,18 +598,16 @@ pub fn main() {
             }
             // Handle transient modes (Exit / LoadContext / LoadPrograms)
             // that the reducer set on state.mode.
-            let take_mode = std::mem::replace(
-                &mut state.mode,
-                Mode::Select {
-                    message: String::new(),
-                },
-            );
+            let take_mode = std::mem::replace(&mut state.mode, Mode::Select);
             state.mode = match take_mode {
                 Mode::Exit => {
                     return;
                 }
-                Mode::LoadContext {} => load_context(&args, &mut context),
-                Mode::LoadPrograms {} => {
+                Mode::LoadContext => {
+                    state.message = load_context(&args, &mut context);
+                    Mode::Select
+                }
+                Mode::LoadPrograms => {
                     let (slider_values, errors) = load_programs(&args, &mut state.programs);
                     slider_sender
                         .send(renderer::SliderEvent::SetInitialValues(slider_values))
@@ -638,17 +627,12 @@ pub fn main() {
                         &mut world,
                         vec![actions::Effect::SyncEncoders],
                     );
-                    // run_all auto-folds any message it produced; the
-                    // explicit Mode::Select below overrides it anyway.
-                    if errors.len() > 0 {
-                        Mode::Select {
-                            message: format!("Error loading programs: {}", errors[0].to_string()),
-                        }
+                    state.message = if errors.len() > 0 {
+                        format!("Error loading programs: {}", errors[0].to_string())
                     } else {
-                        Mode::Select {
-                            message: format!("Loaded programs"),
-                        }
-                    }
+                        "Loaded programs".to_string()
+                    };
+                    Mode::Select
                 }
                 other => other,
             }
@@ -742,6 +726,7 @@ pub fn main() {
             &status,
             &state.mode,
             state.active_program_index,
+            &state.message,
             &mut metrics,
         );
 

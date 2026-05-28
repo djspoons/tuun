@@ -99,32 +99,36 @@ pub fn mark(arguments: Vec<parser::Expr<MarkId>>) -> parser::Expr<MarkId> {
 #[derive(Debug)]
 // `active_program_index` should be the index of the active program in the `programs` array
 pub enum Mode {
-    Select {
-        message: String,
-    },
+    Select,
     Edit {
         // TODO unicode!!
         cursor_position: usize, // Cursor is located before the character this position
         errors: Vec<parser::Error>,
-        message: String,
     },
-    MoveSliders {},
+    MoveSliders,
     /// Computer-keyboard piano: lower QWERTY row plays white keys, row above
     /// plays sharps. Only reachable when `state.keys` is installed.
-    Keys {
-        message: String,
-    },
+    Keys,
     // The following are transient modes that are used to indicate an action should be
     // taken. They are used either when the action requires significant computation or
     // modifies the context.
-    LoadContext {},
-    LoadPrograms {},
+    LoadContext,
+    LoadPrograms,
     Exit,
 }
 
-pub enum WaveformOrMode {
+/// A parse / evaluate failure with both a user-visible message and the underlying
+/// error list.
+//
+// TODO rename to something other than "Parse" since it also contains evaluation errors.
+pub struct ParseError {
+    pub message: String,
+    pub errors: Vec<parser::Error>,
+}
+
+pub enum WaveformOrError {
     Waveform(waveform::Waveform<MarkId>),
-    Mode(Mode),
+    Error(ParseError),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -306,6 +310,7 @@ impl Renderer {
         }
     }
 
+    // TODO should this take AppState?
     pub fn render(
         &mut self,
         ttf_context: &Sdl2TtfContext,
@@ -313,6 +318,7 @@ impl Renderer {
         status: &tracker::Status<WaveformId, MarkId>,
         mode: &Mode,
         active_program_index: usize,
+        message: &str,
         metrics: &mut Metrics,
     ) {
         // TODO so much clean-up
@@ -532,10 +538,10 @@ impl Renderer {
                         }
                     }
                 }
-                Mode::Select { .. } | Mode::MoveSliders { .. } | Mode::Keys { .. } => {
+                Mode::Select | Mode::MoveSliders | Mode::Keys => {
                     if active_program_index == index {
                         let color = match mode {
-                            Mode::MoveSliders { .. } => ACTIVE_COLOR,
+                            Mode::MoveSliders => ACTIVE_COLOR,
                             _ => INACTIVE_COLOR, // Select
                         };
                         let prompt_texture = make_texture(&font, color, &texture_creator, " ▸ ");
@@ -579,13 +585,13 @@ impl Renderer {
                             .unwrap();
                     }
                 }
-                Mode::LoadContext { .. } | Mode::LoadPrograms { .. } | Mode::Exit => (),
+                Mode::LoadContext | Mode::LoadPrograms | Mode::Exit => (),
             }
             y += self.line_height as i32;
         }
 
         // Draw the sliders
-        let slider_color = if let Mode::MoveSliders { .. } = mode {
+        let slider_color = if let Mode::MoveSliders = mode {
             ACTIVE_COLOR
         } else {
             INACTIVE_COLOR
@@ -701,23 +707,24 @@ impl Renderer {
             }
         }
 
-        // Draw the message
-        let mut message = match mode {
-            Mode::Edit { message, .. } => message,
-            Mode::Select { message, .. } => message,
-            Mode::Keys { message, .. } => message,
-            Mode::MoveSliders { .. } => {
-                if slider_display.is_empty() {
-                    &"No sliders configured".to_string()
+        // Draw the message. MoveSliders shows the live slider values
+        // instead of `state.message` — slider feedback is the whole point
+        // of that mode, and replaces any status text while active.
+        let dynamic_slider_message: String;
+        let mut message: &str = match mode {
+            Mode::MoveSliders => {
+                dynamic_slider_message = if slider_display.is_empty() {
+                    "No sliders configured".to_string()
                 } else {
-                    &slider_display
+                    slider_display
                         .iter()
                         .map(|s| format!("{}", s))
                         .collect::<Vec<_>>()
                         .join(", ")
-                }
+                };
+                &dynamic_slider_message
             }
-            Mode::LoadContext { .. } | Mode::LoadPrograms { .. } | Mode::Exit => "",
+            _ => message,
         };
 
         if !message.is_empty() && message != self.last_message {

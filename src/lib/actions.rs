@@ -22,6 +22,10 @@ pub struct AppState {
     pub mode: Mode,
     pub keys: Option<Keys>,
     pub repeat_after_measures: Option<u32>,
+    /// Last user-visible status message. Set by `Effect::ShowMessage` (and
+    /// a few direct writes from the reducer / runner). Persists across
+    /// mode transitions; cleared explicitly by navigation actions.
+    pub message: String,
 }
 
 impl AppState {
@@ -271,7 +275,7 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
             let program = state.active_program();
             let cursor = program.text.len();
             let errors = parse_program_errors(&program.text);
-            let message = if !errors.is_empty() {
+            state.message = if !errors.is_empty() {
                 format!("Error: {}", errors[0].to_string())
             } else if !program.sliders.configs.is_empty() {
                 program
@@ -287,40 +291,35 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.mode = Mode::Edit {
                 cursor_position: cursor,
                 errors,
-                message,
             };
             vec![]
         }
         Action::EnterSelectMode => {
-            state.mode = Mode::Select {
-                message: String::new(),
-            };
+            state.mode = Mode::Select;
+            state.message.clear();
             vec![]
         }
         Action::EnterMoveSlidersMode => {
-            state.mode = Mode::MoveSliders {};
+            state.mode = Mode::MoveSliders;
             vec![]
         }
         Action::ExitMoveSlidersMode => {
-            if let Mode::MoveSliders {} = &state.mode {
-                state.mode = Mode::Select {
-                    message: String::new(),
-                };
+            if let Mode::MoveSliders = &state.mode {
+                state.mode = Mode::Select;
+                state.message.clear();
             }
             vec![]
         }
         Action::EnterKeysMode => {
-            state.mode = Mode::Keys {
-                message: "Piano keys enabled".to_string(),
-            };
-            vec![]
+            state.mode = Mode::Keys;
+            vec![Effect::ShowMessage("Piano keys enabled".to_string())]
         }
         Action::RequestLoadContext => {
-            state.mode = Mode::LoadContext {};
+            state.mode = Mode::LoadContext;
             vec![]
         }
         Action::RequestLoadPrograms => {
-            state.mode = Mode::LoadPrograms {};
+            state.mode = Mode::LoadPrograms;
             vec![]
         }
         Action::RequestExit => {
@@ -407,7 +406,7 @@ fn apply_install_keys(state: &mut AppState, program_index: usize) -> Vec<Effect>
         ];
     }
     // Otherwise, defer the parse + validation to the runner; on success the
-    // runner sets `state.keys` directly and emits a brightness Effect.
+    // runner sets `state.keys` directly and sets controller and message state.
     vec![Effect::InstallKeysFromActive(program_index)]
 }
 
@@ -698,11 +697,10 @@ mod tests {
         AppState {
             programs: vec![test_program()],
             active_program_index: 0,
-            mode: Mode::Select {
-                message: String::new(),
-            },
+            mode: Mode::Select,
             keys: None,
             repeat_after_measures: None,
+            message: String::new(),
         }
     }
 
@@ -745,10 +743,10 @@ mod tests {
             mode: Mode::Edit {
                 cursor_position: 0,
                 errors: vec![],
-                message: String::new(),
             },
             keys: None,
             repeat_after_measures: None,
+            message: String::new(),
         };
         apply(&mut state, Action::InsertText("(".to_string()));
         let Mode::Edit { errors, .. } = &state.mode else {
