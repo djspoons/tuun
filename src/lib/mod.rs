@@ -14,6 +14,8 @@ pub mod effects;
 #[cfg(feature = "native")]
 pub mod launchkey;
 #[cfg(feature = "native")]
+pub mod loader;
+#[cfg(feature = "native")]
 pub mod midi_input;
 #[cfg(feature = "native")]
 pub mod play_helper;

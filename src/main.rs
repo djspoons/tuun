@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::fs;
 use std::process;
 use std::sync::mpsc;
 use std::thread;
@@ -10,13 +9,12 @@ use sdl2::audio::AudioSpecDesired;
 use sdl2::ttf::Sdl2TtfContext;
 
 use tuun::actions;
-use tuun::builtins;
 use tuun::effects;
 use tuun::generator;
 use tuun::launchkey;
+use tuun::loader;
 use tuun::metric;
 use tuun::midi_input;
-use tuun::parser;
 use tuun::play_helper;
 use tuun::renderer;
 use tuun::sdl2_input;
@@ -25,8 +23,7 @@ use tuun::tracker;
 use tuun::waveform;
 
 use metric::Metric;
-use parser::Expr;
-use renderer::{MarkId, Mode, Program, ProgramSliders, Renderer, WaveformId};
+use renderer::{MarkId, Mode, Program, Renderer, WaveformId};
 use tracker::Command;
 
 #[derive(ClapParser, Debug)]
@@ -66,212 +63,19 @@ struct Args {
     output_dir: String, // Captures waveforms to the specified directory
 }
 
-/// Loads context files into `context`; returns a status message (caller
-/// is responsible for setting `Mode::Select`).
-fn load_context(args: &Args, mut context: &mut Vec<(String, Expr<MarkId>)>) -> String {
-    context.clear();
-    context.push(("tempo".to_string(), Expr::Float(args.tempo as f32)));
-    context.push((
-        "sample_rate".to_string(),
-        Expr::Float(args.sample_rate as f32),
-    ));
-    builtins::add_prelude(&mut context);
-    context.push((
-        "mark".to_string(),
-        Expr::BuiltIn {
-            name: "mark".to_string(),
-            function: parser::BuiltInFn(std::rc::Rc::new(renderer::mark)),
-        },
-    ));
-
-    let mut bindings = 0;
-    let mut errors = Vec::new();
-    for file in args.context_files.iter() {
-        let raw_context = std::fs::read_to_string(file)
-            .expect(format!("Failed to read context file: {}", file).as_str());
-        // Strip out comments (that is any after // on a line)
-        let raw_context: String = raw_context
-            .lines()
-            .map(|line| {
-                if let Some(comment_index) = line.find("//") {
-                    &line[..comment_index]
-                } else {
-                    line
-                }
-            })
-            .collect::<Vec<&str>>()
-            .join("\n");
-        match parser::parse_context(&raw_context) {
-            Ok(parsed_exprs) => {
-                println!("Parsed context from {}:", file);
-                for (pattern, parsed_expr) in parsed_exprs {
-                    match parser::evaluate(&context, parsed_expr) {
-                        Ok(expr) => {
-                            match parser::extend_context(&mut context, &pattern, &expr) {
-                                Ok(_) => println!("   {}", &pattern),
-                                Err(error) => errors.push(error),
-                            }
-                            // Not exactly one binding... :shrug:
-                            bindings += 1;
-                        }
-                        Err(error) => {
-                            println!(
-                                "Error evaluating context expression for {}: {:?}",
-                                pattern, error
-                            );
-                            errors.push(error);
-                        }
-                    }
-                }
-            }
-            Err(es) => {
-                println!("Errors parsing context: {:?}", es);
-                errors.extend_from_slice(&es);
-            }
-        }
-    }
-
-    if errors.len() == 0 {
-        format!("Loaded {} bindings from context", bindings)
-    } else {
-        format!("Error loading context: {}", errors[0].to_string())
-    }
-}
-
-// Returns the initial values for all sliders
-fn load_programs(
-    args: &Args,
-    programs: &mut Vec<Program>,
-) -> (HashMap<(WaveformId, String), f32>, Vec<parser::Error>) {
-    let mut errors = Vec::new();
-    programs.clear();
-    if !args.programs_file.is_empty() {
-        let mut count = 0;
-        let contents = fs::read_to_string(&args.programs_file).unwrap_or_default();
-        let mut pending_sliders: Option<Vec<parser::Slider>> = None;
-        let mut pending_color: Option<(u8, u8, u8)> = None;
-        let mut pending_level_db: f32 = 0.0;
-        for line in contents.lines() {
-            // Check for annotations before stripping comments
-            let annos = match parser::parse_annotations(line) {
-                Ok(annos) => annos,
-                Err(mut e) => {
-                    println!("Got errors parsing annotations: {:?}", e);
-                    errors.append(&mut e);
-                    continue;
-                }
-            };
-            for anno in annos {
-                match anno {
-                    parser::Annotation::Sliders(sliders) => {
-                        pending_sliders = Some(sliders);
-                    }
-                    parser::Annotation::Color(r, g, b) => {
-                        pending_color = Some((r, g, b));
-                    }
-                    parser::Annotation::Level(v) => {
-                        pending_level_db = v;
-                    }
-                    parser::Annotation::NextBank => {
-                        while programs.len() % renderer::PROGRAMS_PER_BANK != 0 {
-                            programs.push(Program {
-                                text: String::new(),
-                                id: renderer::id_from_index(programs.len()),
-                                sliders: ProgramSliders::default(),
-                                color: None,
-                                level_db: 0.0,
-                            })
-                        }
-                    }
-                }
-            }
-
-            let line = if let Some(comment_index) = line.find("//") {
-                &line[..comment_index]
-            } else {
-                line
-            }
-            .trim();
-            if !line.is_empty() {
-                let sliders = if let Some(configs) = pending_sliders.take() {
-                    use parser::SliderFunction;
-                    let normalized_values = configs
-                        .iter()
-                        .map(|c| match &c.function {
-                            SliderFunction::Linear {
-                                initial_value,
-                                min,
-                                max,
-                            } => ((initial_value - min) / (max - min)).clamp(0.0, 1.0),
-                            SliderFunction::UserDefined {
-                                normalized_initial_value,
-                                ..
-                            } => normalized_initial_value.clamp(0.0, 1.0),
-                        })
-                        .collect();
-                    ProgramSliders {
-                        configs,
-                        normalized_values,
-                    }
-                } else {
-                    ProgramSliders::default()
-                };
-                let level_db = std::mem::replace(&mut pending_level_db, 0.0);
-                programs.push(Program {
-                    text: line.to_string(),
-                    id: renderer::id_from_index(programs.len()),
-                    sliders,
-                    color: pending_color.take(),
-                    level_db,
-                });
-                count += 1;
-            }
-        }
-        println!("Loaded {} programs from {}", count, args.programs_file);
-    }
-    // Add in any additional programs specified on the command line
-    for program_text in &args.programs {
-        if !program_text.is_empty() {
-            programs.push(Program {
-                text: program_text.to_string(),
-                id: renderer::id_from_index(programs.len()),
-                sliders: ProgramSliders::default(),
-                color: None,
-                level_db: 0.0,
-            });
-        }
-    }
-    // Fill up with empty entries if necessary
-    while programs.len() < renderer::NUM_PROGRAM_BANKS * renderer::PROGRAMS_PER_BANK {
-        programs.push(Program {
-            text: String::new(),
-            id: renderer::id_from_index(programs.len()),
-            sliders: ProgramSliders::default(),
-            color: None,
-            level_db: 0.0,
-        });
-    }
-    // Copy initial values for each slider for all programs
-    let mut last_slider_values: HashMap<(WaveformId, String), f32> = HashMap::new();
-    for Program { id, sliders, .. } in programs.iter() {
-        for (j, config) in sliders.configs.iter().enumerate() {
-            let value =
-                slider::denormalize(&config.function, sliders.normalized_values[j]).unwrap_or(0.0);
-            last_slider_values.insert(
-                (WaveformId::Program(id.clone()), config.label.clone()),
-                value,
-            );
-        }
-    }
-    (last_slider_values, errors)
-}
-
 pub fn main() {
     let args = Args::parse();
+    let config = loader::Config {
+        tempo: args.tempo,
+        sample_rate: args.sample_rate,
+        context_files: args.context_files.clone(),
+        programs_file: args.programs_file.clone(),
+        additional_programs: args.programs.clone(),
+    };
     let mut context = Vec::new();
-    let mut message = load_context(&args, &mut context);
+    let mut message = loader::load_context(&config, &mut context);
     let mut programs: Vec<Program> = Vec::new();
-    let (last_slider_values, errors) = load_programs(&args, &mut programs);
+    let (last_slider_values, errors) = loader::load_programs(&config, &mut programs);
     if errors.len() > 0 {
         message = format!("Error loading programs: {}", errors[0].to_string());
     }
@@ -579,62 +383,27 @@ pub fn main() {
         mode,
         keys: None,
         repeat_after_measures: None,
+        context,
+        config,
+        should_exit: false,
         message,
     };
     loop {
+        if state.should_exit {
+            return;
+        }
         for event in event_pump.poll_iter() {
             let sdl_actions = sdl2_handler.classify(&event, &state, &status);
             if let Some(actions) = sdl_actions {
                 let mut world = effects::World {
                     launchkey: launchkey.as_mut(),
                     status: &status,
-                    context: &context,
                     play_helper: &mut effect_play_helper,
                 };
                 effect_runner.dispatch(&mut state, &mut world, actions);
             } else {
                 // classify() should cover every SDL event we care about.
                 println!("Unhandled SDL event: {:?}", event);
-            }
-            // Handle transient modes (Exit / LoadContext / LoadPrograms)
-            // that the reducer set on state.mode.
-            let take_mode = std::mem::replace(&mut state.mode, Mode::Select);
-            state.mode = match take_mode {
-                Mode::Exit => {
-                    return;
-                }
-                Mode::LoadContext => {
-                    state.message = load_context(&args, &mut context);
-                    Mode::Select
-                }
-                Mode::LoadPrograms => {
-                    let (slider_values, errors) = load_programs(&args, &mut state.programs);
-                    slider_sender
-                        .send(renderer::SliderEvent::SetInitialValues(slider_values))
-                        .unwrap();
-                    // Programs (and so the encoder values) just changed; push
-                    // the controller's encoders to match by dispatching
-                    // `Effect::SyncEncoders` through the runner — same path
-                    // the Action/Effect pipeline uses elsewhere.
-                    let mut world = effects::World {
-                        launchkey: launchkey.as_mut(),
-                        status: &status,
-                        context: &context,
-                        play_helper: &mut effect_play_helper,
-                    };
-                    effect_runner.run_all(
-                        &mut state,
-                        &mut world,
-                        vec![actions::Effect::SyncEncoders],
-                    );
-                    state.message = if errors.len() > 0 {
-                        format!("Error loading programs: {}", errors[0].to_string())
-                    } else {
-                        "Loaded programs".to_string()
-                    };
-                    Mode::Select
-                }
-                other => other,
             }
         }
 
@@ -647,15 +416,9 @@ pub fn main() {
                             let mut world = effects::World {
                                 launchkey: Some(launchkey),
                                 status: &status,
-                                context: &context,
                                 play_helper: &mut effect_play_helper,
                             };
                             effect_runner.dispatch(&mut state, &mut world, actions);
-                            // NB: transient mode handling (Exit /
-                            // LoadContext / LoadPrograms) only fires after
-                            // SDL events. Today no MIDI event produces
-                            // those modes; if that changes, this loop
-                            // needs its own transient-mode pass.
                         } else {
                             // classify() should be exhaustive for launchkey
                             // events.

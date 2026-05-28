@@ -9,6 +9,8 @@ use crate::tracker;
 use crate::waveform;
 
 /// Represents a program installed to respond to MIDI note-on/-off events.
+//
+// TODO maybe move out of here since this isn't tied to MIDI input anymore
 pub struct Keys {
     pub id: renderer::ProgramId,
     pub context: Vec<(String, parser::Expr<MarkId>)>,

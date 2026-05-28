@@ -62,7 +62,6 @@ fn apply_note_function_as_waveforms(
 pub struct World<'a> {
     pub launchkey: Option<&'a mut launchkey::Launchkey>,
     pub status: &'a tracker::Status<WaveformId, MarkId>,
-    pub context: &'a [(String, parser::Expr<MarkId>)],
     pub play_helper: &'a mut play_helper::PlayHelper,
 }
 
@@ -119,7 +118,7 @@ impl EffectRunner {
                     None => return,
                 };
                 match world.play_helper.play_waveform(
-                    world.context,
+                    &state.context,
                     program,
                     world.status,
                     start_at_next_measure,
@@ -193,7 +192,7 @@ impl EffectRunner {
                 // Sanity check: actually invoke with dummy args.
                 // TODO use a waveform for velocity
                 if let Err(message) = apply_note_function_as_waveforms(
-                    world.context,
+                    &state.context,
                     &function,
                     vec![parser::Expr::Float(60.0), parser::Expr::Float(0.7)],
                     &program.sliders,
@@ -203,7 +202,7 @@ impl EffectRunner {
                 }
                 let new_keys = Keys {
                     id: program.id,
-                    context: Vec::from(world.context),
+                    context: state.context.clone(),
                     function,
                     sliders: program.sliders.clone(),
                     level_db: program.level_db,
@@ -404,7 +403,7 @@ impl EffectRunner {
             }
             Effect::DumpActiveWaveform => {
                 let program = state.active_program();
-                match play_helper::prepare_waveform(world.context, program) {
+                match play_helper::prepare_waveform(&state.context, program) {
                     renderer::WaveformOrError::Waveform(waveform) => {
                         println!("Waveform definition for program {}:", program.id);
                         println!("{:#?}", waveform);
@@ -414,6 +413,24 @@ impl EffectRunner {
                         state.message = err.message;
                     }
                 }
+            }
+            Effect::LoadContext => {
+                state.message = crate::loader::load_context(&state.config, &mut state.context);
+            }
+            Effect::LoadPrograms => {
+                let (slider_values, errors) =
+                    crate::loader::load_programs(&state.config, &mut state.programs);
+                let _ = self
+                    .slider_sender
+                    .send(renderer::SliderEvent::SetInitialValues(slider_values));
+                state.message = if errors.is_empty() {
+                    "Loaded programs".to_string()
+                } else {
+                    format!("Error loading programs: {}", errors[0].to_string())
+                };
+            }
+            Effect::Exit => {
+                state.should_exit = true;
             }
         }
     }

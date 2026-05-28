@@ -5,7 +5,9 @@
 //! the runner in `effects.rs` executes against the outside world.
 
 use crate::launchkey;
-use crate::midi_input::Keys;
+use crate::loader;
+use crate::midi_input;
+use crate::parser;
 use crate::play_helper;
 use crate::renderer::{MarkId, Mode, PROGRAMS_PER_BANK, Program, WaveformId};
 use crate::slider;
@@ -20,8 +22,14 @@ pub struct AppState {
     pub programs: Vec<Program>,
     pub active_program_index: usize,
     pub mode: Mode,
-    pub keys: Option<Keys>,
+    pub keys: Option<midi_input::Keys>,
     pub repeat_after_measures: Option<u32>,
+    /// Parser context: prelude + bindings loaded from context files.
+    pub context: Vec<(String, parser::Expr<MarkId>)>,
+    /// Loader configuration: filenames, tempo, sample rate.
+    pub config: loader::Config,
+    /// Set by `Effect::Exit`; `main` checks at top of loop and breaks.
+    pub should_exit: bool,
     /// Last user-visible status message. Set by `Effect::ShowMessage` (and
     /// a few direct writes from the reducer / runner). Persists across
     /// mode transitions; cleared explicitly by navigation actions.
@@ -78,14 +86,10 @@ pub enum Action {
     EnterEditMode,
     EnterSelectMode,
     EnterMoveSlidersMode,
-    ExitMoveSlidersMode,
     /// Enter computer-keyboard piano mode. Caller (the classifier) is
     /// responsible for only emitting this when `state.keys.is_some()` —
     /// the reducer accepts unconditionally.
     EnterKeysMode,
-    RequestLoadContext,
-    RequestLoadPrograms,
-    RequestExit,
 
     // --- navigation ---
     /// Jump to a specific program index.
@@ -129,9 +133,12 @@ pub enum Action {
     /// Toggle the default repeat (cycle None -> Some(1) -> Some(2) -> None).
     CycleRepeatAfterMeasures,
 
-    // --- file I/O ---
+    // --- program-related I/O and other effects ---
     SaveProgramsToFile,
     DumpActiveWaveform,
+    LoadContext,
+    LoadPrograms,
+    Exit,
 }
 
 /// Side effects to perform after the reducer runs. The runner translates
@@ -227,6 +234,14 @@ pub enum Effect {
     // --- I/O ---
     SaveProgramsToFile,
     DumpActiveWaveform,
+    /// Re-read `state.config.context_files` into `state.context`.
+    LoadContext,
+    /// Re-read `state.config.programs_file` (+ additional programs) into
+    /// `state.programs` and push the resulting slider initial values into
+    /// the slider pipeline.
+    LoadPrograms,
+    /// Sets `state.should_exit = true`.
+    Exit,
 }
 
 /// Pure reducer: applies an action to state, returns effects.
@@ -303,28 +318,9 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.mode = Mode::MoveSliders;
             vec![]
         }
-        Action::ExitMoveSlidersMode => {
-            if let Mode::MoveSliders = &state.mode {
-                state.mode = Mode::Select;
-                state.message.clear();
-            }
-            vec![]
-        }
         Action::EnterKeysMode => {
             state.mode = Mode::Keys;
             vec![Effect::ShowMessage("Piano keys enabled".to_string())]
-        }
-        Action::RequestLoadContext => {
-            state.mode = Mode::LoadContext;
-            vec![]
-        }
-        Action::RequestLoadPrograms => {
-            state.mode = Mode::LoadPrograms;
-            vec![]
-        }
-        Action::RequestExit => {
-            state.mode = Mode::Exit;
-            vec![]
         }
 
         Action::SelectProgram(i) => apply_select_program(state, i),
@@ -377,6 +373,9 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
 
         Action::SaveProgramsToFile => vec![Effect::SaveProgramsToFile],
         Action::DumpActiveWaveform => vec![Effect::DumpActiveWaveform],
+        Action::LoadContext => vec![Effect::LoadContext],
+        Action::LoadPrograms => vec![Effect::LoadPrograms, Effect::SyncEncoders],
+        Action::Exit => vec![Effect::Exit],
     }
 }
 
@@ -693,6 +692,16 @@ mod tests {
         }
     }
 
+    fn test_config() -> loader::Config {
+        loader::Config {
+            tempo: 90,
+            sample_rate: 44100,
+            context_files: vec![],
+            programs_file: String::new(),
+            additional_programs: vec![],
+        }
+    }
+
     fn test_state() -> AppState {
         AppState {
             programs: vec![test_program()],
@@ -700,6 +709,9 @@ mod tests {
             mode: Mode::Select,
             keys: None,
             repeat_after_measures: None,
+            context: vec![],
+            config: test_config(),
+            should_exit: false,
             message: String::new(),
         }
     }
@@ -746,6 +758,9 @@ mod tests {
             },
             keys: None,
             repeat_after_measures: None,
+            context: vec![],
+            config: test_config(),
+            should_exit: false,
             message: String::new(),
         };
         apply(&mut state, Action::InsertText("(".to_string()));

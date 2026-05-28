@@ -70,7 +70,7 @@ impl InputHandler {
         let mode: &Mode = &state.mode;
         match event {
             // XXX should we use Instant::now() or buffer_start?
-            Event::Quit { .. } => Some(vec![Action::RequestExit]),
+            Event::Quit { .. } => Some(vec![Action::Exit]),
             Event::KeyDown {
                 scancode,
                 keymod,
@@ -135,7 +135,7 @@ impl InputHandler {
             return Some(vec![]);
         }
         match (mode, scancode) {
-            (_, Some(Scancode::C)) if ctrl => Some(vec![Action::RequestExit]),
+            (_, Some(Scancode::C)) if ctrl => Some(vec![Action::Exit]),
             (Mode::Select, Some(Scancode::Up)) => Some(vec![Action::AdvanceProgram(-1)]),
             (Mode::Select, Some(Scancode::Down)) => Some(vec![Action::AdvanceProgram(1)]),
             (Mode::Select, Some(Scancode::Right)) => {
@@ -276,7 +276,7 @@ impl InputHandler {
         }
         match (mode, scancode) {
             (Mode::MoveSliders, Some(Scancode::LAlt) | Some(Scancode::RAlt)) => {
-                Some(vec![Action::ExitMoveSlidersMode])
+                Some(vec![Action::EnterSelectMode])
             }
             // Recognized but no binding — see classify_keydown above.
             _ => Some(vec![]),
@@ -291,8 +291,8 @@ impl InputHandler {
         use actions::Action;
         match state.mode {
             Mode::Select => match text {
-                "R" => Some(vec![Action::RequestLoadContext]),
-                "L" => Some(vec![Action::RequestLoadPrograms]),
+                "R" => Some(vec![Action::LoadContext]),
+                "L" => Some(vec![Action::LoadPrograms]),
                 "S" => Some(vec![Action::SaveProgramsToFile]),
                 "D" => Some(vec![Action::DumpActiveWaveform]),
                 // Uppercase K: install the active program as the keys
@@ -339,6 +339,15 @@ mod tests {
             mode,
             keys: None,
             repeat_after_measures: None,
+            context: vec![],
+            config: crate::loader::Config {
+                tempo: 90,
+                sample_rate: 44100,
+                context_files: vec![],
+                programs_file: String::new(),
+                additional_programs: vec![],
+            },
+            should_exit: false,
             message: String::new(),
         }
     }

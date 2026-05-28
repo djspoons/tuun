@@ -109,12 +109,6 @@ pub enum Mode {
     /// Computer-keyboard piano: lower QWERTY row plays white keys, row above
     /// plays sharps. Only reachable when `state.keys` is installed.
     Keys,
-    // The following are transient modes that are used to indicate an action should be
-    // taken. They are used either when the action requires significant computation or
-    // modifies the context.
-    LoadContext,
-    LoadPrograms,
-    Exit,
 }
 
 /// A parse / evaluate failure with both a user-visible message and the underlying
@@ -585,7 +579,6 @@ impl Renderer {
                             .unwrap();
                     }
                 }
-                Mode::LoadContext | Mode::LoadPrograms | Mode::Exit => (),
             }
             y += self.line_height as i32;
         }
