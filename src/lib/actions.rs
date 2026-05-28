@@ -38,8 +38,7 @@ impl AppState {
 #[derive(Debug)]
 pub enum Action {
     // --- playback ---
-    /// Play the program at `program_index`. `cursor_position` is used to
-    /// truncate the program text in Edit mode (Cmd+Return).
+    /// Play the program at `program_index`.
     ///
     /// When `return_to_select_on_success` is true, the runner sets
     /// `state.mode` from `play_waveform`'s return: `Mode::Select` on
@@ -55,13 +54,13 @@ pub enum Action {
     },
     /// Stop playback of the program waveform immediately.
     StopProgram(usize),
-    /// Drop a pending Play for the given program.
+    /// Remove any pending playback for the given program.
     RemovePendingProgram(usize),
 
     // --- MIDI keys ---
     /// Install the program at `program_index` as the keys instrument. If
     /// keys are already installed (regardless of which program), this
-    /// uninstalls them — i.e. the action is a toggle.
+    /// uninstalls them. (That is, the action is a toggle.)
     InstallKeys(usize),
     NoteOn {
         key: u8,
@@ -135,12 +134,46 @@ pub enum Action {
 /// these into MPSC sends, MIDI controller updates, etc.
 #[derive(Debug)]
 pub enum Effect {
+    // --- tracker commands ---
+    /// Send a Play command for the program at `program_index`. The runner
+    /// looks up the program text, parses, and dispatches via play_helper.
+    /// See `Action::PlayProgram` for `return_to_select_on_success`.
+    PlayProgram {
+        program_index: usize,
+        cursor_position: usize,
+        start_at_next_measure: bool,
+        repeat_after_measures: Option<u32>,
+        return_to_select_on_success: bool,
+    },
+    /// Send a "stop" ramp for the program waveform.
+    StopProgram(usize),
+    /// Remove a pending program from the tracker.
+    RemovePendingProgram(usize),
     /// Send a Modify command to the tracker for one waveform.
     ModifyWaveform {
         id: WaveformId,
         mark_id: MarkId,
         waveform: waveform::Waveform<MarkId>,
     },
+
+    /// Parse the program at `program_index` as a keys instrument function and
+    /// install it as `state.keys`. The runner handles parsing and validation
+    /// because they depend on parser + midi_input helpers; on success it
+    /// mutates `state.keys` directly.
+    InstallKeysFromActive(usize),
+
+    /// Play the note-on waveform produced by the installed keys function.
+    PlayNoteOn {
+        key: u8,
+        velocity: u8,
+    },
+    /// Modify the Level mark on the active key waveform with the note-off
+    /// waveform that was stored at NoteOn time. Falls back to a stop-ramp if
+    /// no waveform was stored.
+    PlayNoteOff {
+        key: u8,
+    },
+
     /// Push a slider value change into the slider pipeline. The downstream
     /// worker thread coalesces these per quantum and sends `Command::Modify`
     /// to the tracker with a ramp from the previous value, so the running
@@ -166,6 +199,10 @@ pub enum Effect {
     ModifyActiveKeysAmplitude {
         amplitude: f32,
     },
+    /// User-visible status message.
+    ShowMessage(String),
+
+    // --- launchkey hardware ---
     /// Update the controller's encoder display text.
     SetEncoderDisplay {
         index: u8,
@@ -174,89 +211,25 @@ pub enum Effect {
     },
     /// Push the current bank/program's encoder values back to the controller.
     /// Only emitted when the source-of-truth (program index, encoder mode)
-    /// actually changes — never on every loop iteration.
+    /// actually changes.
     SyncEncoders,
-    /// User-visible status message.
-    ShowMessage(String),
-
-    // --- tracker commands ---
-    /// Send a Play command for the program at `program_index`. The runner
-    /// looks up the program text, parses, and dispatches via play_helper.
-    /// See `Action::PlayProgram` for `return_to_select_on_success`.
-    PlayProgram {
-        program_index: usize,
-        cursor_position: usize,
-        start_at_next_measure: bool,
-        repeat_after_measures: Option<u32>,
-        return_to_select_on_success: bool,
-    },
-    /// Send a "stop" ramp for the program waveform.
-    StopProgram(usize),
-    /// Remove a pending program from the tracker.
-    RemovePendingProgram(usize),
-    /// Play the note-on waveform produced by the installed keys function.
-    PlayNoteOn {
-        key: u8,
-        velocity: u8,
-    },
-    /// Modify the Level mark on the active key waveform with the note-off
-    /// waveform that was stored at NoteOn time. Falls back to a stop-ramp if
-    /// no waveform was stored.
-    PlayNoteOff {
-        key: u8,
-    },
-
-    /// Parse the program at `program_index` as a keys instrument function and
-    /// install it as `state.keys`. The runner handles parsing and validation
-    /// because they depend on parser + midi_input helpers; on success it
-    /// mutates `state.keys` directly.
-    InstallKeysFromActive(usize),
-
-    // --- launchkey hardware ---
-    /// Indicates the keys-installed state changed; runner updates the
-    /// capture-MIDI button brightness.
+    /// Indicates the keys-installed state changed.
     SetCaptureMidiBrightness(u8),
     /// Update the cached encoder mode on the Launchkey controller and
     /// re-sync the encoders. Runner skips the sync if the cached value
     /// already matches.
     SetLaunchkeyEncoderMode(launchkey::EncoderMode),
 
-    // --- file I/O ---
+    // --- I/O ---
     SaveProgramsToFile,
     DumpActiveWaveform,
 }
 
 /// Pure reducer: applies an action to state, returns effects.
 ///
-/// No I/O. No MPSC sends. No closures. Easy to unit-test.
+/// No I/O. No MPSC sends. No closures.
 pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
     match action {
-        Action::SetSliderNormalized {
-            program,
-            slider_index,
-            normalized,
-        } => apply_slider(state, program, slider_index, normalized),
-
-        Action::SetLevelDb { program, level_db } => apply_level_db(state, program, level_db),
-
-        Action::SetEncoderMode(new_mode) => {
-            // encoder_mode now lives on Launchkey; the runner updates that
-            // cache and re-syncs only if it actually changed.
-            vec![Effect::SetLaunchkeyEncoderMode(new_mode)]
-        }
-
-        Action::SelectProgram(i) => apply_select_program(state, i),
-        Action::AdvanceProgram(delta) => {
-            let len = state.programs.len() as i32;
-            if len == 0 {
-                vec![]
-            } else {
-                let cur = state.active_program_index as i32;
-                let new = ((cur + delta) % len + len) % len;
-                apply_select_program(state, new as usize)
-            }
-        }
-
         Action::PlayProgram {
             program_index,
             cursor_position,
@@ -281,17 +254,8 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
                 state.programs[i].id
             )),
         ],
-        Action::CycleRepeatAfterMeasures => {
-            state.repeat_after_measures = match state.repeat_after_measures {
-                None => Some(1),
-                Some(1) => Some(2),
-                Some(_) => None,
-            };
-            vec![]
-        }
 
         Action::InstallKeys(i) => apply_install_keys(state, i),
-
         // The runner does the parser work and the actual state mutation
         // (storing note_off waveforms) for both of these.
         Action::NoteOn { key, velocity } => {
@@ -364,6 +328,18 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
             vec![]
         }
 
+        Action::SelectProgram(i) => apply_select_program(state, i),
+        Action::AdvanceProgram(delta) => {
+            let len = state.programs.len() as i32;
+            if len == 0 {
+                vec![]
+            } else {
+                let cur = state.active_program_index as i32;
+                let new = ((cur + delta) % len + len) % len;
+                apply_select_program(state, new as usize)
+            }
+        }
+
         Action::InsertText(text) => apply_insert_text(state, &text),
         Action::DeleteCharBeforeCursor => apply_delete_char(state),
         Action::DeleteWordBeforeCursor => apply_delete_word(state),
@@ -375,7 +351,30 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
         }
         Action::MoveCursorToPreviousWord => apply_move_cursor_prev_word(state),
 
+        Action::SetSliderNormalized {
+            program,
+            slider_index,
+            normalized,
+        } => apply_slider(state, program, slider_index, normalized),
+
+        Action::SetLevelDb { program, level_db } => apply_level_db(state, program, level_db),
+
         Action::AdjustMouseSlider { axis, delta } => apply_mouse_slider(state, axis, delta),
+
+        Action::SetEncoderMode(new_mode) => {
+            // encoder_mode now lives on Launchkey; the runner updates that
+            // cache and re-syncs only if it actually changed.
+            vec![Effect::SetLaunchkeyEncoderMode(new_mode)]
+        }
+
+        Action::CycleRepeatAfterMeasures => {
+            state.repeat_after_measures = match state.repeat_after_measures {
+                None => Some(1),
+                Some(1) => Some(2),
+                Some(_) => None,
+            };
+            vec![]
+        }
 
         Action::SaveProgramsToFile => vec![Effect::SaveProgramsToFile],
         Action::DumpActiveWaveform => vec![Effect::DumpActiveWaveform],

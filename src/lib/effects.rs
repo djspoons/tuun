@@ -124,61 +124,6 @@ impl EffectRunner {
 
     fn run_one(&mut self, state: &mut AppState, world: &mut World, effect: Effect) {
         match effect {
-            Effect::ModifyWaveform {
-                id,
-                mark_id,
-                waveform,
-            } => {
-                let _ = self.command_sender.send(tracker::Command::Modify {
-                    id,
-                    mark_id,
-                    waveform,
-                });
-            }
-            Effect::UpdateSlider { id, slider, value } => {
-                let _ = self
-                    .slider_sender
-                    .send(renderer::SliderEvent::UpdateSlider { id, slider, value });
-            }
-            Effect::UpdateActiveKeySliders { slider, value } => {
-                for mark in &world.status.marks {
-                    if let WaveformId::Key(_) = mark.waveform_id {
-                        let _ = self
-                            .slider_sender
-                            .send(renderer::SliderEvent::UpdateSlider {
-                                id: mark.waveform_id.clone(),
-                                slider: slider.clone(),
-                                value,
-                            });
-                    }
-                }
-            }
-            Effect::ModifyActiveKeysAmplitude { amplitude } => {
-                use waveform::Waveform;
-                for mark in &world.status.marks {
-                    if let WaveformId::Key(_) = mark.waveform_id {
-                        let _ = self.command_sender.send(tracker::Command::Modify {
-                            id: mark.waveform_id.clone(),
-                            mark_id: MarkId::Amplitude,
-                            waveform: Waveform::Const(amplitude),
-                        });
-                    }
-                }
-            }
-            Effect::SetEncoderDisplay { index, name, value } => {
-                if let Some(lk) = world.launchkey.as_deref_mut() {
-                    lk.set_encoder_display(index, &name, &value);
-                }
-            }
-            Effect::SyncEncoders => {
-                if let Some(lk) = world.launchkey.as_deref_mut() {
-                    sync_encoders(state, lk);
-                }
-            }
-            Effect::ShowMessage(msg) => {
-                self.last_message = Some(msg);
-            }
-
             Effect::PlayProgram {
                 program_index,
                 cursor_position,
@@ -233,6 +178,63 @@ impl EffectRunner {
                     id: WaveformId::Program(program.id),
                 });
             }
+            Effect::ModifyWaveform {
+                id,
+                mark_id,
+                waveform,
+            } => {
+                let _ = self.command_sender.send(tracker::Command::Modify {
+                    id,
+                    mark_id,
+                    waveform,
+                });
+            }
+
+            Effect::InstallKeysFromActive(program_index) => {
+                let program = match state.programs.get(program_index) {
+                    Some(p) => p,
+                    None => return,
+                };
+                let function: parser::Expr<MarkId> = match parser::parse_program(&program.text) {
+                    Ok(expr @ (parser::Expr::Function { .. } | parser::Expr::BuiltIn { .. })) => {
+                        expr
+                    }
+                    Ok(other) => {
+                        self.last_message = Some(format!("Expected note function, got: {}", other));
+                        return;
+                    }
+                    Err(errors) => {
+                        self.last_message = Some(format!("Error: {}", errors[0].to_string()));
+                        return;
+                    }
+                };
+                // Sanity check: actually invoke with dummy args.
+                // TODO use a waveform for velocity
+                if let Err(message) = apply_note_function_as_waveforms(
+                    world.context,
+                    &function,
+                    vec![parser::Expr::Float(60.0), parser::Expr::Float(0.7)],
+                    &program.sliders,
+                ) {
+                    self.last_message = Some(message);
+                    return;
+                }
+                let new_keys = Keys {
+                    id: program.id,
+                    context: Vec::from(world.context),
+                    function,
+                    sliders: program.sliders.clone(),
+                    level_db: program.level_db,
+                    note_off_waveforms: HashMap::new(),
+                };
+                let id = new_keys.id;
+                state.keys = Some(new_keys);
+                if let Some(lk) = world.launchkey.as_deref_mut() {
+                    lk.set_capture_midi_brightness(127);
+                }
+                self.last_message = Some(format!("Installed keys from program {}", id));
+            }
+
             Effect::PlayNoteOn { key, velocity } => {
                 let Some(keys) = state.keys.as_mut() else {
                     return;
@@ -302,6 +304,53 @@ impl EffectRunner {
                 // no-op if there's no matching waveform on the tracker.
                 world.play_helper.stop_waveform(id);
             }
+
+            Effect::UpdateSlider { id, slider, value } => {
+                let _ = self
+                    .slider_sender
+                    .send(renderer::SliderEvent::UpdateSlider { id, slider, value });
+            }
+            Effect::UpdateActiveKeySliders { slider, value } => {
+                for mark in &world.status.marks {
+                    if let WaveformId::Key(_) = mark.waveform_id {
+                        let _ = self
+                            .slider_sender
+                            .send(renderer::SliderEvent::UpdateSlider {
+                                id: mark.waveform_id.clone(),
+                                slider: slider.clone(),
+                                value,
+                            });
+                    }
+                }
+            }
+            Effect::ModifyActiveKeysAmplitude { amplitude } => {
+                use waveform::Waveform;
+                for mark in &world.status.marks {
+                    if let WaveformId::Key(_) = mark.waveform_id {
+                        let _ = self.command_sender.send(tracker::Command::Modify {
+                            id: mark.waveform_id.clone(),
+                            mark_id: MarkId::Amplitude,
+                            waveform: Waveform::Const(amplitude),
+                        });
+                    }
+                }
+            }
+
+            Effect::ShowMessage(msg) => {
+                self.last_message = Some(msg);
+            }
+
+            Effect::SetEncoderDisplay { index, name, value } => {
+                if let Some(lk) = world.launchkey.as_deref_mut() {
+                    lk.set_encoder_display(index, &name, &value);
+                }
+            }
+            Effect::SyncEncoders => {
+                if let Some(lk) = world.launchkey.as_deref_mut() {
+                    sync_encoders(state, lk);
+                }
+            }
+
             Effect::SetCaptureMidiBrightness(b) => {
                 if let Some(lk) = world.launchkey.as_deref_mut() {
                     lk.set_capture_midi_brightness(b);
@@ -315,50 +364,7 @@ impl EffectRunner {
                     }
                 }
             }
-            Effect::InstallKeysFromActive(program_index) => {
-                let program = match state.programs.get(program_index) {
-                    Some(p) => p,
-                    None => return,
-                };
-                let function: parser::Expr<MarkId> = match parser::parse_program(&program.text) {
-                    Ok(expr @ (parser::Expr::Function { .. } | parser::Expr::BuiltIn { .. })) => {
-                        expr
-                    }
-                    Ok(other) => {
-                        self.last_message = Some(format!("Expected note function, got: {}", other));
-                        return;
-                    }
-                    Err(errors) => {
-                        self.last_message = Some(format!("Error: {}", errors[0].to_string()));
-                        return;
-                    }
-                };
-                // Sanity check: actually invoke with dummy args.
-                // TODO use a waveform for velocity
-                if let Err(message) = apply_note_function_as_waveforms(
-                    world.context,
-                    &function,
-                    vec![parser::Expr::Float(60.0), parser::Expr::Float(0.7)],
-                    &program.sliders,
-                ) {
-                    self.last_message = Some(message);
-                    return;
-                }
-                let new_keys = Keys {
-                    id: program.id,
-                    context: Vec::from(world.context),
-                    function,
-                    sliders: program.sliders.clone(),
-                    level_db: program.level_db,
-                    note_off_waveforms: HashMap::new(),
-                };
-                let id = new_keys.id;
-                state.keys = Some(new_keys);
-                if let Some(lk) = world.launchkey.as_deref_mut() {
-                    lk.set_capture_midi_brightness(127);
-                }
-                self.last_message = Some(format!("Installed keys from program {}", id));
-            }
+
             Effect::SaveProgramsToFile => {
                 use std::io::Write;
                 let datetime = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
