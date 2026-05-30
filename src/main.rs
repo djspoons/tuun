@@ -388,6 +388,18 @@ pub fn main() {
         should_exit: false,
         message,
     };
+    // Push the initial slider values to the controller so its 14-bit
+    // encoder positions match `state.programs[..].sliders`. Without this,
+    // the first encoder turn would read the device's stale internal
+    // position (typically zero) and snap the slider to minimum.
+    {
+        let mut world = effects::World {
+            launchkey: launchkey.as_mut(),
+            status: &status,
+            play_helper: &mut effect_play_helper,
+        };
+        effect_runner.run_all(&mut state, &mut world, vec![actions::Effect::SyncEncoders]);
+    }
     loop {
         if state.should_exit {
             return;

@@ -610,6 +610,15 @@ fn apply_slider(
         });
     }
 
+    // Refresh the controller's display for this encoder. In Plugin mode
+    // the 8 encoders map 1:1 to the active program's sliders, so the
+    // slider_index IS the encoder index. (Format matches sync_encoders.)
+    effects.push(Effect::SetEncoderDisplay {
+        index: slider_index as u8,
+        name: label.clone(),
+        value: format!("{:.3}", actual_value),
+    });
+
     effects.push(Effect::ShowMessage(format!(
         "{}({}) = {:.3}",
         label, slider_index, actual_value

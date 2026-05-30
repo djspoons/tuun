@@ -14,11 +14,9 @@ pub struct Launchkey {
     midi_input_conn: MidiInputConnection<()>,
 
     pub events: mpsc::Receiver<Event>,
-    /// Main-thread mirror of `DAWState::encoder_mode`. Kept in sync by
-    /// observing `Event::EncoderModeChanged` events. The DAW input thread
-    /// is the source of truth for what the controller is currently doing;
-    /// this cache lets the main thread decide what to push back without
-    /// crossing the thread boundary on every read.
+    /// Main-thread mirror of `DAWState::encoder_mode`, kept in sync by
+    /// observing `Event::EncoderModeChanged`. Lets the runner decide what
+    /// to push back without crossing the input-thread boundary.
     pub encoder_mode: EncoderMode,
 }
 
