@@ -168,6 +168,27 @@ pub struct Program {
 pub const PROGRAMS_PER_BANK: usize = 8;
 pub const NUM_PROGRAM_BANKS: usize = 8;
 
+pub fn format_sig_digits(val: f32, sig_figs: usize) -> String {
+    if val == 0.0 || !val.is_finite() {
+        return format!("{val:.precision$}", precision = sig_figs - 1);
+    }
+
+    // Calculate the position of the first significant digit
+    let digits_before_decimal = val.abs().log10().floor() + 1.0;
+
+    // Determine required fractional precision
+    let precision = (sig_figs as f32 - digits_before_decimal) as isize;
+
+    if precision >= 0 {
+        format!("{val:.precision$}", precision = precision as usize)
+    } else {
+        // If the number is large, round to the nearest tens/hundreds/etc.
+        let scale = 10.0f32.powi(precision as i32);
+        let rounded = (val * scale).round() / scale;
+        format!("{rounded:.0}")
+    }
+}
+
 pub struct SliderDisplay {
     pub label: String,
     pub axis: String, // "X" or "Y" or an index
@@ -179,8 +200,10 @@ impl fmt::Display for SliderDisplay {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}({}) = {:.3}",
-            self.label, self.axis, self.actual_value
+            "{}({}) = {}",
+            self.label,
+            self.axis,
+            format_sig_digits(self.actual_value, 3),
         )
     }
 }

@@ -9,14 +9,14 @@ use crate::loader;
 use crate::midi_input;
 use crate::parser;
 use crate::play_helper;
-use crate::renderer::{MarkId, Mode, PROGRAMS_PER_BANK, Program, WaveformId};
+use crate::renderer::{self, MarkId, Mode, PROGRAMS_PER_BANK, WaveformId};
 use crate::slider;
 use crate::waveform;
 
 /// Internal state of the application. The reducer takes `&mut AppState` and mutates it in
 /// place; `main` keeps a single instance for the lifetime of the program.
 pub struct AppState {
-    pub programs: Vec<Program>,
+    pub programs: Vec<renderer::Program>,
     pub active_program_index: usize,
     pub mode: Mode,
     pub keys: Option<midi_input::Keys>,
@@ -38,7 +38,7 @@ impl AppState {
         self.active_program_index - (self.active_program_index % PROGRAMS_PER_BANK)
     }
 
-    pub fn active_program(&self) -> &Program {
+    pub fn active_program(&self) -> &renderer::Program {
         &self.programs[self.active_program_index]
     }
 }
@@ -614,18 +614,20 @@ fn apply_slider(
         });
     }
 
+    let formatted_value = renderer::format_sig_digits(actual_value, 3);
+
     // Refresh the controller's display for this encoder. In Plugin mode
     // the 8 encoders map 1:1 to the active program's sliders, so the
     // slider_index IS the encoder index. (Format matches sync_encoders.)
     effects.push(Effect::SetEncoderDisplay {
         index: slider_index as u8,
         name: label.clone(),
-        value: format!("{:.3}", actual_value),
+        value: formatted_value.clone(),
     });
 
     effects.push(Effect::ShowMessage(format!(
-        "{}({}) = {:.3}",
-        label, slider_index, actual_value
+        "{}({}) = {}",
+        label, slider_index, formatted_value,
     )));
     effects
 }
@@ -671,7 +673,7 @@ fn apply_level_db(state: &mut AppState, program_index: usize, level_db: f32) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::renderer::ProgramSliders;
+    use renderer::{Program, ProgramSliders};
 
     fn test_program() -> Program {
         Program {

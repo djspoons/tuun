@@ -458,7 +458,7 @@ fn sync_encoders(state: &AppState, launchkey: &mut launchkey::Launchkey) {
                     launchkey.set_encoder_display(
                         i as u8,
                         &config.label,
-                        &format!("{:.3}", actual_value),
+                        &format!("{}", renderer::format_sig_digits(actual_value, 3)),
                     );
                 } else {
                     launchkey.set_encoder_display(i as u8, &"", &"");
