@@ -341,6 +341,10 @@ impl EffectRunner {
                 if let Some(lk) = world.launchkey.as_deref_mut() {
                     if lk.encoder_mode != new_mode {
                         lk.encoder_mode = new_mode;
+                        // The device resets the relative-output feature
+                        // when the user switches encoder modes, so we
+                        // have to re-assert it every time.
+                        lk.set_encoder_relative_output();
                         sync_encoders(state, lk);
                     }
                 }
@@ -436,7 +440,8 @@ impl EffectRunner {
     }
 }
 
-/// Pushes the current bank/program's encoder values to the controller.
+/// Pushes the current bank/program's encoder state to the controller.
+///
 /// Called only via `Effect::SyncEncoders`, never on a tick.
 fn sync_encoders(state: &AppState, launchkey: &mut launchkey::Launchkey) {
     match launchkey.encoder_mode {
@@ -445,16 +450,19 @@ fn sync_encoders(state: &AppState, launchkey: &mut launchkey::Launchkey) {
                 Some(p) => p,
                 None => return,
             };
-            for (i, value) in program.sliders.normalized_values.iter().enumerate() {
-                let config = &program.sliders.configs[i];
-                let actual_value = slider::denormalize(&config.function, *value).unwrap_or(0.0);
-                launchkey.set_encoder_display(
-                    i as u8,
-                    &config.label,
-                    &format!("{:.3}", actual_value),
-                );
-                launchkey
-                    .update_encoder_state(i as u8, (launchkey::ENCODER_MAX as f32 * value) as u16);
+            // Set the display for all encoders.
+            for i in 0..launchkey::NUM_ENCODERS {
+                if let Some(value) = program.sliders.normalized_values.get(i as usize) {
+                    let config = &program.sliders.configs[i as usize];
+                    let actual_value = slider::denormalize(&config.function, *value).unwrap_or(0.0);
+                    launchkey.set_encoder_display(
+                        i as u8,
+                        &config.label,
+                        &format!("{:.3}", actual_value),
+                    );
+                } else {
+                    launchkey.set_encoder_display(i as u8, &"", &"");
+                }
             }
         }
         launchkey::EncoderMode::Mixer => {
@@ -464,8 +472,11 @@ fn sync_encoders(state: &AppState, launchkey: &mut launchkey::Launchkey) {
                     Some(p) => p,
                     None => continue,
                 };
-                let encoder_value = actions::level_db_to_encoder(program.level_db);
-                launchkey.update_encoder_state(i as u8, encoder_value);
+                launchkey.set_encoder_display(
+                    i as u8,
+                    "level",
+                    &format!("{:.1} dB", program.level_db),
+                );
             }
         }
     }

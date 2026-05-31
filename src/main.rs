@@ -388,10 +388,7 @@ pub fn main() {
         should_exit: false,
         message,
     };
-    // Push the initial slider values to the controller so its 14-bit
-    // encoder positions match `state.programs[..].sliders`. Without this,
-    // the first encoder turn would read the device's stale internal
-    // position (typically zero) and snap the slider to minimum.
+    // Push the initial encoder state to the controller if present.
     {
         let mut world = effects::World {
             launchkey: launchkey.as_mut(),

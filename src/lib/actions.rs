@@ -13,9 +13,6 @@ use crate::renderer::{MarkId, Mode, PROGRAMS_PER_BANK, Program, WaveformId};
 use crate::slider;
 use crate::waveform;
 
-/// Maximum 14-bit MIDI value (0x3FFF = 16383).
-const ENCODER_MAX: u16 = launchkey::ENCODER_MAX;
-
 /// Internal state of the application. The reducer takes `&mut AppState` and mutates it in
 /// place; `main` keeps a single instance for the lifetime of the program.
 pub struct AppState {
@@ -363,12 +360,19 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
         }
 
         Action::CycleRepeatAfterMeasures => {
-            state.repeat_after_measures = match state.repeat_after_measures {
-                None => Some(1),
-                Some(1) => Some(2),
-                Some(_) => None,
+            let effect;
+            (state.repeat_after_measures, effect) = match state.repeat_after_measures {
+                None => (
+                    Some(1),
+                    Effect::ShowMessage("Repeat after 1 measure".to_string()),
+                ),
+                Some(1) => (
+                    Some(2),
+                    Effect::ShowMessage("Repeat after 2 measures".to_string()),
+                ),
+                Some(_) => (None, Effect::ShowMessage("No repeats".to_string())),
             };
-            vec![]
+            vec![effect]
         }
 
         Action::SaveProgramsToFile => vec![Effect::SaveProgramsToFile],
@@ -664,28 +668,6 @@ fn apply_level_db(state: &mut AppState, program_index: usize, level_db: f32) -> 
     effects
 }
 
-// --- conversions used by handlers when emitting Actions ---
-
-/// Converts a 14-bit MIDI encoder value (0-16383) to a level in dB.
-pub fn encoder_to_level_db(value: u16) -> f32 {
-    if value == 0 {
-        f32::NEG_INFINITY
-    } else {
-        -60.0 + (value as f32 - 1.0) / (ENCODER_MAX - 1) as f32 * 66.0
-    }
-}
-
-/// Converts a level in dB to a 14-bit MIDI encoder value (0-16383).
-pub fn level_db_to_encoder(level_db: f32) -> u16 {
-    if level_db == f32::NEG_INFINITY || level_db < -60.0 {
-        0
-    } else {
-        ((level_db + 60.0) / 66.0 * (ENCODER_MAX - 1) as f32 + 1.0)
-            .round()
-            .clamp(0.0, ENCODER_MAX as f32) as u16
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -830,21 +812,5 @@ mod tests {
             effects[0],
             Effect::SetLaunchkeyEncoderMode(launchkey::EncoderMode::Mixer)
         ));
-    }
-
-    #[test]
-    fn level_db_round_trips_through_encoder() {
-        let cases = [-60.0, -6.0, 0.0, 6.0];
-        for db in cases {
-            let encoded = level_db_to_encoder(db);
-            let decoded = encoder_to_level_db(encoded);
-            assert!(
-                (decoded - db).abs() < 0.01,
-                "{} -> {} -> {}",
-                db,
-                encoded,
-                decoded
-            );
-        }
     }
 }

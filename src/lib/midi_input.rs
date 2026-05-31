@@ -20,6 +20,9 @@ pub struct Keys {
     pub note_off_waveforms: HashMap<u8, waveform::Waveform<MarkId>>, // keys are MIDI note numbers
 }
 
+/// The number of rotations of the encoder that represents the full range.
+const ENCODER_ROTATIONS: f32 = 4.0;
+
 /// Classifies a launchkey event into a list of `Action`s.
 pub fn classify(
     event: &launchkey::Event,
@@ -35,17 +38,26 @@ pub fn classify(
     let repeat_after_measures: Option<u32> = state.repeat_after_measures;
     let bank_start = state.bank_start();
     match event {
-        Event::PluginEncoderChange { index, value } => {
-            let normalized = (*value as f32 / launchkey::ENCODER_MAX as f32).clamp(0.0, 1.0);
+        Event::PluginEncoderChange { index, delta } => {
+            // Encoders are in Relative output mode: one detent = one
+            // unit. Map that to a fraction of the slider's full range.
+            let slider_index = *index as usize;
+            let program = programs.get(active_program_index)?;
+            let current = *program.sliders.normalized_values.get(slider_index)?;
+            let normalized_delta = *delta as f32 / (ENCODER_ROTATIONS * 128.0);
+            let normalized = (current + normalized_delta).clamp(0.0, 1.0);
             Some(vec![Action::SetSliderNormalized {
                 program: active_program_index,
-                slider_index: *index as usize,
+                slider_index,
                 normalized,
             }])
         }
-        Event::MixerEncoderChange { index, value } => {
+        Event::MixerEncoderChange { index, delta } => {
             let program_index = bank_start + *index as usize;
-            let level_db = actions::encoder_to_level_db(*value);
+            let program = programs.get(program_index)?;
+            // ~0.5 dB per detent; spans the -60..+6 range in roughly four full turns.
+            let db_delta = *delta as f32 * 0.25;
+            let level_db = (program.level_db + db_delta).clamp(-60.0, 6.0);
             Some(vec![Action::SetLevelDb {
                 program: program_index,
                 level_db,
