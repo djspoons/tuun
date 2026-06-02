@@ -4,6 +4,7 @@
 //! These functions do file I/O; they're called from `main` to bootstrap
 //! and from the effect runner in response to reload requests.
 
+use std::cell;
 use std::collections::HashMap;
 use std::fs;
 
@@ -144,6 +145,7 @@ pub fn load_programs(
                                 sliders: ProgramSliders::default(),
                                 color: None,
                                 level_db: 0.0,
+                                valid_keys_program: cell::Cell::new(None),
                             })
                         }
                     }
@@ -187,6 +189,7 @@ pub fn load_programs(
                     sliders,
                     color: pending_color.take(),
                     level_db,
+                    valid_keys_program: cell::Cell::new(None),
                 });
                 count += 1;
             }
@@ -202,6 +205,7 @@ pub fn load_programs(
                 sliders: ProgramSliders::default(),
                 color: None,
                 level_db: 0.0,
+                valid_keys_program: cell::Cell::new(None),
             });
         }
     }
@@ -213,6 +217,7 @@ pub fn load_programs(
             sliders: ProgramSliders::default(),
             color: None,
             level_db: 0.0,
+            valid_keys_program: cell::Cell::new(None),
         });
     }
     // Copy initial values for each slider for all programs

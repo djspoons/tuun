@@ -492,6 +492,7 @@ fn apply_insert_text(state: &mut AppState, text: &str) -> Vec<Effect> {
     let mut new_text = program.text.clone();
     new_text.insert_str(cursor, text);
     program.text = new_text;
+    program.valid_keys_program.set(None);
     if let Mode::Edit {
         cursor_position, ..
     } = &mut state.mode
@@ -516,6 +517,7 @@ fn apply_delete_char(state: &mut AppState) -> Vec<Effect> {
     let mut new_text = program.text.clone();
     new_text.remove(cursor - 1);
     program.text = new_text;
+    program.valid_keys_program.set(None);
     if let Mode::Edit {
         cursor_position, ..
     } = &mut state.mode
@@ -545,6 +547,7 @@ fn apply_delete_word(state: &mut AppState) -> Vec<Effect> {
     let mut new_text = program.text.clone();
     new_text.replace_range(new_cursor..cursor, "");
     program.text = new_text;
+    program.valid_keys_program.set(None);
     if let Mode::Edit {
         cursor_position, ..
     } = &mut state.mode
@@ -717,6 +720,7 @@ fn apply_level_db(state: &mut AppState, program_index: usize, level_db: f32) -> 
 mod tests {
     use super::*;
     use renderer::{Program, ProgramSliders};
+    use std::cell;
 
     fn test_program() -> Program {
         Program {
@@ -725,6 +729,7 @@ mod tests {
             sliders: ProgramSliders::default(),
             color: None,
             level_db: 0.0,
+            valid_keys_program: cell::Cell::new(None),
         }
     }
 
@@ -787,6 +792,7 @@ mod tests {
                 sliders: ProgramSliders::default(),
                 color: None,
                 level_db: 0.0,
+                valid_keys_program: cell::Cell::new(None),
             }],
             active_program_index: 0,
             mode: Mode::Edit {
@@ -831,6 +837,7 @@ mod tests {
             sliders: ProgramSliders::default(),
             color: None,
             level_db: 0.0,
+            valid_keys_program: cell::Cell::new(None),
         });
         let effects = apply(&mut state, Action::AdvanceProgram(1));
         assert_eq!(state.active_program_index, 1);

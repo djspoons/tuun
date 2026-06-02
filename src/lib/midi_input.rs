@@ -150,18 +150,29 @@ pub fn classify(
 /// Returns true iff `program` parses and evaluates as a valid keys instrument:
 /// a 2-arg function returning a pair of waveforms. Mirrors the validation
 /// `Effect::InstallKeysFromActive` runs before installing.
+//
+// Memoized on `program.valid_keys_program`; callers are responsible for
+// invalidating that cell (set to `None`) when anything that affects
+// validity changes — the program's text or the parser context. See
+// `invalidate_keys_validity_caches` for the bulk-invalidation case.
 fn is_valid_keys_program(state: &actions::AppState, program: &Program) -> bool {
-    let function = match parser::parse_program::<MarkId>(&program.text) {
-        Ok(expr @ (parser::Expr::Function { .. } | parser::Expr::BuiltIn { .. })) => expr,
-        _ => return false,
+    if let Some(cached) = program.valid_keys_program.get() {
+        return cached;
+    }
+    let valid = match parser::parse_program::<MarkId>(&program.text) {
+        Ok(expr @ (parser::Expr::Function { .. } | parser::Expr::BuiltIn { .. })) => {
+            effects::apply_note_function_as_waveforms(
+                &state.context,
+                &expr,
+                vec![parser::Expr::Float(60.0), parser::Expr::Float(0.7)],
+                &program.sliders,
+            )
+            .is_ok()
+        }
+        _ => false,
     };
-    effects::apply_note_function_as_waveforms(
-        &state.context,
-        &function,
-        vec![parser::Expr::Float(60.0), parser::Expr::Float(0.7)],
-        &program.sliders,
-    )
-    .is_ok()
+    program.valid_keys_program.set(Some(valid));
+    valid
 }
 
 /// Pushes the current app state out to the Launchkey hardware: pad colors
@@ -327,7 +338,12 @@ fn update_pads_keys_installer(
                 continue;
             }
         };
-        if !is_valid_keys_program(state, program) {
+        let installed = state.keys.as_ref().is_some_and(|k| k.id == program.id);
+        // If this program is the installed keys instrument, light it up
+        // regardless of whether the current text is still a valid keys
+        // program — the installed function is what's actually playing.
+        // Otherwise only color pads that can be installed right now.
+        if !installed && !is_valid_keys_program(state, program) {
             launchkey.set_daw_bottom_pad_color(i as u8, 0, 0, 0);
             continue;
         }
@@ -335,7 +351,6 @@ fn update_pads_keys_installer(
             Some(color) => (color.0 / 2, color.1 / 2, color.2 / 2),
             None => (0, 127, 127),
         };
-        let installed = state.keys.as_ref().is_some_and(|k| k.id == program.id);
         if installed {
             let intensity = now
                 .duration_since(current_beat_start)

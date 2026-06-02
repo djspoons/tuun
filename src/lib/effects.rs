@@ -425,6 +425,12 @@ impl EffectRunner {
             }
             Effect::LoadContext => {
                 state.message = crate::loader::load_context(&state.config, &mut state.context);
+                // The keys-validity cache memoizes an evaluation that
+                // depends on `state.context`, so a context reload
+                // invalidates every program's cached result.
+                for program in &state.programs {
+                    program.valid_keys_program.set(None);
+                }
             }
             Effect::LoadPrograms => {
                 let (slider_values, errors) =

@@ -1,3 +1,4 @@
+use std::cell;
 use std::collections::HashMap;
 use std::process;
 use std::sync::mpsc;
@@ -121,6 +122,7 @@ pub fn main() {
                 sliders: program.sliders.clone(),
                 color: program.color,
                 level_db: program.level_db,
+                valid_keys_program: cell::Cell::new(None),
             };
             match play_helper.play_waveform(&context, &program, &status, false, None) {
                 Ok(_) => (),

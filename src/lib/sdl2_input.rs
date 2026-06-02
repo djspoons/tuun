@@ -325,6 +325,7 @@ mod tests {
     use crate::actions::{Action, AppState};
     use crate::renderer::ProgramSliders;
     use sdl2::keyboard::{Mod, Scancode};
+    use std::cell;
 
     fn test_state(mode: Mode) -> AppState {
         AppState {
@@ -334,6 +335,7 @@ mod tests {
                 sliders: ProgramSliders::default(),
                 color: None,
                 level_db: 0.0,
+                valid_keys_program: cell::Cell::new(None),
             }],
             active_program_index: 0,
             mode,

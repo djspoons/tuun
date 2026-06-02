@@ -1,3 +1,4 @@
+use std::cell;
 use std::collections::HashMap;
 use std::fmt;
 use std::time::{Duration, Instant};
@@ -158,11 +159,17 @@ impl ProgramSliders {
 
 #[derive(Debug, Clone)]
 pub struct Program {
+    // Changes to `text` should also invalid the cache below.
     pub text: String,
     pub id: ProgramId,
     pub sliders: ProgramSliders,
     pub color: Option<(u8, u8, u8)>,
     pub level_db: f32,
+    // Cached result of `midi_input::is_valid_keys_program`. `None` means
+    // uncached; populated lazily on first check. Invalidate (set to
+    // `None`) whenever something that affects validity changes — the
+    // program's text or the parser context.
+    pub valid_keys_program: cell::Cell<Option<bool>>,
 }
 
 pub const PROGRAMS_PER_BANK: usize = 8;
