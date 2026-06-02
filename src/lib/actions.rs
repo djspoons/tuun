@@ -13,6 +13,28 @@ use crate::renderer::{self, MarkId, Mode, PROGRAMS_PER_BANK, WaveformId};
 use crate::slider;
 use crate::waveform;
 
+/// Behavior of the pads when the controller is in DAW pad mode. Cycled by
+/// `Action::CycleDawPadMode` on each `Event::PadModeChanged(DAW)` so the
+/// user can repurpose the pads by re-pressing the DAW pad-mode button.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DawPadMode {
+    /// Top row plays or stops, bottom row queues or cancels.
+    ClipLauncher,
+    /// Bottom row installs (or uninstalls) the program as the keys instrument.
+    KeysInstaller,
+}
+
+impl DawPadMode {
+    /// Human-readable label shown on the controller's display strip when
+    /// this sub-mode is active.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            DawPadMode::ClipLauncher => "Clip Launcher",
+            DawPadMode::KeysInstaller => "Keys Installer",
+        }
+    }
+}
+
 /// Internal state of the application. The reducer takes `&mut AppState` and mutates it in
 /// place; `main` keeps a single instance for the lifetime of the program.
 pub struct AppState {
@@ -21,6 +43,8 @@ pub struct AppState {
     pub mode: Mode,
     pub keys: Option<midi_input::Keys>,
     pub repeat_after_measures: Option<u32>,
+    /// Active behavior for the DAW pad.
+    pub daw_pad_mode: DawPadMode,
     /// Parser context: prelude + bindings loaded from context files.
     pub context: Vec<(String, parser::Expr<MarkId>)>,
     /// Loader configuration: filenames, tempo, sample rate.
@@ -127,6 +151,10 @@ pub enum Action {
     // --- other MIDI controller state ---
     /// Encoder mode changed on the controller.
     SetEncoderMode(launchkey::EncoderMode),
+    /// Pad mode changed on the controller.
+    SetPadMode(launchkey::PadMode),
+    /// Cycle the DAW-pad-mode sub-behavior.
+    CycleDawPadMode,
     /// Toggle the default repeat (cycle None -> Some(1) -> Some(2) -> None).
     CycleRepeatAfterMeasures,
 
@@ -221,12 +249,14 @@ pub enum Effect {
     /// Only emitted when the source-of-truth (program index, encoder mode)
     /// actually changes.
     SyncEncoders,
-    /// Indicates the keys-installed state changed.
-    SetCaptureMidiBrightness(u8),
     /// Update the cached encoder mode on the Launchkey controller and
     /// re-sync the encoders. Runner skips the sync if the cached value
     /// already matches.
     SetLaunchkeyEncoderMode(launchkey::EncoderMode),
+    /// Update the pad mode on the Launchkey controller.
+    SetLaunchkeyPadMode(launchkey::PadMode),
+    /// Push a label onto the controller display strip indicating which DAW mode is active.
+    SetDawModeDisplay(String),
 
     // --- I/O ---
     SaveProgramsToFile,
@@ -358,6 +388,19 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
             // cache and re-syncs only if it actually changed.
             vec![Effect::SetLaunchkeyEncoderMode(new_mode)]
         }
+        Action::SetPadMode(new_mode) => vec![Effect::SetLaunchkeyPadMode(new_mode)],
+        Action::CycleDawPadMode => {
+            let next = match state.daw_pad_mode {
+                DawPadMode::ClipLauncher => DawPadMode::KeysInstaller,
+                DawPadMode::KeysInstaller => DawPadMode::ClipLauncher,
+            };
+            state.daw_pad_mode = next;
+            let label = next.display_name().to_string();
+            vec![
+                Effect::SetDawModeDisplay(label.clone()),
+                Effect::ShowMessage(label),
+            ]
+        }
 
         Action::CycleRepeatAfterMeasures => {
             let effect;
@@ -400,16 +443,16 @@ fn apply_select_program(state: &mut AppState, i: usize) -> Vec<Effect> {
 }
 
 fn apply_install_keys(state: &mut AppState, program_index: usize) -> Vec<Effect> {
-    // If keys are already installed, this acts as a toggle (uninstall).
-    if state.keys.is_some() {
+    // Applying with the currently-installed program uninstalls it; for any
+    // other program, tries to install that one in its place. (The runner
+    // leaves `state.keys` untouched if the new program fails to parse or
+    // validate, so an invalid target is a no-op rather than a kick-out.)
+    if let Some(keys) = &state.keys
+        && renderer::index_from_id(keys.id) == program_index
+    {
         state.keys = None;
-        return vec![
-            Effect::SetCaptureMidiBrightness(0),
-            Effect::ShowMessage("Uninstalled keys".to_string()),
-        ];
+        return vec![Effect::ShowMessage("Uninstalled keys".to_string())];
     }
-    // Otherwise, defer the parse + validation to the runner; on success the
-    // runner sets `state.keys` directly and sets controller and message state.
     vec![Effect::InstallKeysFromActive(program_index)]
 }
 
@@ -702,6 +745,7 @@ mod tests {
             mode: Mode::Select,
             keys: None,
             repeat_after_measures: None,
+            daw_pad_mode: DawPadMode::ClipLauncher,
             context: vec![],
             config: test_config(),
             should_exit: false,
@@ -751,6 +795,7 @@ mod tests {
             },
             keys: None,
             repeat_after_measures: None,
+            daw_pad_mode: DawPadMode::ClipLauncher,
             context: vec![],
             config: test_config(),
             should_exit: false,

@@ -296,8 +296,8 @@ impl InputHandler {
                 "S" => Some(vec![Action::SaveProgramsToFile]),
                 "D" => Some(vec![Action::DumpActiveWaveform]),
                 // Uppercase K: install the active program as the keys
-                // instrument (computer-keyboard analogue of the
-                // launchkey CaptureMIDI button).
+                // instrument (computer-keyboard analogue of pressing the
+                // active program's pad in "Install Keys" mode).
                 "K" => Some(vec![Action::InstallKeys(state.active_program_index)]),
                 // Lowercase k: enter Keys (piano) mode — only if keys
                 // are actually installed; otherwise silently no-op.
@@ -339,6 +339,7 @@ mod tests {
             mode,
             keys: None,
             repeat_after_measures: None,
+            daw_pad_mode: actions::DawPadMode::ClipLauncher,
             context: vec![],
             config: crate::loader::Config {
                 tempo: 90,

@@ -17,6 +17,10 @@ pub struct Launchkey {
     /// observing `Event::EncoderModeChanged`. Lets the runner decide what
     /// to push back without crossing the input-thread boundary.
     pub encoder_mode: EncoderMode,
+    /// Main-thread mirror of `DAWState::pad_mode`.
+    //
+    // Kept in sync by observing `Event::PadModeChanged`.
+    pub pad_mode: PadMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -25,9 +29,21 @@ pub enum EncoderMode {
     Mixer,
 }
 
+/// Selected pad mode.
+//
+// Reported by the controller on channel 7 / CC 1Dh.
+// We only care about whether we're in DAW (so we own the pad LEDs and
+// notes) or some other mode (in which case we leave the pads alone).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PadMode {
+    DAW,
+    Other,
+}
+
 /// Responsible for decoding and forwarding messages received on the DAW connection.
 struct DAWState {
     encoder_mode: EncoderMode,
+    pad_mode: PadMode,
     sender: mpsc::Sender<Event>,
 }
 
@@ -70,10 +86,9 @@ pub enum Event {
     },
 
     EncoderModeChanged(EncoderMode),
+    PadModeChanged(PadMode),
 
     PadFunctionDown,
-
-    CaptureMIDIDown,
 }
 
 #[derive(Debug, Error)]
@@ -111,9 +126,12 @@ const NUM_DAW_PADS_PER_ROW: u8 = 8;
 
 const ENCODER_MODE_CC: u8 = 30; // on channel 7
 const ENCODER_MODE_CHANNEL: u8 = 6; // channel 7 (0-indexed)
+// Pad-mode select/report CC; sent on the same channel as the encoder-mode CC.
+const PAD_MODE_CC: u8 = 29; // 0x1D
+// Pad-mode CC value for the DAW pad layout (page 10 of the MK4 reference).
+const PAD_MODE_DAW_VALUE: u8 = 2;
 
 const PAD_FUNCTION_OFFSET: u8 = 105;
-const CAPTURE_MIDI_OFFSET: u8 = 74;
 
 const DAW_MODE_DISPLAY_TARGET: u8 = 34;
 
@@ -158,6 +176,7 @@ impl Launchkey {
         let (sender, receiver) = mpsc::channel();
         let mut daw_state = DAWState {
             encoder_mode: EncoderMode::Plugin,
+            pad_mode: PadMode::DAW,
             sender: sender.clone(),
         };
         let mut daw_input = MidiInput::new("tuun reading DAW input")?;
@@ -206,6 +225,8 @@ impl Launchkey {
 
             events: receiver,
             encoder_mode: EncoderMode::Plugin,
+            // Entering DAW mode resets pads to the DAW layout (see page 10).
+            pad_mode: PadMode::DAW,
         };
         launchkey.set_encoder_relative_output();
         Ok(launchkey)
@@ -271,21 +292,6 @@ impl Launchkey {
             message: MidiMessage::Controller {
                 controller: PAD_FUNCTION_OFFSET.into(),
                 value: (color as u8).into(),
-            },
-        });
-    }
-
-    pub fn set_capture_midi_brightness(&mut self, brightness: u8) {
-        self.send_event(LiveEvent::Midi {
-            channel: 0.into(),
-            message: MidiMessage::Controller {
-                controller: CAPTURE_MIDI_OFFSET.into(),
-                // XXX Sort of a hack, but not sure how this brightness thing works
-                value: if brightness > 0 {
-                    (Color::White as u8).into()
-                } else {
-                    (Color::Gray as u8).into()
-                }, //(brightness & 0x7f).into(),
             },
         });
     }
@@ -382,6 +388,7 @@ impl DAWState {
 
     fn decode(&mut self, message: &[u8]) -> Option<Event> {
         let event = LiveEvent::parse(message).unwrap();
+        //println!("Got event on DAW: {:?}", event);
         match event {
             LiveEvent::Midi { channel, message } => match message {
                 MidiMessage::Controller { controller, value } => {
@@ -410,6 +417,15 @@ impl DAWState {
                                 None
                             }
                         };
+                    }
+                    // Pad mode changes are on the same channel, CC 1Dh.
+                    if ch == ENCODER_MODE_CHANNEL && controller.as_int() == PAD_MODE_CC {
+                        let new_mode = match value.as_int() {
+                            PAD_MODE_DAW_VALUE => PadMode::DAW,
+                            _ => PadMode::Other,
+                        };
+                        self.pad_mode = new_mode;
+                        return Some(Event::PadModeChanged(new_mode));
                     }
                     match (controller.as_int(), value.as_int()) {
                         // Navigation
@@ -446,8 +462,6 @@ impl DAWState {
                         // Other buttons
                         (PAD_FUNCTION_OFFSET, 127) => Some(Event::PadFunctionDown),
                         (PAD_FUNCTION_OFFSET, 0) => None,
-                        (CAPTURE_MIDI_OFFSET, 127) => Some(Event::CaptureMIDIDown),
-                        (CAPTURE_MIDI_OFFSET, 0) => None,
 
                         _ => {
                             println!(
@@ -470,15 +484,21 @@ impl DAWState {
                         if key >= DAW_PAD_TOP_ROW_OFFSET
                             && key < DAW_PAD_TOP_ROW_OFFSET + NUM_DAW_PADS_PER_ROW
                         {
-                            Some(Event::DAWTopPadDown {
-                                index: key.as_int() - DAW_PAD_TOP_ROW_OFFSET,
-                            })
+                            let index = key.as_int() - DAW_PAD_TOP_ROW_OFFSET;
+                            match self.pad_mode {
+                                PadMode::DAW => Some(Event::DAWTopPadDown { index }),
+                                // Not clear when this happens, but ignore anyway
+                                PadMode::Other => None,
+                            }
                         } else if key >= DAW_PAD_BOTTOM_ROW_OFFSET
                             && key < DAW_PAD_BOTTOM_ROW_OFFSET + NUM_DAW_PADS_PER_ROW
                         {
-                            Some(Event::DAWBottomPadDown {
-                                index: key.as_int() - DAW_PAD_BOTTOM_ROW_OFFSET,
-                            })
+                            let index = key.as_int() - DAW_PAD_BOTTOM_ROW_OFFSET;
+                            match self.pad_mode {
+                                PadMode::DAW => Some(Event::DAWBottomPadDown { index }),
+                                // Not clear when this happens, but ignore anyway
+                                PadMode::Other => None,
+                            }
                         } else {
                             None
                         }
@@ -513,6 +533,7 @@ impl MIDIState {
 
     fn decode(&mut self, message: &[u8]) -> Option<Event> {
         let event = LiveEvent::parse(message).unwrap();
+        //println!("Got event on MIDI: {:?}", event);
         match event {
             LiveEvent::Midi { channel, message } => match message {
                 MidiMessage::NoteOn { key, vel } if vel > 0 => Some(Event::NoteOn {

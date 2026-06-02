@@ -341,14 +341,7 @@ pub fn main() {
     let sdl2_handler =
         sdl2_input::InputHandler::new(launchkey.is_err(), renderer.width, renderer.height);
 
-    // Own the launchkey directly in main. midi_input is now a set of free
-    // functions; there's no handler struct.
-    let mut launchkey = if let Ok(mut lk) = launchkey {
-        lk.set_daw_mode_display(&"Clip Launcher".to_string());
-        Some(lk)
-    } else {
-        None
-    };
+    let mut launchkey = launchkey.ok();
     let mut effect_runner =
         effects::EffectRunner::new(command_sender.clone(), slider_sender.clone());
     // A PlayHelper owned by the effect runner's "World" — used to dispatch
@@ -383,19 +376,29 @@ pub fn main() {
         mode,
         keys: None,
         repeat_after_measures: None,
+        daw_pad_mode: actions::DawPadMode::ClipLauncher,
         context,
         config,
         should_exit: false,
         message,
     };
-    // Push the initial encoder state to the controller if present.
+    // Push the initial encoder + DAW-mode display state to the controller
+    // if present.
     {
+        let daw_mode_label = state.daw_pad_mode.display_name().to_string();
         let mut world = effects::World {
             launchkey: launchkey.as_mut(),
             status: &status,
             play_helper: &mut effect_play_helper,
         };
-        effect_runner.run_all(&mut state, &mut world, vec![actions::Effect::SyncEncoders]);
+        effect_runner.run_all(
+            &mut state,
+            &mut world,
+            vec![
+                actions::Effect::SyncEncoders,
+                actions::Effect::SetDawModeDisplay(daw_mode_label),
+            ],
+        );
     }
     loop {
         if state.should_exit {

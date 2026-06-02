@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::actions;
+use crate::effects;
 use crate::launchkey;
 use crate::parser;
 use crate::renderer::{self, MarkId, PROGRAMS_PER_BANK, Program, WaveformId};
@@ -72,46 +73,59 @@ pub fn classify(
             Some(vec![Action::AdvanceProgram(-(PROGRAMS_PER_BANK as i32))])
         }
 
-        Event::DAWTopPadDown { index } => {
-            let program_index = bank_start + *index as usize;
-            let program = programs.get(program_index)?;
-            let id = WaveformId::Program(program.id);
-            let now = Instant::now();
-            let is_installed_keys = keys.as_ref().is_some_and(|k| k.id == program.id);
-            if status.has_active_mark(now, id.clone(), MarkId::TopLevel) {
-                Some(vec![Action::StopProgram(program_index)])
-            } else if is_installed_keys {
-                Some(vec![]) // no-op
-            } else {
-                Some(vec![Action::PlayProgram {
-                    program_index,
-                    cursor_position: program.text.len(),
-                    start_at_next_measure: false,
-                    repeat_after_measures: None,
-                    return_to_select_on_success: false,
-                }])
+        Event::DAWTopPadDown { index } => match state.daw_pad_mode {
+            actions::DawPadMode::ClipLauncher => {
+                let program_index = bank_start + *index as usize;
+                let program = programs.get(program_index)?;
+                let id = WaveformId::Program(program.id);
+                let now = Instant::now();
+                let is_installed_keys = keys.as_ref().is_some_and(|k| k.id == program.id);
+                if status.has_active_mark(now, id.clone(), MarkId::TopLevel) {
+                    Some(vec![Action::StopProgram(program_index)])
+                } else if is_installed_keys {
+                    Some(vec![]) // no-op
+                } else {
+                    Some(vec![Action::PlayProgram {
+                        program_index,
+                        cursor_position: program.text.len(),
+                        start_at_next_measure: false,
+                        repeat_after_measures: None,
+                        return_to_select_on_success: false,
+                    }])
+                }
             }
-        }
-        Event::DAWBottomPadDown { index } => {
-            let program_index = bank_start + *index as usize;
-            let program = programs.get(program_index)?;
-            let id = WaveformId::Program(program.id);
-            let now = Instant::now();
-            let is_installed_keys = keys.as_ref().is_some_and(|k| k.id == program.id);
-            if status.has_pending_mark(now, id.clone(), MarkId::TopLevel) {
-                Some(vec![Action::RemovePendingProgram(program_index)])
-            } else if is_installed_keys {
-                Some(vec![]) // no-op
-            } else {
-                Some(vec![Action::PlayProgram {
-                    program_index,
-                    cursor_position: program.text.len(),
-                    start_at_next_measure: true,
-                    repeat_after_measures,
-                    return_to_select_on_success: false,
-                }])
+            // Top row does nothing in the keys-installer mode.
+            actions::DawPadMode::KeysInstaller => Some(vec![]),
+        },
+        Event::DAWBottomPadDown { index } => match state.daw_pad_mode {
+            actions::DawPadMode::ClipLauncher => {
+                let program_index = bank_start + *index as usize;
+                let program = programs.get(program_index)?;
+                let id = WaveformId::Program(program.id);
+                let now = Instant::now();
+                let is_installed_keys = keys.as_ref().is_some_and(|k| k.id == program.id);
+                if status.has_pending_mark(now, id.clone(), MarkId::TopLevel) {
+                    Some(vec![Action::RemovePendingProgram(program_index)])
+                } else if is_installed_keys {
+                    Some(vec![]) // no-op
+                } else {
+                    Some(vec![Action::PlayProgram {
+                        program_index,
+                        cursor_position: program.text.len(),
+                        start_at_next_measure: true,
+                        repeat_after_measures,
+                        return_to_select_on_success: false,
+                    }])
+                }
             }
-        }
+            // Bottom row picks which program to install/uninstall as
+            // keys.
+            actions::DawPadMode::KeysInstaller => {
+                let program_index = bank_start + *index as usize;
+                programs.get(program_index)?;
+                Some(vec![Action::InstallKeys(program_index)])
+            }
+        },
         Event::PadFunctionDown => Some(vec![Action::CycleRepeatAfterMeasures]),
 
         Event::NoteOn { key, velocity } => Some(vec![Action::NoteOn {
@@ -120,11 +134,34 @@ pub fn classify(
         }]),
         Event::NoteOff { key } => Some(vec![Action::NoteOff { key: *key }]),
 
-        // InstallKeys toggles based on current state: if keys are already
-        // installed (for any program), the reducer uninstalls them;
-        // otherwise it installs the active program as the keys instrument.
-        Event::CaptureMIDIDown => Some(vec![Action::InstallKeys(active_program_index)]),
+        // Each (re-)selection of DAW pad mode cycles the sub-behavior. Other
+        // pad modes just update the cached mode so we know to leave the pads
+        // alone.
+        Event::PadModeChanged(new_mode) => {
+            let mut actions = vec![Action::SetPadMode(*new_mode)];
+            if *new_mode == launchkey::PadMode::DAW {
+                actions.push(Action::CycleDawPadMode);
+            }
+            Some(actions)
+        }
     }
+}
+
+/// Returns true iff `program` parses and evaluates as a valid keys instrument:
+/// a 2-arg function returning a pair of waveforms. Mirrors the validation
+/// `Effect::InstallKeysFromActive` runs before installing.
+fn is_valid_keys_program(state: &actions::AppState, program: &Program) -> bool {
+    let function = match parser::parse_program::<MarkId>(&program.text) {
+        Ok(expr @ (parser::Expr::Function { .. } | parser::Expr::BuiltIn { .. })) => expr,
+        _ => return false,
+    };
+    effects::apply_note_function_as_waveforms(
+        &state.context,
+        &function,
+        vec![parser::Expr::Float(60.0), parser::Expr::Float(0.7)],
+        &program.sliders,
+    )
+    .is_ok()
 }
 
 /// Pushes the current app state out to the Launchkey hardware: pad colors
@@ -159,6 +196,45 @@ pub fn update_launchkey_state(
     let (_current_beat, current_beat_start, current_beat_duration) =
         renderer::current_beat_info(now, status);
     let bank_start = state.bank_start();
+    if launchkey.pad_mode != launchkey::PadMode::DAW {
+        // Some other pad layout (Drum, Custom, etc.) owns the pads —
+        // leave the LEDs alone so we don't fight it.
+        return;
+    }
+    match state.daw_pad_mode {
+        actions::DawPadMode::ClipLauncher => {
+            update_pads_clip_launcher(
+                state,
+                status,
+                launchkey,
+                now,
+                current_beat_start,
+                current_beat_duration,
+                bank_start,
+            );
+        }
+        actions::DawPadMode::KeysInstaller => {
+            update_pads_keys_installer(
+                state,
+                launchkey,
+                now,
+                current_beat_start,
+                current_beat_duration,
+                bank_start,
+            );
+        }
+    }
+}
+
+fn update_pads_clip_launcher(
+    state: &actions::AppState,
+    status: &tracker::Status<WaveformId, MarkId>,
+    launchkey: &mut launchkey::Launchkey,
+    now: Instant,
+    current_beat_start: Instant,
+    current_beat_duration: std::time::Duration,
+    bank_start: usize,
+) {
     for (i, program) in state.programs[bank_start..bank_start + renderer::PROGRAMS_PER_BANK]
         .iter()
         .enumerate()
@@ -228,6 +304,50 @@ pub fn update_launchkey_state(
         } else {
             // empty
             launchkey.set_daw_bottom_pad_color(i as u8, 0, 0, 0);
+        }
+    }
+}
+
+/// Updates the controller state for keys-installer mode.
+fn update_pads_keys_installer(
+    state: &actions::AppState,
+    launchkey: &mut launchkey::Launchkey,
+    now: Instant,
+    current_beat_start: Instant,
+    current_beat_duration: std::time::Duration,
+    bank_start: usize,
+) {
+    for i in 0..renderer::PROGRAMS_PER_BANK {
+        launchkey.set_daw_top_pad_color(i as u8, 0, 0, 0);
+
+        let program = match state.programs.get(bank_start + i) {
+            Some(p) => p,
+            None => {
+                launchkey.set_daw_bottom_pad_color(i as u8, 0, 0, 0);
+                continue;
+            }
+        };
+        if !is_valid_keys_program(state, program) {
+            launchkey.set_daw_bottom_pad_color(i as u8, 0, 0, 0);
+            continue;
+        }
+        let (red, blue, green) = match program.color {
+            Some(color) => (color.0 / 2, color.1 / 2, color.2 / 2),
+            None => (0, 127, 127),
+        };
+        let installed = state.keys.as_ref().is_some_and(|k| k.id == program.id);
+        if installed {
+            let intensity = now
+                .duration_since(current_beat_start)
+                .div_duration_f32(current_beat_duration);
+            launchkey.set_daw_bottom_pad_color(
+                i as u8,
+                red.saturating_sub((intensity * red as f32) as u8),
+                green.saturating_sub((intensity * green as f32) as u8),
+                blue.saturating_sub((intensity * blue as f32) as u8),
+            );
+        } else {
+            launchkey.set_daw_bottom_pad_color(i as u8, red, blue, green);
         }
     }
 }

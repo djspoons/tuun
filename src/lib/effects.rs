@@ -18,10 +18,13 @@ use crate::slider;
 use crate::tracker;
 use crate::waveform;
 
-/// Applies a note function expecting a pair of Waveforms as a result. Used
-/// by `PlayNoteOn` and `InstallKeysFromActive` to invoke the installed keys
-/// function with `(midi_note, velocity)` arguments.
-fn apply_note_function_as_waveforms(
+/// Applies a note function expecting a pair of Waveforms as a result.
+//
+// Used by `PlayNoteOn` and `InstallKeysFromActive` to invoke the installed keys
+// function with `(midi_note, velocity)` arguments. Also used by
+// `midi_input::update_launchkey_state` to validate whether a program is a
+// valid keys instrument before coloring its pad.
+pub fn apply_note_function_as_waveforms(
     context: &[(String, parser::Expr<MarkId>)],
     expr: &parser::Expr<MarkId>,
     args: Vec<parser::Expr<MarkId>>,
@@ -210,9 +213,6 @@ impl EffectRunner {
                 };
                 let id = new_keys.id;
                 state.keys = Some(new_keys);
-                if let Some(lk) = world.launchkey.as_deref_mut() {
-                    lk.set_capture_midi_brightness(127);
-                }
                 state.message = format!("Installed keys from program {}", id);
             }
 
@@ -332,11 +332,6 @@ impl EffectRunner {
                 }
             }
 
-            Effect::SetCaptureMidiBrightness(b) => {
-                if let Some(lk) = world.launchkey.as_deref_mut() {
-                    lk.set_capture_midi_brightness(b);
-                }
-            }
             Effect::SetLaunchkeyEncoderMode(new_mode) => {
                 if let Some(lk) = world.launchkey.as_deref_mut() {
                     if lk.encoder_mode != new_mode {
@@ -347,6 +342,16 @@ impl EffectRunner {
                         lk.set_encoder_relative_output();
                         sync_encoders(state, lk);
                     }
+                }
+            }
+            Effect::SetLaunchkeyPadMode(new_mode) => {
+                if let Some(lk) = world.launchkey.as_deref_mut() {
+                    lk.pad_mode = new_mode;
+                }
+            }
+            Effect::SetDawModeDisplay(label) => {
+                if let Some(lk) = world.launchkey.as_deref_mut() {
+                    lk.set_daw_mode_display(&label);
                 }
             }
 
