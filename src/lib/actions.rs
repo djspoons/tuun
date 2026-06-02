@@ -154,7 +154,14 @@ pub enum Action {
     /// Pad mode changed on the controller.
     SetPadMode(launchkey::PadMode),
     /// Cycle the DAW-pad-mode sub-behavior.
+    ///
+    /// Just toggles `state.daw_pad_mode`; the caller is responsible for
+    /// following up with `AnnounceDawPadMode` if it wants the display or
+    /// status message refreshed.
     CycleDawPadMode,
+    /// Push the current DAW-pad sub-mode out to the controller display
+    /// and the in-app status message.
+    AnnounceDawPadMode,
     /// Toggle the default repeat (cycle None -> Some(1) -> Some(2) -> None).
     CycleRepeatAfterMeasures,
 
@@ -390,12 +397,14 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
         }
         Action::SetPadMode(new_mode) => vec![Effect::SetLaunchkeyPadMode(new_mode)],
         Action::CycleDawPadMode => {
-            let next = match state.daw_pad_mode {
+            state.daw_pad_mode = match state.daw_pad_mode {
                 DawPadMode::ClipLauncher => DawPadMode::KeysInstaller,
                 DawPadMode::KeysInstaller => DawPadMode::ClipLauncher,
             };
-            state.daw_pad_mode = next;
-            let label = next.display_name().to_string();
+            vec![]
+        }
+        Action::AnnounceDawPadMode => {
+            let label = state.daw_pad_mode.display_name().to_string();
             vec![
                 Effect::SetDawModeDisplay(label.clone()),
                 Effect::ShowMessage(label),

@@ -134,13 +134,18 @@ pub fn classify(
         }]),
         Event::NoteOff { key } => Some(vec![Action::NoteOff { key: *key }]),
 
-        // Each (re-)selection of DAW pad mode cycles the sub-behavior. Other
-        // pad modes just update the cached mode so we know to leave the pads
-        // alone.
-        Event::PadModeChanged(new_mode) => {
-            let mut actions = vec![Action::SetPadMode(*new_mode)];
-            if *new_mode == launchkey::PadMode::DAW {
-                actions.push(Action::CycleDawPadMode);
+        // Re-selecting DAW pad mode while already in it cycles the
+        // sub-behavior. Returning to DAW from another pad mode (Drum,
+        // Custom, etc.) leaves the sub-mode alone, so the user picks up
+        // wherever they left off. Either way, announce the active
+        // sub-mode so the display strip and status message reflect it.
+        Event::PadModeChanged { previous, current } => {
+            let mut actions = vec![Action::SetPadMode(*current)];
+            if *current == launchkey::PadMode::DAW {
+                if *previous == launchkey::PadMode::DAW {
+                    actions.push(Action::CycleDawPadMode);
+                }
+                actions.push(Action::AnnounceDawPadMode);
             }
             Some(actions)
         }

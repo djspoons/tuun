@@ -100,10 +100,12 @@ impl EffectRunner {
         world: &mut World,
         actions: Vec<actions::Action>,
     ) {
+        //println!("dispatch: actions = {:?}", actions);
         let mut all_effects = Vec::new();
         for action in actions {
             all_effects.extend(actions::apply(state, action));
         }
+        //println!("  -> effects = {:?}", all_effects);
         self.run_all(state, world, all_effects);
     }
 

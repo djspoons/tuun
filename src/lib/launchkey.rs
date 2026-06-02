@@ -86,7 +86,15 @@ pub enum Event {
     },
 
     EncoderModeChanged(EncoderMode),
-    PadModeChanged(PadMode),
+    /// Fires whenever the controller reports a pad press for "Pad Mode."
+    ///
+    /// Carries `previous` so the classifier can distinguish a same-mode
+    /// re-selection (DAW → DAW, used as a cycling trigger) from a real
+    /// transition (Other → DAW, which should leave any sub-mode alone).
+    PadModeChanged {
+        previous: PadMode,
+        current: PadMode,
+    },
 
     PadFunctionDown,
 }
@@ -141,6 +149,9 @@ enum DisplayArrangement {
     //TitleNameAndText = 2,
     //TitleAndEncoderNames = 3,
     //NameAndNumber = 4,
+    /// A special arrangement that causes the display to display to show
+    /// the current contents.
+    TriggerDisplay = 31,
 }
 
 const DISPLAY_CONFIG_DISPLAY_ON_CHANGE: u8 = 1 << 6;
@@ -304,12 +315,21 @@ impl Launchkey {
         buf.push(DisplayArrangement::NameAndText as u8);
         self.send_sys_ex(&buf);
 
+        // Set field 0 (the name) to `name`.
         buf.clear();
         buf.extend(&STANDARD_SKU_PREFIX);
         buf.extend(&SET_DISPLAY_TEXT_FIELD);
         buf.push(DAW_MODE_DISPLAY_TARGET);
         buf.push(0); // field
         buf.extend(string_to_ascii(name));
+        self.send_sys_ex(&buf);
+
+        // Trigger a redraw: setting the text above only stores it.
+        buf.clear();
+        buf.extend(&STANDARD_SKU_PREFIX);
+        buf.extend(&CONFIGURE_DISPLAY);
+        buf.push(DAW_MODE_DISPLAY_TARGET);
+        buf.push(DisplayArrangement::TriggerDisplay as u8);
         self.send_sys_ex(&buf);
     }
 
@@ -424,8 +444,12 @@ impl DAWState {
                             PAD_MODE_DAW_VALUE => PadMode::DAW,
                             _ => PadMode::Other,
                         };
+                        let previous = self.pad_mode;
                         self.pad_mode = new_mode;
-                        return Some(Event::PadModeChanged(new_mode));
+                        return Some(Event::PadModeChanged {
+                            previous,
+                            current: new_mode,
+                        });
                     }
                     match (controller.as_int(), value.as_int()) {
                         // Navigation
