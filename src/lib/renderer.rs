@@ -13,6 +13,7 @@ use realfft::RealFftPlanner;
 use realfft::num_complex::{Complex, ComplexFloat};
 
 use crate::builtins;
+use crate::launchkey;
 use crate::metric::Metric;
 use crate::parser;
 use crate::slider;
@@ -344,6 +345,7 @@ impl Renderer {
         active_program_index: usize,
         message: &str,
         metrics: &mut Metrics,
+        encoder_mode: Option<launchkey::EncoderMode>,
     ) {
         // TODO so much clean-up
         let now = Instant::now();
@@ -613,36 +615,41 @@ impl Renderer {
             y += self.line_height as i32;
         }
 
-        // Draw the sliders
-        let slider_color = if let Mode::MoveSliders = mode {
-            ACTIVE_COLOR
-        } else {
-            INACTIVE_COLOR
-        };
-        self.canvas.set_draw_color(slider_color);
+        // Draw the sliders. Only the mouse-driven (no-launchkey) layout
+        // gets the top/left edge bars; when the controller is connected
+        // the encoder visualization below covers the same data more
+        // completely.
         let slider_display: Vec<SliderDisplay> =
             programs[active_program_index].sliders.slider_display();
-        // First slider: horizontal indicator at top
-        if let Some(s) = slider_display.get(0) {
-            self.canvas
-                .fill_rect(sdl2::rect::Rect::new(
-                    (self.width as f32 * s.normalized_value) as i32 - 3,
-                    0,
-                    6,
-                    16,
-                ))
-                .unwrap();
-        }
-        // Second slider: vertical indicator at left
-        if let Some(s) = slider_display.get(1) {
-            self.canvas
-                .fill_rect(sdl2::rect::Rect::new(
-                    0,
-                    self.height as i32 - (self.height as f32 * s.normalized_value) as i32 - 3,
-                    16,
-                    6,
-                ))
-                .unwrap();
+        if encoder_mode.is_none() {
+            let slider_color = if let Mode::MoveSliders = mode {
+                ACTIVE_COLOR
+            } else {
+                INACTIVE_COLOR
+            };
+            self.canvas.set_draw_color(slider_color);
+            // First slider: horizontal indicator at top
+            if let Some(s) = slider_display.get(0) {
+                self.canvas
+                    .fill_rect(sdl2::rect::Rect::new(
+                        (self.width as f32 * s.normalized_value) as i32 - 3,
+                        0,
+                        6,
+                        16,
+                    ))
+                    .unwrap();
+            }
+            // Second slider: vertical indicator at left
+            if let Some(s) = slider_display.get(1) {
+                self.canvas
+                    .fill_rect(sdl2::rect::Rect::new(
+                        0,
+                        self.height as i32 - (self.height as f32 * s.normalized_value) as i32 - 3,
+                        16,
+                        6,
+                    ))
+                    .unwrap();
+            }
         }
 
         // Draw the marks
@@ -667,9 +674,9 @@ impl Renderer {
             let mut marks_duration = Duration::from_secs(0);
             let marks_width = self.width as f32 / 4.0; // for one measure
             let marks_x_offset = if even {
-                self.width as f32 / 2.0
+                5.0 * self.width as f32 / 8.0
             } else {
-                self.width as f32 / 4.0
+                3.0 * self.width as f32 / 8.0
             };
             // Find the start of the first Beats waveform that's odd/even
             for mark in status.marks.iter() {
@@ -725,6 +732,76 @@ impl Renderer {
                         y as i32,
                         width as u32,
                         height as u32,
+                    ))
+                    .unwrap();
+            }
+        }
+
+        // Encoder visualization: fader-style bars. Plugin mode shows the active program's
+        // sliders (one bar per slider); Mixer mode shows level_db for every non-empty
+        // programs in the bank.
+        if let Some(encoder_mode) = encoder_mode {
+            let bars_left = self.width as f32 / 8.0;
+            let bars_right = 3.0 * self.width as f32 / 8.0;
+            let bars_top = programs_bottom + 10.0;
+            let bars_bottom = marks_bottom - 10.0;
+            let slot_width = (bars_right - bars_left) / PROGRAMS_PER_BANK as f32;
+            let bar_height = 6.0_f32;
+            let track_top = bars_top + bar_height / 2.0;
+            let track_bottom = bars_bottom - bar_height / 2.0;
+            let track_span = track_bottom - track_top;
+            let bar_width = slot_width * 0.6;
+
+            for i in 0..PROGRAMS_PER_BANK {
+                let slot_center = bars_left + (i as f32 + 0.5) * slot_width;
+                let (normalized, color) = match encoder_mode {
+                    launchkey::EncoderMode::Plugin => {
+                        let program = &programs[active_program_index];
+                        let Some(&normalized) = program.sliders.normalized_values.get(i) else {
+                            continue;
+                        };
+                        let color = program
+                            .color
+                            .map(|(r, g, b)| Color::RGB(r, g, b))
+                            .unwrap_or(INACTIVE_COLOR);
+                        (normalized, color)
+                    }
+                    launchkey::EncoderMode::Mixer => {
+                        let Some(program) = programs.get(bank_start + i) else {
+                            continue;
+                        };
+                        if program.text.is_empty() {
+                            continue;
+                        }
+                        // level_db ∈ [-60, +6] → [0, 1].
+                        let normalized = ((program.level_db + 60.0) / 66.0).clamp(0.0, 1.0);
+                        let color = program
+                            .color
+                            .map(|(r, g, b)| Color::RGB(r, g, b))
+                            .unwrap_or(INACTIVE_COLOR);
+                        (normalized, color)
+                    }
+                };
+
+                // Dim vertical track behind the bar.
+                let track_color = Color::RGB(color.r / 3, color.g / 3, color.b / 3);
+                self.canvas.set_draw_color(track_color);
+                self.canvas
+                    .draw_line(
+                        (slot_center as i32, track_top as i32),
+                        (slot_center as i32, track_bottom as i32),
+                    )
+                    .unwrap();
+
+                // Fader bar.
+                self.canvas.set_draw_color(color);
+                let bar_center_y = track_bottom - normalized * track_span;
+                self.canvas
+                    .fill_rect(sdl2::rect::Rect::new(
+                        (slot_center - bar_width / 2.0) as i32,
+                        (bar_center_y - bar_height / 2.0) as i32,
+                        bar_width as u32,
+                        bar_height as u32,
                     ))
                     .unwrap();
             }

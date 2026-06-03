@@ -505,6 +505,7 @@ pub fn main() {
             state.active_program_index,
             &state.message,
             &mut metrics,
+            launchkey.as_ref().map(|l| l.encoder_mode),
         );
 
         if let Some(launchkey) = launchkey.as_mut() {
