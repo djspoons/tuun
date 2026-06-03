@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{Debug, Display};
 use std::io::BufWriter;
-use std::{f64, mem, usize};
+use std::{f64, mem};
 
 use fastrand;
 
@@ -37,16 +37,18 @@ pub enum State {
 pub type Waveform<M> = waveform::Waveform<M, State>;
 
 pub fn initialize_state<M, S>(waveform: waveform::Waveform<M, S>) -> Waveform<M> {
-    return waveform::initialize_state(waveform, State::Initial);
+    waveform::initialize_state(waveform, State::Initial)
 }
+
+pub type CaptureState<'a> =
+    Option<RefCell<&'a mut HashMap<String, hound::WavWriter<BufWriter<std::fs::File>>>>>;
 
 /*
  * Generator converts waveforms into sequences of samples.
  */
 pub struct Generator<'a> {
     sample_rate: i32,
-    pub capture_state:
-        Option<RefCell<&'a mut HashMap<String, hound::WavWriter<BufWriter<std::fs::File>>>>>,
+    pub capture_state: CaptureState<'a>,
     // Total number of samples allocated as part of generation
     pub allocations: usize,
 }
@@ -88,7 +90,7 @@ impl<'a> Generator<'a> {
     ) -> usize {
         use State::*;
         use waveform::Waveform::*;
-        if out.len() == 0 {
+        if out.is_empty() {
             return 0;
         }
         match waveform {
@@ -104,7 +106,7 @@ impl<'a> Generator<'a> {
                 for (i, x) in out.iter_mut().enumerate() {
                     *x = (*position + i) as f32 / self.sample_rate as f32;
                 }
-                *position = *position + out.len();
+                *position += out.len();
                 out.len()
             }
             Time(_) => unreachable!("Time waveform has non-Position state"),
@@ -124,7 +126,7 @@ impl<'a> Generator<'a> {
                 }
                 let len = (samples.len() - *position).min(out.len());
                 out[..len].copy_from_slice(&samples[*position..(*position + len)]);
-                *position = *position + len;
+                *position += len;
                 len
             }
             Fixed(_, _) => unreachable!("Fixed waveform has non-Initial, non-Position state"),
@@ -379,8 +381,8 @@ impl<'a> Generator<'a> {
     fn generate_filter<M: Debug + Display>(
         &mut self,
         inner: &mut Waveform<M>,
-        feed_forward: &mut Vec<Waveform<M>>,
-        feedback: &mut Vec<Waveform<M>>,
+        feed_forward: &mut [Waveform<M>],
+        feedback: &mut [Waveform<M>],
         input: &mut VecDeque<f32>,
         output: &mut VecDeque<f32>,
         out: &mut [f32],
@@ -461,16 +463,16 @@ impl<'a> Generator<'a> {
         } else {
             // If they are not all constants, then generate output for each coefficient, which
             // we'll copy over later (inside the loop).
-            for mut ff in feed_forward.iter_mut() {
+            for ff in feed_forward.iter_mut() {
                 let mut ff_out = vec![0.0; out_len];
                 self.allocations += out_len;
-                _ = self.generate(&mut ff, &mut ff_out);
+                _ = self.generate(ff, &mut ff_out);
                 ff_outs.push(ff_out);
             }
-            for mut fb in feedback.iter_mut() {
+            for fb in feedback.iter_mut() {
                 let mut fb_out = vec![0.0; out_len];
                 self.allocations += out_len;
-                _ = self.generate(&mut fb, &mut fb_out);
+                _ = self.generate(fb, &mut fb_out);
                 fb_outs.push(fb_out);
             }
         }
@@ -583,7 +585,7 @@ impl<'a> Generator<'a> {
                 self.length(waveform, max)
             }
             Time(Position(position)) => {
-                *position = *position + max;
+                *position += max;
                 max
             }
             Time(_) => unreachable!("Time waveform with non-Initial, non-Position state"),
@@ -597,8 +599,8 @@ impl<'a> Generator<'a> {
                     return 0;
                 }
                 let len = max.min(samples.len() - *position);
-                *position = *position + len;
-                return len;
+                *position += len;
+                len
             }
             Fixed(_, _) => unreachable!("Fixed waveform with non-Initial, non-Position state"),
             Fin {
@@ -633,8 +635,8 @@ impl<'a> Generator<'a> {
                         self.allocations += max;
                         let length_len = self.generate(length, &mut length_out);
                         let inner_len = self.length(inner, max);
-                        for i in 0..max {
-                            if i == length_len || length_out[i] >= 0.0 || i == inner_len {
+                        for (i, &v) in length_out.iter().enumerate() {
+                            if i == length_len || v >= 0.0 || i == inner_len {
                                 return i;
                             }
                         }
@@ -713,11 +715,10 @@ impl<'a> Generator<'a> {
                 }
             }
             Reset { trigger, .. } => {
-                let len = self.length(trigger, max);
                 // We don't change the state of waveform here as its position
                 // isn't meaningful in a global sense.
                 // TODO reconsider this
-                len
+                self.length(trigger, max)
             }
             Alt {
                 trigger,
@@ -730,14 +731,8 @@ impl<'a> Generator<'a> {
                 let _ = self.length(negative_waveform, max);
                 len
             }
-            Marked { waveform, .. } => {
-                let len = self.length(waveform, max);
-                len
-            }
-            Captured { waveform, .. } => {
-                let len = self.length(waveform, max);
-                len
-            }
+            Marked { waveform, .. } => self.length(waveform, max),
+            Captured { waveform, .. } => self.length(waveform, max),
         }
     }
 
@@ -765,7 +760,7 @@ impl<'a> Generator<'a> {
                     // current_value < value and current_value >= 0 so value > 0 (so usize is ok)
                     let target_position = (value * self.sample_rate as f32).ceil() as usize;
                     // Also, target_position must be > position
-                    MaybeOption::Some(max.min((target_position - position) as usize))
+                    MaybeOption::Some(max.min(target_position - position))
                 }
             }
             Append(a, _, _) => {
@@ -831,16 +826,16 @@ impl<'a> Generator<'a> {
         }
         enum Result<M> {
             // Pre-computable
-            PC(Waveform<M>),
+            Pc(Waveform<M>),
             // Not-pre-computable
-            NPC(Reason, Waveform<M>),
+            Npc(Reason, Waveform<M>),
         }
 
-        impl<M> Into<Waveform<M>> for Result<M> {
-            fn into(self) -> Waveform<M> {
-                match self {
-                    Result::PC(w) => w,
-                    Result::NPC(_, w) => w,
+        impl<M> From<Result<M>> for Waveform<M> {
+            fn from(val: Result<M>) -> Self {
+                match val {
+                    Result::Pc(w) => w,
+                    Result::Npc(_, w) => w,
                 }
             }
         }
@@ -893,7 +888,7 @@ impl<'a> Generator<'a> {
             use waveform::Waveform::*;
 
             // do_one_dynamic takes a waveform and determines if it can be pre-computed. If so, it applies `wf` and
-            // then wraps the result in NPC(Dynamic).
+            // then wraps the result in Npc(Dynamic).
             fn do_one_dynamic<M, F: FnOnce(Waveform<M>) -> Waveform<M>>(
                 g: &mut Generator,
                 a: Waveform<M>,
@@ -903,14 +898,14 @@ impl<'a> Generator<'a> {
                 M: Debug + Display,
             {
                 match precompute_internal(g, a) {
-                    PC(a) => NPC(Dynamic, wf(generate_fixed(g, a))),
-                    NPC(_, a) => NPC(Dynamic, wf(a)),
+                    Pc(a) => Npc(Dynamic, wf(generate_fixed(g, a))),
+                    Npc(_, a) => Npc(Dynamic, wf(a)),
                 }
             }
 
             // do_two attempts to pre-compute two waveforms, then applies `wf` to the results. If both waveforms are
-            // pre-computable, then the result is wrapped in PC. If at least one is not pre-computable, then the result
-            // is wrapped in NPC, with the reason determined by the reason(s) for the two waveforms.
+            // pre-computable, then the result is wrapped in Pc. If at least one is not pre-computable, then the result
+            // is wrapped in Npc, with the reason determined by the reason(s) for the two waveforms.
             fn do_two<M, F: FnOnce(Waveform<M>, Waveform<M>) -> Waveform<M>>(
                 g: &mut Generator,
                 a: Waveform<M>,
@@ -921,12 +916,12 @@ impl<'a> Generator<'a> {
                 M: Debug + Display,
             {
                 match (precompute_internal(g, a), precompute_internal(g, b)) {
-                    (PC(a), PC(b)) => PC(wf(a, b)),
-                    (PC(a), NPC(why, b)) => NPC(why, wf(generate_fixed(g, a), b)),
-                    (NPC(why, a), PC(b)) => NPC(why, wf(a, generate_fixed(g, b))),
-                    (NPC(Infinite, a), NPC(Infinite, b)) => NPC(Infinite, wf(a, b)),
+                    (Pc(a), Pc(b)) => Pc(wf(a, b)),
+                    (Pc(a), Npc(why, b)) => Npc(why, wf(generate_fixed(g, a), b)),
+                    (Npc(why, a), Pc(b)) => Npc(why, wf(a, generate_fixed(g, b))),
+                    (Npc(Infinite, a), Npc(Infinite, b)) => Npc(Infinite, wf(a, b)),
                     // At least one is Dynamic and neither is pre-computable
-                    (a, b) => NPC(Dynamic, wf(a.into(), b.into())),
+                    (a, b) => Npc(Dynamic, wf(a.into(), b.into())),
                 }
             }
 
@@ -939,7 +934,7 @@ impl<'a> Generator<'a> {
             }
 
             // Like do_two, do_three, attempts to pre-compute the three waveforms, then applies `wf` to the results.
-            // The result is wrapped in PC if all three are pre-computable, and NPC otherwise, with the reason
+            // The result is wrapped in Pc if all three are pre-computable, and Npc otherwise, with the reason
             // determined by the reason(s) for the three waveforms.
             fn do_three<M, F: FnOnce(Waveform<M>, Waveform<M>, Waveform<M>) -> Waveform<M>>(
                 g: &mut Generator,
@@ -957,32 +952,32 @@ impl<'a> Generator<'a> {
                     precompute_internal(g, c),
                 ) {
                     // All pre-computable
-                    (PC(a), PC(b), PC(c)) => PC(wf(a, b, c)),
+                    (Pc(a), Pc(b), Pc(c)) => Pc(wf(a, b, c)),
 
                     // One is not pre-computable, two are pre-computable, so pre-compute those two now
-                    (PC(a), PC(b), NPC(why, c)) => {
-                        NPC(why, wf(generate_fixed(g, a), generate_fixed(g, b), c))
+                    (Pc(a), Pc(b), Npc(why, c)) => {
+                        Npc(why, wf(generate_fixed(g, a), generate_fixed(g, b), c))
                     }
-                    (PC(a), NPC(why, b), PC(c)) => {
-                        NPC(why, wf(generate_fixed(g, a), b, generate_fixed(g, c)))
+                    (Pc(a), Npc(why, b), Pc(c)) => {
+                        Npc(why, wf(generate_fixed(g, a), b, generate_fixed(g, c)))
                     }
-                    (NPC(why, a), PC(b), PC(c)) => {
-                        NPC(why, wf(a, generate_fixed(g, b), generate_fixed(g, c)))
+                    (Npc(why, a), Pc(b), Pc(c)) => {
+                        Npc(why, wf(a, generate_fixed(g, b), generate_fixed(g, c)))
                     }
 
                     // Two are not pre-computable, one is pre-computable, so pre-compute that one now
-                    (NPC(why1, a), NPC(why2, b), PC(c)) => {
-                        NPC(resolve_reason(why1, why2), wf(a, b, generate_fixed(g, c)))
+                    (Npc(why1, a), Npc(why2, b), Pc(c)) => {
+                        Npc(resolve_reason(why1, why2), wf(a, b, generate_fixed(g, c)))
                     }
-                    (NPC(why1, a), PC(b), NPC(why2, c)) => {
-                        NPC(resolve_reason(why1, why2), wf(a, generate_fixed(g, b), c))
+                    (Npc(why1, a), Pc(b), Npc(why2, c)) => {
+                        Npc(resolve_reason(why1, why2), wf(a, generate_fixed(g, b), c))
                     }
-                    (PC(a), NPC(why1, b), NPC(why2, c)) => {
-                        NPC(resolve_reason(why1, why2), wf(generate_fixed(g, a), b, c))
+                    (Pc(a), Npc(why1, b), Npc(why2, c)) => {
+                        Npc(resolve_reason(why1, why2), wf(generate_fixed(g, a), b, c))
                     }
 
                     // All three are not pre-computable
-                    (NPC(why1, a), NPC(why2, b), NPC(why3, c)) => NPC(
+                    (Npc(why1, a), Npc(why2, b), Npc(why3, c)) => Npc(
                         resolve_reason(resolve_reason(why1, why2), why3),
                         wf(a, b, c),
                     ),
@@ -991,21 +986,21 @@ impl<'a> Generator<'a> {
 
             match waveform {
                 // Const, Time, and Noise are all infinite.
-                Const(_) | Time(_) | Noise => NPC(Infinite, waveform),
+                Const(_) | Time(_) | Noise => Npc(Infinite, waveform),
                 // Fixed is the quintessential pre-computable waveform.
-                Fixed(_, _) => PC(waveform),
+                Fixed(_, _) => Pc(waveform),
                 Fin { length, waveform } => match (
                     // XXX we could check to see that `length` crosses zero at some point for the cases where we
                     // call generate_fixed
                     precompute_internal(g, *length),
                     precompute_internal(g, *waveform),
                 ) {
-                    (length, NPC(Dynamic, waveform)) => {
+                    (length, Npc(Dynamic, waveform)) => {
                         println!(
                             "Cannot precompute Fin because inner waveform is dynamic: {}",
                             &waveform
                         );
-                        NPC(
+                        Npc(
                             Dynamic,
                             Fin {
                                 length: Box::new(length.into()),
@@ -1013,12 +1008,12 @@ impl<'a> Generator<'a> {
                             },
                         )
                     }
-                    (NPC(Dynamic, length), waveform) => {
+                    (Npc(Dynamic, length), waveform) => {
                         println!(
                             "Cannot precompute Fin because length waveform is dynamic: {}",
                             &length
                         );
-                        NPC(
+                        Npc(
                             Dynamic,
                             Fin {
                                 length: Box::new(length),
@@ -1028,7 +1023,7 @@ impl<'a> Generator<'a> {
                     }
                     // Neither is dynamic, so we can pre-compute
                     // TODO... maybe we should check that `length` is non-zero at some point?
-                    (length, waveform) => PC(Fin {
+                    (length, waveform) => Pc(Fin {
                         length: Box::new(length.into()),
                         waveform: Box::new(waveform.into()),
                     }),
@@ -1047,24 +1042,24 @@ impl<'a> Generator<'a> {
                 }),
                 BinaryPointOp(op, a, b) => {
                     match (op, precompute_internal(g, *a), precompute_internal(g, *b)) {
-                        (op, PC(a), PC(b)) => PC(BinaryPointOp(op, Box::new(a), Box::new(b))),
-                        (op @ (Operator::Multiply | Operator::Divide), NPC(Infinite, a), PC(b))
-                        | (op @ (Operator::Multiply | Operator::Divide), PC(a), NPC(Infinite, b)) => {
-                            PC(BinaryPointOp(op, Box::new(a), Box::new(b)))
+                        (op, Pc(a), Pc(b)) => Pc(BinaryPointOp(op, Box::new(a), Box::new(b))),
+                        (op @ (Operator::Multiply | Operator::Divide), Npc(Infinite, a), Pc(b))
+                        | (op @ (Operator::Multiply | Operator::Divide), Pc(a), Npc(Infinite, b)) => {
+                            Pc(BinaryPointOp(op, Box::new(a), Box::new(b)))
                         }
-                        (op, PC(a), NPC(why, b)) => NPC(
+                        (op, Pc(a), Npc(why, b)) => Npc(
                             why,
                             BinaryPointOp(op, Box::new(generate_fixed(g, a)), Box::new(b)),
                         ),
-                        (op, NPC(why, a), PC(b)) => NPC(
+                        (op, Npc(why, a), Pc(b)) => Npc(
                             why,
                             BinaryPointOp(op, Box::new(a), Box::new(generate_fixed(g, b))),
                         ),
-                        (op, NPC(Infinite, a), NPC(Infinite, b)) => {
-                            NPC(Infinite, BinaryPointOp(op, Box::new(a), Box::new(b)))
+                        (op, Npc(Infinite, a), Npc(Infinite, b)) => {
+                            Npc(Infinite, BinaryPointOp(op, Box::new(a), Box::new(b)))
                         }
                         // At least one is Dynamic and neither is pre-computable
-                        (op, a, b) => NPC(
+                        (op, a, b) => Npc(
                             Dynamic,
                             BinaryPointOp(op, Box::new(a.into()), Box::new(b.into())),
                         ),
@@ -1087,11 +1082,11 @@ impl<'a> Generator<'a> {
                         .collect();
 
                     let mut reason: Option<Reason> = None;
-                    if let NPC(why, _) = &inner {
+                    if let Npc(why, _) = &inner {
                         reason = Some(*why);
                     }
                     for r in &ff {
-                        if let NPC(why, _) = r {
+                        if let Npc(why, _) = r {
                             reason = Some(match reason {
                                 Some(prev) => resolve_reason(prev, *why),
                                 None => *why,
@@ -1099,7 +1094,7 @@ impl<'a> Generator<'a> {
                         }
                     }
                     for r in &fb {
-                        if let NPC(why, _) = r {
+                        if let Npc(why, _) = r {
                             reason = Some(match reason {
                                 Some(prev) => resolve_reason(prev, *why),
                                 None => *why,
@@ -1107,16 +1102,16 @@ impl<'a> Generator<'a> {
                         }
                     }
 
-                    // If `reason` is Some then we will be returning NPC for the Filter, so generate
+                    // If `reason` is Some then we will be returning Npc for the Filter, so generate
                     // samples for any pre-computable sub-waveforms.
                     let mut extract = |r: Result<M>| match (r, &reason) {
-                        (PC(w), Some(_)) => generate_fixed(g, w),
-                        (PC(w), None) => w,
-                        (NPC(_, w), _) => w,
+                        (Pc(w), Some(_)) => generate_fixed(g, w),
+                        (Pc(w), None) => w,
+                        (Npc(_, w), _) => w,
                     };
                     let inner_wf = extract(inner);
-                    let ff_wfs: Vec<_> = ff.into_iter().map(|r| extract(r)).collect();
-                    let fb_wfs: Vec<_> = fb.into_iter().map(|r| extract(r)).collect();
+                    let ff_wfs: Vec<_> = ff.into_iter().map(&mut extract).collect();
+                    let fb_wfs: Vec<_> = fb.into_iter().map(extract).collect();
 
                     let filter_wf = Filter {
                         waveform: Box::new(inner_wf),
@@ -1125,8 +1120,8 @@ impl<'a> Generator<'a> {
                         state,
                     };
                     match reason {
-                        Some(why) => NPC(why, filter_wf),
-                        None => PC(filter_wf),
+                        Some(why) => Npc(why, filter_wf),
+                        None => Pc(filter_wf),
                     }
                 }
                 Reset {
@@ -1169,8 +1164,8 @@ impl<'a> Generator<'a> {
         }
 
         let result = match precompute_internal(self, initialize_state(waveform)) {
-            Result::PC(w) => generate_fixed(self, w),
-            Result::NPC(_, w) => w,
+            Result::Pc(w) => generate_fixed(self, w),
+            Result::Npc(_, w) => w,
         };
         /*
         println!(

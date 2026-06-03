@@ -198,7 +198,7 @@ where
         } => Sine {
             frequency: Box::new(initialize_state(*frequency, state.clone())),
             phase: Box::new(initialize_state(*phase, state.clone())),
-            state: state,
+            state,
         },
         Filter {
             waveform,
@@ -215,7 +215,7 @@ where
                 .into_iter()
                 .map(|w| initialize_state(w, state.clone()))
                 .collect(),
-            state: state,
+            state,
         },
         BinaryPointOp(op, a, b) => BinaryPointOp(
             op,
@@ -227,7 +227,7 @@ where
         } => Reset {
             trigger: Box::new(initialize_state(*trigger, state.clone())),
             waveform: Box::new(initialize_state(*waveform, state.clone())),
-            state: state,
+            state,
         },
         Alt {
             trigger,
@@ -353,11 +353,9 @@ where
         } => {
             set_state(waveform, new_state.clone());
             let _ = feed_forward
-                .into_iter()
+                .iter_mut()
                 .map(|w| set_state(w, new_state.clone()));
-            let _ = feedback
-                .into_iter()
-                .map(|w| set_state(w, new_state.clone()));
+            let _ = feedback.iter_mut().map(|w| set_state(w, new_state.clone()));
             *state = new_state;
         }
         BinaryPointOp(_, a, b) => {

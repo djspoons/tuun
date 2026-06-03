@@ -51,7 +51,7 @@ pub fn load_context(config: &Config, context: &mut Vec<(String, parser::Expr<Mar
     let mut errors = Vec::new();
     for file in config.context_files.iter() {
         let raw_context = std::fs::read_to_string(file)
-            .expect(format!("Failed to read context file: {}", file).as_str());
+            .unwrap_or_else(|_| panic!("Failed to read context file: {}", file));
         // Strip out comments (that is any after // on a line)
         let raw_context: String = raw_context
             .lines()
@@ -97,7 +97,7 @@ pub fn load_context(config: &Config, context: &mut Vec<(String, parser::Expr<Mar
     if errors.is_empty() {
         format!("Loaded {} bindings from context", bindings)
     } else {
-        format!("Error loading context: {}", errors[0].to_string())
+        format!("Error loading context: {}", errors[0])
     }
 }
 
@@ -226,10 +226,7 @@ pub fn load_programs(
         for (j, config) in sliders.configs.iter().enumerate() {
             let value =
                 slider::denormalize(&config.function, sliders.normalized_values[j]).unwrap_or(0.0);
-            last_slider_values.insert(
-                (WaveformId::Program(id.clone()), config.label.clone()),
-                value,
-            );
+            last_slider_values.insert((WaveformId::Program(*id), config.label.clone()), value);
         }
     }
     (last_slider_values, errors)

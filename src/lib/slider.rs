@@ -33,7 +33,7 @@ pub fn denormalize(function: &parser::SliderFunction, normalized: f32) -> Result
             let mut context = Vec::new();
             builtins::add_prelude(&mut context);
             let result = parser::evaluate(&context, expr)
-                .map_err(|e| format!("slider function eval error: {}", e.to_string()))?;
+                .map_err(|e| format!("slider function eval error: {}", e))?;
             match result {
                 parser::Expr::Float(v) => Ok(v),
                 other => Err(format!(
@@ -46,8 +46,8 @@ pub fn denormalize(function: &parser::SliderFunction, normalized: f32) -> Result
 }
 
 pub fn prepend_slider_bindings<M, F>(
-    configs: &Vec<parser::Slider>,
-    normalized_values: &Vec<f32>,
+    configs: &[parser::Slider],
+    normalized_values: &[f32],
     mark_id: F,
     expr: parser::Expr<M>,
 ) -> parser::Expr<M>

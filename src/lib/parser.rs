@@ -39,7 +39,7 @@ pub struct Error {
     message: String,
 }
 
-impl<'a> Error {
+impl Error {
     pub fn new(message: String) -> Self {
         Self {
             range: None,
@@ -77,11 +77,11 @@ impl<'a> nom::error::ParseError<LocatedSpan<'a>> for Error {
     // }
 }
 
-impl ToString for Error {
-    fn to_string(&self) -> String {
+impl Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.range {
-            Some(range) => format!("{} at {}..{}", self.message, range.start, range.end),
-            None => self.message.clone(),
+            Some(range) => write!(f, "{} at {}..{}", self.message, range.start, range.end),
+            None => f.write_str(&self.message),
         }
     }
 }
@@ -203,7 +203,7 @@ fn parse_string<M>(input: LocatedSpan) -> IResult<Expr<M>> {
         take_while(|c: char| c != '"'),
         char('"'),
     ).parse(input)?;
-    return Ok((rest, Expr::String(value.fragment().to_string())));
+    Ok((rest, Expr::String(value.fragment().to_string())))
 }
 
 fn parse_literal<M>(input: LocatedSpan) -> IResult<Expr<M>> {
@@ -216,7 +216,7 @@ fn parse_literal<M>(input: LocatedSpan) -> IResult<Expr<M>> {
         ).map(Expr::Float),
         parse_string,
     )).parse(input)?;
-    return Ok((rest, value));
+    Ok((rest, value))
 }
 
 fn parse_identifier(input: LocatedSpan) -> IResult<String> {
@@ -234,7 +234,7 @@ fn parse_identifier(input: LocatedSpan) -> IResult<String> {
             ),
             parse_unary_operator,
         )).parse(input)?;
-    return Ok((rest, value.to_string()));
+    Ok((rest, value.to_string()))
 }
 
 fn parse_unary_operator(input: LocatedSpan) -> IResult<LocatedSpan> {
@@ -248,7 +248,7 @@ fn parse_unary_operator(input: LocatedSpan) -> IResult<LocatedSpan> {
             tag("-"),
             tag("?"),
         )).parse(input)?;
-    return Ok((rest, value));
+    Ok((rest, value))
 }
 
 fn parse_pattern(input: LocatedSpan) -> IResult<Pattern> {
@@ -264,13 +264,13 @@ fn parse_pattern(input: LocatedSpan) -> IResult<Pattern> {
                 (multispace0, expect(char(')'), "expected ')' at end of tuple pattern")),
             ).map(Pattern::Tuple),
         )).parse(input)?;
-    return Ok((rest, pattern));
+    Ok((rest, pattern))
 }
 
 fn parse_function<M>(input: LocatedSpan) -> IResult<Expr<M>> {
     #[rustfmt::skip]
     let (rest, expr) =
-        ((delimited(
+        (delimited(
             (tag("fn"), multispace0),
             alt((
                 delimited((char('('), multispace0),
@@ -280,10 +280,10 @@ fn parse_function<M>(input: LocatedSpan) -> IResult<Expr<M>> {
             )),
             ws(expect(tag("=>"), "expected '=>'"))),
             parse_expr,
-        )).map(|(pattern, body)| {
+        ).map(|(pattern, body)| {
             Expr::Function { pattern, body: Box::new(body) }
         }).parse(input)?;
-    return Ok((rest, expr));
+    Ok((rest, expr))
 }
 
 fn parse_bindings<M>(input: LocatedSpan) -> IResult<Vec<(Pattern, Expr<M>)>> {
@@ -300,7 +300,7 @@ fn parse_bindings<M>(input: LocatedSpan) -> IResult<Vec<(Pattern, Expr<M>)>> {
             ),
             opt((multispace0, char(','))),
         ).parse(input)?;
-    return Ok((rest, bindings));
+    Ok((rest, bindings))
 }
 
 pub fn make_let<M>(bindings: Vec<(Pattern, Expr<M>)>, mut expr: Expr<M>) -> Expr<M> {
@@ -329,7 +329,7 @@ fn parse_let<M>(input: LocatedSpan) -> IResult<Expr<M>> {
             let expr = expr.unwrap_or_default();
             make_let(bindings, expr)
         }).parse(input)?;
-    return Ok((rest, expr));
+    Ok((rest, expr))
 }
 
 fn parse_if_then_else<M>(input: LocatedSpan) -> IResult<Expr<M>> {
@@ -350,7 +350,7 @@ fn parse_if_then_else<M>(input: LocatedSpan) -> IResult<Expr<M>> {
                 else_: Box::new(else_),
             }
         }).parse(input)?;
-    return Ok((rest, expr));
+    Ok((rest, expr))
 }
 
 fn parse_primitive<M>(input: LocatedSpan) -> IResult<Expr<M>> {
@@ -373,7 +373,7 @@ fn parse_primitive<M>(input: LocatedSpan) -> IResult<Expr<M>> {
         parse_tuple,
         parse_list
     )).parse(input)?;
-    return Ok((rest, value));
+    Ok((rest, value))
 }
 
 fn parse_application<M>(input: LocatedSpan) -> IResult<Expr<M>> {
@@ -394,10 +394,10 @@ fn parse_application<M>(input: LocatedSpan) -> IResult<Expr<M>> {
                     argument: Box::new(expr),
                 };
             }
-            return result;
+            result
         },
     ).parse(input)?;
-    return Ok((rest, expr));
+    Ok((rest, expr))
 }
 
 fn parse_multiplicative<M>(input: LocatedSpan) -> IResult<Expr<M>> {
@@ -418,10 +418,10 @@ fn parse_multiplicative<M>(input: LocatedSpan) -> IResult<Expr<M>> {
                     argument: Box::new(Expr::Tuple(vec![expr, factor.unwrap_or_default()])),
                 };
             }
-            return expr;
+            expr
         },
     ).parse(input)?;
-    return Ok((rest, value));
+    Ok((rest, value))
 }
 
 fn parse_additive<M>(input: LocatedSpan) -> IResult<Expr<M>> {
@@ -442,10 +442,10 @@ fn parse_additive<M>(input: LocatedSpan) -> IResult<Expr<M>> {
                     argument: Box::new(Expr::Tuple(vec![expr, term.unwrap_or_default()])),
                 };
             }
-            return expr;
+            expr
         },
     ).parse(input)?;
-    return Ok((rest, value));
+    Ok((rest, value))
 }
 
 fn parse_relational<M>(input: LocatedSpan) -> IResult<Expr<M>> {
@@ -465,10 +465,10 @@ fn parse_relational<M>(input: LocatedSpan) -> IResult<Expr<M>> {
                     argument: Box::new(Expr::Tuple(vec![expr, term])),
                 };
             }
-            return expr;
+            expr
         },
     ).parse(input)?;
-    return Ok((rest, value));
+    Ok((rest, value))
 }
 
 fn parse_chord<M>(input: LocatedSpan) -> IResult<Expr<M>> {
@@ -478,13 +478,13 @@ fn parse_chord<M>(input: LocatedSpan) -> IResult<Expr<M>> {
         parse_expr,
         (multispace0, expect(char('}'), "expected '}' at end of chord")),
     ).parse(input)?;
-    return Ok((
+    Ok((
         rest,
         Expr::Application {
             function: Box::new(Expr::Variable(("_chord").to_string())),
             argument: Box::new(expr),
         },
-    ));
+    ))
 }
 
 fn parse_sequence<M>(input: LocatedSpan) -> IResult<Expr<M>> {
@@ -494,13 +494,13 @@ fn parse_sequence<M>(input: LocatedSpan) -> IResult<Expr<M>> {
         parse_expr,
         (multispace0, expect(char('>'), "expected '>' at end of sequence")),
     ).parse(input)?;
-    return Ok((
+    Ok((
         rest,
         Expr::Application {
             function: Box::new(Expr::Variable(("_sequence").to_string())),
             argument: Box::new(expr),
         },
-    ));
+    ))
 }
 
 /// Parses a parenthesized expression or expressions. If there is only one element, returns just that element;
@@ -518,7 +518,7 @@ fn parse_tuple<M>(input: LocatedSpan) -> IResult<Expr<M>> {
     if exprs.len() == 1 {
         return Ok((rest, exprs.pop().unwrap()));
     }
-    return Ok((rest, Expr::Tuple(exprs)));
+    Ok((rest, Expr::Tuple(exprs)))
 }
 
 fn parse_list<M>(input: LocatedSpan) -> IResult<Expr<M>> {
@@ -531,7 +531,7 @@ fn parse_list<M>(input: LocatedSpan) -> IResult<Expr<M>> {
         ),
         (multispace0, expect(char(']'), "expected ']' at end of list")),
     ).parse(input)?;
-    return Ok((rest, Expr::List(exprs)));
+    Ok((rest, Expr::List(exprs)))
 }
 
 fn parse_reverse_application<M>(input: LocatedSpan) -> IResult<Expr<M>> {
@@ -559,10 +559,10 @@ fn parse_reverse_application<M>(input: LocatedSpan) -> IResult<Expr<M>> {
                     }
                 }
             }
-            return expr;
+            expr
         }
     ).parse(input)?;
-    return Ok((rest, expr));
+    Ok((rest, expr))
 }
 
 fn parse_expr<M>(input: LocatedSpan) -> IResult<Expr<M>> {
@@ -582,33 +582,31 @@ fn parse_expr<M>(input: LocatedSpan) -> IResult<Expr<M>> {
                     argument: Box::new(Expr::Tuple(vec![expr, op_expr.unwrap_or_default()])),
                 };
             }
-            return expr;
+            expr
         }
     ).parse(input)?;
-    return Ok((rest, expr));
+    Ok((rest, expr))
 }
 
 fn translate_parse_result<T>(result: IResult<T>) -> Result<T, Vec<Error>> {
     match result {
-        Ok((_, a)) => {
-            return Ok(a);
-        }
+        Ok((_, a)) => Ok(a),
         Err(nom::Err::Error(e)) => {
             //println!("Error on parsing input: {:?}", e);
-            return Err(vec![Error::new_from_span(
+            Err(vec![Error::new_from_span(
                 &e.input,
                 "unable to parse input".to_string(),
-            )]);
+            )])
         }
         Err(nom::Err::Incomplete(_)) => {
             panic!("Incomplete error on input");
         }
         Err(nom::Err::Failure(e)) => {
             println!("Failed to parse input: {:?}", e);
-            return Err(vec![Error::new_from_span(
+            Err(vec![Error::new_from_span(
                 &e.input,
                 "unable to parse input".to_string(),
-            )]);
+            )])
         }
     }
 }
@@ -623,7 +621,7 @@ where
     let result = all_consuming(
         ws(parse_expr),
     ).parse(span);
-    if errors.borrow().len() > 0 {
+    if !errors.borrow().is_empty() {
         println!(
             "Got result {:} and errors {:?}",
             match result {
@@ -641,7 +639,7 @@ pub fn parse_context<M>(input: &str) -> Result<Vec<(Pattern, Expr<M>)>, Vec<Erro
     let errors = RefCell::new(Vec::new());
     let span = LocatedSpan::new_extra(input, ParseState(&errors));
     let result = all_consuming(ws(parse_bindings)).parse(span);
-    if errors.borrow().len() > 0 {
+    if !errors.borrow().is_empty() {
         return Err(errors.into_inner());
     }
     translate_parse_result(result)
@@ -771,7 +769,7 @@ pub fn parse_sliders(input: &str) -> Result<Vec<Slider>, Vec<Error>> {
     let errors = RefCell::new(Vec::new());
     let span = LocatedSpan::new_extra(input, ParseState(&errors));
     let result = all_consuming(parse_sliders_internal).parse(span);
-    if errors.borrow().len() > 0 {
+    if !errors.borrow().is_empty() {
         return Err(errors.into_inner());
     }
     translate_parse_result(result)
@@ -819,7 +817,7 @@ pub fn parse_annotations(line: &str) -> Result<Vec<Annotation>, Vec<Error>> {
                     ws(char('}')),
                 )
             ).parse(span);
-            if errors.borrow().len() > 0 {
+            if !errors.borrow().is_empty() {
                 return Err(errors.into_inner());
             }
             translate_parse_result(result)
@@ -1064,9 +1062,9 @@ where
             then,
             else_,
         } => match evaluate_closed(*condition)? {
-            Bool(true) => return evaluate_closed(*then),
-            Bool(false) => return evaluate_closed(*else_),
-            _ => return Err(Error::new("Expected boolean condition".to_string())),
+            Bool(true) => evaluate_closed(*then),
+            Bool(false) => evaluate_closed(*else_),
+            _ => Err(Error::new("Expected boolean condition".to_string())),
         },
         Application { function, argument } => {
             let function = evaluate_closed(*function)?;
@@ -1080,42 +1078,36 @@ where
                 }
                 (BuiltIn { function, .. }, Tuple(actuals)) => {
                     let result = function.0(actuals);
-                    return match result {
+                    match result {
                         Expr::Error(s) => Err(Error::new(s)),
                         _ => Ok(result),
-                    };
+                    }
                 }
                 (BuiltIn { function, .. }, actual) => {
                     let result = function.0(vec![actual]);
-                    return match result {
+                    match result {
                         Expr::Error(s) => Err(Error::new(s)),
                         _ => Ok(result),
-                    };
+                    }
                 }
-                (function, actuals) => {
-                    return Err(Error::new(format!(
-                        "Invalid application: {} {}",
-                        function, actuals
-                    )));
-                }
+                (function, actuals) => Err(Error::new(format!(
+                    "Invalid application: {} {}",
+                    function, actuals
+                ))),
             }
         }
-        Tuple(exprs) => {
-            return Ok(Tuple(
-                exprs
-                    .into_iter()
-                    .map(|e| evaluate_closed(e))
-                    .collect::<Result<Vec<_>, _>>()?,
-            ));
-        }
-        List(exprs) => {
-            return Ok(List(
-                exprs
-                    .into_iter()
-                    .map(|e| evaluate_closed(e))
-                    .collect::<Result<Vec<_>, _>>()?,
-            ));
-        }
+        Tuple(exprs) => Ok(Tuple(
+            exprs
+                .into_iter()
+                .map(|e| evaluate_closed(e))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        List(exprs) => Ok(List(
+            exprs
+                .into_iter()
+                .map(|e| evaluate_closed(e))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
         Expr::Error(s) => Err(Error::new(s)),
     }
 }
@@ -1125,7 +1117,7 @@ where
     M: Clone + fmt::Display + fmt::Debug,
 {
     expr = substitute(context, expr);
-    return evaluate_closed(expr);
+    evaluate_closed(expr)
 }
 
 #[cfg(test)]

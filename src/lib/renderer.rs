@@ -12,6 +12,7 @@ use sdl2::video::WindowContext;
 use realfft::RealFftPlanner;
 use realfft::num_complex::{Complex, ComplexFloat};
 
+use crate::actions::AppState;
 use crate::builtins;
 use crate::launchkey;
 use crate::metric::Metric;
@@ -38,21 +39,18 @@ pub enum WaveformId {
 
 impl WaveformId {
     pub fn is_beats(&self) -> bool {
-        match self {
-            WaveformId::Beats(_) => true,
-            _ => false,
-        }
+        matches!(self, WaveformId::Beats(_))
     }
 }
 
 // These two functions allow for explicit conversion from index to id.
 
 pub fn index_from_id(id: ProgramId) -> usize {
-    return (id - 1) as usize;
+    (id - 1) as usize
 }
 
 pub fn id_from_index(index: usize) -> ProgramId {
-    return (index + 1) as ProgramId;
+    (index + 1) as ProgramId
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -237,11 +235,10 @@ fn make_texture<'a>(
         .blended(color)
         .map_err(|e| e.to_string())
         .unwrap();
-    let texture = texture_creator
+    texture_creator
         .create_texture_from_surface(&surface)
         .map_err(|e| e.to_string())
-        .unwrap();
-    return texture;
+        .unwrap()
 }
 
 const INACTIVE_COLOR: Color = Color::RGB(0x00, 0xFF, 0xFF);
@@ -273,7 +270,7 @@ pub struct Metrics {
     pub allocations_per_sample: Metric<f32>,
 }
 
-const FONT_PATH: &'static str = "/Library/Fonts/Arial Unicode.ttf";
+const FONT_PATH: &str = "/Library/Fonts/Arial Unicode.ttf";
 
 impl Renderer {
     pub fn new(
@@ -335,18 +332,22 @@ impl Renderer {
         }
     }
 
-    // TODO should this take AppState?
     pub fn render(
         &mut self,
         ttf_context: &Sdl2TtfContext,
-        programs: &[Program],
+        state: &AppState,
         status: &tracker::Status<WaveformId, MarkId>,
-        mode: &Mode,
-        active_program_index: usize,
-        message: &str,
         metrics: &mut Metrics,
         encoder_mode: Option<launchkey::EncoderMode>,
     ) {
+        // Alias the AppState fields the body uses so the rest of this
+        // function (still mostly written against unbound locals) keeps
+        // working unchanged.
+        let programs = state.programs.as_slice();
+        let mode = &state.mode;
+        let active_program_index = state.active_program_index;
+        let message = state.message.as_str();
+
         // TODO so much clean-up
         let now = Instant::now();
         let (current_beat, current_beat_start, current_beat_duration) =
@@ -377,7 +378,7 @@ impl Renderer {
             // Draw the waveform
             let x_scale = self.width as f32 / (self.samples.len() + 1) as f32;
             let waveform_height = self.height * 3 / 5;
-            if self.samples.len() > 0 {
+            if !self.samples.is_empty() {
                 self.canvas.set_draw_color(Color::RGB(0x00, 0xFF, 0x00));
                 let mut last_y = (waveform_height as f32
                     - ((self.samples[0] + 1.0) * (waveform_height as f32 / 2.4)))
@@ -394,7 +395,7 @@ impl Renderer {
                         self.canvas.set_draw_color(Color::RGB(0xFF, 0x00, 0x00));
                     }
                     self.canvas
-                        .draw_line((x, last_y as i32), (x + x_scale as i32, y))
+                        .draw_line((x, last_y), (x + x_scale as i32, y))
                         .unwrap();
                     last_y = y;
                 }
@@ -526,10 +527,10 @@ impl Renderer {
                         // ranges
                         let mut x = self.nav_width as i32;
                         for (j, c) in program.text.chars().enumerate() {
-                            let color = if errors.iter().any(|e| match e.range() {
-                                Some(range) if range.contains(&j) => true,
-                                _ => false,
-                            }) {
+                            let color = if errors
+                                .iter()
+                                .any(|e| matches!(e.range(), Some(range) if range.contains(&j)))
+                            {
                                 ERROR_COLOR
                             } else {
                                 EDIT_COLOR
@@ -629,7 +630,7 @@ impl Renderer {
             };
             self.canvas.set_draw_color(slider_color);
             // First slider: horizontal indicator at top
-            if let Some(s) = slider_display.get(0) {
+            if let Some(s) = slider_display.first() {
                 self.canvas
                     .fill_rect(sdl2::rect::Rect::new(
                         (self.width as f32 * s.normalized_value) as i32 - 3,
@@ -680,14 +681,12 @@ impl Renderer {
             };
             // Find the start of the first Beats waveform that's odd/even
             for mark in status.marks.iter() {
-                if mark.waveform_id == WaveformId::Beats(even) {
-                    if mark.mark_id == MarkId::TopLevel {
-                        // We want to find the oldest even/odd beats in the marks.
-                        if mark.start < marks_start {
-                            marks_start = mark.start;
-                            // Make the duration shorter by one sample to avoid spurious overlaps due to rounding.
-                            marks_duration = mark.duration - sample_duration;
-                        }
+                if mark.waveform_id == WaveformId::Beats(even) && mark.mark_id == MarkId::TopLevel {
+                    // We want to find the oldest even/odd beats in the marks.
+                    if mark.start < marks_start {
+                        marks_start = mark.start;
+                        // Make the duration shorter by one sample to avoid spurious overlaps due to rounding.
+                        marks_duration = mark.duration - sample_duration;
                     }
                 }
             }
@@ -885,7 +884,7 @@ impl Renderer {
             .unwrap();
 
         // Draw some internal metrics
-        let metrics_height = self.height / 2 - beat_height as u32 - 40;
+        let metrics_height = self.height / 2 - beat_height - 40;
         let metrics_width = 200;
         let x = (self.width - metrics_width - 20) as i32;
         let y = self.height as i32 / 2;
@@ -923,7 +922,7 @@ impl Renderer {
         texture_creator: &TextureCreator<WindowContext>,
     ) {
         let font = ttf_context.load_font(FONT_PATH, 48).unwrap();
-        let cursor_texture = make_texture(&font, color, &texture_creator, "‸");
+        let cursor_texture = make_texture(&font, color, texture_creator, "‸");
         let TextureQuery {
             width: cursor_width,
             height: cursor_height,
@@ -943,6 +942,7 @@ impl Renderer {
             .unwrap();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_metric(
         self: &mut Renderer,
         ttf_context: &Sdl2TtfContext,
@@ -956,7 +956,7 @@ impl Renderer {
         let font = ttf_context.load_font(FONT_PATH, 48).unwrap();
         let default_color = Color::RGBA(0, 255, 0, 128);
         let points: Vec<f32> = metric.iter().collect();
-        if points.len() > 0 {
+        if !points.is_empty() {
             let last_value_texture = make_texture(
                 &font,
                 default_color,

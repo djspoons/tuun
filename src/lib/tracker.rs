@@ -139,7 +139,7 @@ where
         command_receiver: mpsc::Receiver<Command<I, M>>,
         status_sender: mpsc::Sender<Status<I, M>>,
     ) -> Tracker<'a, I, M> {
-        return Tracker {
+        Tracker {
             generator: generator::Generator::new(sample_rate),
             sample_rate,
             captured_output_dir,
@@ -151,7 +151,7 @@ where
             pending_waveforms: Vec::new(),
 
             send_current_buffer: false,
-        };
+        }
     }
 
     fn process_captured<S>(
@@ -161,16 +161,14 @@ where
     ) {
         use waveform::Waveform::*;
         match waveform {
-            Const(_) | Time(_) | Noise | Fixed(_, _) => {
-                return;
-            }
+            Const(_) | Time(_) | Noise | Fixed(_, _) => {}
             // TODO think harder about captures for the other sub-waveforms in these cases
             Fin { waveform, .. }
             | Alt {
                 trigger: waveform, ..
             }
             | Marked { waveform, .. } => {
-                self.process_captured(&*waveform, out);
+                self.process_captured(waveform, out);
             }
             Sine {
                 frequency: a,
@@ -179,8 +177,8 @@ where
             }
             | Append(a, b, _)
             | BinaryPointOp(_, a, b) => {
-                self.process_captured(&*a, out);
-                self.process_captured(&*b, out);
+                self.process_captured(a, out);
+                self.process_captured(b, out);
             }
             Reset {
                 trigger, waveform, ..
@@ -207,7 +205,7 @@ where
                 waveform,
             } => {
                 use hound::{SampleFormat, WavSpec, WavWriter};
-                self.process_captured(&*waveform, out);
+                self.process_captured(waveform, out);
                 if out.contains_key(file_stem) {
                     // TODO in theory we could check for this earlier
                     panic!("Captured waveform with duplicate file stem: {}", file_stem);
@@ -243,9 +241,7 @@ fn process_marked<I, M>(
 {
     use waveform::Waveform::*;
     match waveform {
-        Const(_) | Time(_) | Noise | Fixed(_, _) => {
-            return;
-        }
+        Const(_) | Time(_) | Noise | Fixed(_, _) => {}
         // TODO Fin seems not quite right here, since its length might truncate any marks inside it
         Fin { waveform, .. }
         | Filter { waveform, .. }
@@ -287,17 +283,17 @@ fn process_marked<I, M>(
             );
         }
         Append(a, b, _) => {
-            process_marked(generator, sample_rate, waveform_id, start, &*a, out);
+            process_marked(generator, sample_rate, waveform_id, start, a, out);
             let a_len = generator.length(
                 &mut a.clone(),
                 10 * sample_rate as usize, // XXX
             );
-            let start = start + Duration::from_secs_f32(a_len as f32 / sample_rate as f32);
+            let start = start + Duration::from_secs_f32(a_len as f32 / sample_rate);
             process_marked(generator, sample_rate, waveform_id, start, b.as_ref(), out);
         }
         BinaryPointOp(_, a, b) => {
-            process_marked(generator, sample_rate, waveform_id, start, &*a, out);
-            process_marked(generator, sample_rate, waveform_id, start, &*b, out);
+            process_marked(generator, sample_rate, waveform_id, start, a, out);
+            process_marked(generator, sample_rate, waveform_id, start, b, out);
         }
         Marked { waveform, id } => {
             let len = generator.length(
@@ -308,9 +304,9 @@ fn process_marked<I, M>(
                 waveform_id: waveform_id.clone(),
                 mark_id: id.clone(),
                 start,
-                duration: Duration::from_secs_f32(len as f32 / sample_rate as f32),
+                duration: Duration::from_secs_f32(len as f32 / sample_rate),
             });
-            process_marked(generator, sample_rate, waveform_id, start, &*waveform, out);
+            process_marked(generator, sample_rate, waveform_id, start, waveform, out);
         }
     }
 }
@@ -549,7 +545,7 @@ where
 
                     if let Some(repeat_every) = pending.repeat_every {
                         // If it's repeating, find the next start time that's after segment_start
-                        pending.start = pending.start + repeat_every;
+                        pending.start += repeat_every;
                         // Check to see if we've missed one or more repetitions.
                         while pending.start <= segment_start {
                             pending.start += repeat_every;
@@ -590,7 +586,7 @@ where
 
             // Finally, walk through the waveforms and generate samples up to the next start. If there
             // are no active waveforms, then just updated filled and continue.
-            if self.active_waveforms.len() == 0 {
+            if self.active_waveforms.is_empty() {
                 filled += segment_length;
                 segment_start +=
                     Duration::from_secs_f32(segment_length as f32 / self.sample_rate as f32);
@@ -644,6 +640,6 @@ where
                 Duration::from_secs_f32(segment_length as f32 / self.sample_rate as f32);
             segment_length = out.len() - filled;
         }
-        return (finished, allocations);
+        (finished, allocations)
     }
 }

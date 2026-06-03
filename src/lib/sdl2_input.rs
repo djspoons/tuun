@@ -124,13 +124,13 @@ impl InputHandler {
             if repeat {
                 return Some(vec![]);
             }
-            if let Some(sc) = scancode {
-                if let Some(midi_note) = scancode_to_midi_note(sc) {
-                    return Some(vec![Action::NoteOn {
-                        key: midi_note,
-                        velocity: 64, // computer keyboard has no velocity; pick mf
-                    }]);
-                }
+            if let Some(sc) = scancode
+                && let Some(midi_note) = scancode_to_midi_note(sc)
+            {
+                return Some(vec![Action::NoteOn {
+                    key: midi_note,
+                    velocity: 64, // computer keyboard has no velocity; pick mf
+                }]);
             }
             return Some(vec![]);
         }
@@ -269,10 +269,10 @@ impl InputHandler {
         // This avoids stuck notes if the user exits Keys mode while
         // still holding a key (Escape, click away, etc.). The runner's
         // PlayNoteOff is a no-op when the key isn't currently playing.
-        if let Some(sc) = scancode {
-            if let Some(midi_note) = scancode_to_midi_note(sc) {
-                return Some(vec![Action::NoteOff { key: midi_note }]);
-            }
+        if let Some(sc) = scancode
+            && let Some(midi_note) = scancode_to_midi_note(sc)
+        {
+            return Some(vec![Action::NoteOff { key: midi_note }]);
         }
         match (mode, scancode) {
             (Mode::MoveSliders, Some(Scancode::LAlt) | Some(Scancode::RAlt)) => {
@@ -304,7 +304,7 @@ impl InputHandler {
                 "k" if state.keys.is_some() => Some(vec![Action::EnterKeysMode]),
                 // Digits 1..=8 select a program in the active bank.
                 t if t.len() == 1 => match t.parse::<usize>() {
-                    Ok(n) if n >= 1 && n <= PROGRAMS_PER_BANK => {
+                    Ok(n) if (1..=PROGRAMS_PER_BANK).contains(&n) => {
                         Some(vec![Action::SelectProgram(state.bank_start() + n - 1)])
                     }
                     _ => Some(vec![]),

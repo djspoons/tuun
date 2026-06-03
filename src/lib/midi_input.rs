@@ -269,14 +269,7 @@ fn update_pads_clip_launcher(
                 status
                     .marks
                     .iter()
-                    .find(|m| {
-                        if let WaveformId::Key(_) = m.waveform_id {
-                            true
-                        } else {
-                            false
-                        }
-                    })
-                    .is_some()
+                    .any(|m| matches!(m.waveform_id, WaveformId::Key(_)))
             } else {
                 false
             })

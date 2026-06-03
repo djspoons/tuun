@@ -62,7 +62,7 @@ where
             match length {
                 // Zero length
                 Const(a) if a >= 0.0 => Fixed(vec![], ()),
-                Fixed(v, _) if v.len() >= 1 && v[0] >= 0.0 => Fixed(vec![], ()),
+                Fixed(v, _) if !v.is_empty() && v[0] >= 0.0 => Fixed(vec![], ()),
                 // TODO for longer Fixed, replace with * Fixed(vec![1.0; v.len()])?
                 Time(_) => Fixed(vec![], ()),
                 length => match optimize(*waveform) {
@@ -98,8 +98,8 @@ where
             let a = optimize(*a);
             let b = optimize(*b);
             match (a, b) {
-                (Fixed(a, _), b) if a.len() == 0 => b,
-                (a, Fixed(b, _)) if b.len() == 0 => a,
+                (Fixed(a, _), b) if a.is_empty() => b,
+                (a, Fixed(b, _)) if b.is_empty() => a,
                 (Fixed(a, _), Fixed(b, _)) => Fixed([a, b].concat(), ()),
                 (a, b) => Append(Box::new(a), Box::new(b), state),
             }
@@ -139,8 +139,8 @@ where
         BinaryPointOp(Operator::Add, a, b) => {
             match (optimize(*a), optimize(*b)) {
                 // Add yields the shorter of the two inputs.
-                (Fixed(a, _), _) if a.len() == 0 => Fixed(vec![], ()),
-                (_, Fixed(b, _)) if b.len() == 0 => Fixed(vec![], ()),
+                (Fixed(a, _), _) if a.is_empty() => Fixed(vec![], ()),
+                (_, Fixed(b, _)) if b.is_empty() => Fixed(vec![], ()),
                 (Const(a), Const(b)) => Const(a + b),
                 // Adding 0 is identity (because Add truncates to shorter, and Const is infinite)
                 (a, Const(0.0)) => a,
@@ -195,8 +195,8 @@ where
             use Waveform::Marked;
             match (optimize(*a), optimize(*b)) {
                 // Merge yields the longer of the two inputs.
-                (Fixed(a, _), b) if a.len() == 0 => b,
-                (a, Fixed(b, _)) if b.len() == 0 => a,
+                (Fixed(a, _), b) if a.is_empty() => b,
+                (a, Fixed(b, _)) if b.is_empty() => a,
                 (Const(a), Const(b)) => Const(a + b),
                 // Merging 0 is the identity if the left-hand side is infinite
                 // TODO could check for other infinite waveforms
@@ -273,8 +273,8 @@ where
         }
         BinaryPointOp(Operator::Multiply, a, b) => {
             match (optimize(*a), optimize(*b)) {
-                (Fixed(a, _), _) if a.len() == 0 => Fixed(vec![], ()),
-                (_, Fixed(b, _)) if b.len() == 0 => Fixed(vec![], ()),
+                (Fixed(a, _), _) if a.is_empty() => Fixed(vec![], ()),
+                (_, Fixed(b, _)) if b.is_empty() => Fixed(vec![], ()),
                 (a, Const(1.0)) => a,
                 (Const(a), Const(b)) => Const(a * b),
                 (Fixed(a, _), Const(b)) => Fixed(a.into_iter().map(|x| x * b).collect(), ()),
@@ -346,7 +346,7 @@ where
         }
         BinaryPointOp(Operator::Divide, a, b) => {
             match (optimize(*a), optimize(*b)) {
-                (_, Fixed(b, _)) if b.len() == 0 => Fixed(vec![], ()),
+                (_, Fixed(b, _)) if b.is_empty() => Fixed(vec![], ()),
                 // Prefer multiplication
                 (a, Const(b)) => optimize(BinaryPointOp(
                     Operator::Multiply,

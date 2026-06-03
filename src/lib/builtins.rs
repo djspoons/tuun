@@ -7,6 +7,10 @@ use crate::parser::{BuiltInFn, Expr};
 use crate::waveform::{Operator, Waveform};
 use Expr::{Application, Bool, BuiltIn, Error, Float, List, Seq, Tuple};
 
+type WaveformBinOp<M> = fn(Box<Waveform<M>>, Box<Waveform<M>>) -> Waveform<M>;
+
+type BuiltinFn<M> = fn(Vec<Expr<M>>) -> Expr<M>;
+
 fn unary_op<M>(
     mut arguments: Vec<Expr<M>>,
     name: String,
@@ -30,14 +34,14 @@ fn binary_op<M>(
     mut arguments: Vec<Expr<M>>,
     name: String,
     float_op: fn(f32, f32) -> f32,
-    waveform_op: fn(Box<Waveform<M>>, Box<Waveform<M>>) -> Waveform<M>,
+    waveform_op: WaveformBinOp<M>,
 ) -> Expr<M>
 where
     M: Debug,
 {
     fn make_seq<M>(
         offset: Box<Expr<M>>,
-        waveform_op: fn(Box<Waveform<M>>, Box<Waveform<M>>) -> Waveform<M>,
+        waveform_op: WaveformBinOp<M>,
         a: Waveform<M>,
         b: Waveform<M>,
     ) -> Expr<M>
@@ -94,9 +98,9 @@ pub fn plus<M>(arguments: Vec<Expr<M>>) -> Expr<M>
 where
     M: Debug,
 {
-    return binary_op(arguments, "+".to_string(), std::ops::Add::add, |a, b| {
+    binary_op(arguments, "+".to_string(), std::ops::Add::add, |a, b| {
         Waveform::BinaryPointOp(Operator::Add, a, b)
-    });
+    })
 }
 
 pub fn minus<M>(arguments: Vec<Expr<M>>) -> Expr<M>
@@ -117,18 +121,18 @@ where
             },
         );
     }
-    return binary_op(arguments, "-".to_string(), std::ops::Sub::sub, |a, b| {
+    binary_op(arguments, "-".to_string(), std::ops::Sub::sub, |a, b| {
         Waveform::BinaryPointOp(Operator::Subtract, a, b)
-    });
+    })
 }
 
 pub fn times<M>(arguments: Vec<Expr<M>>) -> Expr<M>
 where
     M: Debug,
 {
-    return binary_op(arguments, "*".to_string(), std::ops::Mul::mul, |a, b| {
+    binary_op(arguments, "*".to_string(), std::ops::Mul::mul, |a, b| {
         Waveform::BinaryPointOp(Operator::Multiply, a, b)
-    });
+    })
 }
 
 pub fn divide<M>(arguments: Vec<Expr<M>>) -> Expr<M>
@@ -146,15 +150,12 @@ where
 {
     // It seems strange to ever apply & to two floats, so just promote them
     // here.
-    match &arguments[..] {
-        [Float(a), Float(b)] => {
-            return Expr::Waveform(Waveform::BinaryPointOp(
-                Operator::Merge,
-                Box::new(Waveform::Const(*a)),
-                Box::new(Waveform::Const(*b)),
-            ));
-        }
-        _ => (),
+    if let [Float(a), Float(b)] = &arguments[..] {
+        return Expr::Waveform(Waveform::BinaryPointOp(
+            Operator::Merge,
+            Box::new(Waveform::Const(*a)),
+            Box::new(Waveform::Const(*b)),
+        ));
     }
     // Otherwise, just do the usual binary op thing.
     binary_op(
@@ -694,14 +695,14 @@ pub fn unseq<M>(arguments: Vec<Expr<M>>) -> Expr<M>
 where
     M: Debug + 'static,
 {
-    if arguments.len() != 0 {
+    if !arguments.is_empty() {
         return Error(format!(
             "Expected no arguments for unseq, got {}",
             arguments.len()
         ));
     }
     Expr::BuiltIn {
-        name: format!("unseq()"),
+        name: "unseq()".to_string(),
         function: BuiltInFn(Rc::new(|mut arguments: Vec<Expr<M>>| -> Expr<M> {
             if arguments.len() != 1 {
                 return Error(format!(
@@ -750,7 +751,7 @@ where
     }
     let feed_forward = match arguments.remove(0) {
         Expr::List(exprs) => {
-            if exprs.len() == 0 {
+            if exprs.is_empty() {
                 return Error("Filter requires at least one feed-forward coefficient".to_string());
             }
             let mut feed_forward = Vec::with_capacity(exprs.len());
@@ -797,7 +798,7 @@ where
                 .join(", ")
         ),
         function: curry(move |waveform: Box<Waveform<M>>| Waveform::Filter {
-            waveform: waveform,
+            waveform,
             feed_forward: feed_forward.clone(),
             feedback: feedback.clone(),
             state: (),
@@ -897,9 +898,9 @@ where
                 };
                 result = Waveform::BinaryPointOp(Operator::Merge, waveform, Box::new(result));
             }
-            return Expr::Waveform(result);
+            Expr::Waveform(result)
         }
-        _ => return Error("Invalid argument for chord".to_string()),
+        _ => Error("Invalid argument for chord".to_string()),
     }
 }
 
@@ -912,7 +913,7 @@ where
     }
     match &mut arguments[0] {
         List(exprs) => {
-            if exprs.len() == 0 {
+            if exprs.is_empty() {
                 return Expr::Waveform(Waveform::Fixed(vec![], ()));
             } else if exprs.len() == 1 {
                 return match &exprs[0] {
@@ -925,9 +926,9 @@ where
             while !exprs.is_empty() {
                 result = followed_by(vec![exprs.remove(exprs.len() - 1), result]);
             }
-            return result;
+            result
         }
-        _ => return Error("Invalid argument for sequence".to_string()),
+        _ => Error("Invalid argument for sequence".to_string()),
     }
 }
 
@@ -939,7 +940,7 @@ pub fn add_prelude<M: Debug + Clone + Display + PartialEq + 'static>(
     context.push(("time".to_string(), Expr::Waveform(Waveform::Time(()))));
     context.push(("noise".to_string(), Expr::Waveform(Waveform::Noise)));
 
-    let builtins: Vec<(&str, fn(Vec<Expr<M>>) -> Expr<M>)> = vec![
+    let builtins: Vec<(&str, BuiltinFn<M>)> = vec![
         ("+", plus),
         ("-", minus),
         ("*", times),

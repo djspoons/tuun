@@ -171,8 +171,7 @@ impl Launchkey {
         let midi_output = MidiOutput::new("tuun sending output")?;
         let mut daw_output_conn;
         if let Some(daw_output_port) = midi_output.ports().iter().find(|p| {
-            midi_output.port_name(p).unwrap_or("error".to_string())
-                == "Launchkey MK4 37 DAW In".to_string()
+            midi_output.port_name(p).unwrap_or("error".to_string()) == "Launchkey MK4 37 DAW In"
         }) {
             daw_output_conn = midi_output.connect(daw_output_port, "tuun-daw-output-port")?;
             // Enter DAW mode.
@@ -194,8 +193,7 @@ impl Launchkey {
         daw_input.ignore(Ignore::Time);
         let daw_input_conn;
         if let Some(daw_input_port) = daw_input.ports().iter().find(|p| {
-            daw_input.port_name(p).unwrap_or("error".to_string())
-                == "Launchkey MK4 37 DAW Out".to_string()
+            daw_input.port_name(p).unwrap_or("error".to_string()) == "Launchkey MK4 37 DAW Out"
         }) {
             daw_input_conn = daw_input.connect(
                 daw_input_port,
@@ -209,13 +207,12 @@ impl Launchkey {
             ));
         }
 
-        let mut midi_state = MIDIState { sender: sender };
+        let mut midi_state = MIDIState { sender };
         let mut midi_input = MidiInput::new("tuun reading MIDI input")?;
         midi_input.ignore(Ignore::Time);
         let midi_input_conn;
         if let Some(midi_input_port) = midi_input.ports().iter().find(|p| {
-            midi_input.port_name(p).unwrap_or("error".to_string())
-                == "Launchkey MK4 37 MIDI Out".to_string()
+            midi_input.port_name(p).unwrap_or("error".to_string()) == "Launchkey MK4 37 MIDI Out"
         }) {
             midi_input_conn = midi_input.connect(
                 midi_input_port,
@@ -307,7 +304,7 @@ impl Launchkey {
         });
     }
 
-    pub fn set_daw_mode_display(&mut self, name: &String) {
+    pub fn set_daw_mode_display(&mut self, name: &str) {
         let mut buf = Vec::new();
         buf.extend(&STANDARD_SKU_PREFIX);
         buf.extend(&CONFIGURE_DISPLAY);
@@ -468,8 +465,9 @@ impl DAWState {
                         // pivot, route by mode.
                         (controller, value)
                             if ch == ENCODER_CHANNEL
-                                && controller >= ENCODER_RELATIVE_CC_OFFSET
-                                && controller < ENCODER_RELATIVE_CC_OFFSET + NUM_ENCODERS =>
+                                && (ENCODER_RELATIVE_CC_OFFSET
+                                    ..ENCODER_RELATIVE_CC_OFFSET + NUM_ENCODERS)
+                                    .contains(&controller) =>
                         {
                             let index = controller - ENCODER_RELATIVE_CC_OFFSET;
                             let delta = value as i8 - ENCODER_RELATIVE_PIVOT as i8;
@@ -505,8 +503,8 @@ impl DAWState {
                     );
 
                     if vel > 0 {
-                        if key >= DAW_PAD_TOP_ROW_OFFSET
-                            && key < DAW_PAD_TOP_ROW_OFFSET + NUM_DAW_PADS_PER_ROW
+                        if (DAW_PAD_TOP_ROW_OFFSET..DAW_PAD_TOP_ROW_OFFSET + NUM_DAW_PADS_PER_ROW)
+                            .contains(&key)
                         {
                             let index = key.as_int() - DAW_PAD_TOP_ROW_OFFSET;
                             match self.pad_mode {
@@ -514,8 +512,9 @@ impl DAWState {
                                 // Not clear when this happens, but ignore anyway
                                 PadMode::Other => None,
                             }
-                        } else if key >= DAW_PAD_BOTTOM_ROW_OFFSET
-                            && key < DAW_PAD_BOTTOM_ROW_OFFSET + NUM_DAW_PADS_PER_ROW
+                        } else if (DAW_PAD_BOTTOM_ROW_OFFSET
+                            ..DAW_PAD_BOTTOM_ROW_OFFSET + NUM_DAW_PADS_PER_ROW)
+                            .contains(&key)
                         {
                             let index = key.as_int() - DAW_PAD_BOTTOM_ROW_OFFSET;
                             match self.pad_mode {
@@ -847,7 +846,7 @@ impl Color {
     pub fn from_index(index: u8) -> Option<Self> {
         if index < 128 {
             // SAFETY: all values 0..128 are valid variants due to #[repr(u8)]
-            Some(unsafe { std::mem::transmute(index) })
+            Some(unsafe { std::mem::transmute::<u8, Color>(index) })
         } else {
             None
         }

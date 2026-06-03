@@ -57,7 +57,7 @@ where
         if for_write {
             self.last_write = now;
         }
-        return current_bucket;
+        current_bucket
     }
     /*
     pub fn add(&mut self, value: T) {

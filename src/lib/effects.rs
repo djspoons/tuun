@@ -190,7 +190,7 @@ impl EffectRunner {
                         return;
                     }
                     Err(errors) => {
-                        state.message = format!("Error: {}", errors[0].to_string());
+                        state.message = format!("Error: {}", errors[0]);
                         return;
                     }
                 };
@@ -272,15 +272,15 @@ impl EffectRunner {
             }
             Effect::PlayNoteOff { key } => {
                 let id = WaveformId::Key(key);
-                if let Some(keys) = state.keys.as_mut() {
-                    if let Some(note_off) = keys.note_off_waveforms.remove(&key) {
-                        let _ = self.command_sender.send(tracker::Command::Modify {
-                            id,
-                            mark_id: MarkId::Terminator,
-                            waveform: note_off,
-                        });
-                        return;
-                    }
+                if let Some(keys) = state.keys.as_mut()
+                    && let Some(note_off) = keys.note_off_waveforms.remove(&key)
+                {
+                    let _ = self.command_sender.send(tracker::Command::Modify {
+                        id,
+                        mark_id: MarkId::Terminator,
+                        waveform: note_off,
+                    });
+                    return;
                 }
                 // No stored note-off (key wasn't NoteOn'd, or keys were
                 // uninstalled mid-note). Send a generic stop ramp; it's a
@@ -335,15 +335,15 @@ impl EffectRunner {
             }
 
             Effect::SetLaunchkeyEncoderMode(new_mode) => {
-                if let Some(lk) = world.launchkey.as_deref_mut() {
-                    if lk.encoder_mode != new_mode {
-                        lk.encoder_mode = new_mode;
-                        // The device resets the relative-output feature
-                        // when the user switches encoder modes, so we
-                        // have to re-assert it every time.
-                        lk.set_encoder_relative_output();
-                        sync_encoders(state, lk);
-                    }
+                if let Some(lk) = world.launchkey.as_deref_mut()
+                    && lk.encoder_mode != new_mode
+                {
+                    lk.encoder_mode = new_mode;
+                    // The device resets the relative-output feature
+                    // when the user switches encoder modes, so we
+                    // have to re-assert it every time.
+                    lk.set_encoder_relative_output();
+                    sync_encoders(state, lk);
                 }
             }
             Effect::SetLaunchkeyPadMode(new_mode) => {
@@ -443,7 +443,7 @@ impl EffectRunner {
                 state.message = if errors.is_empty() {
                     "Loaded programs".to_string()
                 } else {
-                    format!("Error loading programs: {}", errors[0].to_string())
+                    format!("Error loading programs: {}", errors[0])
                 };
             }
             Effect::Exit => {
@@ -469,12 +469,12 @@ fn sync_encoders(state: &AppState, launchkey: &mut launchkey::Launchkey) {
                     let config = &program.sliders.configs[i as usize];
                     let actual_value = slider::denormalize(&config.function, *value).unwrap_or(0.0);
                     launchkey.set_encoder_display(
-                        i as u8,
+                        i,
                         &config.label,
-                        &format!("{}", renderer::format_sig_digits(actual_value, 3)),
+                        &renderer::format_sig_digits(actual_value, 3).to_string(),
                     );
                 } else {
-                    launchkey.set_encoder_display(i as u8, &"", &"");
+                    launchkey.set_encoder_display(i, "", "");
                 }
             }
         }

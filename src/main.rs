@@ -77,8 +77,8 @@ pub fn main() {
     let mut message = loader::load_context(&config, &mut context);
     let mut programs: Vec<Program> = Vec::new();
     let (last_slider_values, errors) = loader::load_programs(&config, &mut programs);
-    if errors.len() > 0 {
-        message = format!("Error loading programs: {}", errors[0].to_string());
+    if !errors.is_empty() {
+        message = format!("Error loading programs: {}", errors[0]);
     }
     let mode = Mode::Select;
 
@@ -499,11 +499,8 @@ pub fn main() {
         */
         renderer.render(
             &ttf_context,
-            &state.programs,
+            &state,
             &status,
-            &state.mode,
-            state.active_program_index,
-            &state.message,
             &mut metrics,
             launchkey.as_ref().map(|l| l.encoder_mode),
         );

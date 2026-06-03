@@ -19,9 +19,9 @@ fn generate_linear_naively32(
         let freq = 2.0 * f32::consts::PI * (start_freq_hz + freq_slope_hz * time);
         let phase = freq * time;
 
-        *x = phase.sin() as f32;
+        *x = phase.sin();
     }
-    return result;
+    result
 }
 
 fn generate_linear_naively64(
@@ -41,7 +41,7 @@ fn generate_linear_naively64(
 
         *x = phase.sin() as f32;
     }
-    return result;
+    result
 }
 
 fn generate_linear_by_rectangle32(
@@ -60,18 +60,18 @@ fn generate_linear_by_rectangle32(
     let mut accumulator: f32 = 0.0;
     let mut result = vec![0.0; total_samples];
     for (sample, x) in result.iter_mut().enumerate() {
-        *x = accumulator.sin() as f32;
+        *x = accumulator.sin();
 
         let time = sample as f32 / sampling_rate;
         let freq = 2.0 * f32::consts::PI * (start_freq_hz + freq_slope_hz * time);
 
         let phase_inc = freq / sampling_rate;
-        accumulator = accumulator + phase_inc;
+        accumulator += phase_inc;
         if use_rem {
             accumulator = accumulator.rem_euclid(f32::consts::TAU);
         }
     }
-    return result;
+    result
 }
 
 fn generate_linear_by_rectangle64(
@@ -93,12 +93,12 @@ fn generate_linear_by_rectangle64(
         let freq = 2.0 * f64::consts::PI * (start_freq_hz + freq_slope_hz * time);
 
         let phase_inc = freq / sampling_rate;
-        accumulator = accumulator + phase_inc;
+        accumulator += phase_inc;
         if use_rem {
             accumulator = accumulator.rem_euclid(f64::consts::TAU);
         }
     }
-    return result;
+    result
 }
 
 fn generate_linear_by_trapezoid32(
@@ -117,7 +117,7 @@ fn generate_linear_by_trapezoid32(
     let mut accumulator: f32 = 0.0;
     let mut result = vec![0.0; total_samples];
     for (sample, x) in result.iter_mut().enumerate() {
-        *x = accumulator.sin() as f32;
+        *x = accumulator.sin();
 
         let time_current = sample as f32 / sampling_rate;
         let freq_current = 2.0 * f32::consts::PI * (start_freq_hz + freq_slope_hz * time_current);
@@ -126,12 +126,12 @@ fn generate_linear_by_trapezoid32(
         let freq_average = (freq_current + freq_next) / 2.0;
 
         let phase_inc = freq_average / sampling_rate;
-        accumulator = accumulator + phase_inc;
+        accumulator += phase_inc;
         if use_rem {
             accumulator = accumulator.rem_euclid(f32::consts::TAU);
         }
     }
-    return result;
+    result
 }
 
 fn generate_linear_by_trapezoid64(
@@ -156,12 +156,12 @@ fn generate_linear_by_trapezoid64(
         let freq_average = (freq_current + freq_next) / 2.0;
 
         let phase_inc = freq_average / sampling_rate;
-        accumulator = accumulator + phase_inc;
+        accumulator += phase_inc;
         if use_rem {
             accumulator = accumulator.rem_euclid(f64::consts::TAU);
         }
     }
-    return result;
+    result
 }
 
 fn generate_linear_by_trapezoid_mixed(
@@ -188,12 +188,12 @@ fn generate_linear_by_trapezoid_mixed(
         let freq_average = (freq_current + freq_next) / 2.0;
 
         let phase_inc = freq_average as f64 / sampling_rate;
-        accumulator = accumulator + phase_inc;
+        accumulator += phase_inc;
         if use_rem {
             accumulator = accumulator.rem_euclid(f64::consts::TAU);
         }
     }
-    return result;
+    result
 }
 
 fn generate_linear_analytically(
@@ -213,7 +213,7 @@ fn generate_linear_analytically(
 
         *x = phase.sin() as f32;
     }
-    return result;
+    result
 }
 
 fn generate_quadratic_by_rectangle32(
@@ -230,19 +230,19 @@ fn generate_quadratic_by_rectangle32(
     let mut result = vec![0.0; total_samples];
     //println!("time, freq, phase_inc, accumulator");
     for (sample, x) in result.iter_mut().enumerate() {
-        *x = accumulator.sin() as f32;
+        *x = accumulator.sin();
 
         let time = sample as f32 / sampling_rate;
         let freq = 2.0 * f32::consts::PI * (start_freq_hz + time * time);
 
         let phase_inc = freq / sampling_rate;
         //println!("{}, {}, {}, {}", time, freq, phase_inc, accumulator);
-        accumulator = accumulator + phase_inc;
+        accumulator += phase_inc;
         if use_rem {
             accumulator = accumulator.rem_euclid(f32::consts::TAU);
         }
     }
-    return result;
+    result
 }
 
 fn generate_quadratic_by_trapezoid32(
@@ -258,7 +258,7 @@ fn generate_quadratic_by_trapezoid32(
     let mut accumulator: f32 = 0.0;
     let mut result = vec![0.0; total_samples];
     for (sample, x) in result.iter_mut().enumerate() {
-        *x = accumulator.sin() as f32;
+        *x = accumulator.sin();
 
         let time_current = sample as f32 / sampling_rate;
         let freq_current = 2.0 * f32::consts::PI * (start_freq_hz + time_current * time_current);
@@ -267,12 +267,12 @@ fn generate_quadratic_by_trapezoid32(
         let freq_average = (freq_current + freq_next) / 2.0;
 
         let phase_inc = freq_average / sampling_rate;
-        accumulator = accumulator + phase_inc;
+        accumulator += phase_inc;
         if use_rem {
             accumulator = accumulator.rem_euclid(f32::consts::TAU);
         }
     }
-    return result;
+    result
 }
 
 fn generate_quadratic_analytically(
@@ -293,7 +293,7 @@ fn generate_quadratic_analytically(
         *x = phase.sin() as f32;
     }
     _ = last_phase;
-    return result;
+    result
 }
 
 fn generate_piecewise_cubic_by_rectangle32(
@@ -310,19 +310,19 @@ fn generate_piecewise_cubic_by_rectangle32(
     let mut result = vec![0.0; total_samples];
     //println!("time, freq, phase_inc, accumulator");
     for (sample, x) in result.iter_mut().enumerate() {
-        *x = accumulator.sin() as f32;
+        *x = accumulator.sin();
 
         let time = (sample as f32 / sampling_rate).rem_euclid(10.0);
         let freq = 2.0 * f32::consts::PI * (start_freq_hz + time * time * time);
 
         let phase_inc = freq / sampling_rate;
         //println!("{}, {}, {}, {}", time, freq, phase_inc, accumulator);
-        accumulator = accumulator + phase_inc;
+        accumulator += phase_inc;
         if use_rem {
             accumulator = accumulator.rem_euclid(f32::consts::TAU);
         }
     }
-    return result;
+    result
 }
 
 fn generate_piecewise_cubic_analytically(
@@ -344,15 +344,10 @@ fn generate_piecewise_cubic_analytically(
         *x = phase.sin() as f32;
     }
     _ = last_phase;
-    return result;
+    result
 }
 
-fn compute_diff_and_write_wav(
-    spec: hound::WavSpec,
-    name: String,
-    buf: &Vec<f32>,
-    correct: &Vec<f32>,
-) {
+fn compute_diff_and_write_wav(spec: hound::WavSpec, name: String, buf: &[f32], correct: &[f32]) {
     let mut writer = hound::WavWriter::create(format!("{}.wav", name), spec).unwrap();
     let mut diff = 0.0;
     for (i, x) in buf.iter().enumerate() {
@@ -383,14 +378,14 @@ pub fn main() {
     compute_diff_and_write_wav(
         spec,
         "naively32".to_string(),
-        &&generate_linear_naively32(start_freq_hz, end_freq_hz, sampling_rate, duration),
+        &generate_linear_naively32(start_freq_hz, end_freq_hz, sampling_rate, duration),
         &linear_correct,
     );
 
     compute_diff_and_write_wav(
         spec,
         "naively64".to_string(),
-        &&generate_linear_naively64(start_freq_hz, end_freq_hz, sampling_rate, duration),
+        &generate_linear_naively64(start_freq_hz, end_freq_hz, sampling_rate, duration),
         &linear_correct,
     );
 

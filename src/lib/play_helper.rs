@@ -57,7 +57,7 @@ impl PlayHelper {
                     repeat_every = None;
                 }
                 let start = if start_at_next_measure {
-                    Some(next_measure_start(&status))
+                    Some(next_measure_start(status))
                 } else {
                     None
                 };
@@ -106,7 +106,7 @@ impl PlayHelper {
     pub fn start_beats(
         &self,
         status_receiver: &mpsc::Receiver<tracker::Status<WaveformId, MarkId>>,
-        context: &Vec<(String, parser::Expr<MarkId>)>,
+        context: &[(String, parser::Expr<MarkId>)],
     ) {
         // Play the odd Beats waveform starting immediately and repeating every two measures
         self.command_sender
@@ -121,34 +121,29 @@ impl PlayHelper {
             .unwrap();
         // We need to wait to start the even Beats until we know when the odd Beats started
         'start_even_beats: loop {
-            match status_receiver.recv() {
-                Ok(status) => {
-                    for mark in status.marks {
-                        if mark.waveform_id == WaveformId::Beats(false)
-                            && mark.mark_id == MarkId::TopLevel
-                        {
-                            self.command_sender
-                                .send(tracker::Command::Play {
-                                    id: WaveformId::Beats(true),
-                                    waveform: beats_waveform(
-                                        self.tempo,
-                                        self.beats_per_measure,
-                                        context,
-                                    ),
-                                    start: Some(mark.start + mark.duration),
-                                    repeat_every: Some(
-                                        duration_from_beats(
-                                            self.tempo,
-                                            self.beats_per_measure as u64,
-                                        ) * 2,
-                                    ),
-                                })
-                                .unwrap();
-                            break 'start_even_beats;
-                        }
+            if let Ok(status) = status_receiver.recv() {
+                for mark in status.marks {
+                    if mark.waveform_id == WaveformId::Beats(false)
+                        && mark.mark_id == MarkId::TopLevel
+                    {
+                        self.command_sender
+                            .send(tracker::Command::Play {
+                                id: WaveformId::Beats(true),
+                                waveform: beats_waveform(
+                                    self.tempo,
+                                    self.beats_per_measure,
+                                    context,
+                                ),
+                                start: Some(mark.start + mark.duration),
+                                repeat_every: Some(
+                                    duration_from_beats(self.tempo, self.beats_per_measure as u64)
+                                        * 2,
+                                ),
+                            })
+                            .unwrap();
+                        break 'start_even_beats;
                     }
                 }
-                Err(_) => {}
             }
         }
     }
@@ -193,22 +188,22 @@ pub fn prepare_waveform(
                     };
                     waveform = optimizer::optimize(waveform);
                     println!("optimizer::optimize returned: {}", &waveform);
-                    return WaveformOrError::Waveform(waveform);
+                    WaveformOrError::Waveform(waveform)
                 }
                 Err(error) => {
                     println!("Errors while evaluating input: {:?}", error);
-                    let message = format!("Error: {}", error.to_string());
-                    return WaveformOrError::Error(ParseError {
+                    let message = format!("Error: {}", error);
+                    WaveformOrError::Error(ParseError {
                         message,
                         errors: vec![error],
-                    });
+                    })
                 }
             }
         }
         Err(errors) => {
             println!("Errors while parsing input: {:?}", errors);
-            let message = format!("Error: {}", errors[0].to_string());
-            return WaveformOrError::Error(ParseError { message, errors });
+            let message = format!("Error: {}", errors[0]);
+            WaveformOrError::Error(ParseError { message, errors })
         }
     }
 }
@@ -260,7 +255,7 @@ fn duration_from_beats(tempo: u32, beats: u64) -> Duration {
 pub fn beats_waveform(
     tempo: u32,
     beats_per_measure: u32,
-    context: &Vec<(String, parser::Expr<MarkId>)>,
+    context: &[(String, parser::Expr<MarkId>)],
 ) -> waveform::Waveform<MarkId> {
     let seconds_per_beat = duration_from_beats(tempo, 1);
     let mut ws = Vec::new();
@@ -276,7 +271,7 @@ pub fn beats_waveform(
         Ok(expr) => expr,
         Err(errors) => panic!("Error parsing beats waveform: {:?}", errors),
     };
-    match parser::evaluate(&context, expr) {
+    match parser::evaluate(context, expr) {
         Ok(parser::Expr::Seq { waveform, .. }) => match *waveform {
             parser::Expr::Waveform(waveform) => waveform::Waveform::<MarkId>::Marked {
                 id: MarkId::TopLevel,

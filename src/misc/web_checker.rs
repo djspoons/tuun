@@ -149,10 +149,7 @@ fn find_tuun_synth_blocks(input: &str) -> Vec<(usize, &str)> {
     blocks
 }
 
-fn check_file(
-    file: &str,
-    context: &Vec<(String, parser::Expr<renderer::MarkId>)>,
-) -> (usize, usize) {
+fn check_file(file: &str, context: &[(String, parser::Expr<renderer::MarkId>)]) -> (usize, usize) {
     let input = match fs::read_to_string(file) {
         Ok(s) => s,
         Err(e) => {
