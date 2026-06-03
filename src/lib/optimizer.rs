@@ -386,6 +386,18 @@ where
                 (a, b) => BinaryPointOp(Operator::Divide, Box::new(a), Box::new(b)),
             }
         }
+        BinaryPointOp(Operator::Power, a, b) => {
+            match (optimize(*a), optimize(*b)) {
+                (Fixed(a, _), _) if a.is_empty() => Fixed(vec![], ()),
+                (_, Fixed(b, _)) if b.is_empty() => Fixed(vec![], ()),
+                // TODO could do other infinite waveforms below
+                (Const(_), Const(0.0)) => Const(1.0),
+                (a, Const(1.0)) => a,
+                (Const(a), Const(b)) => Const(a.powf(b)),
+                (Fixed(a, _), Const(b)) => Fixed(a.into_iter().map(|x| x.powf(b)).collect(), ()),
+                (a, b) => BinaryPointOp(Operator::Power, Box::new(a), Box::new(b)),
+            }
+        }
         Reset {
             trigger,
             waveform,

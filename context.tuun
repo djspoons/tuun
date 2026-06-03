@@ -37,6 +37,7 @@ pulse = fn(width, freq_hz) =>
 
 // HELPERS
 amp = fn(level) => fn(w) => level * w,
+db = fn(db) => amp(pow(10.0, db / 20.0)),
 // slope is in terms of level-change per second
 linear = fn(initial, slope) => initial + (time * slope),
 // Convert from MIDI note numbers to frequency

@@ -292,10 +292,9 @@ pub fn power<M>(arguments: Vec<Expr<M>>) -> Expr<M>
 where
     M: Debug,
 {
-    match arguments[..] {
-        [Float(base), Float(exponent)] => Expr::Float(base.powf(exponent)),
-        _ => Error("Invalid arguments for power".to_string()),
-    }
+    binary_op(arguments, "pow".to_string(), f32::powf, |a, b| {
+        Waveform::BinaryPointOp(Operator::Power, a, b)
+    })
 }
 
 pub fn log<M>(arguments: Vec<Expr<M>>) -> Expr<M>

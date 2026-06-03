@@ -266,6 +266,7 @@ impl<'a> Generator<'a> {
                     Operator::Divide => |a: f32, b: f32| {
                         if b == 0.0 { 0.0 } else { a / b }
                     },
+                    Operator::Power => f32::powf,
                 };
                 self.generate_binary_op(op_fn, a, b, *op == Operator::Merge, out)
             }
@@ -708,9 +709,11 @@ impl<'a> Generator<'a> {
                 let a_len = self.length(a, max);
                 let b_len = self.length(b, max);
                 match op {
-                    Operator::Add | Operator::Subtract | Operator::Multiply | Operator::Divide => {
-                        a_len.min(b_len)
-                    }
+                    Operator::Add
+                    | Operator::Subtract
+                    | Operator::Multiply
+                    | Operator::Divide
+                    | Operator::Power => a_len.min(b_len),
                     Operator::Merge => a_len.max(b_len),
                 }
             }

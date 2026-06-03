@@ -14,6 +14,8 @@ pub enum Operator {
     /// Computes the sum of two samples or, in the case where only one sample is defined,
     /// returns that sample.
     Merge,
+    /// Raises the first sample to the power of the second.
+    Power,
 }
 
 /// Waveform is a compact representation of a sequence of samples.
