@@ -46,7 +46,7 @@ pub struct AppState {
     /// Active behavior for the DAW pad.
     pub daw_pad_mode: DawPadMode,
     /// Parser context: prelude + bindings loaded from context files.
-    pub context: Vec<(String, parser::Expr<MarkId>)>,
+    pub context: Vec<(String, parser::SourceExpr<MarkId>)>,
     /// Loader configuration: filenames, tempo, sample rate.
     pub config: loader::Config,
     /// Set by `Effect::Exit`; `main` checks at top of loop and breaks.

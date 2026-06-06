@@ -32,7 +32,7 @@ impl fmt::Display for MarkId {
 #[wasm_bindgen(js_name = "Tuun")]
 pub struct Wasm {
     sample_rate: i32,
-    context: Vec<(String, parser::Expr<MarkId>)>,
+    context: Vec<(String, parser::SourceExpr<MarkId>)>,
     waveform: Option<generator::Waveform<MarkId>>,
     last_slider_values: HashMap<String, f32>,
     buffer_duration: Duration,
@@ -47,7 +47,7 @@ impl Wasm {
     /// * `tempo` - The tempo in beats per minute (e.g., 120)
     #[wasm_bindgen(constructor)]
     pub fn new(sample_rate: i32, tempo: f32) -> Result<Wasm, String> {
-        use parser::Expr;
+        use parser::SourceExpr;
         // Set up better panic messages in the browser console
         console_error_panic_hook::set_once();
 
@@ -55,33 +55,23 @@ impl Wasm {
 
         // Initialize context with builtins
         let mut context = Vec::new();
-        context.push(("sample_rate".to_string(), Expr::Float(sample_rate as f32)));
+        context.push((
+            "sample_rate".to_string(),
+            SourceExpr::float(sample_rate as f32),
+        ));
         builtins::add_prelude(&mut context);
 
-        context.push(("tempo".to_string(), Expr::Float(tempo)));
+        context.push(("tempo".to_string(), SourceExpr::float(tempo)));
 
         // Load context from embedded .tuun file
         // The file is embedded at compile time using include_str!
         // Default: context.tuun from the repository
         let context_content = include_str!("../../context.tuun");
 
-        // Strip comments and parse the context file
-        let context_content: String = context_content
-            .lines()
-            .map(|line| {
-                if let Some(comment_index) = line.find("//") {
-                    &line[..comment_index]
-                } else {
-                    line
-                }
-            })
-            .collect::<Vec<&str>>()
-            .join("\n");
-
-        // Parse and add all context definitions
-        match parser::parse_context(&context_content) {
+        // Parse and add all context definitions.
+        match parser::parse_context(context_content) {
             Ok(parsed_defs) => {
-                for (pattern, expr) in parsed_defs {
+                for parser::Binding { pattern, expr, .. } in parsed_defs {
                     match parser::evaluate(&context, expr) {
                         Ok(expr) => {
                             if let Err(e) = parser::extend_context(&mut context, &pattern, &expr) {
@@ -128,10 +118,12 @@ impl Wasm {
                 .map(|(name, value)| {
                     (
                         parser::Pattern::Identifier(name.clone()),
-                        parser::Expr::Waveform(waveform::Waveform::Marked {
-                            id: MarkId::Slider(name.clone()),
-                            waveform: Box::new(waveform::Waveform::Const(*value)),
-                        }),
+                        parser::SourceExpr::from(parser::Expr::Waveform(
+                            waveform::Waveform::Marked {
+                                id: MarkId::Slider(name.clone()),
+                                waveform: Box::new(waveform::Waveform::Const(*value)),
+                            },
+                        )),
                     )
                 })
                 .collect();
@@ -143,9 +135,9 @@ impl Wasm {
 
         // TODO Do we want to precompute here?
 
-        let waveform = match expr {
+        let waveform = match expr.expr {
             parser::Expr::Waveform(w) => w,
-            parser::Expr::Seq { waveform, .. } => match *waveform {
+            parser::Expr::Seq { waveform, .. } => match (*waveform).expr {
                 parser::Expr::Waveform(w) => w,
                 _ => return Err("Got non-Waveform in seq after evaluate".to_string()),
             },

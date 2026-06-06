@@ -171,6 +171,33 @@ pub struct Program {
     pub valid_keys_program: cell::Cell<Option<bool>>,
 }
 
+impl Program {
+    /// Atomically replace `text[target_span]` with `new_text`, validating
+    /// the result by re-parsing.
+    ///
+    /// On success, `text` is updated and the `valid_keys_program` cache is
+    /// invalidated. On parse failure (the proposed edit produces an
+    /// un-parseable program), nothing is changed and the errors are
+    /// returned — this is the "mid-edit garbage" guard.
+    ///
+    /// This is the AST-aware editor primitive that lifts
+    /// [`parser::replace_at`] to operate on a `Program`. The save path
+    /// (`Effect::SaveProgramsToFile`) emits `program.text` verbatim, so as
+    /// long as edits flow through here (rather than direct `text =` writes)
+    /// the saved file round-trips byte-for-byte for the program body —
+    /// comments, whitespace, formatting all preserved.
+    pub fn edit_text(
+        &mut self,
+        target_span: std::ops::Range<usize>,
+        new_text: &str,
+    ) -> Result<(), Vec<parser::Error>> {
+        let mut ast = parser::parse_program::<MarkId>(&self.text)?;
+        parser::replace_at(&mut ast, target_span, new_text, &mut self.text)?;
+        self.valid_keys_program.set(None);
+        Ok(())
+    }
+}
+
 pub const PROGRAMS_PER_BANK: usize = 8;
 pub const NUM_PROGRAM_BANKS: usize = 8;
 
@@ -1034,4 +1061,67 @@ pub fn current_beat_info(
         );
     }
     (current_beat, current_beat_start, current_beat_duration)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn new_program(text: &str) -> Program {
+        Program {
+            text: text.to_string(),
+            id: id_from_index(0),
+            sliders: ProgramSliders::default(),
+            color: None,
+            level_db: 0.0,
+            valid_keys_program: cell::Cell::new(Some(true)),
+        }
+    }
+
+    fn find_first_list_span(node: &parser::SourceExpr<MarkId>) -> Option<std::ops::Range<usize>> {
+        if let parser::Expr::List(_) = &node.expr {
+            return node.span.clone();
+        }
+        match &node.expr {
+            parser::Expr::Application { function, argument } => {
+                find_first_list_span(function).or_else(|| find_first_list_span(argument))
+            }
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn edit_text_updates_text_and_invalidates_cache() {
+        // The Stage 6 motivating case: editing the list passed to
+        // `on_beats(...)` inside a program's text.
+        let mut program = new_program("on_beats( // pattern\n [0, 1, 2, 3])");
+        assert_eq!(program.valid_keys_program.get(), Some(true));
+
+        let ast = parser::parse_program::<MarkId>(&program.text).unwrap();
+        let list_span = find_first_list_span(&ast).expect("should find a list");
+
+        program.edit_text(list_span, "[0, 2]").unwrap();
+
+        // `program.text` is what `SaveProgramsToFile` emits verbatim, so the
+        // round-tripped file preserves the inter-call comment.
+        assert_eq!(program.text, "on_beats( // pattern\n [0, 2])");
+        // Edit invalidated the keys-validity cache.
+        assert_eq!(program.valid_keys_program.get(), None);
+    }
+
+    #[test]
+    fn edit_text_rejects_bad_edit_atomically() {
+        let mut program = new_program("[1, 2, 3]");
+        program.valid_keys_program.set(Some(false));
+
+        let ast = parser::parse_program::<MarkId>(&program.text).unwrap();
+        let list_span = ast.span.clone().unwrap();
+
+        // Replacing the list with malformed text fails.
+        let result = program.edit_text(list_span, "[1,");
+        assert!(result.is_err());
+        // Neither the text nor the cache moved.
+        assert_eq!(program.text, "[1, 2, 3]");
+        assert_eq!(program.valid_keys_program.get(), Some(false));
+    }
 }

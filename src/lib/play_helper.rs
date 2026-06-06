@@ -37,7 +37,7 @@ impl PlayHelper {
     /// success, or a `ParseError` on failure.
     pub fn play_waveform(
         &mut self,
-        context: &[(String, parser::Expr<MarkId>)],
+        context: &[(String, parser::SourceExpr<MarkId>)],
         program: &Program,
         status: &tracker::Status<WaveformId, MarkId>,
         start_at_next_measure: bool,
@@ -106,7 +106,7 @@ impl PlayHelper {
     pub fn start_beats(
         &self,
         status_receiver: &mpsc::Receiver<tracker::Status<WaveformId, MarkId>>,
-        context: &[(String, parser::Expr<MarkId>)],
+        context: &[(String, parser::SourceExpr<MarkId>)],
     ) {
         // Play the odd Beats waveform starting immediately and repeating every two measures
         self.command_sender
@@ -154,7 +154,7 @@ impl PlayHelper {
 /// Returns a waveform if the program parses and evaluates successfully;
 /// otherwise returns a `ParseError`.
 pub fn prepare_waveform(
-    context: &[(String, parser::Expr<MarkId>)],
+    context: &[(String, parser::SourceExpr<MarkId>)],
     program: &Program,
 ) -> WaveformOrError {
     match parser::parse_program(&program.text) {
@@ -170,16 +170,16 @@ pub fn prepare_waveform(
                 Ok(expr) => {
                     println!("parser::evaluate returned: {}", &expr);
                     use parser::Expr;
-                    let mut waveform = match expr {
+                    let mut waveform = match expr.expr {
                         Expr::Waveform(waveform) => waveform,
-                        Expr::Seq { waveform, .. } => match *waveform {
+                        Expr::Seq { waveform, .. } => match waveform.expr {
                             Expr::Waveform(waveform) => waveform,
                             _ => panic!("Got non-Waveform in seq after evaluate"),
                         },
-                        _ => {
-                            println!("Expression is not a waveform, cannot play: {:#?}", expr);
+                        other => {
+                            println!("Expression is not a waveform, cannot play: {:#?}", other);
                             return WaveformOrError::Error(ParseError {
-                                message: format!("Not a waveform: {}", expr),
+                                message: format!("Not a waveform: {}", other),
                                 errors: vec![parser::Error::new(
                                     "Expression is not a waveform".to_string(),
                                 )],
@@ -255,7 +255,7 @@ fn duration_from_beats(tempo: u32, beats: u64) -> Duration {
 pub fn beats_waveform(
     tempo: u32,
     beats_per_measure: u32,
-    context: &[(String, parser::Expr<MarkId>)],
+    context: &[(String, parser::SourceExpr<MarkId>)],
 ) -> waveform::Waveform<MarkId> {
     let seconds_per_beat = duration_from_beats(tempo, 1);
     let mut ws = Vec::new();
@@ -271,8 +271,8 @@ pub fn beats_waveform(
         Ok(expr) => expr,
         Err(errors) => panic!("Error parsing beats waveform: {:?}", errors),
     };
-    match parser::evaluate(context, expr) {
-        Ok(parser::Expr::Seq { waveform, .. }) => match *waveform {
+    match parser::evaluate(context, expr).map(|s| s.expr) {
+        Ok(parser::Expr::Seq { waveform, .. }) => match waveform.expr {
             parser::Expr::Waveform(waveform) => waveform::Waveform::<MarkId>::Marked {
                 id: MarkId::TopLevel,
                 waveform: Box::new(optimizer::optimize(waveform)),

@@ -11,29 +11,21 @@ struct Args {
     input_files: Vec<String>,
 }
 
-fn load_context() -> Vec<(String, parser::Expr<renderer::MarkId>)> {
+fn load_context() -> Vec<(String, parser::SourceExpr<renderer::MarkId>)> {
     // TODO this context business is now getting duplicated across main, here, and the web stuff
     let mut context = Vec::new();
-    context.push(("sample_rate".to_string(), parser::Expr::Float(44100.0)));
-    context.push(("tempo".to_string(), parser::Expr::Float(120.0)));
+    context.push((
+        "sample_rate".to_string(),
+        parser::SourceExpr::float(44100.0),
+    ));
+    context.push(("tempo".to_string(), parser::SourceExpr::float(120.0)));
     builtins::add_prelude(&mut context);
 
     let context_content = include_str!("../../context.tuun");
-    let context_content: String = context_content
-        .lines()
-        .map(|line| {
-            if let Some(comment_index) = line.find("//") {
-                &line[..comment_index]
-            } else {
-                line
-            }
-        })
-        .collect::<Vec<&str>>()
-        .join("\n");
 
-    match parser::parse_context(&context_content) {
+    match parser::parse_context(context_content) {
         Ok(parsed_defs) => {
-            for (pattern, expr) in parsed_defs {
+            for parser::Binding { pattern, expr, .. } in parsed_defs {
                 match parser::evaluate(&context, expr) {
                     Ok(expr) => {
                         if let Err(e) = parser::extend_context(&mut context, &pattern, &expr) {
@@ -149,7 +141,10 @@ fn find_tuun_synth_blocks(input: &str) -> Vec<(usize, &str)> {
     blocks
 }
 
-fn check_file(file: &str, context: &[(String, parser::Expr<renderer::MarkId>)]) -> (usize, usize) {
+fn check_file(
+    file: &str,
+    context: &[(String, parser::SourceExpr<renderer::MarkId>)],
+) -> (usize, usize) {
     let input = match fs::read_to_string(file) {
         Ok(s) => s,
         Err(e) => {

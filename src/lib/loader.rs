@@ -30,21 +30,25 @@ pub struct Config {
 /// Reads and evaluates all configured context files into `context`,
 /// replacing whatever was there. Returns a user-visible status message
 /// (success count or first error).
-pub fn load_context(config: &Config, context: &mut Vec<(String, parser::Expr<MarkId>)>) -> String {
+pub fn load_context(
+    config: &Config,
+    context: &mut Vec<(String, parser::SourceExpr<MarkId>)>,
+) -> String {
     use parser::Expr;
+    use parser::SourceExpr;
     context.clear();
-    context.push(("tempo".to_string(), Expr::Float(config.tempo as f32)));
+    context.push(("tempo".to_string(), SourceExpr::float(config.tempo as f32)));
     context.push((
         "sample_rate".to_string(),
-        Expr::Float(config.sample_rate as f32),
+        SourceExpr::float(config.sample_rate as f32),
     ));
     builtins::add_prelude(context);
     context.push((
         "mark".to_string(),
-        Expr::BuiltIn {
+        SourceExpr::from(Expr::BuiltIn {
             name: "mark".to_string(),
             function: parser::BuiltInFn(std::rc::Rc::new(renderer::mark)),
-        },
+        }),
     ));
 
     let mut bindings = 0;
@@ -52,22 +56,15 @@ pub fn load_context(config: &Config, context: &mut Vec<(String, parser::Expr<Mar
     for file in config.context_files.iter() {
         let raw_context = std::fs::read_to_string(file)
             .unwrap_or_else(|_| panic!("Failed to read context file: {}", file));
-        // Strip out comments (that is any after // on a line)
-        let raw_context: String = raw_context
-            .lines()
-            .map(|line| {
-                if let Some(comment_index) = line.find("//") {
-                    &line[..comment_index]
-                } else {
-                    line
-                }
-            })
-            .collect::<Vec<&str>>()
-            .join("\n");
         match parser::parse_context(&raw_context) {
             Ok(parsed_exprs) => {
                 println!("Parsed context from {}:", file);
-                for (pattern, parsed_expr) in parsed_exprs {
+                for parser::Binding {
+                    pattern,
+                    expr: parsed_expr,
+                    ..
+                } in parsed_exprs
+                {
                     match parser::evaluate(context, parsed_expr) {
                         Ok(expr) => {
                             match parser::extend_context(context, &pattern, &expr) {
@@ -152,13 +149,13 @@ pub fn load_programs(
                 }
             }
 
-            let line = if let Some(comment_index) = line.find("//") {
-                &line[..comment_index]
-            } else {
-                line
-            }
-            .trim();
-            if !line.is_empty() {
+            // Skip blank lines and comment-only lines. Lines that mix code
+            // with a trailing `// ...` comment are passed verbatim to the
+            // parser, which now treats line comments as trivia.
+            let trimmed = line.trim_start();
+            let is_blank_or_comment = trimmed.is_empty() || trimmed.starts_with("//");
+            if !is_blank_or_comment {
+                let line = line.trim();
                 let sliders = if let Some(configs) = pending_sliders.take() {
                     use parser::SliderFunction;
                     let normalized_values = configs

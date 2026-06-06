@@ -25,16 +25,16 @@ use crate::waveform;
 // `midi_input::update_launchkey_state` to validate whether a program is a
 // valid keys instrument before coloring its pad.
 pub fn apply_note_function_as_waveforms(
-    context: &[(String, parser::Expr<MarkId>)],
-    expr: &parser::Expr<MarkId>,
-    args: Vec<parser::Expr<MarkId>>,
+    context: &[(String, parser::SourceExpr<MarkId>)],
+    expr: &parser::SourceExpr<MarkId>,
+    args: Vec<parser::SourceExpr<MarkId>>,
     sliders: &renderer::ProgramSliders,
 ) -> Result<(waveform::Waveform<MarkId>, waveform::Waveform<MarkId>), String> {
     use parser::Expr::{Tuple, Waveform};
-    let expr = parser::Expr::Application {
+    let expr = parser::SourceExpr::from(parser::Expr::Application {
         function: Box::new(expr.clone()),
-        argument: Box::new(Tuple(args)),
-    };
+        argument: Box::new(parser::SourceExpr::from(Tuple(args))),
+    });
     let expr = slider::prepend_slider_bindings(
         &sliders.configs,
         &sliders.normalized_values,
@@ -42,7 +42,7 @@ pub fn apply_note_function_as_waveforms(
         expr,
     );
     let expr = parser::evaluate(context, expr).map_err(|e| e.to_string());
-    match expr {
+    match expr.map(|s| s.expr) {
         Ok(Tuple(mut exprs)) => {
             if exprs.len() != 2 {
                 return Err(format!(
@@ -50,7 +50,7 @@ pub fn apply_note_function_as_waveforms(
                     exprs.len()
                 ));
             }
-            match (exprs.remove(0), exprs.remove(0)) {
+            match (exprs.remove(0).expr, exprs.remove(0).expr) {
                 (Waveform(note_on), Waveform(note_off)) => Ok((note_on, note_off)),
                 (expr, Waveform(_)) => Err(format!("Expected waveform for note-on, got: {}", expr)),
                 (_, expr) => Err(format!("Expected waveform for note-off, got: {}", expr)),
@@ -181,25 +181,34 @@ impl EffectRunner {
                     Some(p) => p,
                     None => return,
                 };
-                let function: parser::Expr<MarkId> = match parser::parse_program(&program.text) {
-                    Ok(expr @ (parser::Expr::Function { .. } | parser::Expr::BuiltIn { .. })) => {
-                        expr
-                    }
-                    Ok(other) => {
-                        state.message = format!("Expected note function, got: {}", other);
-                        return;
-                    }
-                    Err(errors) => {
-                        state.message = format!("Error: {}", errors[0]);
-                        return;
-                    }
-                };
+                let function: parser::SourceExpr<MarkId> =
+                    match parser::parse_program(&program.text) {
+                        Ok(expr)
+                            if matches!(
+                                expr.expr,
+                                parser::Expr::Function { .. } | parser::Expr::BuiltIn { .. }
+                            ) =>
+                        {
+                            expr
+                        }
+                        Ok(other) => {
+                            state.message = format!("Expected note function, got: {}", other);
+                            return;
+                        }
+                        Err(errors) => {
+                            state.message = format!("Error: {}", errors[0]);
+                            return;
+                        }
+                    };
                 // Sanity check: actually invoke with dummy args.
                 // TODO use a waveform for velocity
                 if let Err(message) = apply_note_function_as_waveforms(
                     &state.context,
                     &function,
-                    vec![parser::Expr::Float(60.0), parser::Expr::Float(0.7)],
+                    vec![
+                        parser::SourceExpr::float(60.0),
+                        parser::SourceExpr::float(0.7),
+                    ],
                     &program.sliders,
                 ) {
                     state.message = message;
@@ -223,9 +232,9 @@ impl EffectRunner {
                     return;
                 };
                 let args = vec![
-                    parser::Expr::Float(key as f32),
+                    parser::SourceExpr::float(key as f32),
                     // TODO use a marked waveform for velocity so we can implement after-touch
-                    parser::Expr::Float(velocity as f32 / 127.0),
+                    parser::SourceExpr::float(velocity as f32 / 127.0),
                 ];
                 match apply_note_function_as_waveforms(
                     &keys.context,

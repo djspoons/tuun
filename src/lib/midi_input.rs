@@ -14,8 +14,8 @@ use crate::waveform;
 // TODO maybe move out of here since this isn't tied to MIDI input anymore
 pub struct Keys {
     pub id: renderer::ProgramId,
-    pub context: Vec<(String, parser::Expr<MarkId>)>,
-    pub function: parser::Expr<MarkId>,
+    pub context: Vec<(String, parser::SourceExpr<MarkId>)>,
+    pub function: parser::SourceExpr<MarkId>,
     pub sliders: renderer::ProgramSliders,
     pub level_db: f32,
     pub note_off_waveforms: HashMap<u8, waveform::Waveform<MarkId>>, // keys are MIDI note numbers
@@ -165,11 +165,19 @@ fn is_valid_keys_program(state: &actions::AppState, program: &Program) -> bool {
         return cached;
     }
     let valid = match parser::parse_program::<MarkId>(&program.text) {
-        Ok(expr @ (parser::Expr::Function { .. } | parser::Expr::BuiltIn { .. })) => {
+        Ok(expr)
+            if matches!(
+                expr.expr,
+                parser::Expr::Function { .. } | parser::Expr::BuiltIn { .. }
+            ) =>
+        {
             effects::apply_note_function_as_waveforms(
                 &state.context,
                 &expr,
-                vec![parser::Expr::Float(60.0), parser::Expr::Float(0.7)],
+                vec![
+                    parser::SourceExpr::float(60.0),
+                    parser::SourceExpr::float(0.7),
+                ],
                 &program.sliders,
             )
             .is_ok()

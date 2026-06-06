@@ -92,10 +92,10 @@ fn bench_marks(c: &mut Criterion) {
             builtins::add_prelude(&mut context);
             context.push((
                 "mark".to_string(),
-                parser::Expr::BuiltIn {
+                parser::SourceExpr::from(parser::Expr::BuiltIn {
                     name: "mark".to_string(),
                     function: parser::BuiltInFn(std::rc::Rc::new(renderer::mark)),
-                },
+                }),
             ));
             const SAMPLE_RATE: i32 = 44100;
             let mut generator = generator::Generator::new(SAMPLE_RATE);
@@ -118,8 +118,7 @@ fn bench_marks(c: &mut Criterion) {
 }
 
 fn bench_large(c: &mut Criterion) {
-    type Expr = parser::Expr<u32>;
-    let mut context: Vec<(String, Expr)> = Vec::new();
+    let mut context: Vec<(String, parser::SourceExpr<u32>)> = Vec::new();
     builtins::add_prelude(&mut context);
     match parser::parse_context(
         r#"
@@ -131,7 +130,7 @@ fn bench_large(c: &mut Criterion) {
     R = fn(dur, level) => fn(w) => w * Rw(dur, level),"#,
     ) {
         Ok(bindings) => {
-            for (pattern, expr) in bindings {
+            for parser::Binding { pattern, expr, .. } in bindings {
                 //println!("Parsed binding: {:?} = {:}", &pattern, &expr);
                 match parser::evaluate(&context, expr) {
                     Ok(expr) => {
@@ -157,7 +156,7 @@ fn bench_large(c: &mut Criterion) {
                     match parser::evaluate(&context, expr) {
                         Ok(expr) => {
                             //println!("Evaluate returned: {:}", &expr);
-                            if let parser::Expr::Waveform(waveform) = expr {
+                            if let parser::Expr::Waveform(waveform) = expr.expr {
                                 let mut generator = generator::Generator::new(44100);
                                 let mut w = generator::initialize_state(waveform);
                                 let mut out = vec![0.0; 1024];

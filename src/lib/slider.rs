@@ -34,7 +34,7 @@ pub fn denormalize(function: &parser::SliderFunction, normalized: f32) -> Result
             builtins::add_prelude(&mut context);
             let result = parser::evaluate(&context, expr)
                 .map_err(|e| format!("slider function eval error: {}", e))?;
-            match result {
+            match result.expr {
                 parser::Expr::Float(v) => Ok(v),
                 other => Err(format!(
                     "slider function did not return a number, got: {:?}",
@@ -49,8 +49,8 @@ pub fn prepend_slider_bindings<M, F>(
     configs: &[parser::Slider],
     normalized_values: &[f32],
     mark_id: F,
-    expr: parser::Expr<M>,
-) -> parser::Expr<M>
+    expr: parser::SourceExpr<M>,
+) -> parser::SourceExpr<M>
 where
     F: Fn(String) -> M,
 {
@@ -64,10 +64,10 @@ where
             let value = denormalize(&config.function, *normalized_value).unwrap_or(0.0);
             (
                 parser::Pattern::Identifier(config.label.clone()),
-                parser::Expr::Waveform(waveform::Waveform::Marked {
+                parser::SourceExpr::from(parser::Expr::Waveform(waveform::Waveform::Marked {
                     id: mark_id(config.label.clone()),
                     waveform: Box::new(waveform::Waveform::Const(value)),
-                }),
+                })),
             )
         })
         .collect::<Vec<_>>();
