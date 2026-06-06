@@ -718,6 +718,7 @@ fn apply_level_db(state: &mut AppState, program_index: usize, level_db: f32) -> 
         name: "level".to_string(),
         value: format!("{:.1} dB", level_db),
     });
+    // TODO should be (program_id mod bank) here and elsewhere
     effects.push(Effect::ShowMessage(format!(
         "level({}) = {:.1} dB",
         program_id, level_db
