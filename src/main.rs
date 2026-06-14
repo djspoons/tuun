@@ -1,5 +1,6 @@
-use std::cell;
 use std::collections::HashMap;
+use std::fs;
+use std::path;
 use std::process;
 use std::sync::mpsc;
 use std::thread;
@@ -13,9 +14,9 @@ use tuun::actions;
 use tuun::effects;
 use tuun::generator;
 use tuun::launchkey;
-use tuun::loader;
 use tuun::metric;
 use tuun::midi_input;
+use tuun::parser;
 use tuun::play_helper;
 use tuun::renderer;
 use tuun::sdl2_input;
@@ -24,7 +25,7 @@ use tuun::tracker;
 use tuun::waveform;
 
 use metric::Metric;
-use renderer::{MarkId, Mode, Program, Renderer, WaveformId};
+use renderer::{MarkId, Renderer, WaveformId};
 use tracker::Command;
 
 #[derive(ClapParser, Debug)]
@@ -35,16 +36,9 @@ struct Args {
     #[arg(long = "beats_per_measure", default_value_t = 4)]
     beats_per_measure: u32,
     #[arg(long, default_value_t = 44100)]
-    sample_rate: i32,
+    sample_rate: u32,
     #[arg(long, default_value_t = 1024)]
     buffer_size: u16,
-    #[arg(short = 'C', long = "context_file", number_of_values = 1)]
-    context_files: Vec<String>,
-    #[arg(short = 'P', long = "programs_file", default_value = "")]
-    programs_file: String,
-    // Additional programs to load
-    #[arg(short, long = "program", default_value = "", number_of_values = 1)]
-    programs: Vec<String>,
     // Date format to use when saving captured waveforms
     #[arg(long, default_value = "_%Y-%m-%d_%H-%M-%S")]
     date_format: String,
@@ -60,35 +54,32 @@ struct Args {
         default_value = "true", // Default if the flag is not present
         default_missing_value = "true")]
     ui: bool, // When set to value, just runs each of the programs once then exits
+    /// Root directory for module resolution. A module path `["foo", "bar"]`
+    /// resolves to `<library_root>/foo/bar.tuun`.
+    #[arg(long, default_value = "./lib")]
+    library_root: path::PathBuf,
+    input_file: String,
     #[arg(short = 'O', long, default_value = ".")]
     output_dir: String, // Captures waveforms to the specified directory
 }
 
 pub fn main() {
     let args = Args::parse();
-    let config = loader::Config {
-        tempo: args.tempo,
-        sample_rate: args.sample_rate,
-        context_files: args.context_files.clone(),
-        programs_file: args.programs_file.clone(),
-        additional_programs: args.programs.clone(),
-    };
-    let mut context = Vec::new();
-    let mut message = loader::load_context(&config, &mut context);
-    let mut programs: Vec<Program> = Vec::new();
-    let (last_slider_values, errors) = loader::load_programs(&config, &mut programs);
-    if !errors.is_empty() {
-        message = format!("Error loading programs: {}", errors[0]);
-    }
-    let mode = Mode::Select;
 
     let (status_sender, status_receiver) = mpsc::channel();
     let (command_sender, command_receiver) = mpsc::channel();
 
+    let input_path = path::PathBuf::from(&args.input_file);
+    let input = fs::read_to_string(&input_path)
+        .unwrap_or_else(|_| panic!("Failed to read input_file: {}", args.input_file));
+    // TODO we don't want to ever fail here:
+    let mut state = actions::AppState::from_source(input, input_path)
+        .unwrap_or_else(|errors| panic!("Failed to parse {}: {:?}", args.input_file, errors));
+
     if !args.ui {
         println!("Starting in non-UI mode");
         // Filter out any empty programs
-        programs.retain(|p| !p.text.is_empty());
+        state.programs.retain(|p| !p.text.is_empty());
 
         let mut tracker = tracker::Tracker::<WaveformId, MarkId>::new(
             args.sample_rate,
@@ -102,32 +93,32 @@ pub fn main() {
 
         // Call the callback to get at least one status update
         tracker.callback(&mut out);
-        let mut status = status_receiver.recv().unwrap();
-        // We need to add one Beats mark so that we can reuse the helper below to play waveforms
-        status.marks = vec![tracker::Mark {
-            waveform_id: WaveformId::Beats(false),
-            mark_id: MarkId::TopLevel,
-            start: Instant::now() + Duration::from_millis(100), // Some time in the near future
-            duration: Duration::from_secs(4),                   // Doesn't matter
-        }];
-
+        let status = status_receiver.recv().unwrap();
         // Parse and send commands to play all of the waveforms.
-        let mut play_helper =
-            play_helper::PlayHelper::new(args.tempo, args.beats_per_measure, command_sender);
-        for program in programs.iter() {
+        let mut play_helper = play_helper::PlayHelper::new(
+            args.sample_rate,
+            args.tempo,
+            args.beats_per_measure,
+            args.library_root.clone(),
+            command_sender,
+        );
+        for program in state.programs.iter_mut() {
             println!("Playing program {}: {}", program.id, program.text);
-            let program = Program {
-                text: program.text.to_string(),
-                id: program.id,
-                sliders: program.sliders.clone(),
-                color: program.color,
-                level_db: program.level_db,
-                valid_keys_program: cell::Cell::new(None),
-            };
-            match play_helper.play_waveform(&context, &program, &status, false, None) {
-                Ok(_) => (),
-                Err(err) => {
-                    println!("{}", err.message);
+            match play_helper.evaluate_program(&state.bindings, program) {
+                Ok(expr) => match expr.expr {
+                    parser::Expr::Waveform(w) => {
+                        program.cached_waveform = Some(w);
+                        play_helper.play_program_as_waveform(program, &status, false, None);
+                    }
+                    other => {
+                        println!(
+                            "Program {} did not evaluate to a waveform: {}",
+                            program.id, other
+                        );
+                    }
+                },
+                Err(message) => {
+                    println!("{}", message);
                     process::exit(1);
                 }
             }
@@ -139,7 +130,7 @@ pub fn main() {
             let mark_count = status
                 .marks
                 .iter()
-                .filter(|mark| !mark.waveform_id.is_beats() && mark.mark_id == MarkId::TopLevel)
+                .filter(|mark| mark.mark_id == MarkId::TopLevel)
                 .count();
             if mark_count == 0 {
                 println!("All waveforms finished");
@@ -153,7 +144,7 @@ pub fn main() {
     let sdl_context = sdl2::init().unwrap();
     let audio_subsystem = sdl_context.audio().unwrap();
     let desired_spec = AudioSpecDesired {
-        freq: Some(args.sample_rate),
+        freq: Some(args.sample_rate as i32),
         channels: Some(1), // mono
         samples: Some(args.buffer_size),
     };
@@ -231,13 +222,28 @@ pub fn main() {
         tx
     };
 
+    // Start the beats!
     play_helper::PlayHelper::new(
+        args.sample_rate,
         args.tempo,
         args.beats_per_measure,
+        args.library_root.clone(),
         precomputing_command_sender.clone(),
     )
-    .start_beats(&status_receiver, &context);
+    .start_beats(&status_receiver);
 
+    // Copy initial values for each slider for all programs
+    let mut last_slider_values: HashMap<(WaveformId, String), f32> = HashMap::new();
+    for program in state.programs.iter() {
+        for (j, config) in program.sliders.configs.iter().enumerate() {
+            let value = slider::denormalize(&config.function, program.sliders.normalized_values[j])
+                .unwrap_or(0.0);
+            last_slider_values.insert(
+                (WaveformId::Program(program.id), config.label.clone()),
+                value,
+            );
+        }
+    }
     // Spawn a thread that batches slider updates, sending them approximately once per audio buffer
     let buffer_duration =
         Duration::from_secs_f32(args.buffer_size as f32 / args.sample_rate as f32);
@@ -285,7 +291,7 @@ pub fn main() {
                     Ok(SliderEvent::SetInitialValues(values)) => {
                         // What to do with these new values for waveforms that are playing? Especially ones
                         // where the sliders are moving? Maybe think of something better in the future once
-                        // we understand better what "load_programs" does to currently playing waveforms.
+                        // we understand better happens to currently playing waveforms.
                         last_slider_values = values;
                     }
                     Ok(SliderEvent::UpdateInitialValues(values)) => {
@@ -351,10 +357,40 @@ pub fn main() {
     // PlayHelpers. Routes through the precompute thread so `--precompute`
     // actually takes effect on interactive playback.
     let mut effect_play_helper = play_helper::PlayHelper::new(
+        args.sample_rate,
         args.tempo,
         args.beats_per_measure,
+        args.library_root.clone(),
         precomputing_command_sender,
     );
+
+    // Populate each program's cached_waveform / cached_keys_instrument from
+    // its initial source so that playback and InstallKeys work without
+    // needing to enter and exit Edit mode first.
+    // TODO this sort of duplicates parts of EvaluateAndUpdateSource; refactor
+    for program in state.programs.iter_mut() {
+        if program.text.is_empty() {
+            continue;
+        }
+        match effect_play_helper.evaluate_program(&state.bindings, program) {
+            Ok(expr) => {
+                if let parser::Expr::Waveform(w) = expr.expr {
+                    program.cached_waveform = Some(w);
+                } else if matches!(
+                    expr.expr,
+                    parser::Expr::Function { .. } | parser::Expr::BuiltIn { .. }
+                ) {
+                    program.cached_keys_instrument = Some(expr);
+                }
+            }
+            Err(message) => {
+                println!(
+                    "Initial evaluate of program {} failed: {}",
+                    program.id, message
+                );
+            }
+        }
+    }
 
     let mut status = tracker::Status {
         buffer_start: Instant::now(),
@@ -371,19 +407,6 @@ pub fn main() {
     const BUFFER_REFRESH_INTERVAL: Duration = Duration::from_millis(200);
     let mut next_buffer_refresh = Instant::now();
     command_sender.send(Command::SendCurrentBuffer).unwrap();
-    // All internal app state; modified by the reducer.
-    let mut state = actions::AppState {
-        programs,
-        active_program_index: 0,
-        mode,
-        keys: None,
-        repeat_after_measures: None,
-        daw_pad_mode: actions::DawPadMode::ClipLauncher,
-        context,
-        config,
-        should_exit: false,
-        message,
-    };
     // Push the initial encoder + DAW-mode display state to the controller
     // if present.
     {

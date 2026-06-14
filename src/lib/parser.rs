@@ -8,9 +8,9 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take_while, take_while1},
     character::complete as character,
-    character::complete::{alpha1, alphanumeric1, char},
+    character::complete::{alphanumeric1, char},
     combinator::{all_consuming, not, peek, recognize, verify},
-    multi::{many0, many1, separated_list0},
+    multi::{many0, many1, separated_list0, separated_list1},
     number::complete as number,
     sequence::{delimited, preceded, terminated},
 };
@@ -131,11 +131,20 @@ where
 /// Consumes a `//` line comment up to (but not including) the trailing newline.
 ///
 /// The newline itself is whitespace and will be picked up by the next pass.
+/// `//#` is the annotation-line prefix and is reserved for
+/// [`parse_annotation_line`]; this parser refuses to match it so `trivia0`
+/// does not silently swallow annotations.
 fn line_comment<'a, E>(input: LocatedSpan<'a>) -> nom::IResult<LocatedSpan<'a>, (), E>
 where
     E: nom::error::ParseError<LocatedSpan<'a>>,
 {
     let (rest, _) = tag::<_, _, E>("//").parse(input)?;
+    if rest.fragment().starts_with('#') {
+        return Err(nom::Err::Error(E::from_error_kind(
+            rest,
+            nom::error::ErrorKind::Tag,
+        )));
+    }
     let (rest, _) = take_while::<_, _, E>(|c: char| c != '\n').parse(rest)?;
     Ok((rest, ()))
 }
@@ -319,24 +328,74 @@ impl<M> SourceExpr<M> {
     }
 }
 
-/// A `pattern = expr` binding plus its byte range in the source.
+/// Bindings modify the current scope of evaluation.
 ///
-/// Span semantics ("absorbing" model): the span covers any leading trivia
-/// (after the previous `,`, or at the start of the bindings region) through
-/// the binding's content. For non-last bindings, it also absorbs trailing
-/// trivia up to but not including the following `,`. For the last binding,
-/// the span ends at the end of the expression — surrounding parsers (e.g.
-/// `parse_let`'s ` in`) consume the trailing whitespace.
-///
-/// Consequence: comments between two bindings belong to whichever side of
-/// the `,` they're on. `x = 1, // for y\n y = 2` puts the comment inside
-/// `y`'s span (matching the convention that "comment after the separator
-/// applies to the following element").
+// TODO tighten up this comment
+// Span semantics ("absorbing" model): the span covers any leading trivia (after
+// the previous `,`, or at the start of the bindings region) through the
+// binding's content. For non-last bindings, it also absorbs trailing trivia up
+// to but not including the following `,`. For the last binding, the span ends
+// at the end of the expression — surrounding parsers (e.g. `parse_let`'s ` in`)
+// consume the trailing whitespace.
+//
+// Consequence: comments between two bindings belong to whichever side of the
+// `,` they're on. `x = 1, // for y\n y = 2` puts the comment inside `y`'s span
+// (matching the convention that "comment after the separator applies to the
+// following element").
 #[derive(Debug, Clone)]
-pub struct Binding<M> {
-    pub pattern: Pattern,
-    pub expr: SourceExpr<M>,
-    pub span: Range<usize>,
+pub enum Binding<M> {
+    /// An import that binds all bindings from the module at `path` in the
+    /// current scope. These bindings are not public in the current scope.
+    // TODO make it just bind public ones
+    Open(Vec<String>),
+    /// Binds variables in `pattern` to the corresponding values in `expr`.
+    Definition(Pattern, SourceExpr<M>),
+    /// A placeholder that carries only trivia (an annotation that does not
+    /// directly precede a `Definition`/`Open`, or trailing comments at end
+    /// of file). Holds no semantic data — its `annotations` and `span` on
+    /// the enclosing [`SourceBinding`] preserve the source bytes so the
+    /// file can round-trip.
+    Empty,
+}
+
+#[derive(Clone, Debug)]
+pub struct SourceBinding<M> {
+    pub binding: Binding<M>,
+    /// Annotations attached to this binding.
+    pub annotations: Vec<SourceAnnotation>,
+    pub span: Option<Range<usize>>,
+}
+
+impl<M> From<Binding<M>> for SourceBinding<M> {
+    fn from(binding: Binding<M>) -> Self {
+        SourceBinding {
+            binding,
+            annotations: Vec::new(),
+            span: None,
+        }
+    }
+}
+
+impl<M> SourceBinding<M> {
+    pub fn definition(pattern: Pattern, expr: SourceExpr<M>) -> SourceBinding<M> {
+        SourceBinding::from(Binding::Definition(pattern, expr))
+    }
+}
+
+/// An `Annotation` together with the byte range in source it was parsed from.
+#[derive(Debug, Clone)]
+pub struct SourceAnnotation {
+    pub annotation: Annotation,
+    pub span: Option<Range<usize>>,
+}
+
+impl From<Annotation> for SourceAnnotation {
+    fn from(annotation: Annotation) -> Self {
+        SourceAnnotation {
+            annotation,
+            span: None,
+        }
+    }
 }
 
 fn parse_string<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
@@ -376,13 +435,13 @@ fn parse_identifier(input: LocatedSpan) -> IResult<String> {
     let (rest, value) =
         alt((
             verify(recognize((
-                    alpha1,
+                    alt((alphanumeric1, tag("_"))),
                     many0(alt((alphanumeric1, tag("_"), tag("#")))),
                 )),
                 |s: &LocatedSpan| *s.fragment() != "fn" &&
                     *s.fragment() != "let" && *s.fragment() != "in" &&
                     *s.fragment() != "if" && *s.fragment() != "then" &&
-                    *s.fragment() != "else",
+                    *s.fragment() != "else" && *s.fragment() != "open",
             ),
             parse_unary_operator,
         )).parse(input)?;
@@ -442,61 +501,194 @@ fn parse_function<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
     Ok((rest, SourceExpr::with_span(expr, start..end)))
 }
 
-/// Parses a comma-separated list of `pattern = expr` bindings, returning
-/// each with an absorbing span (see [`Binding`] for the semantics).
-fn parse_bindings<M>(input: LocatedSpan) -> IResult<Vec<Binding<M>>> {
+/// Parses a comma-separated list of `pattern = expr` bindings each with an
+/// optional preceding `//#{...}` annotation line, returning each with an
+/// absorbing span (see [`Binding`] for the semantics).
+///
+// TODO clean up comment
+// Annotation policy: at most one `//#{...}` LINE attaches to any
+// `Definition`/`Open` — comma-separated annotations on that line attach as a
+// group. If multiple annotation LINES appear before a binding, only the LAST
+// line attaches; earlier lines each become a separate [`Binding::Empty`] entry
+// so that commenting out a binding doesn't cause its annotations to silently
+// fall through to the next one. Annotations not followed by a binding (e.g. at
+// end of file) become `Empty` entries. Plain trailing comments at end of file
+// are absorbed into a final `Empty`.
+fn parse_bindings<M>(input: LocatedSpan) -> IResult<Vec<SourceBinding<M>>> {
     let mut bindings = Vec::new();
     let mut rest = input;
-    let mut binding_start = rest.location_offset();
+    // TODO look more closely at this and see if we can tighten it up
+    // Span start of the next binding to emit. Updated each time we push.
+    let mut chunk_start = rest.location_offset();
+    // Annotation line we've parsed but haven't decided where to attach
+    // yet: (annotations-from-this-line, end-position). If a binding
+    // follows immediately, all of them attach as a group; otherwise we
+    // flush as a single Empty carrying the full line's annotations.
+    let mut pending: Option<(Vec<SourceAnnotation>, usize)> = None;
 
-    // Position tracking is done manually rather than via `separated_list0`
-    // because we need to know where the next `,` lands so each binding's span
-    // extends to just before it.
     loop {
-        // Try to parse one binding: leading trivia + pattern + ws(=) + expr.
-        let attempt = (trivia0, parse_pattern, ws(char('=')), parse_expr).parse(rest);
-        let (after_expr, (_, pattern, _, expr)) = match attempt {
+        // Consume non-annotation trivia (whitespace + plain `//` comments).
+        // `line_comment` no longer matches `//#`, so this never swallows
+        // annotation lines.
+        let after_trivia = trivia0::<Error>(rest).map(|(r, _)| r).unwrap_or(rest);
+
+        // EOF or non-parseable: exit the loop and let the trailing-trivia
+        // handler decide whether to emit one final Empty.
+        if after_trivia.fragment().is_empty() {
+            rest = after_trivia;
+            break;
+        }
+
+        // An annotation line: hold it as pending. If a previous annotation
+        // line was already pending, flush it as Empty since the new line
+        // means the previous can no longer attach to a binding.
+        if let Ok((after_anno, annos)) = parse_annotation_line(after_trivia) {
+            let anno_end = after_anno.location_offset();
+            if let Some((prev_annos, prev_end)) = pending.take() {
+                bindings.push(SourceBinding {
+                    binding: Binding::Empty,
+                    annotations: prev_annos,
+                    span: Some(chunk_start..prev_end),
+                });
+                chunk_start = prev_end;
+            }
+            pending = Some((annos, anno_end));
+            rest = after_anno;
+            continue;
+        }
+
+        // An `open path.to.module` directive: try this before `Definition`
+        // so the `open` keyword isn't mis-parsed as an identifier pattern.
+        if let Ok((after_path, path)) = parse_open_path(after_trivia) {
+            let body_end = after_path.location_offset();
+            let annotations = match pending.take() {
+                Some((annos, _)) => annos,
+                None => Vec::new(),
+            };
+            let binding = Binding::Open(path);
+            // Same comma-handling as `Definition` below: trailing trivia is
+            // absorbed into the span when a `,` follows, otherwise left for
+            // the surrounding parser.
+            let after_trailing = trivia0::<Error>(after_path)
+                .map(|(r, _)| r)
+                .unwrap_or(after_path);
+            let pre_comma = after_trailing.location_offset();
+            let comma: IResult<char> = char(',').parse(after_trailing);
+            match comma {
+                Ok((after_comma, _)) => {
+                    let next_start = after_comma.location_offset();
+                    bindings.push(SourceBinding {
+                        binding,
+                        annotations,
+                        span: Some(chunk_start..pre_comma),
+                    });
+                    rest = after_comma;
+                    chunk_start = next_start;
+                }
+                Err(_) => {
+                    bindings.push(SourceBinding {
+                        binding,
+                        annotations,
+                        span: Some(chunk_start..body_end),
+                    });
+                    rest = after_path;
+                    chunk_start = body_end;
+                    break;
+                }
+            }
+            continue;
+        }
+
+        // A Definition: parse it and attach the pending annotation (if any).
+        let attempt = (parse_pattern, ws(char('=')), parse_expr).parse(after_trivia);
+        let (after_expr, (pattern, _, expr)) = match attempt {
             Ok(x) => x,
             Err(_) => break,
         };
         let expr_end = after_expr.location_offset();
+        let annotations = match pending.take() {
+            Some((annos, _)) => annos,
+            None => Vec::new(),
+        };
 
-        // Consume trailing trivia in preparation for a possible `,`.
-        // `trivia0` always succeeds (it's a `many0`), so the unwrap_or is
-        // dead code in practice — keep the after_expr fallback for safety.
-        let (after_trivia, _) = trivia0::<Error>(after_expr).unwrap_or((after_expr, ()));
-        let pre_comma = after_trivia.location_offset();
-        let comma: IResult<char> = char(',').parse(after_trivia);
+        // Consume trailing trivia in preparation for a possible `,`. As before,
+        // `trivia0` always succeeds.
+        let after_trailing = trivia0::<Error>(after_expr)
+            .map(|(r, _)| r)
+            .unwrap_or(after_expr);
+        let pre_comma = after_trailing.location_offset();
+        let comma: IResult<char> = char(',').parse(after_trailing);
 
         match comma {
             Ok((after_comma, _)) => {
-                // Non-last binding: span absorbs trailing trivia, ends just
-                // before the `,`. The `,` is the only gap byte.
+                // Non-last definition: span absorbs trailing trivia, ends just
+                // before the `,`.
                 let next_start = after_comma.location_offset();
-                bindings.push(Binding {
-                    pattern,
-                    expr,
-                    span: binding_start..pre_comma,
+                bindings.push(SourceBinding {
+                    binding: Binding::Definition(pattern, expr),
+                    annotations,
+                    span: Some(chunk_start..pre_comma),
                 });
                 rest = after_comma;
-                binding_start = next_start;
+                chunk_start = next_start;
             }
             Err(_) => {
-                // Last binding: span ends at end of expr. Don't consume
+                // Last definition: span ends at end of expr. Don't consume
                 // trailing trivia — the surrounding parser may need it
                 // (e.g. `parse_let`'s ` in` requires trivia1).
-                bindings.push(Binding {
-                    pattern,
-                    expr,
-                    span: binding_start..expr_end,
+                bindings.push(SourceBinding {
+                    binding: Binding::Definition(pattern, expr),
+                    annotations,
+                    span: Some(chunk_start..expr_end),
                 });
                 rest = after_expr;
+                chunk_start = expr_end;
                 break;
             }
         }
     }
 
+    // Flush any annotation line still pending — no binding followed it.
+    if let Some((annos, anno_end)) = pending.take() {
+        bindings.push(SourceBinding {
+            binding: Binding::Empty,
+            annotations: annos,
+            span: Some(chunk_start..anno_end),
+        });
+        chunk_start = anno_end;
+    }
+
+    // If there's trailing trivia that contains a `//` comment (annotation or
+    // plain), emit one final Empty to anchor its span so the file round-trips.
+    // Trailing whitespace alone is left for the caller to consume.
+    let after_final = trivia0::<Error>(rest).map(|(r, _)| r).unwrap_or(rest);
+    let final_end = after_final.location_offset();
+    let original_start = input.location_offset();
+    let input_str = input.fragment();
+    if final_end > chunk_start
+        && input_str[chunk_start - original_start..final_end - original_start].contains("//")
+    {
+        bindings.push(SourceBinding {
+            binding: Binding::Empty,
+            annotations: Vec::new(),
+            span: Some(chunk_start..final_end),
+        });
+        rest = after_final;
+    }
+
     Ok((rest, bindings))
+}
+
+/// Parses `open foo.bar.baz` and returns the module path as a list of
+/// components.
+//
+// TODO is the following true?
+// The `open` keyword must be followed by at least one
+// whitespace/comment, and the path must contain at least one component.
+fn parse_open_path(input: LocatedSpan) -> IResult<Vec<String>> {
+    let (rest, _) = tag("open").parse(input)?;
+    let (rest, _) = trivia1(rest)?;
+    separated_list1(char('.'), parse_identifier).parse(rest)
 }
 
 pub fn make_let<M>(
@@ -522,13 +714,27 @@ fn parse_let<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
         ).parse(input)?;
     let end = rest.location_offset();
     let body = body.unwrap_or_default();
-    // Strip binding spans for `make_let`: the de-sugared lambda form doesn't
-    // model them.
-    let bindings: Vec<(Pattern, SourceExpr<M>)> =
-        bindings.into_iter().map(|b| (b.pattern, b.expr)).collect();
+    // Extract `Definition`s for `make_let` (the de-sugared lambda form doesn't
+    // model spans). `Open` directives aren't valid inside `let` so report each
+    // one as an error via `ParseState`.
+    let mut definitions: Vec<(Pattern, SourceExpr<M>)> = Vec::new();
+    for source_binding in bindings {
+        match source_binding.binding {
+            Binding::Definition(pattern, expr) => definitions.push((pattern, expr)),
+            Binding::Open(_) => {
+                rest.extra.report_error(Error::with_range(
+                    "`open` is not allowed inside `let`; use it at the top level".to_string(),
+                    source_binding.span,
+                ));
+            }
+            // Empty bindings carry only trivia (annotations/comments) and have
+            // no semantic effect on the `let`. Skip them.
+            Binding::Empty => {}
+        }
+    }
     // `make_let` de-sugars to nested applications; stamp the outer span over
     // the whole `let … in …` source range.
-    let folded = make_let(bindings, body);
+    let folded = make_let(definitions, body);
     Ok((rest, SourceExpr::with_span(folded.expr, start..end)))
 }
 
@@ -572,6 +778,7 @@ fn parse_unary_application<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
 fn parse_variable<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
     let start = input.location_offset();
     let (rest, name) = parse_identifier(input)?;
+    // TODO don't allow "_" as a variable
     let end = rest.location_offset();
     Ok((
         rest,
@@ -863,15 +1070,15 @@ where
     translate_parse_result(result)
 }
 
-pub fn parse_context<M>(input: &str) -> Result<Vec<Binding<M>>, Vec<Error>> {
+/// Parses a file whose contents are `input`, yielding the bindings defined by
+/// that file.
+pub fn parse_file<M>(input: &str) -> Result<Vec<SourceBinding<M>>, Vec<Error>> {
     let errors = RefCell::new(Vec::new());
     let span = LocatedSpan::new_extra(input, ParseState(&errors));
-    // `parse_bindings` already absorbs leading trivia inside its first
-    // iteration (so the first binding's span includes any file-leading
-    // comments). The trailing consumer is `multispace0` rather than
-    // `trivia0` so that trailing *comments* (which aren't in any binding's
-    // span) cause a parse failure rather than being silently dropped on
-    // round-trip. Trailing whitespace is incidental and still consumed.
+    // `parse_bindings` absorbs leading trivia inside its first iteration (so
+    // the first binding's span includes any file-leading comments) and emits a
+    // final `Empty` binding for any trailing `//` comments so they also
+    // round-trip. Pure trailing whitespace is left for the terminator.
     let result = all_consuming(terminated(
         parse_bindings,
         nom::character::complete::multispace0,
@@ -905,13 +1112,54 @@ pub enum SliderFunction {
 #[derive(Debug, Clone)]
 pub enum Annotation {
     Sliders(Vec<Slider>),
-    NextBank,
     Color(u8, u8, u8),
     Level(f32),
+    /// 1-indexed UI slot this `Definition` occupies. Definitions without a
+    /// `Slot` annotation are not shown in the UI.
+    Slot(u32),
 }
 
-/// Parses a slider config entry — either linear `"label:initial:min:max"`
-/// or user-defined `"label:normalized_initial_value:fn(x) => expr"`.
+impl Display for Slider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.function {
+            SliderFunction::Linear {
+                initial_value,
+                min,
+                max,
+            } => write!(f, "\"{}:{}:{}:{}\"", self.label, initial_value, min, max),
+            SliderFunction::UserDefined {
+                normalized_initial_value,
+                function_source,
+            } => write!(
+                f,
+                "\"{}:{}:{}\"",
+                self.label, normalized_initial_value, function_source
+            ),
+        }
+    }
+}
+
+impl Display for Annotation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Annotation::Color(r, g, b) => write!(f, "color=rgb({},{},{})", r, g, b),
+            Annotation::Level(v) => write!(f, "level_db={}", v),
+            Annotation::Slot(n) => write!(f, "slot={}", n),
+            Annotation::Sliders(sliders) => {
+                write!(f, "sliders=[")?;
+                for (i, s) in sliders.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ",")?;
+                    }
+                    write!(f, "{}", s)?;
+                }
+                write!(f, "]")
+            }
+        }
+    }
+}
+
+/// Parses a slider config entry.
 fn parse_slider(input: LocatedSpan) -> IResult<Slider> {
     // TODO this is a bit of a mess... and also could first parse the whole thing as a string literal.
     let label_char = |c: char| c != ':' && c != '"' && c != ',' && c != ']' && !c.is_whitespace();
@@ -1034,34 +1282,53 @@ fn parse_level(input: LocatedSpan) -> IResult<f32> {
     Ok((rest, value))
 }
 
-/// Parses annotations like `//#{sliders=[...],next_bank}`.
-pub fn parse_annotations(line: &str) -> Result<Vec<Annotation>, Vec<Error>> {
-    match line.trim().strip_prefix("//#") {
-        Some(input) => {
-            let errors = RefCell::new(Vec::new());
-            let span = LocatedSpan::new_extra(input, ParseState(&errors));
-            #[rustfmt::skip]
-            let result = all_consuming(
-                delimited(
-                    ws(char('{')),
-                    separated_list0(
-                        ws(char(',')),
-                        alt((
-                            parse_sliders_internal.map(Annotation::Sliders),
-                            tag("next_bank").map(|_| Annotation::NextBank),
-                            parse_color.map(|(r, g, b)| Annotation::Color(r, g, b)),
-                            parse_level.map(Annotation::Level),
-                        ))),
-                    ws(char('}')),
-                )
-            ).parse(span);
-            if !errors.borrow().is_empty() {
-                return Err(errors.into_inner());
-            }
-            translate_parse_result(result)
-        }
-        None => Ok(Vec::new()),
-    }
+/// Parses `slot=<positive integer>` (e.g., `slot=3`).
+fn parse_slot(input: LocatedSpan) -> IResult<u32> {
+    // TODO combinators
+    let (rest, _) = tag("slot=").parse(input)?;
+    let (rest, digits) = character::digit1(rest)?;
+    let value = digits
+        .fragment()
+        .parse::<u32>()
+        .map_err(|_| nom::Err::Error(nom::error::Error::new(rest, nom::error::ErrorKind::Digit)))?;
+    Ok((rest, value))
+}
+
+/// Parses a single annotation variant (one element from inside `//#{ ... }`)
+/// with its byte range captured.
+fn parse_annotation(input: LocatedSpan) -> IResult<SourceAnnotation> {
+    // TODO can we capture this start/end+wrap pattern as a combinator here and
+    // elsewhere?
+    let start = input.location_offset();
+    let (rest, annotation) = alt((
+        parse_sliders_internal.map(Annotation::Sliders),
+        parse_color.map(|(r, g, b)| Annotation::Color(r, g, b)),
+        parse_level.map(Annotation::Level),
+        parse_slot.map(Annotation::Slot),
+    ))
+    .parse(input)?;
+    let end = rest.location_offset();
+    Ok((
+        rest,
+        SourceAnnotation {
+            annotation,
+            span: Some(start..end),
+        },
+    ))
+}
+
+/// Parses an annotation comment line `//#{anno, anno, ...}` and returns the
+/// inner annotations (each with its own span). Whitespace is permitted
+/// around `{`, `,`, and `}`. Stops at the closing `}` — does not consume
+/// trailing trivia.
+fn parse_annotation_line(input: LocatedSpan) -> IResult<Vec<SourceAnnotation>> {
+    // TODO combinators
+    let (rest, _) = tag("//#").parse(input)?;
+    let (rest, _) = ws(char('{')).parse(rest)?;
+    let (rest, annos) = separated_list0(ws(char(',')), parse_annotation).parse(rest)?;
+    let (rest, _) = trivia0(rest)?;
+    let (rest, _) = char('}').parse(rest)?;
+    Ok((rest, annos))
 }
 
 /// Extends the context with a binding for each identifier in the pattern that is bound to
@@ -1079,6 +1346,9 @@ fn extend_with_trivial_context<M>(context: &mut Vec<(String, SourceExpr<M>)>, pa
     }
 }
 
+/// Substitutes any occurrences of the variables in `context` that are found in
+/// `expr` with the corresponding expressions. All of the expressions in
+/// `context` should be closed values. The resulting expression will be closed.
 fn substitute<M>(context: &[(String, SourceExpr<M>)], expr: SourceExpr<M>) -> SourceExpr<M>
 where
     M: Clone,
@@ -1147,23 +1417,6 @@ where
             exprs.into_iter().map(|e| substitute(context, e)).collect(),
         )),
         Expr::Error(s) => SourceExpr::error(s),
-    }
-}
-
-fn fmt_with_parens<M>(expr: &SourceExpr<M>, f: &mut fmt::Formatter) -> fmt::Result
-where
-    M: fmt::Display,
-{
-    match &expr.expr {
-        Expr::Float(_)
-        | Expr::Waveform(_)
-        | Expr::Variable(_)
-        | Expr::BuiltIn { .. }
-        | Expr::Application { .. }
-        | Expr::Tuple(_) => {
-            write!(f, "{}", expr)
-        }
-        _ => write!(f, "({})", expr),
     }
 }
 
@@ -1279,7 +1532,7 @@ where
 /// adding parens iff the child's outermost form binds looser than required.
 fn fmt_at<M>(expr: &SourceExpr<M>, min_precedence: u8, f: &mut fmt::Formatter) -> fmt::Result
 where
-    M: fmt::Display,
+    M: Display,
 {
     if (expr_precedence(&expr.expr) as u8) < min_precedence {
         write!(f, "({})", expr)
@@ -1288,7 +1541,7 @@ where
     }
 }
 
-impl fmt::Display for Pattern {
+impl Display for Pattern {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Pattern::Identifier(name) => write!(f, "{}", name),
@@ -1306,18 +1559,18 @@ impl fmt::Display for Pattern {
     }
 }
 
-impl<M> fmt::Display for SourceExpr<M>
+impl<M> Display for SourceExpr<M>
 where
-    M: fmt::Display,
+    M: Display,
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         self.expr.fmt(f)
     }
 }
 
-impl<M> fmt::Display for Expr<M>
+impl<M> Display for Expr<M>
 where
-    M: fmt::Display,
+    M: Display,
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
@@ -1383,8 +1636,10 @@ where
                     write!(f, " | ")?;
                     return fmt_at(function, (Precedence::ReverseApp as u8) + 1, f);
                 }
-                // Default: function-call form.
-                fmt_with_parens(function, f)?;
+                // Default: function-call form. The head is printed at
+                // `Application` precedence — anything looser (Function,
+                // IfThenElse, an operator app) gets wrapped.
+                fmt_at(function, Precedence::Application as u8, f)?;
                 if let Expr::Tuple(_) = &argument.expr {
                     write!(f, "{}", argument)
                 } else {
@@ -1425,8 +1680,8 @@ where
 // dirty regions — recursing into each child so that clean sub-sub-trees
 // inside a dirty parent still come back verbatim from `source`.
 
-/// True iff `node` and every descendant either has Some span or is one of
-/// the parser's "transparent packaging" forms (binary-op-argument Tuples).
+/// Returns true iff `node` and every descendant either has Some span or is one
+/// of the parser's "transparent packaging" forms (binary-op-argument Tuples).
 fn is_clean<M>(node: &SourceExpr<M>) -> bool {
     match &node.expr {
         // Leaves: must have been stamped by the parser.
@@ -1450,21 +1705,21 @@ fn is_clean<M>(node: &SourceExpr<M>) -> bool {
             node.span.is_some() && is_clean(function) && is_clean(argument)
         }
         // Tuples are sometimes synthesized by `fold_binary_op` as transparent
-        // packaging around the two operands of a binary operator — those
-        // Tuples have no span of their own but the surrounding Application
-        // does, and splicing the Application's span gives the right text.
-        // So a Tuple's own span isn't required; what matters is its children.
+        // packaging around the two operands of a binary operator — those Tuples
+        // have no span of their own but the surrounding Application does, and
+        // splicing the Application's span gives the right text. So a Tuple's
+        // own span isn't required; what matters is its children.
         Expr::Tuple(items) => items.iter().all(is_clean),
         // Lists in source always have brackets; we require a span.
         Expr::List(items) => node.span.is_some() && items.iter().all(is_clean),
     }
 }
 
-/// Return a string that reproduces `node` using `source` as a verbatim
-/// reference for unchanged sub-trees. For any subtree where every leaf
-/// still has a span, splices `source[span]`. For dirty regions, falls back
-/// to structural pretty-print, recursing into children so that clean
-/// sub-sub-trees still splice their original source.
+/// Returns a string that reproduces `node` using `source` as a verbatim
+/// reference for unchanged sub-trees. For any subtree where every leaf still
+/// has a span, splices `source[span]`. For dirty regions, falls back to
+/// structural pretty-print, recursing into children so that clean sub-sub-trees
+/// still splice their original source.
 pub fn print_preserving<M>(node: &SourceExpr<M>, source: &str) -> String
 where
     M: Display,
@@ -1474,11 +1729,11 @@ where
     out
 }
 
-/// Round-trip a parsed context (a list of bindings) back to source.
+/// Round-trip a list of bindings) back to source.
 ///
-/// Splices each binding's span verbatim. Between consecutive bindings,
-/// splices `source[prev.span.end..next.span.start]` — which captures the
-/// `,` separator and any whitespace the user had around it.
+/// Splices each binding's span verbatim. Between consecutive bindings, splices
+/// `source[prev.span.end..next.span.start]` — which captures the `,` separator
+/// and any whitespace the user had around it.
 ///
 /// Comments are preserved by the [`Binding::span`] semantics:
 /// - Leading comments (including any file-header before the first binding)
@@ -1486,48 +1741,110 @@ where
 /// - Trailing comments (before the next `,`) belong to the **preceding**
 ///   binding — its span extends through them.
 /// - Trailing content *after the last binding* can only be whitespace —
-///   [`parse_context`] rejects trailing comments.
-pub fn print_preserving_context<M>(bindings: &[Binding<M>], source: &str) -> String
+///   [`parse_file`] rejects trailing comments.
+// TODO do we need this?
+pub fn print_preserving_context<M>(bindings: &[SourceBinding<M>], source: &str) -> String
 where
     M: Display,
 {
+    use fmt::Write;
     let mut out = String::new();
-    for (i, binding) in bindings.iter().enumerate() {
+    for (i, source_binding) in bindings.iter().enumerate() {
         if i > 0 {
-            let prev_end = bindings[i - 1].span.end;
-            let curr_start = binding.span.start;
-            if prev_end <= curr_start && curr_start <= source.len() {
-                out.push_str(&source[prev_end..curr_start]);
-            } else {
-                out.push_str(", ");
+            // Gap between consecutive bindings — if both have spans, splice
+            // `source[prev.end..curr.start]` to keep the original `,` plus
+            // any whitespace/comments around it. Fall back to a canonical
+            // `, ` if either side lacks a span (synthesized binding).
+            let prev_end = bindings[i - 1].span.as_ref().map(|s| s.end);
+            let curr_start = source_binding.span.as_ref().map(|s| s.start);
+            match (prev_end, curr_start) {
+                (Some(p), Some(c)) if p <= c && c <= source.len() => {
+                    out.push_str(&source[p..c]);
+                }
+                _ => out.push_str(", "),
             }
         }
-        // A binding is "clean" iff its expr is clean (the Pattern is owned
-        // by the binding and can't drift independently for now). Splice
-        // the binding's source span when clean; structural-print pattern
-        // + " = " + expr otherwise.
-        if is_clean(&binding.expr) && binding.span.end <= source.len() {
-            out.push_str(&source[binding.span.clone()]);
+        // TODO clean up comments here
+        // "Clean" means: the source bytes at `span` still faithfully
+        // represent what this binding looks like — nothing inside has been
+        // mutated since parsing. When that's true, we can splice the
+        // original bytes verbatim and get back the user's exact formatting:
+        // comments, whitespace, parentheses, all preserved. When it's
+        // false, we have to structurally re-format from the AST, which is
+        // semantically equivalent but loses the original formatting.
+        //
+        // A `SourceBinding` is clean iff:
+        //
+        // - It has a span (we know *where* it lives in source).
+        // - For `Definition`s, the bound expression's tree is clean (see
+        //   `is_clean`, which recurses through the expression looking for
+        //   any node whose span was cleared — the canonical "this got
+        //   edited" marker). Patterns aren't separately checked: they
+        //   don't carry spans of their own and aren't mutated by any
+        //   editor operation we currently support.
+        // - For `Open`s, no inner tree exists — span alone is enough.
+        // - Every annotation has a span. If any annotation was mutated
+        //   wholesale (cleared span) the binding is dirty too. Note that
+        //   annotation values edited via `replace_at` keep their spans
+        //   intact (they re-parse fresh), so surgical edits don't trip
+        //   this — only "I replaced the annotation with a new in-memory
+        //   value without going through the source" trips it.
+        //
+        // The `span.end <= source.len()` guard catches the pathological
+        // case where a span is somehow outside the current `source`
+        // (shouldn't happen with the editor primitives we have, but
+        // defensive).
+        let annotations_clean = source_binding.annotations.iter().all(|a| a.span.is_some());
+        let span_clean = if annotations_clean {
+            match (&source_binding.span, &source_binding.binding) {
+                (Some(span), Binding::Definition(_, expr))
+                    if is_clean(expr) && span.end <= source.len() =>
+                {
+                    Some(span.clone())
+                }
+                (Some(span), Binding::Open(_)) if span.end <= source.len() => Some(span.clone()),
+                (Some(span), Binding::Empty) if span.end <= source.len() => Some(span.clone()),
+                _ => None,
+            }
         } else {
-            // Structural fallback: emit pattern + " = " + expr.
-            // (Leading/trailing trivia inside binding.span is lost in this
-            // path — same boundary case as Stage 4's dirty subtrees.)
-            use std::fmt::Write;
-            write!(out, "{} = ", binding.pattern).expect("write to String");
-            write_preserving(&binding.expr, source, &mut out).expect("write to String");
+            None
+        };
+        if let Some(span) = span_clean {
+            out.push_str(&source[span]);
+            continue;
+        }
+        // Structural fallback. Loses leading/trailing trivia inside the
+        // binding's span — same boundary case as Stage 4's dirty subtrees.
+        //
+        // Annotations are re-emitted in order, one per `//#{...}` line, then
+        // the binding itself.
+        for sa in &source_binding.annotations {
+            writeln!(out, "//#{{{}}}", sa.annotation).expect("write to String");
+        }
+        match &source_binding.binding {
+            Binding::Definition(pattern, expr) => {
+                write!(out, "{} = ", pattern).expect("write to String");
+                write_preserving(expr, source, &mut out).expect("write to String");
+            }
+            Binding::Open(path) => {
+                write!(out, "open {}", path.join(".")).expect("write to String");
+            }
+            // Annotations were already emitted above; Empty bindings have
+            // no further body.
+            Binding::Empty => {}
         }
     }
     out
 }
 
 /// Replaces `source[target_span]` with `new_text`, re-parse the resulting
-/// source, and atomically update both `source` and `root` on success. On
-/// parse failure neither is modified and the parse errors are returned.
+/// source, and atomically update both `source` and `root` on success. On parse
+/// failure neither is modified and the parse errors are returned.
 ///
-/// The intended use is to find a node by walking `root`, grab its `span`,
-/// and pass it as `target_span` here. After the call returns Ok, every
-/// node in the new `root` has fresh spans into the new `source`, so
-/// `print_preserving` round-trips the edited file.
+/// The intended use is to find a node by walking `root`, grab its `span`, and
+/// pass it as `target_span` here. After the call returns Ok, every node in the
+/// new `root` has fresh spans into the new `source`, so `print_preserving`
+/// round-trips the edited file.
 pub fn replace_at<M>(
     root: &mut SourceExpr<M>,
     target_span: Range<usize>,
@@ -1535,7 +1852,7 @@ pub fn replace_at<M>(
     source: &mut String,
 ) -> Result<(), Vec<Error>>
 where
-    M: fmt::Display,
+    M: Display,
 {
     if target_span.end > source.len() || target_span.start > target_span.end {
         return Err(vec![Error::with_range(
@@ -1742,7 +2059,7 @@ fn write_preserving_with_parens<M, W>(
     out: &mut W,
 ) -> fmt::Result
 where
-    M: fmt::Display,
+    M: Display,
     W: fmt::Write,
 {
     match &expr.expr {
@@ -1799,7 +2116,7 @@ where
     }
 }
 
-pub fn extend_context<M>(
+fn extend_context<M>(
     context: &mut Vec<(String, SourceExpr<M>)>,
     pattern: &Pattern,
     argument: &SourceExpr<M>,
@@ -1831,6 +2148,11 @@ where
     }
 }
 
+/// Evaluates a closed expression to a value. Closed expressions do not contain
+/// variables.
+///
+/// The resulting expression will have a `span` only if the argument is a value
+/// already.
 fn evaluate_closed<M>(expr: SourceExpr<M>) -> Result<SourceExpr<M>, Error>
 where
     M: Clone + fmt::Display + fmt::Debug,
@@ -1842,6 +2164,9 @@ where
     let SourceExpr { expr, span } = expr;
     match expr {
         Bool(_) | Float(_) | String(_) | Waveform(_) | Function { .. } => {
+            // For values, we can preserve the input span, since it still faithfully
+            // represents the value.
+            // TODO is that true for functions?
             Ok(SourceExpr { expr, span })
         }
         Variable(name) => Err(Error::new(format!(
@@ -1917,15 +2242,59 @@ where
     }
 }
 
-pub fn evaluate<M>(
-    context: &[(String, SourceExpr<M>)],
-    mut expr: SourceExpr<M>,
+/// Evaluates `bindings` and then `expr` in the context of those bindings.
+///
+/// `resolve` should return the parsed but unevaluated bindings of a module.
+/// For each `Open(path)`, `resolve` is called with the module path to
+/// retrieve that module's parsed bindings, which are then recursively
+/// processed.
+///
+/// After `bindings` is fully processed, `expr` is substituted against the
+/// final context and reduced to a value.
+pub fn evaluate<'a, M, F>(
+    resolve: F,
+    bindings: &'a [SourceBinding<M>],
+    expr: SourceExpr<M>,
 ) -> Result<SourceExpr<M>, Error>
 where
-    M: Clone + fmt::Display + fmt::Debug,
+    F: Fn(&[String]) -> Result<&'a [SourceBinding<M>], Error>,
+    M: Clone + Display + Debug,
 {
-    expr = substitute(context, expr);
+    let mut context: Vec<(String, SourceExpr<M>)> = Vec::new();
+    build_context(&resolve, bindings, &mut context)?;
+    let expr = substitute(&context, expr);
     evaluate_closed(expr)
+}
+
+/// Walks `bindings`, accumulating evaluated entries into `context`. `Open`
+/// bindings recurse through `resolve` to pull in their referenced module's
+/// bindings.
+fn build_context<'a, M, F>(
+    resolve: &F,
+    bindings: &'a [SourceBinding<M>],
+    context: &mut Vec<(String, SourceExpr<M>)>,
+) -> Result<(), Error>
+where
+    F: Fn(&[String]) -> Result<&'a [SourceBinding<M>], Error>,
+    M: Clone + Display + Debug,
+{
+    for source_binding in bindings {
+        match &source_binding.binding {
+            Binding::Open(path) => {
+                let module = resolve(path)?;
+                build_context(resolve, module, context)?;
+            }
+            Binding::Definition(pattern, def_expr) => {
+                let substituted = substitute(context, def_expr.clone());
+                let value = evaluate_closed(substituted)?;
+                extend_context(context, pattern, &value)?;
+            }
+            // Empty bindings have no semantic content — they exist only to
+            // anchor annotation/comment spans for source preservation.
+            Binding::Empty => {}
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1976,7 +2345,7 @@ mod tests {
             // standalone
             y = x + 1
         ";
-        let result = parse_context::<u32>(input);
+        let result = parse_file::<u32>(input);
         assert!(result.is_ok(), "got {:?}", result.err());
         assert_eq!(result.unwrap().len(), 2);
 
@@ -2146,46 +2515,218 @@ mod tests {
         // its span). Comment before the separator → belongs to the preceding
         // binding. Splicing each binding's span reproduces every comment.
         let input = "x = 1, // for y\n y = x + 1";
-        let bindings = parse_context::<u32>(input).unwrap();
+        let bindings = parse_file::<u32>(input).unwrap();
         assert_eq!(bindings.len(), 2);
         assert_eq!(print_preserving_context(&bindings, input), input);
 
         // Comment trailing the first binding (before the `,`) is in x's span.
         let input = "x = 1 // for x\n, y = x + 1";
-        let bindings = parse_context::<u32>(input).unwrap();
+        let bindings = parse_file::<u32>(input).unwrap();
         assert_eq!(bindings.len(), 2);
         assert_eq!(print_preserving_context(&bindings, input), input);
 
         // Mixed: header + trailing + leading + inter-binding blank line.
         let input = "x = 1,\n\n// section header\ny = x + 1";
-        let bindings = parse_context::<u32>(input).unwrap();
+        let bindings = parse_file::<u32>(input).unwrap();
         assert_eq!(bindings.len(), 2);
         assert_eq!(print_preserving_context(&bindings, input), input);
 
         // A file-header comment at the very top is absorbed into the first
-        // binding's span (since `parse_context` doesn't strip leading trivia
+        // binding's span (since `parse_file` doesn't strip leading trivia
         // anymore — the first iteration's inner `trivia0` consumes it).
         let input = "// file header\n// also for the first binding\nx = 1,\ny = 2";
-        let bindings = parse_context::<u32>(input).unwrap();
+        let bindings = parse_file::<u32>(input).unwrap();
         assert_eq!(bindings.len(), 2);
         assert_eq!(
-            bindings[0].span.start, 0,
+            bindings[0].span.as_ref().map(|s| s.start),
+            Some(0),
             "first binding should absorb file-leading"
         );
         assert_eq!(print_preserving_context(&bindings, input), input);
     }
 
     #[test]
-    fn test_parse_context_rejects_trailing_comments() {
+    fn test_parse_file_accepts_trailing_comments() {
         // Trailing whitespace is fine (consumed silently by the terminator).
-        assert!(parse_context::<u32>("x = 1\n").is_ok());
-        assert!(parse_context::<u32>("x = 1, y = 2 \n  ").is_ok());
+        assert!(parse_file::<u32>("x = 1\n").is_ok());
+        assert!(parse_file::<u32>("x = 1, y = 2 \n  ").is_ok());
 
-        // Trailing comments aren't in any binding's span, so allowing them
-        // would mean silent loss on round-trip. The terminator uses
-        // `multispace0` (whitespace only) so this fails loudly instead.
-        assert!(parse_context::<u32>("x = 1\n// trailing").is_err());
-        assert!(parse_context::<u32>("x = 1, // trailing").is_err());
+        // Trailing `//` comments at end of file become an extra `Empty`
+        // binding so their span round-trips through
+        // `print_preserving_context`.
+        let input = "x = 1\n// trailing";
+        let bindings = parse_file::<u32>(input).unwrap();
+        assert_eq!(bindings.len(), 2);
+        assert!(matches!(bindings[1].binding, Binding::Empty));
+        assert_eq!(print_preserving_context(&bindings, input), input);
+
+        let input = "x = 1, // trailing";
+        let bindings = parse_file::<u32>(input).unwrap();
+        assert_eq!(bindings.len(), 2);
+        assert!(matches!(bindings[1].binding, Binding::Empty));
+        assert_eq!(print_preserving_context(&bindings, input), input);
+    }
+
+    #[test]
+    fn test_annotations_attach_to_following_binding() {
+        // Each `Definition` carries at most one annotation: the LAST `//#{...}`
+        // line directly preceding it. Earlier annotations become standalone
+        // `Empty` bindings so that commenting out a definition doesn't cause
+        // its annotations to silently slide onto the next one. Regular line
+        // comments (without `#`) are still plain trivia.
+        let input = "\
+//#{color=rgb(255,0,128)}
+//#{level_db=-6}
+// just a comment, not an annotation
+x = 1,
+y = 2";
+        let bindings = parse_file::<u32>(input).unwrap();
+        assert_eq!(bindings.len(), 3);
+
+        // [0] is the first annotation lifted into its own Empty binding.
+        assert!(matches!(bindings[0].binding, Binding::Empty));
+        assert_eq!(bindings[0].annotations.len(), 1);
+        assert!(matches!(
+            bindings[0].annotations[0].annotation,
+            Annotation::Color(255, 0, 128)
+        ));
+
+        // [1] is `x = 1` with the LAST preceding annotation attached.
+        assert!(matches!(bindings[1].binding, Binding::Definition(..)));
+        assert_eq!(bindings[1].annotations.len(), 1);
+        assert!(matches!(
+            bindings[1].annotations[0].annotation,
+            Annotation::Level(_)
+        ));
+
+        // [2] is `y = 2` with no annotation.
+        assert!(matches!(bindings[2].binding, Binding::Definition(..)));
+        assert_eq!(bindings[2].annotations.len(), 0);
+
+        // Annotation spans still point into source.
+        for binding in &bindings {
+            for sa in &binding.annotations {
+                let span = sa.span.as_ref().expect("annotation should have a span");
+                assert!(span.end <= input.len());
+            }
+        }
+
+        // Full round-trip through `print_preserving_context`.
+        assert_eq!(print_preserving_context(&bindings, input), input);
+    }
+
+    #[test]
+    fn test_parse_slot_annotation() {
+        // `slot=N` is a 1-indexed UI slot annotation. Survives round-trip
+        // through `print_preserving_context`.
+        let input = "\
+//#{slot=1}
+kick = pulse(60),
+//#{slot=9, color=rgb(0,128,255)}
+synth = saw(220)";
+        let bindings = parse_file::<u32>(input).unwrap();
+        assert_eq!(bindings.len(), 2);
+        let slot0 = bindings[0]
+            .annotations
+            .iter()
+            .find_map(|a| match &a.annotation {
+                Annotation::Slot(n) => Some(*n),
+                _ => None,
+            });
+        assert_eq!(slot0, Some(1));
+        let slot1 = bindings[1]
+            .annotations
+            .iter()
+            .find_map(|a| match &a.annotation {
+                Annotation::Slot(n) => Some(*n),
+                _ => None,
+            });
+        assert_eq!(slot1, Some(9));
+        assert_eq!(print_preserving_context(&bindings, input), input);
+    }
+
+    #[test]
+    fn test_parse_open_bindings() {
+        // `open path.to.module` is a binding with a `.`-separated module
+        // path. It coexists with `Definition`s and pending annotations.
+        let input = "\
+open foo,
+open bar.baz,
+//#{color=rgb(0,0,0)}
+open util.synths,
+x = 1";
+        let bindings = parse_file::<u32>(input).unwrap();
+        assert_eq!(bindings.len(), 4);
+
+        match &bindings[0].binding {
+            Binding::Open(p) => assert_eq!(p, &vec!["foo".to_string()]),
+            other => panic!("expected Open for [0], got {:?}", other),
+        }
+        match &bindings[1].binding {
+            Binding::Open(p) => {
+                assert_eq!(p, &vec!["bar".to_string(), "baz".to_string()]);
+            }
+            other => panic!("expected Open for [1], got {:?}", other),
+        }
+        // Pending annotation attaches to the next binding even when that
+        // binding is an `open`.
+        match &bindings[2].binding {
+            Binding::Open(p) => {
+                assert_eq!(p, &vec!["util".to_string(), "synths".to_string()]);
+            }
+            other => panic!("expected Open for [2], got {:?}", other),
+        }
+        assert_eq!(bindings[2].annotations.len(), 1);
+
+        assert!(matches!(bindings[3].binding, Binding::Definition(..)));
+
+        // Full round-trip.
+        assert_eq!(print_preserving_context(&bindings, input), input);
+    }
+
+    #[test]
+    fn test_print_preserving_context_round_trip_with_annotations() {
+        // Each binding's span absorbs only the annotation directly
+        // preceding it; extra annotations become their own `Empty`
+        // bindings. A clean round-trip then splices each binding's span
+        // and reproduces the source verbatim.
+        let input = "\
+//#{color=rgb(255,0,128)}
+//#{level_db=-6}
+kick = pulse(60),
+//#{sliders=[\"cutoff:800:200:4000\"]}
+synth = saw(220)";
+        let bindings = parse_file::<u32>(input).unwrap();
+        assert_eq!(bindings.len(), 3);
+        assert!(matches!(bindings[0].binding, Binding::Empty));
+        assert_eq!(bindings[0].annotations.len(), 1);
+        assert!(matches!(bindings[1].binding, Binding::Definition(..)));
+        assert_eq!(bindings[1].annotations.len(), 1);
+        assert!(matches!(bindings[2].binding, Binding::Definition(..)));
+        assert_eq!(bindings[2].annotations.len(), 1);
+        assert_eq!(print_preserving_context(&bindings, input), input);
+    }
+
+    #[test]
+    fn test_dirty_annotation_falls_back_to_structural() {
+        // Clear an annotation's span (simulating an in-memory mutation
+        // that hasn't been written back through `replace_at`). The whole
+        // binding now needs a structural re-emit — annotation lines + the
+        // binding's own structural form.
+        let input = "//#{color=rgb(10,20,30)}\nx = 1";
+        let mut bindings = parse_file::<u32>(input).unwrap();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].annotations.len(), 1);
+
+        // Mutate: bump the color and clear its span.
+        bindings[0].annotations[0].annotation = Annotation::Color(99, 99, 99);
+        bindings[0].annotations[0].span = None;
+
+        let out = print_preserving_context(&bindings, input);
+        // Structural fallback re-emits the annotation with its new value.
+        assert!(out.contains("color=rgb(99,99,99)"), "got {:?}", out);
+        // The binding's content survives via the expression printer.
+        assert!(out.contains("x = 1"), "got {:?}", out);
     }
 
     /// Walks `node` and returns the span of the first `List` it finds, or
@@ -2275,10 +2816,13 @@ mod tests {
     fn test_print_preserving_context_dirty_binding_splices_others() {
         // Edit one binding's RHS (replace Float(1) with Float(99) — no span)
         // and confirm: the dirty binding emits structurally (`x = 99`), but
-        // the OTHER binding still splices its leading comment verbatim.
+        // the other binding still splices its leading comment verbatim.
         let input = "x = 1,\n// leading for y\n y = 2";
-        let mut bindings = parse_context::<u32>(input).unwrap();
-        bindings[0].expr = SourceExpr::float(99.0); // synth, span: None
+        let mut bindings = parse_file::<u32>(input).unwrap();
+        match &mut bindings[0].binding {
+            Binding::Definition(_pattern, expr) => *expr = SourceExpr::float(99.0),
+            _ => panic!("expected first binding to be a Definition"),
+        }
         let out = print_preserving_context(&bindings, input);
         // x is dirty → structural: "x = 99". y is clean → splices its span
         // (which includes the leading comment).
@@ -2289,27 +2833,22 @@ mod tests {
 
     #[test]
     fn test_function_eval() {
-        let context = Vec::new();
+        let resolve = |_: &[String]| Err(Error::new("no bindings".to_string()));
+
         let input = "(fn(x) => fn(x) => x)(7)(5)";
-        let result = parse_program::<u32>(input);
-        assert!(result.is_ok());
-        let expr = result.unwrap();
+        let expr = parse_program::<u32>(input).unwrap();
         println!("Parsed expression: {}", expr);
-        let evaluated = evaluate(&context, expr).unwrap();
+        let evaluated = evaluate(resolve, &[], expr).unwrap();
         assert_eq!(format!("{}", evaluated), "5");
 
         let input = "(fn(x) => fn(y, z) => (x, y, z))(3)(4, 5)";
-        let result = parse_program::<u32>(input);
-        assert!(result.is_ok());
-        let expr = result.unwrap();
-        let evaluated = evaluate(&context, expr).unwrap();
+        let expr = parse_program::<u32>(input).unwrap();
+        let evaluated = evaluate(resolve, &[], expr).unwrap();
         assert_eq!(format!("{}", evaluated), "(3, 4, 5)");
 
         let input = "(fn(x, (y, z)) => (x, y, z))(3, (4, 5))";
-        let result = parse_program::<u32>(input);
-        assert!(result.is_ok());
-        let expr = result.unwrap();
-        let evaluated = evaluate(&context, expr).unwrap();
+        let expr = parse_program::<u32>(input).unwrap();
+        let evaluated = evaluate(resolve, &[], expr).unwrap();
         assert_eq!(format!("{}", evaluated), "(3, 4, 5)");
     }
 
@@ -2387,76 +2926,77 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Test helper: run `parse_annotation_line` on `input` and either
+    /// return the flat list of `Annotation`s or surface the parse error.
+    fn parse_one_annotation_line(input: &str) -> Result<Vec<Annotation>, Vec<Error>> {
+        let errors = RefCell::new(Vec::new());
+        let span = LocatedSpan::new_extra(input, ParseState(&errors));
+        let result = all_consuming(parse_annotation_line).parse(span);
+        if !errors.borrow().is_empty() {
+            return Err(errors.into_inner());
+        }
+        match result {
+            Ok((_, annos)) => Ok(annos.into_iter().map(|sa| sa.annotation).collect()),
+            Err(_) => Err(vec![Error::new("parse failed".to_string())]),
+        }
+    }
+
     #[test]
-    fn test_parse_annotations() {
-        // Valid annotation
-        let result = parse_annotations(r#"  //#{sliders=["volume:0.75:0:1"]}  "#);
-        assert!(result.is_ok());
-        let annos = result.unwrap();
+    fn test_parse_annotation_line() {
+        // Single slider annotation.
+        let annos = parse_one_annotation_line(r#"//#{sliders=["volume:0.75:0:1"]}"#).unwrap();
         assert_eq!(annos.len(), 1);
-        let result = parse_annotations(r#"  //#{sliders=["volume:0.75:0:1"],next_bank}"#);
-        assert!(result.is_ok());
-        let annos = result.unwrap();
+        assert!(matches!(annos[0], Annotation::Sliders(_)));
+
+        // Two annotations on one line.
+        let annos =
+            parse_one_annotation_line(r#"//#{sliders=["volume:0.75:0:1"],slot=2}"#).unwrap();
         assert_eq!(annos.len(), 2);
+        assert!(matches!(annos[1], Annotation::Slot(2)));
 
-        // Not an annotation
-        let result = parse_annotations("// regular comment");
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().len(), 0);
-        let result = parse_annotations("let x = 1");
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().len(), 0);
+        // Missing closing brace.
+        assert!(parse_one_annotation_line("//#{slot=1").is_err());
+        // Unknown key.
+        assert!(parse_one_annotation_line("//#{bad_key=[]}").is_err());
+        // Not an annotation line at all.
+        assert!(parse_one_annotation_line("// regular comment").is_err());
+        assert!(parse_one_annotation_line("let x = 1").is_err());
 
-        // Missing closing bracket
-        assert!(parse_annotations("//#{next_bank").is_err());
-        // Bad key
-        assert!(parse_annotations("//#{bad_key=[]}").is_err());
-
-        // Color annotation
-        let result = parse_annotations("//#{color=rgb(255,0,128)}");
-        assert!(result.is_ok());
-        let annos = result.unwrap();
-        assert_eq!(annos.len(), 1);
+        // Color.
+        let annos = parse_one_annotation_line("//#{color=rgb(255,0,128)}").unwrap();
         assert!(matches!(annos[0], Annotation::Color(255, 0, 128)));
 
-        // Color with whitespace
-        let result = parse_annotations("//#{color=rgb( 255 , 0 , 128 )}");
-        assert!(result.is_ok());
-        let annos = result.unwrap();
+        // Color with internal whitespace.
+        let annos = parse_one_annotation_line("//#{color=rgb( 255 , 0 , 128 )}").unwrap();
         assert!(matches!(annos[0], Annotation::Color(255, 0, 128)));
 
-        // Color combined with sliders
-        let result = parse_annotations(r#"//#{sliders=["vol:0.5:0:1"],color=rgb(255,128,0)}"#);
-        assert!(result.is_ok());
-        let annos = result.unwrap();
+        // Color combined with sliders.
+        let annos =
+            parse_one_annotation_line(r#"//#{sliders=["vol:0.5:0:1"],color=rgb(255,128,0)}"#)
+                .unwrap();
         assert_eq!(annos.len(), 2);
         assert!(matches!(annos[1], Annotation::Color(255, 128, 0)));
 
-        // Color out of range
-        assert!(parse_annotations("//#{color=rgb(256,0,0)}").is_err());
-        // Color missing component
-        assert!(parse_annotations("//#{color=rgb(0,0)}").is_err());
-        // Color non-integer
-        assert!(parse_annotations("//#{color=rgb(1.5,0,0)}").is_err());
+        // Color out of range / missing component / non-integer.
+        assert!(parse_one_annotation_line("//#{color=rgb(256,0,0)}").is_err());
+        assert!(parse_one_annotation_line("//#{color=rgb(0,0)}").is_err());
+        assert!(parse_one_annotation_line("//#{color=rgb(1.5,0,0)}").is_err());
 
-        // Level annotation
-        let result = parse_annotations("//#{level_db=-6.0}");
-        assert!(result.is_ok());
-        let annos = result.unwrap();
-        assert_eq!(annos.len(), 1);
+        // Level.
+        let annos = parse_one_annotation_line("//#{level_db=-6.0}").unwrap();
         assert!(matches!(annos[0], Annotation::Level(v) if (v - -6.0).abs() < 0.01));
 
-        // Level with other annotations
-        let result = parse_annotations(r#"//#{level_db=-3.0,color=rgb(255,0,0)}"#);
-        assert!(result.is_ok());
-        let annos = result.unwrap();
+        // Level combined with color.
+        let annos = parse_one_annotation_line(r#"//#{level_db=-3.0,color=rgb(255,0,0)}"#).unwrap();
         assert_eq!(annos.len(), 2);
         assert!(matches!(annos[0], Annotation::Level(v) if (v - -3.0).abs() < 0.01));
 
-        // Positive level
-        let result = parse_annotations("//#{level_db=6.0}");
-        assert!(result.is_ok());
-        let annos = result.unwrap();
+        // Positive level.
+        let annos = parse_one_annotation_line("//#{level_db=6.0}").unwrap();
         assert!(matches!(annos[0], Annotation::Level(v) if (v - 6.0).abs() < 0.01));
+
+        // Slot alone.
+        let annos = parse_one_annotation_line("//#{slot=5}").unwrap();
+        assert!(matches!(annos[0], Annotation::Slot(5)));
     }
 }

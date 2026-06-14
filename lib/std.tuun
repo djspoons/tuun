@@ -1,7 +1,9 @@
 
-// math
-min = fn(x, y) => if x < y then x else y,
-max = fn(x, y) => if x < y then y else x,
+// MATH
+
+// Define min and max in a waveform-compatible way.
+min = fn(x, y) => alt(x - y, x, y),
+max = fn(x, y) => alt(x - y, y, x),
 pi = 3.14159265,
 
 // WAVES

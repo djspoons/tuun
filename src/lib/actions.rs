@@ -5,7 +5,6 @@
 //! the runner in `effects.rs` executes against the outside world.
 
 use crate::launchkey;
-use crate::loader;
 use crate::midi_input;
 use crate::parser;
 use crate::play_helper;
@@ -39,16 +38,18 @@ impl DawPadMode {
 /// place; `main` keeps a single instance for the lifetime of the program.
 pub struct AppState {
     pub programs: Vec<renderer::Program>,
+    /// File-level bindings from the loaded source.
+    pub bindings: Vec<parser::SourceBinding<MarkId>>,
+    /// Current source-file contents, kept in sync with `bindings`.
+    pub source: String,
+    /// Path the source is read from / written back to.
+    pub input_path: std::path::PathBuf,
     pub active_program_index: usize,
     pub mode: Mode,
     pub keys: Option<midi_input::Keys>,
     pub repeat_after_measures: Option<u32>,
     /// Active behavior for the DAW pad.
     pub daw_pad_mode: DawPadMode,
-    /// Parser context: prelude + bindings loaded from context files.
-    pub context: Vec<(String, parser::SourceExpr<MarkId>)>,
-    /// Loader configuration: filenames, tempo, sample rate.
-    pub config: loader::Config,
     /// Set by `Effect::Exit`; `main` checks at top of loop and breaks.
     pub should_exit: bool,
     /// Last user-visible status message. Set by `Effect::ShowMessage` (and
@@ -58,6 +59,61 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Builds an `AppState` from the contents of a source file. Parses
+    /// bindings, fills every UI slot with an empty padding program, then
+    /// overwrites slots whose `//#{slot=N}` `Definition` exists in source.
+    /// `input_path` is the file the splice path writes back to (use an
+    /// empty `PathBuf` to suppress the write, e.g. in tests).
+    pub fn from_source(
+        source: String,
+        input_path: std::path::PathBuf,
+    ) -> Result<AppState, Vec<parser::Error>> {
+        let bindings = parser::parse_file::<MarkId>(&source)?;
+        let total_slots = renderer::NUM_PROGRAM_BANKS * PROGRAMS_PER_BANK;
+        let mut programs: Vec<renderer::Program> = (0..total_slots)
+            .map(|i| renderer::Program {
+                text: String::new(),
+                span: 0..0,
+                binding_index: bindings.len(),
+                id: renderer::id_from_index(i),
+                sliders: renderer::ProgramSliders::default(),
+                color: None,
+                level_db: 0.0,
+                cached_waveform: None,
+                cached_keys_instrument: None,
+            })
+            .collect();
+        for (binding_index, sb) in bindings.iter().enumerate() {
+            if let Some(program) =
+                renderer::Program::from_source_binding(sb, binding_index, &source)
+            {
+                let slot = program.id as usize;
+                if slot >= 1 && slot <= programs.len() {
+                    programs[slot - 1] = program;
+                } else {
+                    println!(
+                        "Ignoring program with out-of-range slot {} (max {})",
+                        slot,
+                        programs.len()
+                    );
+                }
+            }
+        }
+        Ok(AppState {
+            programs,
+            bindings,
+            source,
+            input_path,
+            active_program_index: 0,
+            mode: Mode::Select,
+            keys: None,
+            repeat_after_measures: None,
+            daw_pad_mode: DawPadMode::ClipLauncher,
+            should_exit: false,
+            message: String::new(),
+        })
+    }
+
     pub fn bank_start(&self) -> usize {
         self.active_program_index - (self.active_program_index % PROGRAMS_PER_BANK)
     }
@@ -65,35 +121,34 @@ impl AppState {
     pub fn active_program(&self) -> &renderer::Program {
         &self.programs[self.active_program_index]
     }
+
+    pub fn active_program_mut(&mut self) -> &mut renderer::Program {
+        &mut self.programs[self.active_program_index]
+    }
 }
 
 /// Things that can happen, emitted by handlers as pure data.
 #[derive(Debug)]
 pub enum Action {
     // --- playback ---
-    /// Play the program at `program_index`.
+    /// Play the program at `program_index` if it evaluates to a waveform.
+    /// Otherwise, do nothing.
     ///
-    /// When `return_to_select_on_success` is true, the runner sets
-    /// `state.mode` from `play_waveform`'s return: `Mode::Select` on
-    /// success (so the caller drops back to Select), or `Mode::Edit` on
-    /// a parse error (so the caller stays in Edit and can fix the
-    /// syntax). Used by the SDL2 Edit+Return path; left false elsewhere.
+    /// If `start_at_next_measure` is false, then play immediately.
     PlayProgram {
         program_index: usize,
-        cursor_position: usize,
         start_at_next_measure: bool,
         repeat_after_measures: Option<u32>,
-        return_to_select_on_success: bool,
     },
-    /// Stop playback of the program waveform immediately.
+    /// Immediately stop playback of the program waveform if it's playing.
+    /// Otherwise, do nothing.
     StopProgram(usize),
     /// Remove any pending playback for the given program.
     RemovePendingProgram(usize),
 
     // --- MIDI keys ---
     /// Install the program at `program_index` as the keys instrument. If
-    /// keys are already installed (regardless of which program), this
-    /// uninstalls them. (That is, the action is a toggle.)
+    /// the program at the given index is already installed, uninstall it.
     InstallKeys(usize),
     NoteOn {
         key: u8,
@@ -105,6 +160,12 @@ pub enum Action {
 
     // --- mode transitions ---
     EnterEditMode,
+    /// Parse and evaluate the current program, updating its state and the
+    /// source file. On success, return to Select mode; otherwise set the
+    /// mode to `mode_on_failure`.
+    EvaluateAndLeaveEditMode {
+        mode_on_failure: Mode,
+    },
     EnterSelectMode,
     EnterMoveSlidersMode,
     /// Enter computer-keyboard piano mode. Caller (the classifier) is
@@ -166,10 +227,8 @@ pub enum Action {
     CycleRepeatAfterMeasures,
 
     // --- program-related I/O and other effects ---
-    SaveProgramsToFile,
+    ShowMessage(String),
     DumpActiveWaveform,
-    LoadContext,
-    LoadPrograms,
     Exit,
 }
 
@@ -178,15 +237,11 @@ pub enum Action {
 #[derive(Debug)]
 pub enum Effect {
     // --- tracker commands ---
-    /// Send a Play command for the program at `program_index`. The runner
-    /// looks up the program text, parses, and dispatches via play_helper.
-    /// See `Action::PlayProgram` for `return_to_select_on_success`.
+    /// Send a Play command for the program at `program_index`.
     PlayProgram {
         program_index: usize,
-        cursor_position: usize,
         start_at_next_measure: bool,
         repeat_after_measures: Option<u32>,
-        return_to_select_on_success: bool,
     },
     /// Send a "stop" ramp for the program waveform.
     StopProgram(usize),
@@ -199,23 +254,22 @@ pub enum Effect {
         waveform: waveform::Waveform<MarkId>,
     },
 
-    /// Parse the program at `program_index` as a keys instrument function and
-    /// install it as `state.keys`. The runner handles parsing and validation
-    /// because they depend on parser + midi_input helpers; on success it
-    /// mutates `state.keys` directly.
-    InstallKeysFromActive(usize),
+    /// Parse and evaluate the current program, updating its state and the
+    /// source file. On success, return to Select mode; otherwise set the
+    /// mode to `mode_on_failure`.
+    EvaluateAndUpdateSource { mode_on_failure: Mode },
+
+    /// Interpret the program at the given index as a keys instrument function
+    /// and install it as `state.keys`. If that program is already installed,
+    /// uninstall it.
+    InstallKeys(usize),
 
     /// Play the note-on waveform produced by the installed keys function.
-    PlayNoteOn {
-        key: u8,
-        velocity: u8,
-    },
+    PlayNoteOn { key: u8, velocity: u8 },
     /// Modify the Level mark on the active key waveform with the note-off
     /// waveform that was stored at NoteOn time. Falls back to a stop-ramp if
     /// no waveform was stored.
-    PlayNoteOff {
-        key: u8,
-    },
+    PlayNoteOff { key: u8 },
 
     /// Push a slider value change into the slider pipeline. The downstream
     /// worker thread coalesces these per quantum and sends `Command::Modify`
@@ -239,11 +293,7 @@ pub enum Effect {
     // XXX Should this go through the slider pipeline like UpdateActiveKeySliders
     // does (coalesce per quantum, ramp from prior value)? Currently each call
     // sends a Const directly to the tracker, which can cause a step change.
-    ModifyActiveKeysAmplitude {
-        amplitude: f32,
-    },
-    /// User-visible status message.
-    ShowMessage(String),
+    ModifyActiveKeysAmplitude { amplitude: f32 },
 
     // --- launchkey hardware ---
     /// Update the controller's encoder display text.
@@ -266,14 +316,10 @@ pub enum Effect {
     SetDawModeDisplay(String),
 
     // --- I/O ---
-    SaveProgramsToFile,
+    /// User-visible status message.
+    ShowMessage(String),
+    /// Print the waveform of the active program.
     DumpActiveWaveform,
-    /// Re-read `state.config.context_files` into `state.context`.
-    LoadContext,
-    /// Re-read `state.config.programs_file` (+ additional programs) into
-    /// `state.programs` and push the resulting slider initial values into
-    /// the slider pipeline.
-    LoadPrograms,
     /// Sets `state.should_exit = true`.
     Exit,
 }
@@ -285,16 +331,12 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
     match action {
         Action::PlayProgram {
             program_index,
-            cursor_position,
             start_at_next_measure,
             repeat_after_measures,
-            return_to_select_on_success,
         } => vec![Effect::PlayProgram {
             program_index,
-            cursor_position,
             start_at_next_measure,
             repeat_after_measures,
-            return_to_select_on_success,
         }],
         Action::StopProgram(i) => vec![
             Effect::StopProgram(i),
@@ -342,6 +384,9 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
                 errors,
             };
             vec![]
+        }
+        Action::EvaluateAndLeaveEditMode { mode_on_failure } => {
+            vec![Effect::EvaluateAndUpdateSource { mode_on_failure }]
         }
         Action::EnterSelectMode => {
             state.mode = Mode::Select;
@@ -427,10 +472,8 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
             vec![effect]
         }
 
-        Action::SaveProgramsToFile => vec![Effect::SaveProgramsToFile],
+        Action::ShowMessage(message) => vec![Effect::ShowMessage(message)],
         Action::DumpActiveWaveform => vec![Effect::DumpActiveWaveform],
-        Action::LoadContext => vec![Effect::LoadContext],
-        Action::LoadPrograms => vec![Effect::LoadPrograms, Effect::SyncEncoders],
         Action::Exit => vec![Effect::Exit],
     }
 }
@@ -453,16 +496,14 @@ fn apply_select_program(state: &mut AppState, i: usize) -> Vec<Effect> {
 
 fn apply_install_keys(state: &mut AppState, program_index: usize) -> Vec<Effect> {
     // Applying with the currently-installed program uninstalls it; for any
-    // other program, tries to install that one in its place. (The runner
-    // leaves `state.keys` untouched if the new program fails to parse or
-    // validate, so an invalid target is a no-op rather than a kick-out.)
+    // other program, tries to install that one in its place.
     if let Some(keys) = &state.keys
         && renderer::index_from_id(keys.id) == program_index
     {
         state.keys = None;
         return vec![Effect::ShowMessage("Uninstalled keys".to_string())];
     }
-    vec![Effect::InstallKeysFromActive(program_index)]
+    vec![Effect::InstallKeys(program_index)]
 }
 
 /// Re-parses `text` and returns the syntax errors. Empty `text` is treated
@@ -500,8 +541,7 @@ fn apply_insert_text(state: &mut AppState, text: &str) -> Vec<Effect> {
     let program = &mut state.programs[state.active_program_index];
     let mut new_text = program.text.clone();
     new_text.insert_str(cursor, text);
-    program.text = new_text;
-    program.valid_keys_program.set(None);
+    program.set_text(new_text);
     if let Mode::Edit {
         cursor_position, ..
     } = &mut state.mode
@@ -525,8 +565,7 @@ fn apply_delete_char(state: &mut AppState) -> Vec<Effect> {
     let program = &mut state.programs[state.active_program_index];
     let mut new_text = program.text.clone();
     new_text.remove(cursor - 1);
-    program.text = new_text;
-    program.valid_keys_program.set(None);
+    program.set_text(new_text);
     if let Mode::Edit {
         cursor_position, ..
     } = &mut state.mode
@@ -555,8 +594,7 @@ fn apply_delete_word(state: &mut AppState) -> Vec<Effect> {
     };
     let mut new_text = program.text.clone();
     new_text.replace_range(new_cursor..cursor, "");
-    program.text = new_text;
-    program.valid_keys_program.set(None);
+    program.set_text(new_text);
     if let Mode::Edit {
         cursor_position, ..
     } = &mut state.mode
@@ -729,40 +767,19 @@ fn apply_level_db(state: &mut AppState, program_index: usize, level_db: f32) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use renderer::{Program, ProgramSliders};
-    use std::cell;
-
-    fn test_program() -> Program {
-        Program {
-            text: "test".to_string(),
-            id: 1,
-            sliders: ProgramSliders::default(),
-            color: None,
-            level_db: 0.0,
-            valid_keys_program: cell::Cell::new(None),
-        }
-    }
-
-    fn test_config() -> loader::Config {
-        loader::Config {
-            tempo: 90,
-            sample_rate: 44100,
-            context_files: vec![],
-            programs_file: String::new(),
-            additional_programs: vec![],
-        }
-    }
+    use renderer::Program;
 
     fn test_state() -> AppState {
         AppState {
-            programs: vec![test_program()],
+            programs: vec![Program::from_string("test", 0, 1)],
+            bindings: Vec::new(),
+            source: String::new(),
+            input_path: std::path::PathBuf::new(),
             active_program_index: 0,
             mode: Mode::Select,
             keys: None,
             repeat_after_measures: None,
             daw_pad_mode: DawPadMode::ClipLauncher,
-            context: vec![],
-            config: test_config(),
             should_exit: false,
             message: String::new(),
         }
@@ -796,14 +813,10 @@ mod tests {
         // in `Mode::Edit.errors`, otherwise the renderer's per-character
         // highlighting goes stale.
         let mut state = AppState {
-            programs: vec![Program {
-                text: String::new(),
-                id: 1,
-                sliders: ProgramSliders::default(),
-                color: None,
-                level_db: 0.0,
-                valid_keys_program: cell::Cell::new(None),
-            }],
+            programs: vec![Program::from_string("", 0, 1)],
+            bindings: Vec::new(),
+            source: String::new(),
+            input_path: std::path::PathBuf::new(),
             active_program_index: 0,
             mode: Mode::Edit {
                 cursor_position: 0,
@@ -812,8 +825,6 @@ mod tests {
             keys: None,
             repeat_after_measures: None,
             daw_pad_mode: DawPadMode::ClipLauncher,
-            context: vec![],
-            config: test_config(),
             should_exit: false,
             message: String::new(),
         };
@@ -841,14 +852,7 @@ mod tests {
     fn advance_program_emits_empty_show_message_to_clear_status() {
         // Two programs so AdvanceProgram(1) actually moves the index.
         let mut state = test_state();
-        state.programs.push(Program {
-            text: "second".to_string(),
-            id: 2,
-            sliders: ProgramSliders::default(),
-            color: None,
-            level_db: 0.0,
-            valid_keys_program: cell::Cell::new(None),
-        });
+        state.programs.push(Program::from_string("second", 1, 2));
         let effects = apply(&mut state, Action::AdvanceProgram(1));
         assert_eq!(state.active_program_index, 1);
         // The empty ShowMessage is what gets folded into Mode::Select to

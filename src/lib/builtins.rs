@@ -452,10 +452,15 @@ where
     match &arguments[..] {
         [function, List(exprs)] => {
             let mut results: Vec<SourceExpr<M>> = Vec::new();
-            let context = vec![];
+            let resolve = |_: &[String]| {
+                Err(parser::Error::new(
+                    "Didn't expect to resolve in map()".to_string(),
+                ))
+            };
             for expr in exprs {
                 let result = parser::evaluate(
-                    &context,
+                    resolve,
+                    &[],
                     SourceExpr::from(Application {
                         function: boxed(function.clone()),
                         argument: Box::new(expr.clone()), // can we avoid this clone?
@@ -478,11 +483,16 @@ where
 {
     match &arguments[..] {
         [function, acc, List(exprs)] => {
-            let context = vec![];
             let mut acc: SourceExpr<M> = SourceExpr::from(acc.clone());
+            let resolve = |_: &[String]| {
+                Err(parser::Error::new(
+                    "Didn't expect to resolve in reduce()".to_string(),
+                ))
+            };
             for expr in exprs {
                 let result = parser::evaluate(
-                    &context,
+                    resolve,
+                    &[],
                     SourceExpr::from(Application {
                         function: boxed(function.clone()),
                         argument: Box::new(SourceExpr::from(Tuple(vec![acc, expr.clone()]))),
@@ -505,13 +515,19 @@ where
 {
     match &arguments[..] {
         [function, seed, Float(n)] if *n >= 0.0 && n.fract() == 0.0 => {
-            let context = vec![];
             let mut results: Vec<SourceExpr<M>> = Vec::new();
             let mut current: SourceExpr<M> = SourceExpr::from(seed.clone());
+            let resolve = |_: &[String]| {
+                Err(parser::Error::new(
+                    "Didn't expect to resolve in unfold()".to_string(),
+                ))
+            };
+
             for _ in 0..(*n as u32) {
                 results.push(current.clone());
                 let result = parser::evaluate(
-                    &context,
+                    resolve,
+                    &[],
                     SourceExpr::from(Application {
                         function: boxed(function.clone()),
                         argument: Box::new(current.clone()),
@@ -931,17 +947,23 @@ where
     }
 }
 
-pub fn add_prelude<M: Debug + Clone + Display + PartialEq + 'static>(
-    context: &mut Vec<(String, SourceExpr<M>)>,
+/// Adds all of the built-ins to `bindings`.
+pub fn add_bindings<M: Debug + Clone + Display + PartialEq + 'static>(
+    bindings: &mut Vec<parser::SourceBinding<M>>,
 ) {
-    context.push(("true".to_string(), SourceExpr::bool(true)));
-    context.push(("false".to_string(), SourceExpr::bool(false)));
-    context.push((
-        "time".to_string(),
+    fn def<M>(id: &str, expr: parser::SourceExpr<M>) -> parser::SourceBinding<M> {
+        use parser::Binding;
+        use parser::Pattern;
+        Binding::Definition(Pattern::Identifier(id.to_string()), expr).into()
+    }
+    bindings.push(def("true", SourceExpr::bool(true)));
+    bindings.push(def("false", SourceExpr::bool(false)));
+    bindings.push(def(
+        "time",
         SourceExpr::from(Expr::Waveform(Waveform::Time(()))),
     ));
-    context.push((
-        "noise".to_string(),
+    bindings.push(def(
+        "noise",
         SourceExpr::from(Expr::Waveform(Waveform::Noise)),
     ));
 
@@ -981,8 +1003,8 @@ pub fn add_prelude<M: Debug + Clone + Display + PartialEq + 'static>(
         ("_sequence", sequence),
     ];
     for (name, function) in builtins {
-        context.push((
-            name.to_string(),
+        bindings.push(def(
+            name,
             SourceExpr::from(Expr::BuiltIn {
                 name: name.to_string(),
                 function: BuiltInFn(Rc::new(function)),

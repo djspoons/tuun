@@ -11,35 +11,25 @@ struct Args {
     input_files: Vec<String>,
 }
 
-fn load_context() -> Vec<(String, parser::SourceExpr<renderer::MarkId>)> {
-    // TODO this context business is now getting duplicated across main, here, and the web stuff
-    let mut context = Vec::new();
-    context.push((
-        "sample_rate".to_string(),
-        parser::SourceExpr::float(44100.0),
-    ));
-    context.push(("tempo".to_string(), parser::SourceExpr::float(120.0)));
-    builtins::add_prelude(&mut context);
+// XXX this whole path needs lots of help
+fn load_context() -> Vec<parser::SourceBinding<renderer::MarkId>> {
+    fn def(
+        id: &str,
+        expr: parser::SourceExpr<renderer::MarkId>,
+    ) -> parser::SourceBinding<renderer::MarkId> {
+        parser::Binding::Definition(parser::Pattern::Identifier(id.to_string()), expr).into()
+    }
+    let mut bindings = Vec::new();
+    bindings.push(def("sample_rate", parser::SourceExpr::float(44100.0)));
+    bindings.push(def("tempo", parser::SourceExpr::float(120.0)));
+    builtins::add_bindings(&mut bindings);
 
-    let context_content = include_str!("../../context.tuun");
-
-    match parser::parse_context(context_content) {
-        Ok(parsed_defs) => {
-            for parser::Binding { pattern, expr, .. } in parsed_defs {
-                match parser::evaluate(&context, expr) {
-                    Ok(expr) => {
-                        if let Err(e) = parser::extend_context(&mut context, &pattern, &expr) {
-                            eprintln!("Warning: Failed to add context definition: {:?}", e);
-                        }
-                    }
-                    Err(e) => eprintln!("Warning: Failed to evaluate context: {:?}", e),
-                }
-            }
-        }
+    let context_content = include_str!("../../lib/std.tuun");
+    match parser::parse_file::<renderer::MarkId>(context_content) {
+        Ok(parsed) => bindings.extend(parsed),
         Err(e) => eprintln!("Warning: Failed to parse context file: {:?}", e),
     }
-
-    context
+    bindings
 }
 
 /// Find the closing `>` of an HTML opening tag, skipping over quoted attribute values
@@ -141,10 +131,7 @@ fn find_tuun_synth_blocks(input: &str) -> Vec<(usize, &str)> {
     blocks
 }
 
-fn check_file(
-    file: &str,
-    context: &[(String, parser::SourceExpr<renderer::MarkId>)],
-) -> (usize, usize) {
+fn check_file(file: &str, context: &[parser::SourceBinding<renderer::MarkId>]) -> (usize, usize) {
     let input = match fs::read_to_string(file) {
         Ok(s) => s,
         Err(e) => {
@@ -240,13 +227,19 @@ fn check_file(
                 } else {
                     vec![]
                 };
-                let expr = slider::prepend_slider_bindings(
+                let mut local_bindings = context.to_vec();
+                slider::append_slider_bindings(
                     &configs,
                     &vec![0.0; configs.len()],
                     renderer::MarkId::Slider,
-                    expr,
+                    &mut local_bindings,
                 );
-                match parser::evaluate(context, expr) {
+                let resolve = |_: &[String]| {
+                    Err(parser::Error::new(
+                        "didn't expect to resolve in web_checker".to_string(),
+                    ))
+                };
+                match parser::evaluate(resolve, &local_bindings, expr) {
                     Ok(_) => {
                         println!("  {}:{} [ok] \"{}\"", file, line, label);
                     }

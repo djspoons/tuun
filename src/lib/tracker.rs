@@ -114,7 +114,7 @@ where
     M: Clone + Send + fmt::Display,
 {
     generator: generator::Generator<'a>,
-    sample_rate: i32,
+    sample_rate: u32,
     captured_output_dir: path::PathBuf,
     captured_date_format: String,
     command_receiver: mpsc::Receiver<Command<I, M>>,
@@ -133,7 +133,7 @@ where
     M: Clone + Send + Debug + PartialEq + fmt::Display,
 {
     pub fn new(
-        sample_rate: i32,
+        sample_rate: u32,
         captured_output_dir: path::PathBuf,
         captured_date_format: String,
         command_receiver: mpsc::Receiver<Command<I, M>>,
@@ -216,7 +216,7 @@ where
                 let file = std::fs::File::create(path).expect("Failed to create file");
                 let spec = WavSpec {
                     channels: 1,
-                    sample_rate: self.sample_rate as u32,
+                    sample_rate: self.sample_rate,
                     bits_per_sample: 32,
                     sample_format: SampleFormat::Float,
                 };

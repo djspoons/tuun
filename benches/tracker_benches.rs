@@ -1,10 +1,11 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 
+use std::sync::mpsc;
+
 use tuun::builtins;
 use tuun::generator;
 use tuun::parser;
 use tuun::play_helper;
-use tuun::renderer;
 use tuun::waveform;
 
 fn bench_filter(c: &mut Criterion) {
@@ -73,7 +74,7 @@ fn bench_filter(c: &mut Criterion) {
                     Const(0.00323847),
                     Const(0.00107949),
                 ],
-                feedback: vec![Const(-2.56103158), Const(2.2132402), Const(-0.64357271)],
+                feedback: vec![Const(-2.561_031_6), Const(2.2132402), Const(-0.643_572_7)],
                 state: (),
             };
             let mut w2 = generator::initialize_state(w2);
@@ -88,20 +89,19 @@ fn bench_filter(c: &mut Criterion) {
 fn bench_marks(c: &mut Criterion) {
     c.bench_function("marks_4_40", |b| {
         b.iter(|| {
-            let mut context = vec![];
-            builtins::add_prelude(&mut context);
-            context.push((
-                "mark".to_string(),
-                parser::SourceExpr::from(parser::Expr::BuiltIn {
-                    name: "mark".to_string(),
-                    function: parser::BuiltInFn(std::rc::Rc::new(renderer::mark)),
-                }),
-            ));
-            const SAMPLE_RATE: i32 = 44100;
+            const SAMPLE_RATE: u32 = 44100;
+            let (tx, _rx) = mpsc::channel();
+            let helper = play_helper::PlayHelper::new(
+                SAMPLE_RATE,
+                120,
+                4,
+                std::path::PathBuf::from("./lib"),
+                tx,
+            );
             let mut generator = generator::Generator::new(SAMPLE_RATE);
             let mut ws = Vec::new();
             for _ in 0..40 {
-                ws.push(play_helper::beats_waveform(120, 4, &context));
+                ws.push(helper.beats_waveform());
             }
             let w = ws
                 .into_iter()
@@ -118,9 +118,9 @@ fn bench_marks(c: &mut Criterion) {
 }
 
 fn bench_large(c: &mut Criterion) {
-    let mut context: Vec<(String, parser::SourceExpr<u32>)> = Vec::new();
-    builtins::add_prelude(&mut context);
-    match parser::parse_context(
+    let mut bindings: Vec<parser::SourceBinding<u32>> = Vec::new();
+    builtins::add_bindings(&mut bindings);
+    match parser::parse_file::<u32>(
         r#"
     pi = 3.14159265,
     $ = fn(freq_hz) => sine(2*pi * freq_hz, 0),
@@ -129,48 +129,36 @@ fn bench_large(c: &mut Criterion) {
     Rw = fn(dur, level) => linear(level, -level / dur) | fin(time - dur),
     R = fn(dur, level) => fn(w) => w * Rw(dur, level),"#,
     ) {
-        Ok(bindings) => {
-            for parser::Binding { pattern, expr, .. } in bindings {
-                //println!("Parsed binding: {:?} = {:}", &pattern, &expr);
-                match parser::evaluate(&context, expr) {
-                    Ok(expr) => {
-                        //println!("Evaluated to: {:}", &expr);
-                        match parser::extend_context(&mut context, &pattern, &expr) {
-                            Ok(()) => {}
-                            Err(e) => panic!("Failed to extend context: {:?}", e),
-                        }
-                    }
-                    Err(e) => panic!("Evaluate failed: {:?}", e),
-                }
-            }
-        }
+        Ok(parsed) => bindings.extend(parsed),
         Err(e) => panic!("Failed to parse context: {:?}", e),
     }
+
+    let resolve = |_: &[String]| {
+        Err(parser::Error::new(
+            "didn't expect to resolve in bench_large".to_string(),
+        ))
+    };
 
     c.bench_function("large_440", |b| {
         b.iter(|| {
             let program = "triangle(55) + (noise * 0.2) | R(1.0, 1.0)";
             match parser::parse_program(program) {
-                Ok(expr) => {
-                    //println!("Parser returned: {:}", &expr);
-                    match parser::evaluate(&context, expr) {
-                        Ok(expr) => {
-                            //println!("Evaluate returned: {:}", &expr);
-                            if let parser::Expr::Waveform(waveform) = expr.expr {
-                                let mut generator = generator::Generator::new(44100);
-                                let mut w = generator::initialize_state(waveform);
-                                let mut out = vec![0.0; 1024];
+                Ok(expr) => match parser::evaluate(resolve, &bindings, expr) {
+                    Ok(expr) => {
+                        if let parser::Expr::Waveform(waveform) = expr.expr {
+                            let mut generator = generator::Generator::new(44100);
+                            let mut w = generator::initialize_state(waveform);
+                            let mut out = vec![0.0; 1024];
 
-                                for _ in 0..43 {
-                                    let _ = generator.generate(&mut w, &mut out);
-                                }
-                            } else {
-                                panic!("Expected waveform");
+                            for _ in 0..43 {
+                                let _ = generator.generate(&mut w, &mut out);
                             }
+                        } else {
+                            panic!("Expected waveform");
                         }
-                        Err(e) => panic!("Evaluate failed: {:?}", e),
                     }
-                }
+                    Err(e) => panic!("Evaluate failed: {:?}", e),
+                },
                 _ => panic!("Parse failed"),
             }
         });

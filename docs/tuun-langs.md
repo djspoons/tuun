@@ -150,8 +150,8 @@ For comparison, here are the lengths and offsets of each waveform:
 | `Fin(a, b)`             | position w/ `a` >= 0.0
 | `Sine(a, b)`            | min(a.length, b.length)
 | `Add(a, b)`, `Subtract(a, b)`, `Multiply(a, b)`, `Divide(a, b)` | min(a.length, b.length)
-| `Merge(a, b)`.          |  max(a.length, b.length)
-| `Append(a, b)`.         | a.length + b.length
+| `Merge(a, b)`           |  max(a.length, b.length)
+| `Append(a, b)`          | a.length + b.length
 | `Filter(c, [b_0, ...], [a_1, ...])` | c.length
 | `Reset(trigger, a)`     | trigger.length
 | `Alt(trigger, a, b)`    | trigger.length
@@ -174,7 +174,7 @@ expr ::= float
      | expr binary_op expr
      | unary_op expr
      | "if" expr "then" expr "else" expr
-     | "let" binding, ... "in" expr
+     | "let" binding "," ... "in" expr
      | "{" expr "}"
      | ...
 
@@ -182,6 +182,7 @@ pattern ::= var
         | "(" pattern, ... ")"
 
 binding ::= pattern "=" expr
+        | ...
 
 unary_op ::= "-" | "$" | "@" | ...
 binary_op ::= "+" | "-" | "*" | "/" | "&" | "|" | "==" | "!=" | "<" | ...

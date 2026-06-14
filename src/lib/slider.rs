@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use crate::waveform;
 use crate::{builtins, parser};
 
@@ -10,7 +12,7 @@ use waveform::Waveform::{Append, BinaryPointOp, Const, Fin, Time};
 #[derive(Clone, Debug, PartialEq)]
 struct NoMark;
 
-impl std::fmt::Display for NoMark {
+impl Display for NoMark {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "NoMark")
     }
@@ -30,9 +32,14 @@ pub fn denormalize(function: &parser::SliderFunction, normalized: f32) -> Result
             let source = format!("({})({})", function_source, normalized);
             let expr = parser::parse_program::<NoMark>(&source)
                 .map_err(|errors| format!("slider function parse error: {:?}", errors))?;
-            let mut context = Vec::new();
-            builtins::add_prelude(&mut context);
-            let result = parser::evaluate(&context, expr)
+            let mut bindings = Vec::new();
+            builtins::add_bindings(&mut bindings);
+            let resolve = |_: &[String]| {
+                Err(parser::Error::new(
+                    "didn't expect to resolve inside of slider function".to_string(),
+                ))
+            };
+            let result = parser::evaluate(resolve, &bindings, expr)
                 .map_err(|e| format!("slider function eval error: {}", e))?;
             match result.expr {
                 parser::Expr::Float(v) => Ok(v),
@@ -45,33 +52,30 @@ pub fn denormalize(function: &parser::SliderFunction, normalized: f32) -> Result
     }
 }
 
-pub fn prepend_slider_bindings<M, F>(
+pub fn append_slider_bindings<M, F>(
     configs: &[parser::Slider],
     normalized_values: &[f32],
     mark_id: F,
-    expr: parser::SourceExpr<M>,
-) -> parser::SourceExpr<M>
-where
+    bindings: &mut Vec<parser::SourceBinding<M>>,
+) where
     F: Fn(String) -> M,
 {
-    if configs.is_empty() {
-        return expr;
-    }
-    let bindings = configs
-        .iter()
-        .zip(normalized_values)
-        .map(|(config, normalized_value)| {
-            let value = denormalize(&config.function, *normalized_value).unwrap_or(0.0);
-            (
-                parser::Pattern::Identifier(config.label.clone()),
-                parser::SourceExpr::from(parser::Expr::Waveform(waveform::Waveform::Marked {
-                    id: mark_id(config.label.clone()),
-                    waveform: Box::new(waveform::Waveform::Const(value)),
-                })),
-            )
-        })
-        .collect::<Vec<_>>();
-    parser::make_let(bindings, expr)
+    bindings.append(
+        &mut configs
+            .iter()
+            .zip(normalized_values)
+            .map(|(config, normalized_value)| {
+                let value = denormalize(&config.function, *normalized_value).unwrap_or(0.0);
+                parser::SourceBinding::definition(
+                    parser::Pattern::Identifier(config.label.clone()),
+                    parser::SourceExpr::from(parser::Expr::Waveform(waveform::Waveform::Marked {
+                        id: mark_id(config.label.clone()),
+                        waveform: Box::new(waveform::Waveform::Const(value)),
+                    })),
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
 }
 
 /// Build a waveform that ramps linearly from `last_value` to `new_value` over

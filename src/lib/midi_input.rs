@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::actions;
-use crate::effects;
 use crate::launchkey;
 use crate::parser;
 use crate::renderer::{self, MarkId, PROGRAMS_PER_BANK, Program, WaveformId};
@@ -14,7 +13,10 @@ use crate::waveform;
 // TODO maybe move out of here since this isn't tied to MIDI input anymore
 pub struct Keys {
     pub id: renderer::ProgramId,
-    pub context: Vec<(String, parser::SourceExpr<MarkId>)>,
+    /// A function which takes a pair (MIDI note, velocity) and returns a pair
+    /// of Waveforms to be used for note-on and note-off events.
+    ///
+    /// Should be a closed value except for references to sliders.
     pub function: parser::SourceExpr<MarkId>,
     pub sliders: renderer::ProgramSliders,
     pub level_db: f32,
@@ -87,10 +89,8 @@ pub fn classify(
                 } else {
                     Some(vec![Action::PlayProgram {
                         program_index,
-                        cursor_position: program.text.len(),
                         start_at_next_measure: false,
                         repeat_after_measures: None,
-                        return_to_select_on_success: false,
                     }])
                 }
             }
@@ -111,10 +111,8 @@ pub fn classify(
                 } else {
                     Some(vec![Action::PlayProgram {
                         program_index,
-                        cursor_position: program.text.len(),
                         start_at_next_measure: true,
                         repeat_after_measures,
-                        return_to_select_on_success: false,
                     }])
                 }
             }
@@ -150,42 +148,6 @@ pub fn classify(
             Some(actions)
         }
     }
-}
-
-/// Returns true iff `program` parses and evaluates as a valid keys instrument:
-/// a 2-arg function returning a pair of waveforms. Mirrors the validation
-/// `Effect::InstallKeysFromActive` runs before installing.
-//
-// Memoized on `program.valid_keys_program`; callers are responsible for
-// invalidating that cell (set to `None`) when anything that affects
-// validity changes — the program's text or the parser context. See
-// `invalidate_keys_validity_caches` for the bulk-invalidation case.
-fn is_valid_keys_program(state: &actions::AppState, program: &Program) -> bool {
-    if let Some(cached) = program.valid_keys_program.get() {
-        return cached;
-    }
-    let valid = match parser::parse_program::<MarkId>(&program.text) {
-        Ok(expr)
-            if matches!(
-                expr.expr,
-                parser::Expr::Function { .. } | parser::Expr::BuiltIn { .. }
-            ) =>
-        {
-            effects::apply_note_function_as_waveforms(
-                &state.context,
-                &expr,
-                vec![
-                    parser::SourceExpr::float(60.0),
-                    parser::SourceExpr::float(0.7),
-                ],
-                &program.sliders,
-            )
-            .is_ok()
-        }
-        _ => false,
-    };
-    program.valid_keys_program.set(Some(valid));
-    valid
 }
 
 /// Pushes the current app state out to the Launchkey hardware: pad colors
@@ -349,7 +311,7 @@ fn update_pads_keys_installer(
         // regardless of whether the current text is still a valid keys
         // program — the installed function is what's actually playing.
         // Otherwise only color pads that can be installed right now.
-        if !installed && !is_valid_keys_program(state, program) {
+        if !installed && program.cached_keys_instrument.is_none() {
             launchkey.set_daw_bottom_pad_color(i as u8, 0, 0, 0);
             continue;
         }

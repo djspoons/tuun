@@ -1,6 +1,6 @@
-use std::cell;
 use std::collections::HashMap;
 use std::fmt;
+use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use sdl2::Sdl;
@@ -96,7 +96,7 @@ pub fn mark(arguments: Vec<parser::Expr<MarkId>>) -> parser::Expr<MarkId> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 // `active_program_index` should be the index of the active program in the `programs` array
 pub enum Mode {
     Select,
@@ -128,11 +128,34 @@ pub enum WaveformOrError {
 #[derive(Debug, Clone, Default)]
 pub struct ProgramSliders {
     pub configs: Vec<parser::Slider>,
-    /// Normalized values in 0.0..1.0, parallel to configs
+    /// Normalized values in 0.0..1.0, parallel to configs.
     pub normalized_values: Vec<f32>,
 }
 
 impl ProgramSliders {
+    /// Builds a `ProgramSliders` from a list of source-level slider configs.
+    pub fn from_slider_configs(configs: Vec<parser::Slider>) -> Self {
+        use parser::SliderFunction;
+        let normalized_values = configs
+            .iter()
+            .map(|c| match &c.function {
+                SliderFunction::Linear {
+                    initial_value,
+                    min,
+                    max,
+                } => ((initial_value - min) / (max - min)).clamp(0.0, 1.0),
+                SliderFunction::UserDefined {
+                    normalized_initial_value,
+                    ..
+                } => normalized_initial_value.clamp(0.0, 1.0),
+            })
+            .collect();
+        ProgramSliders {
+            configs,
+            normalized_values,
+        }
+    }
+
     // TODO this method only works for mouse-based sliders
     pub fn slider_display(&self) -> Vec<SliderDisplay> {
         self.configs
@@ -156,29 +179,123 @@ impl ProgramSliders {
     }
 }
 
+// TODO maybe Program should live in play_helper? (Which should be renamed?)
 #[derive(Debug, Clone)]
 pub struct Program {
     // Changes to `text` should also invalid the cache below.
     pub text: String,
+    // The span in the source file from which this program came.
+    pub span: Range<usize>,
+    /// Index of the originating binding in the file's `Vec<SourceBinding>`.
+    pub binding_index: usize,
     pub id: ProgramId,
     pub sliders: ProgramSliders,
     pub color: Option<(u8, u8, u8)>,
     pub level_db: f32,
-    // Cached result of `midi_input::is_valid_keys_program`. `None` means
-    // uncached; populated lazily on first check. Invalidate (set to
-    // `None`) whenever something that affects validity changes — the
-    // program's text or the parser context.
-    pub valid_keys_program: cell::Cell<Option<bool>>,
+    // Set if the current text evaluates to a valid waveform.
+    pub cached_waveform: Option<waveform::Waveform<MarkId>>,
+    // Set if the current text evaluates to a valid keys instrument.
+    pub cached_keys_instrument: Option<parser::SourceExpr<MarkId>>,
 }
 
 impl Program {
+    /// Builds a program from a string without attempting to parse it.
+    pub fn from_string(text: &str, binding_index: usize, program_index: usize) -> Program {
+        Program {
+            text: text.to_string(),
+            span: 0..0,
+            binding_index,
+            id: id_from_index(program_index),
+            sliders: ProgramSliders::default(),
+            color: None,
+            level_db: 0.0,
+            cached_waveform: None,
+            cached_keys_instrument: None,
+        }
+    }
+
+    /// Builds a `Program` from a `SourceBinding` plus its position in the
+    /// file's bindings vec.
+    ///
+    /// Only `Definition`s carrying a `//#{slot=N}` annotation become
+    /// programs (the slot determines the UI position); other `Definition`s
+    /// are treated as library bindings and are not shown.
+    pub fn from_source_binding(
+        sb: &parser::SourceBinding<MarkId>,
+        binding_index: usize,
+        source: &str,
+    ) -> Option<Program> {
+        // TODO NextBank is ignored!
+        let mut sliders = ProgramSliders::default();
+        let mut color: Option<(u8, u8, u8)> = None;
+        let mut level_db: f32 = 0.0;
+        let mut slot: Option<u32> = None;
+        for sa in &sb.annotations {
+            match &sa.annotation {
+                parser::Annotation::Sliders(configs) => {
+                    sliders = ProgramSliders::from_slider_configs(configs.clone());
+                }
+                parser::Annotation::Color(r, g, b) => {
+                    color = Some((*r, *g, *b));
+                }
+                parser::Annotation::Level(v) => {
+                    level_db = *v;
+                }
+                parser::Annotation::Slot(n) => {
+                    slot = Some(*n);
+                }
+            }
+        }
+        // No slot → not a UI program.
+        let slot = slot?;
+        if let parser::Binding::Definition(_, expr) = &sb.binding {
+            if let Some(s) = &expr.span
+                && s.end <= source.len()
+            {
+                let span = s.clone();
+                let text = source[s.clone()].to_string();
+                Some(Program {
+                    text,
+                    span,
+                    binding_index,
+                    id: slot as ProgramId,
+                    sliders,
+                    color,
+                    level_db,
+                    cached_waveform: None,
+                    cached_keys_instrument: None,
+                })
+            } else {
+                println!(
+                    "Found source expression without span or invalid span: {:?}",
+                    &sb
+                );
+                None
+            }
+        } else {
+            // Nothing to do for other binding types.
+            None
+        }
+    }
+
+    /// Replaces the program's `text` and invalidates both cached
+    /// evaluations. Callers that mutate `text` directly must keep the
+    /// caches in sync themselves; routing through this method makes that
+    /// the default.
+    pub fn set_text(&mut self, text: String) {
+        self.text = text;
+        self.cached_waveform = None;
+        self.cached_keys_instrument = None;
+    }
+
     /// Atomically replace `text[target_span]` with `new_text`, validating
     /// the result by re-parsing.
     ///
-    /// On success, `text` is updated and the `valid_keys_program` cache is
-    /// invalidated. On parse failure (the proposed edit produces an
+    /// XXX update comment
+    /// On success, `text` is updated and any cached results are discarded.
+    /// On parse failure (the proposed edit produces an
     /// un-parseable program), nothing is changed and the errors are
-    /// returned — this is the "mid-edit garbage" guard.
+    /// returned.
     ///
     /// This is the AST-aware editor primitive that lifts
     /// [`parser::replace_at`] to operate on a `Program`. The save path
@@ -193,7 +310,8 @@ impl Program {
     ) -> Result<(), Vec<parser::Error>> {
         let mut ast = parser::parse_program::<MarkId>(&self.text)?;
         parser::replace_at(&mut ast, target_span, new_text, &mut self.text)?;
-        self.valid_keys_program.set(None);
+        self.cached_waveform = None;
+        self.cached_keys_instrument = None;
         Ok(())
     }
 }
@@ -279,7 +397,7 @@ pub struct Renderer {
 
     tempo: u32,
     beats_per_measure: u32,
-    sample_rate: i32,
+    sample_rate: u32,
 
     pub width: u32,
     pub height: u32,
@@ -305,7 +423,7 @@ impl Renderer {
         ttf_context: &Sdl2TtfContext,
         tempo: u32,
         beats_per_measure: u32,
-        sample_rate: i32,
+        sample_rate: u32,
     ) -> Renderer {
         let video_subsystem = sdl_context.video().unwrap();
         let display_mode = video_subsystem
@@ -1067,17 +1185,6 @@ pub fn current_beat_info(
 mod tests {
     use super::*;
 
-    fn new_program(text: &str) -> Program {
-        Program {
-            text: text.to_string(),
-            id: id_from_index(0),
-            sliders: ProgramSliders::default(),
-            color: None,
-            level_db: 0.0,
-            valid_keys_program: cell::Cell::new(Some(true)),
-        }
-    }
-
     fn find_first_list_span(node: &parser::SourceExpr<MarkId>) -> Option<std::ops::Range<usize>> {
         if let parser::Expr::List(_) = &node.expr {
             return node.span.clone();
@@ -1092,10 +1199,11 @@ mod tests {
 
     #[test]
     fn edit_text_updates_text_and_invalidates_cache() {
-        // The Stage 6 motivating case: editing the list passed to
-        // `on_beats(...)` inside a program's text.
-        let mut program = new_program("on_beats( // pattern\n [0, 1, 2, 3])");
-        assert_eq!(program.valid_keys_program.get(), Some(true));
+        // Editing the list passed to `on_beats(...)` inside a program's text.
+        let mut program = Program::from_string("on_beats( // pattern\n [0, 1, 2, 3])", 0, 1);
+        // Artificially set these so we can check them later.
+        program.cached_waveform = Some(waveform::Waveform::Time(()));
+        program.cached_keys_instrument = Some(parser::SourceExpr::float(1.0));
 
         let ast = parser::parse_program::<MarkId>(&program.text).unwrap();
         let list_span = find_first_list_span(&ast).expect("should find a list");
@@ -1106,13 +1214,16 @@ mod tests {
         // round-tripped file preserves the inter-call comment.
         assert_eq!(program.text, "on_beats( // pattern\n [0, 2])");
         // Edit invalidated the keys-validity cache.
-        assert_eq!(program.valid_keys_program.get(), None);
+        assert!(program.cached_waveform.is_none());
+        assert!(program.cached_keys_instrument.is_none());
     }
 
     #[test]
     fn edit_text_rejects_bad_edit_atomically() {
-        let mut program = new_program("[1, 2, 3]");
-        program.valid_keys_program.set(Some(false));
+        let mut program = Program::from_string("[1, 2, 3]", 0, 1);
+        // Artificially set these so we can check them later.
+        program.cached_waveform = Some(waveform::Waveform::Time(()));
+        program.cached_keys_instrument = Some(parser::SourceExpr::float(1.0));
 
         let ast = parser::parse_program::<MarkId>(&program.text).unwrap();
         let list_span = ast.span.clone().unwrap();
@@ -1122,6 +1233,7 @@ mod tests {
         assert!(result.is_err());
         // Neither the text nor the cache moved.
         assert_eq!(program.text, "[1, 2, 3]");
-        assert_eq!(program.valid_keys_program.get(), Some(false));
+        assert!(program.cached_waveform.is_some());
+        assert!(program.cached_keys_instrument.is_some());
     }
 }
