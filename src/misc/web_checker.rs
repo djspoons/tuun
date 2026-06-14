@@ -24,7 +24,7 @@ fn load_context() -> Vec<parser::SourceBinding<renderer::MarkId>> {
     bindings.push(def("tempo", parser::SourceExpr::float(120.0)));
     builtins::add_bindings(&mut bindings);
 
-    let context_content = include_str!("../../lib/std.tuun");
+    let context_content = include_str!("../../lib/v0/std.tuun");
     match parser::parse_file::<renderer::MarkId>(context_content) {
         Ok(parsed) => bindings.extend(parsed),
         Err(e) => eprintln!("Warning: Failed to parse context file: {:?}", e),

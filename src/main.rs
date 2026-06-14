@@ -56,7 +56,7 @@ struct Args {
     ui: bool, // When set to value, just runs each of the programs once then exits
     /// Root directory for module resolution. A module path `["foo", "bar"]`
     /// resolves to `<library_root>/foo/bar.tuun`.
-    #[arg(long, default_value = "./lib")]
+    #[arg(long, default_value = "./lib/v0")]
     library_root: path::PathBuf,
     input_file: String,
     #[arg(short = 'O', long, default_value = ".")]
