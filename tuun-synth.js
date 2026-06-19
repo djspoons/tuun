@@ -58,8 +58,8 @@ class TuunRuntime {
         await this.audioContext.audioWorklet.addModule(processorUrl);
     }
 
-    parse(expression, sliders) {
-        const result = this.tuun.parse(expression, sliders);
+    parse(expression, sliders, opens) {
+        const result = this.tuun.parse(expression, sliders, opens);
         // If successful, tell the module to discard any state.
         this.tuun.stop();
     }
@@ -327,7 +327,7 @@ input[type="number"]:focus {
 // ─── <tuun-synth> Custom Element ─────────────────────────────────
 
 class TuunSynthElement extends HTMLElement {
-    static observedAttributes = ['expression', 'description', 'controls', 'expanded', 'tempo', 'sliders'];
+    static observedAttributes = ['expression', 'description', 'controls', 'expanded', 'tempo', 'sliders', 'open'];
 
     constructor() {
         super();
@@ -551,8 +551,9 @@ class TuunSynthElement extends HTMLElement {
         expression = this._stripComments(expression);
         await runtime.ensureInitialized(this._getSampleRate(), this._getTempo());
         const sliders = JSON.stringify(Object.fromEntries(this._sliderValues) || {});
+        const opens = this._getOpens();
         // First, check to see if the expression parses.
-        runtime.parse(expression, sliders);
+        runtime.parse(expression, sliders, opens);
         // Claim our status as the active instance.
         runtime.setPlaying(this);
 
@@ -567,9 +568,18 @@ class TuunSynthElement extends HTMLElement {
             type: 'play',
             expression,
             sliders,
+            opens,
         });
         this._isPlaying = true;
         this._updatePlayButton();
+    }
+
+    // The `open` attribute is a JSON array of dotted module paths to bring
+    // into scope (e.g. `open='["std"]'`). Passed through verbatim to
+    // `Tuun.parse`; an absent or empty attribute means no opens.
+    _getOpens() {
+        const attr = this.getAttribute('open');
+        return attr && attr.trim() ? attr : '[]';
     }
 
     async _ensureWorkletNode() {

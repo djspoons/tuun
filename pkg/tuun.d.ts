@@ -40,15 +40,20 @@ export class Tuun {
    * Parses an expression with slider bindings and prepares for playback.
    *
    * `slider_json` is a JSON object mapping slider names to initial values,
-   * for example, `{"volume": 0.5, "cutoff": 2000}`.
-   * Pass `"{}"` for no sliders.
+   * for example, `{"volume": 0.5, "cutoff": 2000}`. Pass `"{}"` for no
+   * sliders.
+   *
+   * `open_json` is a JSON array of dotted module paths to bring into scope
+   * before evaluating, e.g. `["std", "foo.bar"]`. Each entry behaves like an
+   * `open` binding at the top of the expression. Pass `"[]"` for no opens.
    *
    * # Examples
    * ```javascript
-   * const waveform = tuun.parse("sine(2764, 0)", "{}");
+   * const waveform = tuun.parse("sine(2764, 0)", "{}", "[]");
+   * const filtered = tuun.parse("$440 | lpf(0.5, 1900)", "{}", '["std"]');
    * ```
    */
-  parse(expression: string, slider_json: string): void;
+  parse(expression: string, slider_json: string, open_json: string): void;
   /**
    * Drops the current waveform.
    */
@@ -74,7 +79,7 @@ export class Tuun {
    *
    * # Examples
    * ```javascript
-   * tuun.parse("$440", "{}");
+   * tuun.parse("$440", "{}", "[]");
    * const done = tuun.process(output);
    * ```
    */
@@ -95,7 +100,7 @@ export interface InitOutput {
   readonly memory: WebAssembly.Memory;
   readonly __wbg_tuun_free: (a: number, b: number) => void;
   readonly tuun_new: (a: number, b: number) => [number, number, number];
-  readonly tuun_parse: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+  readonly tuun_parse: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
   readonly tuun_stop: (a: number) => void;
   readonly tuun_update_slider: (a: number, b: number, c: number, d: number) => void;
   readonly tuun_process: (a: number, b: number, c: number, d: any) => number;
