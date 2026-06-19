@@ -96,6 +96,7 @@ fn bench_marks(c: &mut Criterion) {
                 120,
                 4,
                 std::path::PathBuf::from("./lib"),
+                tx.clone(),
                 tx,
             );
             let mut generator = generator::Generator::new(SAMPLE_RATE);

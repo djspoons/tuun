@@ -411,10 +411,18 @@ where
             trigger,
             positive_waveform,
             negative_waveform,
-        } => Alt {
-            trigger: Box::new(optimize(*trigger)),
-            positive_waveform: Box::new(optimize(*positive_waveform)),
-            negative_waveform: Box::new(optimize(*negative_waveform)),
+        } => match (
+            optimize(*trigger),
+            optimize(*positive_waveform),
+            optimize(*negative_waveform),
+        ) {
+            (Const(v), positive_waveform, _) if v >= 0.0 => positive_waveform,
+            (Const(v), _, negative_waveform) if v < 0.0 => negative_waveform,
+            (trigger, positive_waveform, negative_waveform) => Alt {
+                trigger: Box::new(trigger),
+                positive_waveform: Box::new(positive_waveform),
+                negative_waveform: Box::new(negative_waveform),
+            },
         },
         Marked { id, waveform } => {
             // TODO could pull out Fin if process_marks better implemented Fin

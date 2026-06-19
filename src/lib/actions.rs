@@ -254,10 +254,16 @@ pub enum Effect {
         waveform: waveform::Waveform<MarkId>,
     },
 
-    /// Parse and evaluate the current program, updating its state and the
-    /// source file. On success, return to Select mode; otherwise set the
-    /// mode to `mode_on_failure`.
-    EvaluateAndUpdateSource { mode_on_failure: Mode },
+    /// Parse and evaluate the current program, updating its state. On success,
+    /// return to Select mode; otherwise set the mode to `mode_on_failure`.
+    EvaluateProgram {
+        program_index: usize,
+        mode_on_failure: Mode,
+    },
+
+    /// Update the source file with the current text of the given program, then
+    /// re-parse and refresh all bindings and program state.
+    UpdateSource(usize),
 
     /// Interpret the program at the given index as a keys instrument function
     /// and install it as `state.keys`. If that program is already installed,
@@ -386,7 +392,13 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
             vec![]
         }
         Action::EvaluateAndLeaveEditMode { mode_on_failure } => {
-            vec![Effect::EvaluateAndUpdateSource { mode_on_failure }]
+            vec![
+                Effect::EvaluateProgram {
+                    program_index: state.active_program_index,
+                    mode_on_failure,
+                },
+                Effect::UpdateSource(state.active_program_index),
+            ]
         }
         Action::EnterSelectMode => {
             state.mode = Mode::Select;
@@ -675,7 +687,6 @@ fn apply_slider(
         Some(p) => p,
         None => return vec![],
     };
-    let program_id = program.id;
     let ps = &mut program.sliders;
     if slider_index >= ps.configs.len() {
         return vec![Effect::ShowMessage(format!(
@@ -689,7 +700,7 @@ fn apply_slider(
     let actual_value = slider::denormalize(&config.function, normalized).unwrap_or(0.0);
 
     let mut effects = vec![Effect::UpdateSlider {
-        id: WaveformId::Program(program_id),
+        id: WaveformId::Program(program.id),
         slider: label.clone(),
         value: actual_value,
     }];
@@ -698,7 +709,7 @@ fn apply_slider(
     // slider value to every active key waveform. The runner will look up
     // active Key marks from the tracker status when handling this effect.
     if let Some(keys) = state.keys.as_mut()
-        && keys.id == program_id
+        && keys.id == program.id
     {
         keys.sliders.normalized_values[slider_index] = normalized;
         effects.push(Effect::UpdateActiveKeySliders {

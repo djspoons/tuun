@@ -256,7 +256,7 @@ fn update_pads_clip_launcher(
         {
             // If it's the installed keys program, don't color the top pad (unless it's playing).
             launchkey.set_daw_top_pad_color(i as u8, 0, 0, 0);
-        } else if !program.text.is_empty() {
+        } else if program.cached_waveform.is_some() {
             launchkey.set_daw_top_pad_color(i as u8, red, blue, green);
         } else {
             // empty
@@ -278,7 +278,7 @@ fn update_pads_clip_launcher(
                 green.saturating_sub((intensity * green as f32) as u8),
                 blue.saturating_sub((intensity * blue as f32) as u8),
             );
-        } else if !program.text.is_empty() {
+        } else if program.cached_waveform.is_some() {
             launchkey.set_daw_bottom_pad_color(i as u8, red, blue, green);
         } else {
             // empty

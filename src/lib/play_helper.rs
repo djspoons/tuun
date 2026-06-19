@@ -48,7 +48,8 @@ pub struct PlayHelper {
     /// loaded) * (edits per file)`, which is fine for tuun's interactive
     /// workflow.
     modules: RefCell<HashMap<Vec<String>, ModuleCacheEntry>>,
-    command_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
+    precomputing_command_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
+    fast_command_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
 }
 
 impl PlayHelper {
@@ -57,7 +58,8 @@ impl PlayHelper {
         tempo: u32,
         beats_per_measure: u32,
         library_root: path::PathBuf,
-        command_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
+        precomputing_command_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
+        fast_command_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
     ) -> PlayHelper {
         // Construct the prelude from the built-ins and any environment specific bindings.
         let mut prelude = Vec::new();
@@ -86,7 +88,8 @@ impl PlayHelper {
             prelude,
             library_root,
             modules: RefCell::new(HashMap::new()),
-            command_sender,
+            precomputing_command_sender,
+            fast_command_sender,
         }
     }
 
@@ -255,15 +258,19 @@ impl PlayHelper {
         if let Some(waveform) = program.cached_waveform.clone() {
             let waveform = optimizer::optimize(waveform);
             println!("optimizer::optimize returned: {}", &waveform);
-            self.command_sender
-                .send(tracker::Command::Play {
-                    // TODO maybe extend the top-level mark to the full measure?
-                    id: WaveformId::Program(program.id),
-                    waveform: build_top_level_waveform(waveform, program.level_db),
-                    start,
-                    repeat_every,
-                })
-                .unwrap();
+            if start_at_next_measure {
+                &mut self.precomputing_command_sender
+            } else {
+                &mut self.fast_command_sender
+            }
+            .send(tracker::Command::Play {
+                // TODO maybe extend the top-level mark to the full measure?
+                id: WaveformId::Program(program.id),
+                waveform: build_top_level_waveform(waveform, program.level_db),
+                start,
+                repeat_every,
+            })
+            .unwrap();
             Some(message)
         } else {
             None
@@ -273,7 +280,7 @@ impl PlayHelper {
     pub fn stop_waveform(&mut self, id: WaveformId) {
         use waveform::{Operator, Waveform::*};
         const STOP_DURATION_SECS: f32 = 0.05;
-        self.command_sender
+        self.fast_command_sender
             .send(tracker::Command::Modify {
                 id,
                 mark_id: MarkId::Terminator,
@@ -302,7 +309,7 @@ impl PlayHelper {
         status_receiver: &mpsc::Receiver<tracker::Status<WaveformId, MarkId>>,
     ) {
         // Play the odd Beats waveform starting immediately and repeating every two measures
-        self.command_sender
+        self.precomputing_command_sender
             .send(tracker::Command::Play {
                 id: WaveformId::Beats(false),
                 waveform: self.beats_waveform(),
@@ -319,7 +326,7 @@ impl PlayHelper {
                     if mark.waveform_id == WaveformId::Beats(false)
                         && mark.mark_id == MarkId::TopLevel
                     {
-                        self.command_sender
+                        self.precomputing_command_sender
                             .send(tracker::Command::Play {
                                 id: WaveformId::Beats(true),
                                 waveform: self.beats_waveform(),

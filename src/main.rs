@@ -100,12 +100,14 @@ pub fn main() {
             args.tempo,
             args.beats_per_measure,
             args.library_root.clone(),
+            command_sender.clone(),
             command_sender,
         );
         for program in state.programs.iter_mut() {
             println!("Playing program {}: {}", program.id, program.text);
             match play_helper.evaluate_program(&state.bindings, program) {
                 Ok(expr) => match expr.expr {
+                    // TODO also need to handle Seq here
                     parser::Expr::Waveform(w) => {
                         program.cached_waveform = Some(w);
                         play_helper.play_program_as_waveform(program, &status, false, None);
@@ -168,10 +170,7 @@ pub fn main() {
     //
     // What goes through (the two PlayHelpers wired to the returned
     // sender below: `start_beats` and `effect_play_helper`):
-    //   - Command::Play from `play_waveform` / `start_beats`  → precomputed
-    //   - Command::Modify from `stop_waveform` (Effect::StopProgram,
-    //     PlayNoteOff fallback) → passed through, but still queued behind
-    //     any in-flight precompute on this thread
+    //   - play_program_as_waveform with start_at_next_measure = true
     //
     // What bypasses entirely (uses `command_sender` directly):
     //   - The slider thread's Modify ramps
@@ -179,6 +178,7 @@ pub fn main() {
     //     RemovePending
     //   - Effect::PlayNoteOn — yes, this is a Command::Play but it
     //     deliberately skips precompute to keep keystroke latency low
+    //   - play_helper's use of `fast_command_sender`
     let precomputing_command_sender = {
         let play_command_sender = command_sender.clone();
         let (tx, play_receiver) = mpsc::channel();
@@ -229,6 +229,7 @@ pub fn main() {
         args.beats_per_measure,
         args.library_root.clone(),
         precomputing_command_sender.clone(),
+        command_sender.clone(),
     )
     .start_beats(&status_receiver);
 
@@ -362,35 +363,8 @@ pub fn main() {
         args.beats_per_measure,
         args.library_root.clone(),
         precomputing_command_sender,
+        command_sender.clone(),
     );
-
-    // Populate each program's cached_waveform / cached_keys_instrument from
-    // its initial source so that playback and InstallKeys work without
-    // needing to enter and exit Edit mode first.
-    // TODO this sort of duplicates parts of EvaluateAndUpdateSource; refactor
-    for program in state.programs.iter_mut() {
-        if program.text.is_empty() {
-            continue;
-        }
-        match effect_play_helper.evaluate_program(&state.bindings, program) {
-            Ok(expr) => {
-                if let parser::Expr::Waveform(w) = expr.expr {
-                    program.cached_waveform = Some(w);
-                } else if matches!(
-                    expr.expr,
-                    parser::Expr::Function { .. } | parser::Expr::BuiltIn { .. }
-                ) {
-                    program.cached_keys_instrument = Some(expr);
-                }
-            }
-            Err(message) => {
-                println!(
-                    "Initial evaluate of program {} failed: {}",
-                    program.id, message
-                );
-            }
-        }
-    }
 
     let mut status = tracker::Status {
         buffer_start: Instant::now(),
@@ -403,6 +377,28 @@ pub fn main() {
         tracker_load: Metric::new(Duration::from_secs(10), 100),
         allocations_per_sample: Metric::new(Duration::from_secs(10), 100),
     };
+
+    // Populate each program's cached_waveform / cached_keys_instrument from
+    // its initial source so that playback and InstallKeys work without
+    // needing to enter and exit Edit mode first.
+    for i in 0..state.programs.len() {
+        if state.programs[i].text.is_empty() {
+            continue;
+        }
+        let mut world = effects::World {
+            launchkey: launchkey.as_mut(),
+            status: &status,
+            play_helper: &mut effect_play_helper,
+        };
+        effect_runner.run_all(
+            &mut state,
+            &mut world,
+            vec![actions::Effect::EvaluateProgram {
+                program_index: i,
+                mode_on_failure: renderer::Mode::Select,
+            }],
+        );
+    }
 
     const BUFFER_REFRESH_INTERVAL: Duration = Duration::from_millis(200);
     let mut next_buffer_refresh = Instant::now();

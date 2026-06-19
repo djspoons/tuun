@@ -23,9 +23,6 @@ use crate::waveform;
 ///
 /// The expressions `expr` and `args` may reference slider variables but
 /// should otherwise be closed.
-//
-// Used by `PlayNoteOn` and `EvaluateUpdateSource` to invoke the keys
-// function with `(midi_note, velocity)` arguments.
 fn apply_note_function(
     expr: &parser::SourceExpr<MarkId>,
     args: Vec<parser::SourceExpr<MarkId>>,
@@ -68,24 +65,23 @@ fn apply_note_function(
     }
 }
 
-/// Splices the active program's edited `text` back into `state.source`,
+/// Splices the given program's edited `text` back into `state.source`,
 /// re-parses the file to refresh `state.bindings`, realigns each program's
-/// `span`/`binding_index` (matching by `slot=N` annotation), and writes
-/// the new source to `state.input_path`.
+/// `span`/`binding_index` (matching by `slot=N` annotation), and writes the new
+/// source to `state.input_path`.
 ///
-/// Programs whose `span` is empty (`0..0`) are treated as brand-new: a
-/// fresh `Definition` is appended at the end of source with a generated
-/// name and a `//#{slot=N}` annotation so the file picks it up on
-/// re-parse. Existing programs are spliced in place.
+/// Programs whose `span` is empty (`0..0`) are treated as brand-new: a fresh
+/// `Definition` is appended at the end of source with a generated name and a
+/// `//#{slot=N}` annotation so the file picks it up on re-parse. Existing
+/// programs are spliced in place.
 ///
-/// Returns a user-visible warning message if any step failed; in that
-/// case `state.bindings`, `state.source`, and the file on disk are all
-/// left unchanged.
-fn splice_active_program(state: &mut AppState) -> Result<(), String> {
-    let active = state.active_program_index;
-    let slot = active + 1;
-    let edited_span = state.programs[active].span.clone();
-    let edited_text = state.programs[active].text.clone();
+/// Returns a user-visible warning message if any step failed; in that case
+/// `state.bindings`, `state.source`, and the file on disk are all left
+/// unchanged.
+fn splice_program(state: &mut AppState, program_index: usize) -> Result<(), String> {
+    let slot = program_index + 1;
+    let edited_span = state.programs[program_index].span.clone();
+    let edited_text = state.programs[program_index].text.clone();
     let is_new = edited_span.start == edited_span.end;
 
     let mut new_source = state.source.clone();
@@ -111,7 +107,7 @@ fn splice_active_program(state: &mut AppState) -> Result<(), String> {
     } else {
         if edited_span.end > state.source.len() {
             return Err(format!(
-                "active program span {:?} is out of bounds for source of length {}",
+                "program span {:?} is out of bounds for source of length {}",
                 edited_span,
                 state.source.len()
             ));
@@ -277,11 +273,14 @@ impl EffectRunner {
                 });
             }
 
-            Effect::EvaluateAndUpdateSource { mode_on_failure } => {
-                // Try to parse and evaluate the active program's text.
+            Effect::EvaluateProgram {
+                program_index,
+                mode_on_failure,
+            } => {
+                // Try to parse and evaluate the given program's text.
                 let result = world
                     .play_helper
-                    .evaluate_program(&state.bindings, state.active_program());
+                    .evaluate_program(&state.bindings, &state.programs[program_index]);
 
                 let expr = match result {
                     Ok(expr) => expr,
@@ -290,8 +289,8 @@ impl EffectRunner {
                         // cached values. We still do this even though editing
                         // clears these as it may have been a dependency that
                         // caused the problem.
-                        state.active_program_mut().cached_waveform = None;
-                        state.active_program_mut().cached_keys_instrument = None;
+                        state.programs[program_index].cached_waveform = None;
+                        state.programs[program_index].cached_keys_instrument = None;
 
                         // Return to the indicated mode.
                         state.message = message;
@@ -300,42 +299,56 @@ impl EffectRunner {
                     }
                 };
 
-                // Splice the edited program text back into the file-level
-                // source, re-parse to refresh `state.bindings`, realign each
-                // program's span/text with its (possibly shifted) binding, and
-                // persist the new source to disk.
-                if let Err(message) = splice_active_program(state) {
-                    state.message = message;
-                }
+                match expr.expr {
+                    parser::Expr::Waveform(w) => {
+                        state.programs[program_index].cached_waveform = Some(w);
+                        state.programs[program_index].cached_keys_instrument = None;
+                    }
+                    parser::Expr::Seq { waveform, .. } => {
+                        if let parser::Expr::Waveform(w) = waveform.expr {
+                            state.programs[program_index].cached_waveform = Some(w);
+                            state.programs[program_index].cached_keys_instrument = None;
+                        }
+                    }
+                    parser::Expr::Function { .. } | parser::Expr::BuiltIn { .. } => {
+                        state.programs[program_index].cached_waveform = None;
+                        // Sanity check: actually invoke with dummy args.
+                        // TODO use a waveform for velocity
+                        if let Err(message) = apply_note_function(
+                            &expr,
+                            vec![
+                                parser::SourceExpr::float(60.0),
+                                parser::SourceExpr::float(0.7),
+                            ],
+                            &state.active_program().sliders,
+                        ) {
+                            state.message = message;
+                            state.programs[program_index].cached_keys_instrument = None;
+                            state.mode = mode_on_failure;
+                            return;
+                        }
+                        state.programs[program_index].cached_keys_instrument = Some(expr);
+                    }
+                    _ => {
+                        state.programs[program_index].cached_waveform = None;
+                        state.programs[program_index].cached_keys_instrument = None;
 
-                // If successful, see if it's a waveform or a keys instrument
-                // and update the program's cached values.
-                if let parser::Expr::Waveform(w) = expr.expr {
-                    state.active_program_mut().cached_waveform = Some(w);
-                    state.active_program_mut().cached_keys_instrument = None;
-                } else if matches!(
-                    expr.expr,
-                    parser::Expr::Function { .. } | parser::Expr::BuiltIn { .. }
-                ) {
-                    state.active_program_mut().cached_waveform = None;
-                    // Sanity check: actually invoke with dummy args.
-                    // TODO use a waveform for velocity
-                    if let Err(message) = apply_note_function(
-                        &expr,
-                        vec![
-                            parser::SourceExpr::float(60.0),
-                            parser::SourceExpr::float(0.7),
-                        ],
-                        &state.active_program().sliders,
-                    ) {
-                        state.message = message;
-                        state.active_program_mut().cached_keys_instrument = None;
+                        state.message = "Program is not a waveform or keys instrument".to_string();
                         state.mode = mode_on_failure;
                         return;
                     }
-                    state.active_program_mut().cached_keys_instrument = Some(expr);
                 }
                 state.mode = renderer::Mode::Select;
+            }
+
+            Effect::UpdateSource(program_index) => {
+                // Splice the indicated program text back into the file-level
+                // source, re-parse to refresh `state.bindings`, realign each
+                // program's span/text with its (possibly shifted) binding, and
+                // persist the new source to disk.
+                if let Err(message) = splice_program(state, program_index) {
+                    state.message = message;
+                }
             }
 
             Effect::InstallKeys(program_index) => {
@@ -364,15 +377,20 @@ impl EffectRunner {
                     parser::SourceExpr::float(velocity as f32 / 127.0),
                 ];
                 match apply_note_function(&keys.function, args, &keys.sliders) {
-                    Ok((note_on, note_off)) => {
+                    Ok((mut note_on, note_off)) => {
                         let level_db = keys.level_db;
                         keys.note_off_waveforms.insert(key, note_off);
                         // Seed the slider-update worker's `last_slider_values`
                         // map for this new Key id. Without this, the next
-                        // PluginEncoderChange for the active keys program
-                        // would fail to look up a previous value when building
-                        // the slider ramp (and the renderer wouldn't have
-                        // initial values to show either).
+                        // PluginEncoderChange for the active keys program would
+                        // fail to look up a previous value when building the
+                        // slider ramp (and the renderer wouldn't have initial
+                        // values to show either).
+                        //
+                        // Also! The Marked(slider(...)) waveforms in note_on
+                        // have the initial values still (from when the
+                        // instrument was originally evaluated, not the
+                        // application just above). Manually update those here.
                         let id = WaveformId::Key(key);
                         let program = &state.programs[renderer::index_from_id(keys.id)];
                         let mut last_slider_values = HashMap::new();
@@ -383,6 +401,11 @@ impl EffectRunner {
                             )
                             .unwrap_or(0.0);
                             last_slider_values.insert((id.clone(), config.label.clone()), value);
+                            waveform::substitute(
+                                &mut note_on,
+                                &MarkId::Slider(config.label.clone()),
+                                &waveform::Waveform::Const(value),
+                            );
                         }
                         let _ =
                             self.slider_sender
@@ -578,10 +601,9 @@ synth = saw(220)";
         assert_eq!(state.programs[1].text, "saw(220)");
 
         // Simulate the Edit-mode flow: select slot 2, change the text.
-        state.active_program_index = 1;
         state.programs[1].set_text("saw(440)".to_string());
 
-        splice_active_program(&mut state).expect("splice should succeed");
+        splice_program(&mut state, 1).expect("splice should succeed");
 
         assert_eq!(
             state.source,
@@ -610,9 +632,8 @@ tone = saw(440)";
         let mut state = state_from(source);
         assert_eq!(state.programs[0].text, "saw(440)");
 
-        state.active_program_index = 0;
         state.programs[0].set_text("saw(220)".to_string());
-        splice_active_program(&mut state).unwrap();
+        splice_program(&mut state, 0).unwrap();
 
         assert_eq!(
             state.source,
@@ -639,10 +660,9 @@ kick = pulse(60)";
         assert_eq!(state.programs[4].span, 0..0);
 
         // Edit slot 5.
-        state.active_program_index = 4;
         state.programs[4].set_text("saw(440)".to_string());
 
-        splice_active_program(&mut state).unwrap();
+        splice_program(&mut state, 4).unwrap();
 
         assert_eq!(
             state.source,
@@ -669,9 +689,8 @@ _ = saw(440)"
 kick = pulse(60)";
         let mut state = state_from(source);
         let before = state.source.clone();
-        state.active_program_index = 4;
         // text is already empty; just splice.
-        splice_active_program(&mut state).unwrap();
+        splice_program(&mut state, 4).unwrap();
         assert_eq!(state.source, before);
     }
 }
