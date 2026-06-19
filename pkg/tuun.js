@@ -210,22 +210,30 @@ export class Tuun {
      * Parses an expression with slider bindings and prepares for playback.
      *
      * `slider_json` is a JSON object mapping slider names to initial values,
-     * for example, `{"volume": 0.5, "cutoff": 2000}`.
-     * Pass `"{}"` for no sliders.
+     * for example, `{"volume": 0.5, "cutoff": 2000}`. Pass `"{}"` for no
+     * sliders.
+     *
+     * `open_json` is a JSON array of dotted module paths to bring into scope
+     * before evaluating, e.g. `["std", "foo.bar"]`. Each entry behaves like an
+     * `open` binding at the top of the expression. Pass `"[]"` for no opens.
      *
      * # Examples
      * ```javascript
-     * const waveform = tuun.parse("sine(2764, 0)", "{}");
+     * const waveform = tuun.parse("sine(2764, 0)", "{}", "[]");
+     * const filtered = tuun.parse("$440 | lpf(0.5, 1900)", "{}", '["std"]');
      * ```
      * @param {string} expression
      * @param {string} slider_json
+     * @param {string} open_json
      */
-    parse(expression, slider_json) {
+    parse(expression, slider_json, open_json) {
         const ptr0 = passStringToWasm0(expression, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passStringToWasm0(slider_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
-        const ret = wasm.tuun_parse(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+        const ptr2 = passStringToWasm0(open_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.tuun_parse(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
         if (ret[1]) {
             throw takeFromExternrefTable0(ret[0]);
         }
@@ -263,7 +271,7 @@ export class Tuun {
      *
      * # Examples
      * ```javascript
-     * tuun.parse("$440", "{}");
+     * tuun.parse("$440", "{}", "[]");
      * const done = tuun.process(output);
      * ```
      * @param {Float32Array} out

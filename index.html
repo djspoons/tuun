@@ -28,6 +28,7 @@
         <h2>Complete</h2>
         <tuun-synth
             description="Low-pass filter example"
+            open='["std"]'
             expression="square(220) | lpf(Q, cutoff)"
             sliders='["Q:0.707:0.1:1","cutoff:0.5886:fn(x) => 200 * pow(50, x)"]'
             controls
@@ -37,25 +38,28 @@
         <h2>Not expanded</h2>
         <tuun-synth
             description="Harmonica"
-            expression="<map(fn(n) => harmonica(H, @n) | unseq() | seq(time - H*0.9), [60, 62, 64, 65, 67, 69, 71, 72])>"
+            open='["std"]'
+            expression="<map(fn(n) => harmonica(H, @n), [60, 62, 64, 65, 67, 69, 71, 72])>"
             controls>
         </tuun-synth>
 
         <h2>No description (expanded by default)</h2>
         <tuun-synth
+            open='["std"]'
             expression="$440">
         </tuun-synth>
 
         <h2>No controls</h2>
         <tuun-synth
             description="Pure tone (550 Hz) with fader"
+            open='["std"]'
             expression="fader * $550"
             sliders='["fader:0.75:0:1"]'>
         </tuun-synth>
 
         <h2>Expression as element body (see code)</h2>
         <p>This allows for newlines in the expression. However, be aware of other text processors, which may interpret some Tuun special characters like <code>$</code>. Use <code>&lt;script type="text/tuun"&gt;</code> to protect the expression in those cases.</p>
-        <tuun-synth>
+        <tuun-synth open='["std"]'>
             <script type="text/tuun">
                 ($440 + $550) * 0.5
             </script>
