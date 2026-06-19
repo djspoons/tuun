@@ -32,13 +32,14 @@ Q:0.707:0.1:1.1
 In the native app, sliders are written as annotations: special comments that appear on the line just before the expression that they annotate.
 ```
 //#{sliders=["Q:0.707:0.1:1.1"]}
-square(220) | lpf(Q, 2000)
+_ = square(220) | lpf(Q, 2000)
 ```
 If a MIDI controller is detected, sliders are mapped to encoders or faders. If no MIDI controller is detected, the first two sliders are mapped to the x- and y-axis of the mouse position.
 
 In the web component, sliders are configured using an HTML attribute.
 ```html
 <tuun-synth
+  open='["std"]'
   sliders='["Q:0.707:0.1:1.1"]'
   expression="square(220) | lpf(Q, 2000)"
   />
@@ -47,6 +48,7 @@ In the web component, sliders are configured using an HTML attribute.
 You can play with this example here:
 <div class="container">
   <tuun-synth
+    open='["std"]'
     sliders='["Q:0.707:0.1:1.1"]'
     expression="square(220) | lpf(Q, 2000)" />
 </div>
@@ -69,6 +71,7 @@ cutoff:0.5:fn(x) => 100 * pow(100, x)
 This can then be used in a different version of our low-pass filter example.
 <div class="container">
   <tuun-synth
+    open='["std"]'
     sliders='["cutoff:0.5:fn(x) => 100 * pow(100, x)"]'
     expression="square(220) | lpf(0.707, cutoff)" />
 </div>

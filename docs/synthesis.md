@@ -16,7 +16,7 @@ over = fn(freq) => fn(x) => $(freq*x) * (1/x),
 Additive synthesis often requires many primitive waveforms to be combined; this example uses 20 per note!
 
 <div class="container">
-  <tuun-synth description="Additive synthesis (harmonic)" expanded>
+  <tuun-synth description="Additive synthesis (harmonic)" open='["std"]' expanded>
     let
       odd = fn(freq) => map(over(freq), [1, 3, 5, 7]),
   
@@ -42,7 +42,7 @@ Additive synthesis often requires many primitive waveforms to be combined; this 
 Additive synthesis can also be used to create inharmonic sounds, including tuned percussion instruments. This example is based on parameters from [Jim Woodhouse's Euphonics site](https://euphonics.org/3-3-marimbas-and-xylophones/).
 
 <div class="container">
-  <tuun-synth description="Additive synthesis (inharmonic)" expanded>
+  <tuun-synth description="Additive synthesis (inharmonic)" open='["std"]' expanded>
     let
       bars = fn(dur, freq) => {map(over(freq), [1.0, 3.92, 9.24, 16.27, 24.22, 33.54, 42.97])}
         | ADSR(0, 0.1, 0.3, 0, 0.2) | seq(time - dur)
@@ -56,7 +56,7 @@ Additive synthesis can also be used to create inharmonic sounds, including tuned
 Subtractive synthesis starts with a waveform with many component frequencies and then passes it through a filter to remove some of those frequencies. One example of such a starting waveform is a pulse wave.
 
 <div class="container">
-  <tuun-synth description="Pulse wave" expanded>
+  <tuun-synth description="Pulse wave" open='["std"]' expanded>
   let pulse_inst = fn(dur, freq) =>
     pulse(0.93, freq) | amp(0.2) | ADSR(0.01, 0, 1, dur, 0.01) | seq(time - dur)
   in
@@ -67,7 +67,7 @@ Subtractive synthesis starts with a waveform with many component frequencies and
 In this example, the two pulse waves are combined and then passed through a low-pass filter (which removes higher frequencies). This example is based on one from [Welsh's Synthesizer Cookbook](https://synthesizer-cookbook.com/).
 
 <div>
-  <tuun-synth description="Subtractive synthesis" expanded>
+  <tuun-synth description="Subtractive synthesis" open='["std"]' expanded>
     <script type="text/tuun">
       let harmonica = fn(dur, freq) =>
         let
@@ -103,7 +103,7 @@ To create a synthesizer instrument using the function below, provide:
 This instrument is based on an example from Chowning's article.
 
 <div class="container">
-  <tuun-synth description="Phase modulation synthesis" expanded>
+  <tuun-synth description="Phase modulation synthesis" open='["std"]' expanded>
     <script type="text/tuun">
       let
         pm_synth = fn(I_max, D, a, d, s_level, r) => fn(dur, freq) =>

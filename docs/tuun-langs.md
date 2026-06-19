@@ -15,13 +15,13 @@ We'll start with a brief introduction to the second one before we dive into the 
 Tuun's interactive expression language is a simple, functional language like OCaml or Standard ML. It supports floating point numbers, arithmetic, functions, and tuples. In addition, it has some built-in syntax and semantics that make it easy to express complicated waveforms. For example, the `$` operator takes a frequency and returns a waveform that will generate a tone at that frequency.
 
 <div class="container">
-  <tuun-synth expression="$220" />
+  <tuun-synth open='["std"]' expression="$220" />
 </div>
 
 Tuun lets you define abstractions so that you can easily convert from MIDI note numbers to frequencies (`@`), create notes of different lengths (`Qw` and `Hw`) and combine notes in a sequence:
 
 <div class="container">
-  <tuun-synth expression="<[$(@60) * Qw, $(@64) * Qw, $(@67) * Hw]>" />
+  <tuun-synth open='["std"]' expression="<[$(@60) * Qw, $(@64) * Qw, $(@67) * Hw]>" />
 </div>
 
 The way that you use the Tuun language is up to you! There's nothing baked in about western music or MIDI. Instead, it's all built from the following waveforms and waveform combinators.
@@ -72,7 +72,7 @@ Fin(Subtract(Time, Const(3)),
     Multiply(Const(0.2), Sine(Const(2 * PI * 2200), Const(0))))))
 ```
 <div class="container">
-  <tuun-synth description="Harmonics" expression="sine(2 * pi * 220, 0) + 0.33 * sine(2 * pi * 1320, 0) + 0.2 * sine(2 * pi * 2200, 0) | fin(time - 3)" />
+  <tuun-synth description="Harmonics" open='["std"]' expression="sine(2 * pi * 220, 0) + 0.33 * sine(2 * pi * 1320, 0) + 0.2 * sine(2 * pi * 2200, 0) | fin(time - 3)" />
 </div>
 
 
@@ -88,7 +88,7 @@ Multiply(
     Fin(Subtract(Time, Const(1)), Add(Multiply(Time, Const(-1), 1)))))
 ```
 <div class="container">
-  <tuun-synth description="Simple amplitude envelope" expression="sine(2 * pi * 220, 0) * append(time * 0.5 | fin(time - 2), time * -1 + 1 | fin(time - 1))" />
+  <tuun-synth description="Simple amplitude envelope" open='["std"]' expression="sine(2 * pi * 220, 0) * append(time * 0.5 | fin(time - 2), time * -1 + 1 | fin(time - 1))" />
 </div>
 
 This plays a 220Hz tone for three seconds, increasing the amplitude for the first two seconds (the "attack") and decreasing it to silence during the third (the "release"). 
@@ -99,7 +99,7 @@ Our last example shows how to combine waveforms at a much smaller scale. Up unti
 Alt(Sine(Const(2 * PI * 220), Const(0)), Const(1), Const(-1))
 ```
 <div class="container">
-  <tuun-synth description="Square wave">
+  <tuun-synth description="Square wave" open='["std"]'>
     alt(sine(2 * pi * 220, 0), 1, -1) * 0.4 // cut the amplitude
   </tuun-synth>
 </div>
@@ -194,7 +194,7 @@ Tuun *waveforms* are also values, and Tuun provides built-in functions like `sin
 
 Tuun also includes a `|` ("pipe") operator, which denotes reverse application, enabling you to write the argument before the function you are passing it to. It's conventional in Tuun to write filters (like the ADSR example below) in a curried-form, so that they can be chained together. Built-in functions for `fin` and `filter` are also written this way. For example, a two second sine wave would be written as follows:
 <div class="container">
-  <tuun-synth expression="$220 | fin(time - 2)" />
+  <tuun-synth open='["std"]' expression="$220 | fin(time - 2)" />
 </div>
 
 Tuun supports special syntax for chords, combining waveforms so that they are played simultaneously using `Merge`. Curly brackets (`{` and `}`) take a list of waveforms and return a single waveform that plays them simultaneously. This is used both for chords as well as for creating complex tones with multiple overtones. 
@@ -202,7 +202,7 @@ Tuun supports special syntax for chords, combining waveforms so that they are pl
 We can now give a more extensive — and more concise — version of the harmonics example, in part by defining a helper function that creates overtones. The dollar sign is shorthand for a sine wave with the given frequency in hertz and no phase offset. The `over` function creates an overtone whose amplitude in inversely proportional to the distance between that overtone and the fundamental. (`$` and `over` are both in the standard context.)
 
 <div class="container">
-  <tuun-synth>
+  <tuun-synth open='["std"]'>
     <script type="text/tuun">
       let
         // $ computes a sine wave at the given frequency in hertz (which must be a float or waveform).
@@ -246,7 +246,7 @@ binary_op ::= ... | "\"
 The first is `seq` (pronounced like "seek") and it take takes two waveforms: the first determines the offset, while the second is the waveform to be played. Effectively, it turns that second waveform into a seq waveform. Analogous to the first parameter to `fin`, the offset is determined by the first position at which the offset waveform is positive. Also like `fin`, `seq` is written in curried form, and it's not uncommon to see the two used together. The following plays three notes, each with a length of two seconds but with only one second from the start of one to the start of the next.
 
 <div class="container">
-  <tuun-synth>
+  <tuun-synth open='["std"]'>
     <script type="text/tuun">
       let
         R = fn(dur) => fn(w) => w * (1 - time / dur) | fin(time - dur)
@@ -283,7 +283,7 @@ Note that a `seq` applied to two values (that is, two waveforms) is also a value
 Finally, we now can revisit our envelope example from above. It uses `seq` and `<...>` to sequence the components of an attack-decay-sustain-release (ADSR) envelope. The example first defines functions to help create waveforms for those four components. In addition to an input waveform, the `ADSR` function takes five parameters denoting the duration and levels of the four parts of the envelope. (`ADSR` is written in a curried form so that it may be used with `|`.) It builds those component waveforms, sequences them, and then combines them with the input waveform using `*`.
 
 <div class="container">
-  <tuun-synth>
+  <tuun-synth open='["std"]'>
     let
       // Helper function that takes a pair of floats and returns a linear waveform
       linear = fn(initial, slope) => initial + (time * slope),
