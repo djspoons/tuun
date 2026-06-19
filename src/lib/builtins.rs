@@ -855,6 +855,7 @@ where
     }
     let trigger = match arguments.remove(0) {
         Expr::Waveform(a) => a,
+        Expr::Float(value) => Waveform::Const(value),
         _ => return Error("First argument must be a waveform".to_string()),
     };
     let positive_waveform = match arguments.remove(0) {

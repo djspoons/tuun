@@ -308,8 +308,8 @@ impl EffectRunner {
                     state.message = message;
                 }
 
-                // If successful, see if it's a waveform or a keys instrument and update
-                // the program's cached values.
+                // If successful, see if it's a waveform or a keys instrument
+                // and update the program's cached values.
                 if let parser::Expr::Waveform(w) = expr.expr {
                     state.active_program_mut().cached_waveform = Some(w);
                     state.active_program_mut().cached_keys_instrument = None;

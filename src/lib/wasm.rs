@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use wasm_bindgen::prelude::*;
 
-use crate::{builtins, generator, optimizer, parser, slider, waveform};
+use crate::{builtins, generator, modules, optimizer, parser, slider, waveform};
 
 #[derive(Clone, Debug, PartialEq)]
 enum MarkId {
@@ -32,10 +32,21 @@ impl fmt::Display for MarkId {
 #[wasm_bindgen(js_name = "Tuun")]
 pub struct Wasm {
     sample_rate: i32,
-    context: Vec<(String, parser::SourceExpr<MarkId>)>,
+    /// Per-instance prelude (built-ins + `sample_rate` + `tempo`) prepended
+    /// to every parse.
+    prelude: Vec<parser::SourceBinding<MarkId>>,
+    /// Parsed embedded modules keyed by dotted path (e.g. `"std"`).
+    /// Looked up by the `evaluate` resolve callback when an `Open`
+    /// binding is processed.
+    modules: HashMap<String, Vec<parser::SourceBinding<MarkId>>>,
     waveform: Option<generator::Waveform<MarkId>>,
     last_slider_values: HashMap<String, f32>,
     buffer_duration: Duration,
+}
+
+/// Builds a `Definition` binding for `id = expr`.
+fn def_binding(id: &str, expr: parser::SourceExpr<MarkId>) -> parser::SourceBinding<MarkId> {
+    parser::Binding::Definition(parser::Pattern::Identifier(id.to_string()), expr).into()
 }
 
 #[wasm_bindgen(js_class = "Tuun")]
@@ -51,43 +62,41 @@ impl Wasm {
         // Set up better panic messages in the browser console
         console_error_panic_hook::set_once();
 
-        // TODO this has a lot of repetition with main.rs
-
-        // Initialize context with builtins
-        let mut context = Vec::new();
-        context.push((
-            "sample_rate".to_string(),
+        // TODO this has a lot of repetition with the native app
+        // Prelude: sample_rate + tempo + built-ins. Cloned into the
+        // bindings vec on every parse.
+        let mut prelude: Vec<parser::SourceBinding<MarkId>> = Vec::new();
+        prelude.push(def_binding(
+            "sample_rate",
             SourceExpr::float(sample_rate as f32),
         ));
-        builtins::add_prelude(&mut context);
+        prelude.push(def_binding("tempo", SourceExpr::float(tempo)));
+        builtins::add_bindings(&mut prelude);
 
-        context.push(("tempo".to_string(), SourceExpr::float(tempo)));
-
-        // Load context from embedded .tuun file
-        // The file is embedded at compile time using include_str!
-        // Default: context.tuun from the repository
-        let context_content = include_str!("../../context.tuun");
-
-        // Parse and add all context definitions.
-        match parser::parse_context(context_content) {
-            Ok(parsed_defs) => {
-                for parser::Binding { pattern, expr, .. } in parsed_defs {
-                    match parser::evaluate(&context, expr) {
-                        Ok(expr) => {
-                            if let Err(e) = parser::extend_context(&mut context, &pattern, &expr) {
-                                eprintln!("Warning: Failed to add context definition: {:?}", e);
-                            }
-                        }
-                        Err(e) => eprintln!("Warning: Failed to evaluate context: {:?}", e),
-                    }
-                }
-            }
-            Err(e) => eprintln!("Warning: Failed to parse context file: {:?}", e),
+        // Parse every embedded module once. Anything that fails to parse
+        // surfaces as a constructor error rather than a later evaluate
+        // error, since modules are fixed at build time.
+        //
+        // Each module gets an implicit `open _prelude` prepended so its
+        // bindings can reference prelude names (`sample_rate`, `tempo`,
+        // built-ins) without depending on the caller having opened the
+        // prelude first. Mirrors `play_helper::PlayHelper::resolve` in
+        // the native runtime.
+        let mut modules: HashMap<String, Vec<parser::SourceBinding<MarkId>>> = HashMap::new();
+        for (name, content) in modules::EMBEDDED_MODULES {
+            let mut bindings = parser::parse_file::<MarkId>(content)
+                .map_err(|errors| format!("Failed to parse module '{}': {:?}", name, errors))?;
+            bindings.insert(
+                0,
+                parser::Binding::Open(vec!["_prelude".to_string()]).into(),
+            );
+            modules.insert((*name).to_string(), bindings);
         }
 
         Ok(Wasm {
             sample_rate,
-            context,
+            prelude,
+            modules,
             waveform: None,
             last_slider_values: HashMap::new(),
             buffer_duration: Duration::from_secs_f32(128.0 / sample_rate as f32),
@@ -97,47 +106,73 @@ impl Wasm {
     /// Parses an expression with slider bindings and prepares for playback.
     ///
     /// `slider_json` is a JSON object mapping slider names to initial values,
-    /// for example, `{"volume": 0.5, "cutoff": 2000}`.
-    /// Pass `"{}"` for no sliders.
+    /// for example, `{"volume": 0.5, "cutoff": 2000}`. Pass `"{}"` for no
+    /// sliders.
+    ///
+    /// `open_json` is a JSON array of dotted module paths to bring into scope
+    /// before evaluating, e.g. `["std", "foo.bar"]`. Each entry behaves like an
+    /// `open` binding at the top of the expression. Pass `"[]"` for no opens.
     ///
     /// # Examples
     /// ```javascript
-    /// const waveform = tuun.parse("sine(2764, 0)", "{}");
+    /// const waveform = tuun.parse("sine(2764, 0)", "{}", "[]");
+    /// const filtered = tuun.parse("$440 | lpf(0.5, 1900)", "{}", '["std"]');
     /// ```
-    pub fn parse(&mut self, expression: &str, slider_json: &str) -> Result<(), String> {
-        let parsed_expr = parser::parse_program(expression)
+    pub fn parse(
+        &mut self,
+        expression: &str,
+        slider_json: &str,
+        open_json: &str,
+    ) -> Result<(), String> {
+        let parsed_expr = parser::parse_program::<MarkId>(expression)
             .map_err(|errors| format!("Parse errors: {:?}", errors))?;
         let sliders = parse_json(slider_json)?;
+        let opens = modules::parse_open_json(open_json)?;
 
-        // Wrap with slider bindings: let name = Marked(Slider(name), Const(value)) in ...
-        let expr = if sliders.is_empty() {
-            parsed_expr
-        } else {
-            let bindings = sliders
-                .iter()
-                .map(|(name, value)| {
-                    (
-                        parser::Pattern::Identifier(name.clone()),
-                        parser::SourceExpr::from(parser::Expr::Waveform(
-                            waveform::Waveform::Marked {
-                                id: MarkId::Slider(name.clone()),
-                                waveform: Box::new(waveform::Waveform::Const(*value)),
-                            },
-                        )),
-                    )
-                })
-                .collect();
-            parser::make_let(bindings, parsed_expr)
+        // Build the bindings vec passed to `evaluate`. Implicit
+        // `open _prelude` first so the user expression can reference
+        // prelude names directly (same prefix each embedded module
+        // gets). Then user-requested opens, then slider bindings.
+        let mut bindings: Vec<parser::SourceBinding<MarkId>> = Vec::new();
+        bindings.push(parser::Binding::Open(vec!["_prelude".to_string()]).into());
+        for path in opens {
+            bindings.push(parser::Binding::Open(path).into());
+        }
+        for (name, value) in &sliders {
+            bindings.push(def_binding(
+                name,
+                parser::SourceExpr::from(parser::Expr::Waveform(waveform::Waveform::Marked {
+                    id: MarkId::Slider(name.clone()),
+                    waveform: Box::new(waveform::Waveform::Const(*value)),
+                })),
+            ));
+        }
+
+        // Resolve `Open(path)` either to the in-memory prelude (for the
+        // special `_prelude` path used by modules) or to a dotted entry
+        // in the embedded module table. Borrowed for the duration of
+        // `evaluate`.
+        let prelude = &self.prelude;
+        let modules = &self.modules;
+        let resolve = |path: &[String]| -> Result<&[parser::SourceBinding<MarkId>], parser::Error> {
+            if path.len() == 1 && path[0] == "_prelude" {
+                return Ok(prelude.as_slice());
+            }
+            let key = path.join(".");
+            modules
+                .get(&key)
+                .map(|v| v.as_slice())
+                .ok_or_else(|| parser::Error::new(format!("Module not found: {}", key)))
         };
 
-        let expr = parser::evaluate(&self.context, expr)
+        let expr = parser::evaluate(resolve, &bindings, parsed_expr)
             .map_err(|e| format!("Evaluate error: {:?}", e))?;
 
         // TODO Do we want to precompute here?
 
         let waveform = match expr.expr {
             parser::Expr::Waveform(w) => w,
-            parser::Expr::Seq { waveform, .. } => match (*waveform).expr {
+            parser::Expr::Seq { waveform, .. } => match waveform.expr {
                 parser::Expr::Waveform(w) => w,
                 _ => return Err("Got non-Waveform in seq after evaluate".to_string()),
             },
@@ -196,7 +231,7 @@ impl Wasm {
     ///
     /// # Examples
     /// ```javascript
-    /// tuun.parse("$440", "{}");
+    /// tuun.parse("$440", "{}", "[]");
     /// const done = tuun.process(output);
     /// ```
     pub fn process(&mut self, out: &mut [f32]) -> bool {
@@ -207,7 +242,7 @@ impl Wasm {
             None => return false,
         };
 
-        let mut g = generator::Generator::new(self.sample_rate);
+        let mut g = generator::Generator::new(self.sample_rate as u32);
         let len = g.generate(waveform, out);
         // Web audio expects the whole buffer to be filled.
         out[len..].fill(0.0);
@@ -291,15 +326,18 @@ pub fn parse_sliders(input: &str) -> Result<String, String> {
                 normalized_initial_value,
                 function_source,
             } => {
-                let initial_value = slider::denormalize(&s.function, *normalized_initial_value)
-                    .unwrap_or(0.0);
+                let initial_value =
+                    slider::denormalize(&s.function, *normalized_initial_value).unwrap_or(0.0);
                 let value_at_0 = slider::denormalize(&s.function, 0.0).unwrap_or(0.0);
                 let value_at_1 = slider::denormalize(&s.function, 1.0).unwrap_or(0.0);
                 format!(
                     r#"{{"type":"user-defined","label":"{}","normalized_initial_value":{},"function_source":"{}","initial_value":{},"value_at_0":{},"value_at_1":{}}}"#,
-                    s.label, normalized_initial_value,
+                    s.label,
+                    normalized_initial_value,
                     function_source.replace('\\', "\\\\").replace('"', "\\\""),
-                    initial_value, value_at_0, value_at_1
+                    initial_value,
+                    value_at_0,
+                    value_at_1
                 )
             }
         })
@@ -343,7 +381,7 @@ mod tests {
         for (expr, description) in examples {
             println!("Testing: {} - {}", description, expr);
 
-            tuun.parse(expr, "{}")
+            tuun.parse(expr, "{}", "[]")
                 .unwrap_or_else(|e| panic!("Failed to parse '{}': {}", expr, e));
 
             let mut out = vec![0.0; 100];
@@ -352,7 +390,7 @@ mod tests {
 
             for (i, &sample) in out.iter().enumerate() {
                 assert!(
-                    sample >= -1.0 && sample <= 1.0,
+                    (-1.0..=1.0).contains(&sample),
                     "Sample {} out of range for '{}': {}",
                     i,
                     expr,
@@ -374,7 +412,7 @@ mod tests {
 
         for expr in invalid_examples {
             println!("Testing invalid expression: {}", expr);
-            let result = tuun.parse(expr, "{}");
+            let result = tuun.parse(expr, "{}", "[]");
             assert!(
                 result.is_err(),
                 "Expected error for invalid expression '{}', but got success",
@@ -386,6 +424,8 @@ mod tests {
 
     #[test]
     fn test_context_functions() {
+        // These all rely on names from the embedded `std` module (`Qw`,
+        // `lpf`, `sawtooth`), so each parse opens it explicitly.
         let mut tuun = Wasm::new(44100, 120.0).expect("Failed to create Tuun instance");
 
         let lpf_examples = vec![
@@ -400,7 +440,7 @@ mod tests {
         for (expr, description) in lpf_examples {
             println!("Testing lpf: {} - {}", description, expr);
 
-            tuun.parse(expr, "{}")
+            tuun.parse(expr, "{}", r#"["std"]"#)
                 .unwrap_or_else(|e| panic!("Failed to parse '{}': {}", expr, e));
 
             let mut out = vec![0.0; 100];
@@ -409,7 +449,7 @@ mod tests {
 
             for (i, &sample) in out.iter().enumerate() {
                 assert!(
-                    sample >= -1.0 && sample <= 1.0,
+                    (-1.0..=1.0).contains(&sample),
                     "Sample {} out of range for '{}': {}",
                     i,
                     expr,
@@ -420,5 +460,17 @@ mod tests {
             tuun.stop();
             println!("  ✓ lpf filter works correctly");
         }
+    }
+
+    #[test]
+    fn test_open_unknown_module_errors() {
+        let mut tuun = Wasm::new(44100, 120.0).expect("Failed to create Tuun instance");
+        let result = tuun.parse("sine(2764, 0)", "{}", r#"["does_not_exist"]"#);
+        let message = result.expect_err("opening an unknown module should fail");
+        assert!(
+            message.contains("does_not_exist"),
+            "expected error to name the missing module, got: {}",
+            message
+        );
     }
 }

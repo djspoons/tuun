@@ -1,6 +1,7 @@
 pub mod builtins;
 pub mod generator;
 pub mod metric;
+pub mod modules;
 pub mod optimizer;
 pub mod parser;
 pub mod slider;

@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::fs;
 
 use clap::Parser as ClapParser;
 
-use tuun::{builtins, parser, renderer, slider};
+use tuun::{builtins, modules, parser, renderer, slider};
 
 #[derive(ClapParser, Debug)]
 #[command(version, about = "Check tuun-synth expressions in .md and .html files")]
@@ -11,25 +12,49 @@ struct Args {
     input_files: Vec<String>,
 }
 
-// XXX this whole path needs lots of help
-fn load_context() -> Vec<parser::SourceBinding<renderer::MarkId>> {
+type Bindings = Vec<parser::SourceBinding<renderer::MarkId>>;
+
+/// Builds the always-in-scope prelude: `sample_rate`, `tempo`, plus the
+/// built-in definitions. Mirrors the wasm runtime's prelude so the
+/// checker evaluates expressions the same way the browser would.
+fn load_prelude() -> Bindings {
     fn def(
         id: &str,
         expr: parser::SourceExpr<renderer::MarkId>,
     ) -> parser::SourceBinding<renderer::MarkId> {
         parser::Binding::Definition(parser::Pattern::Identifier(id.to_string()), expr).into()
     }
-    let mut bindings = Vec::new();
+    let mut bindings: Bindings = Vec::new();
     bindings.push(def("sample_rate", parser::SourceExpr::float(44100.0)));
     bindings.push(def("tempo", parser::SourceExpr::float(120.0)));
     builtins::add_bindings(&mut bindings);
-
-    let context_content = include_str!("../../lib/v0/std.tuun");
-    match parser::parse_file::<renderer::MarkId>(context_content) {
-        Ok(parsed) => bindings.extend(parsed),
-        Err(e) => eprintln!("Warning: Failed to parse context file: {:?}", e),
-    }
     bindings
+}
+
+/// Parses every embedded module ahead of time and indexes them by dotted
+/// path. The result feeds the `resolve` callback used by
+/// [`parser::evaluate`] when a `Binding::Open` is encountered.
+///
+/// Each module gets an implicit `open _prelude` prepended so its
+/// bindings can reference prelude names (`sample_rate`, `tempo`,
+/// built-ins) regardless of caller ordering. Mirrors
+/// `play_helper::PlayHelper::resolve` in the native runtime and
+/// `Wasm::new` in the wasm bindings.
+fn load_modules() -> HashMap<String, Bindings> {
+    let mut out = HashMap::new();
+    for (name, content) in modules::EMBEDDED_MODULES {
+        match parser::parse_file::<renderer::MarkId>(content) {
+            Ok(mut bindings) => {
+                bindings.insert(
+                    0,
+                    parser::Binding::Open(vec!["_prelude".to_string()]).into(),
+                );
+                out.insert((*name).to_string(), bindings);
+            }
+            Err(e) => eprintln!("Warning: failed to parse module '{}': {:?}", name, e),
+        }
+    }
+    out
 }
 
 /// Find the closing `>` of an HTML opening tag, skipping over quoted attribute values
@@ -131,7 +156,139 @@ fn find_tuun_synth_blocks(input: &str) -> Vec<(usize, &str)> {
     blocks
 }
 
-fn check_file(file: &str, context: &[parser::SourceBinding<renderer::MarkId>]) -> (usize, usize) {
+/// Outcome of validating one `<tuun-synth>` block. `Skip` paths are
+/// expected (no expression, malformed tag) — they print a `[skip]`
+/// notice but don't count as failures. `Fail` paths print `[FAIL]` and
+/// increment the failure tally.
+enum CheckResult {
+    Ok,
+    Skip(String),
+    Fail(String),
+}
+
+fn check_block(
+    block: &str,
+    prelude: &Bindings,
+    modules: &HashMap<String, Bindings>,
+) -> CheckResult {
+    let description = extract_attr(block, "description").unwrap_or("");
+
+    // Extract the expression — either from the `expression` attribute or
+    // from the body between `<tuun-synth …>` and `</tuun-synth>`.
+    let expression = match extract_expression(block) {
+        Ok(s) => s,
+        Err(message) => return CheckResult::Skip(message),
+    };
+    let expression = strip_comments(&expression);
+
+    // Label that goes into log output. Prefer the description, otherwise
+    // a flattened snippet of the expression.
+    let label = if !description.is_empty() {
+        description.to_string()
+    } else {
+        let flat: String = expression.split_whitespace().collect::<Vec<_>>().join(" ");
+        if flat.len() > 60 {
+            format!("{}...", &flat[..57])
+        } else {
+            flat
+        }
+    };
+
+    let expr = match parser::parse_program::<renderer::MarkId>(&expression) {
+        Ok(e) => e,
+        Err(errors) => {
+            return CheckResult::Fail(format!("[FAIL] \"{}\" parse errors: {:?}", label, errors));
+        }
+    };
+
+    // Sliders: `sliders='["volume:0.5:0:1", ...]'`.
+    let slider_configs = match extract_attr(block, "sliders") {
+        Some(s) => match parser::parse_sliders(&format!("sliders={}", s)) {
+            Ok(cs) => cs,
+            Err(e) => {
+                return CheckResult::Fail(format!(
+                    "[FAIL] \"{}\" slider parsing error: {:?}",
+                    label, e
+                ));
+            }
+        },
+        None => vec![],
+    };
+
+    // Opens: `open='["std", "foo.bar"]'`. Same shape the wasm runtime
+    // honors — each entry becomes a `Binding::Open(path)` resolved
+    // against the embedded modules table.
+    let open_attr = extract_attr(block, "open").unwrap_or("[]");
+    let opens = match modules::parse_open_json(open_attr) {
+        Ok(o) => o,
+        Err(e) => {
+            return CheckResult::Fail(format!("[FAIL] \"{}\" open parsing error: {}", label, e));
+        }
+    };
+
+    // Build the bindings the same way the wasm runtime does:
+    // implicit `open _prelude` → opens → sliders → expression.
+    let mut bindings: Bindings = Vec::new();
+    bindings.push(parser::Binding::Open(vec!["_prelude".to_string()]).into());
+    for path in opens {
+        bindings.push(parser::Binding::Open(path).into());
+    }
+    slider::append_slider_bindings(
+        &slider_configs,
+        &vec![0.0; slider_configs.len()],
+        renderer::MarkId::Slider,
+        &mut bindings,
+    );
+
+    let resolve =
+        |path: &[String]| -> Result<&[parser::SourceBinding<renderer::MarkId>], parser::Error> {
+            if path.len() == 1 && path[0] == "_prelude" {
+                return Ok(prelude.as_slice());
+            }
+            let key = path.join(".");
+            modules
+                .get(&key)
+                .map(|v| v.as_slice())
+                .ok_or_else(|| parser::Error::new(format!("Module not found: {}", key)))
+        };
+
+    match parser::evaluate(resolve, &bindings, expr) {
+        Ok(_) => CheckResult::Ok,
+        Err(e) => CheckResult::Fail(format!("[FAIL] \"{}\" evaluate error: {:?}", label, e)),
+    }
+}
+
+/// Pulls the expression out of a `<tuun-synth>` block. Tries the
+/// `expression` attribute first, then falls back to the body (optionally
+/// wrapped in `<script type="text/tuun">…</script>`).
+fn extract_expression(block: &str) -> Result<String, String> {
+    if let Some(expr) = extract_attr(block, "expression") {
+        return Ok(expr.to_string());
+    }
+    let open_end = find_tag_close(block).ok_or_else(|| "malformed tag".to_string())?;
+    let close_start = block
+        .find("</tuun-synth>")
+        .ok_or_else(|| "no expression".to_string())?;
+    let content = block[open_end + 1..close_start].trim();
+    // Strip an optional `<script type="text/tuun">…</script>` wrapper.
+    let content = match content.find('>') {
+        Some(script_end) if content[..script_end].contains("<script") => {
+            let inner = &content[script_end + 1..];
+            inner.strip_suffix("</script>").unwrap_or(inner).trim()
+        }
+        _ => content,
+    };
+    if content.is_empty() {
+        return Err("no expression".to_string());
+    }
+    Ok(content.to_string())
+}
+
+fn check_file(
+    file: &str,
+    prelude: &Bindings,
+    modules: &HashMap<String, Bindings>,
+) -> (usize, usize) {
     let input = match fs::read_to_string(file) {
         Ok(s) => s,
         Err(e) => {
@@ -146,117 +303,14 @@ fn check_file(file: &str, context: &[parser::SourceBinding<renderer::MarkId>]) -
 
     for (line, block) in &blocks {
         found += 1;
-        let description = extract_attr(block, "description").unwrap_or("");
-
-        // Extract expression: from attribute or from content between tags
-        let expression = if let Some(expr) = extract_attr(block, "expression") {
-            expr.to_string()
-        } else {
-            // Find the closing > of the <tuun-synth ...> opening tag,
-            // skipping > chars inside quoted attribute values
-            let open_end = match find_tag_close(block) {
-                Some(pos) => pos,
-                None => {
-                    println!(
-                        "  {}:{} [skip] \"{}\" (malformed tag)",
-                        file, line, description
-                    );
-                    continue;
-                }
-            };
-            if let Some(close_start) = block.find("</tuun-synth>") {
-                let content = &block[open_end + 1..close_start];
-                let content = content.trim();
-                // Strip <script type="text/tuun">...</script> wrapper if present
-                let content = if let Some(script_end) = content.find('>') {
-                    if content[..script_end].contains("<script") {
-                        let inner = &content[script_end + 1..];
-                        inner.strip_suffix("</script>").unwrap_or(inner).trim()
-                    } else {
-                        content
-                    }
-                } else {
-                    content
-                };
-                if content.is_empty() {
-                    println!(
-                        "  {}:{} [skip] \"{}\" (no expression)",
-                        file, line, description
-                    );
-                    continue;
-                }
-                content.to_string()
-            } else {
-                println!(
-                    "  {}:{} [skip] \"{}\" (no expression)",
-                    file, line, description
-                );
-                continue;
+        let label = extract_attr(block, "description").unwrap_or("");
+        match check_block(block, prelude, modules) {
+            CheckResult::Ok => println!("  {}:{} [ok] \"{}\"", file, line, label),
+            CheckResult::Skip(msg) => {
+                println!("  {}:{} [skip] \"{}\" ({})", file, line, label, msg)
             }
-        };
-
-        let expression = strip_comments(&expression);
-
-        // Use description if available, otherwise show the start of the expression
-        let label = if !description.is_empty() {
-            description.to_string()
-        } else {
-            let flat: String = expression.split_whitespace().collect::<Vec<_>>().join(" ");
-            if flat.len() > 60 {
-                format!("{}...", &flat[..57])
-            } else {
-                flat
-            }
-        };
-
-        // Parse and evaluate
-        match parser::parse_program(&expression) {
-            Ok(expr) => {
-                let configs = if let Some(configs) = extract_attr(block, "sliders") {
-                    match parser::parse_sliders(&format!("sliders={}", configs)) {
-                        Ok(sliders) => sliders,
-                        Err(e) => {
-                            eprintln!(
-                                "  {}:{} [FAIL] \"{}\" slider parsing error: {:?}",
-                                file, line, label, e
-                            );
-                            failed += 1;
-                            continue;
-                        }
-                    }
-                } else {
-                    vec![]
-                };
-                let mut local_bindings = context.to_vec();
-                slider::append_slider_bindings(
-                    &configs,
-                    &vec![0.0; configs.len()],
-                    renderer::MarkId::Slider,
-                    &mut local_bindings,
-                );
-                let resolve = |_: &[String]| {
-                    Err(parser::Error::new(
-                        "didn't expect to resolve in web_checker".to_string(),
-                    ))
-                };
-                match parser::evaluate(resolve, &local_bindings, expr) {
-                    Ok(_) => {
-                        println!("  {}:{} [ok] \"{}\"", file, line, label);
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "  {}:{} [FAIL] \"{}\" evaluate error: {:?}",
-                            file, line, label, e
-                        );
-                        failed += 1;
-                    }
-                }
-            }
-            Err(errors) => {
-                eprintln!(
-                    "  {}:{} [FAIL] \"{}\" parse errors: {:?}",
-                    file, line, label, errors
-                );
+            CheckResult::Fail(msg) => {
+                eprintln!("  {}:{} {}", file, line, msg);
                 failed += 1;
             }
         }
@@ -277,13 +331,14 @@ fn check_file(file: &str, context: &[parser::SourceBinding<renderer::MarkId>]) -
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let context = load_context();
+    let prelude = load_prelude();
+    let modules = load_modules();
 
     let mut total_found = 0;
     let mut total_failed = 0;
 
     for file in &args.input_files {
-        let (found, failed) = check_file(file, &context);
+        let (found, failed) = check_file(file, &prelude, &modules);
         total_found += found;
         total_failed += failed;
     }
