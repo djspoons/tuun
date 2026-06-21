@@ -144,11 +144,18 @@ impl PlayHelper {
                 e
             ))
         })?;
-        let mut bindings = parser::parse_module::<MarkId>(&contents).map_err(|errors| {
+        // TODO these two error cases are a little hard to unravel, but :shrug:
+        let (mut bindings, errors) =
+            parser::parse_module::<MarkId>(&contents).map_err(|errors| {
+                errors.into_iter().next().unwrap_or_else(|| {
+                    parser::Error::new(format!("Parse failed for {}", file_path.display()))
+                })
+            })?;
+        if !errors.is_empty() {
             errors.into_iter().next().unwrap_or_else(|| {
-                parser::Error::new(format!("Parse failed for {}", file_path.display()))
-            })
-        })?;
+                return parser::Error::new(format!("Parse failed for {}", file_path.display()));
+            });
+        }
 
         // Every loaded module implicitly opens the prelude as its first binding
         // so it can reference prelude names without an explicit `open __prelude`

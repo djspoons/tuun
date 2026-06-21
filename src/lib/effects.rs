@@ -254,7 +254,10 @@ fn parsed_normalized_value(function: &parser::SliderFunction) -> f32 {
 fn splice_program(state: &mut AppState, program_index: usize) -> Result<(), String> {
     let slot = program_index + 1;
     let edited_span = state.programs[program_index].span.clone();
-    let edited_text = state.programs[program_index].text.clone();
+    let mut edited_text = state.programs[program_index].text.clone();
+    // Remove any semicolons since these aren't valid within an expression and
+    // can defeat parsing error recovery.
+    edited_text.retain(|c| c != ';');
     let is_new = edited_span.start == edited_span.end;
 
     // Collect every edit we want to apply to `state.source` in one pass:
@@ -308,7 +311,10 @@ fn splice_program(state: &mut AppState, program_index: usize) -> Result<(), Stri
         new_source.push_str(&text);
     }
 
-    let new_bindings = parser::parse_module::<MarkId>(&new_source)
+    // It's ok to drop the errors here: if parse_module succeeded then we know
+    // that the resulting bindings span the entire input (even if there are
+    // errors).
+    let (new_bindings, _errors) = parser::parse_module::<MarkId>(&new_source)
         .map_err(|errs| format!("Warning: source re-parse failed: {:?}", errs))?;
 
     // Build a slot -> (binding_index, expr_span) map from the new bindings,

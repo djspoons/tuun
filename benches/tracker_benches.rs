@@ -130,7 +130,7 @@ fn bench_large(c: &mut Criterion) {
     Rw = fn(dur, level) => linear(level, -level / dur) | fin(time - dur),
     R = fn(dur, level) => fn(w) => w * Rw(dur, level),"#,
     ) {
-        Ok(parsed) => bindings.extend(parsed),
+        Ok((parsed, _errors)) => bindings.extend(parsed),
         Err(e) => panic!("Failed to parse context: {:?}", e),
     }
 

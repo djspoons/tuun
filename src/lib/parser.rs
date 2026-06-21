@@ -6,7 +6,7 @@ use std::{cell::RefCell, rc::Rc};
 use nom::{
     Parser,
     branch::alt,
-    bytes::complete::{tag, take_while, take_while1},
+    bytes::complete::{tag, take_till, take_while, take_while1},
     character::complete as character,
     character::complete::{alphanumeric1, char},
     combinator::{all_consuming, not, opt, peek, recognize, verify},
@@ -442,7 +442,7 @@ fn parse_identifier(input: LocatedSpan) -> IResult<String> {
             ),
             parse_unary_operator,
             // A lonely underscore is also ok.
-            terminated(tag("_"), not(peek(alt((tag("_"),alphanumeric1))))),
+            terminated(tag("_"), not(peek(alt((tag("_"), alphanumeric1))))),
         )).parse(input)?;
     Ok((rest, value.to_string()))
 }
@@ -509,7 +509,9 @@ fn parse_import_path(input: LocatedSpan) -> IResult<Vec<String>> {
 /// Parses a single binding, including any annotations.
 ///
 /// Unlike many other parsers, this parser consumes surrounding trivia (comments
-/// and whitespace). It does not consume any separator or terminator.
+/// and whitespace). It does not consume any separator or terminator. Returns
+/// success if the resulting bindings span the entire input, even those bindings
+/// may contain errors.
 fn parse_binding<M>(input: LocatedSpan) -> IResult<SourceBinding<M>> {
     let start = input.location_offset();
     #[rustfmt::skip]
@@ -523,9 +525,15 @@ fn parse_binding<M>(input: LocatedSpan) -> IResult<SourceBinding<M>> {
                     separated_pair(
                         parse_pattern,
                         ws(expect(char('='), "expected '=' in definition")),
-                        expect(parse_expr, "expected expression in definition")
-                    ).map(|(p, e)| Binding::Definition(p, e.unwrap_or_default())
-                    ),
+                        alt((
+                            parse_expr,
+                            // If that fails, consume everything up to a ';'
+                            take_till(|c| c == ';').map(|span: LocatedSpan| SourceExpr {
+                                expr: Expr::Error(span.fragment().to_string()),
+                                span: Some(span.location_offset()..span.location_offset()+span.len()),
+                            }),
+                        )),
+                    ).map(|(p, e)| Binding::Definition(p, e)),
                 ))
             ),
             trivia0
@@ -539,16 +547,6 @@ fn parse_binding<M>(input: LocatedSpan) -> IResult<SourceBinding<M>> {
             span: Some(start..end),
         },
     ))
-}
-
-pub fn make_let<M>(
-    bindings: Vec<(Pattern, SourceExpr<M>)>,
-    mut expr: SourceExpr<M>,
-) -> SourceExpr<M> {
-    for (pattern, binding) in bindings.into_iter().rev() {
-        expr = SourceExpr::application(SourceExpr::function(pattern, expr), binding)
-    }
-    expr
 }
 
 fn parse_let<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
@@ -586,9 +584,12 @@ fn parse_let<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
             Binding::Empty => unreachable!("Got Binding::Empty from parse_binding"),
         }
     }
-    // `make_let` de-sugars to nested applications; stamp the outer span over
-    // the whole `let … in …` source range.
-    let expr = make_let(definitions, body);
+    // De-sugars to nested applications; stamp the outer span over the whole
+    // `let … in …` source range.
+    let mut expr = body;
+    for (pattern, binding) in definitions.into_iter().rev() {
+        expr = SourceExpr::application(SourceExpr::function(pattern, expr), binding)
+    }
     Ok((rest, SourceExpr::with_span(expr.expr, start..end)))
 }
 
@@ -940,8 +941,9 @@ where
 /// Parses a module (often a file) whose contents are `input`, yielding the
 /// bindings defined by that module.
 ///
-/// The resulting bindings will span the entire input.
-pub fn parse_module<M>(input: &str) -> Result<Vec<SourceBinding<M>>, Vec<Error>> {
+/// On success, returns set of bindings that span the entire input but may
+/// contain errors.
+pub fn parse_module<M>(input: &str) -> Result<(Vec<SourceBinding<M>>, Vec<Error>), Vec<Error>> {
     let errors = RefCell::new(Vec::new());
     let span = LocatedSpan::new_extra(input, ParseState(&errors));
     #[rustfmt::skip]
@@ -973,13 +975,10 @@ pub fn parse_module<M>(input: &str) -> Result<Vec<SourceBinding<M>>, Vec<Error>>
                     span: Some(trivia.location_offset()..trivia.location_offset() + trivia.len()),
                 });
             }
-            Ok((span, bindings))
+            Ok((span, (bindings, errors.take())))
         }
         Err(e) => Err(e),
     };
-    if !errors.borrow().is_empty() {
-        return Err(errors.into_inner());
-    }
     translate_parse_result(result)
 }
 
@@ -2197,6 +2196,14 @@ mod tests {
         assert!(result.is_err());
     }
 
+    fn parse_module_successfully(input: &str) -> Vec<SourceBinding<u32>> {
+        let result = parse_module::<u32>(input);
+        assert!(result.is_ok(), "got {:?}", result.err());
+        let (bindings, errors) = result.unwrap();
+        assert!(errors.is_empty(), "got {:?}", errors);
+        bindings
+    }
+
     #[test]
     fn test_parse_with_comments() {
         // Comments anywhere whitespace was previously allowed should be ignored.
@@ -2209,10 +2216,9 @@ mod tests {
             // standalone
             y = x + 1;
         ";
-        let result = parse_module::<u32>(input);
-        assert!(result.is_ok(), "got {:?}", result.err());
+        let result = parse_module_successfully(input);
         // Three bindings, since there is an empty one to hold the trailing new-line.
-        assert_eq!(result.unwrap().len(), 3);
+        assert_eq!(result.len(), 3);
 
         // Comment inside a function body.
         assert_round_trip("fn(x) => x // identity\n", "fn(x) => x");
@@ -2380,26 +2386,26 @@ mod tests {
         // its span). Comment before the separator → belongs to the preceding
         // binding. Splicing each binding's span reproduces every comment.
         let input = "x = 1; // for y\n y = x + 1;";
-        let bindings = parse_module::<u32>(input).unwrap();
+        let bindings = parse_module_successfully(input);
         assert_eq!(bindings.len(), 2);
         assert_eq!(print_preserving_module(&bindings, input), input);
 
         // Comment trailing the first binding (before the `;`) is in x's span.
         let input = "x = 1 // for x\n; y = x + 1;";
-        let bindings = parse_module::<u32>(input).unwrap();
+        let bindings = parse_module_successfully(input);
         assert_eq!(bindings.len(), 2);
         assert_eq!(print_preserving_module(&bindings, input), input);
 
         // Mixed: header + trailing + leading + inter-binding blank line.
         let input = "x = 1;\n\n// section header\ny = x + 1;";
-        let bindings = parse_module::<u32>(input).unwrap();
+        let bindings = parse_module_successfully(input);
         assert_eq!(bindings.len(), 2);
         assert_eq!(print_preserving_module(&bindings, input), input);
 
         // A file-header comment at the very top is absorbed into the first
         // binding's span.
         let input = "// file header\n// also for the first binding\nx = 1;\ny = 2;";
-        let bindings = parse_module::<u32>(input).unwrap();
+        let bindings = parse_module_successfully(input);
         assert_eq!(bindings.len(), 2);
         assert_eq!(
             bindings[0].span.as_ref().map(|s| s.start),
@@ -2419,15 +2425,33 @@ mod tests {
         // binding so their span round-trips through
         // `print_preserving_module`.
         let input = "x = 1;\n// trailing";
-        let bindings = parse_module::<u32>(input).unwrap();
+        let bindings = parse_module_successfully(input);
         assert_eq!(bindings.len(), 2);
         assert!(matches!(bindings[1].binding, Binding::Empty));
         assert_eq!(print_preserving_module(&bindings, input), input);
 
         let input = "x = 1; // trailing";
-        let bindings = parse_module::<u32>(input).unwrap();
+        let bindings = parse_module_successfully(input);
         assert_eq!(bindings.len(), 2);
         assert!(matches!(bindings[1].binding, Binding::Empty));
+        assert_eq!(print_preserving_module(&bindings, input), input);
+    }
+
+    #[test]
+    fn test_module_error_recovery() {
+        let input = "\
+#{color=rgb(255,0,128)}
+// just a comment, not an annotation
+_x = )(obviously not parsable, but ends with ;
+y = 2;";
+        let bindings = parse_module_successfully(input);
+        assert_eq!(bindings.len(), 2);
+        assert!(matches!(
+            bindings[0].annotations[0].annotation,
+            Annotation::Color(255, 0, 128)
+        ));
+        assert!(matches!(bindings[1].binding, Binding::Definition(..)));
+        assert_eq!(bindings[1].annotations.len(), 0);
         assert_eq!(print_preserving_module(&bindings, input), input);
     }
 
@@ -2439,7 +2463,7 @@ mod tests {
 // just a comment, not an annotation
 x = 1;
 y = 2;";
-        let bindings = parse_module::<u32>(input).unwrap();
+        let bindings = parse_module_successfully(input);
         assert_eq!(bindings.len(), 2);
 
         // [0] is `x = 1` with all preceding annotations attached.
@@ -2479,7 +2503,7 @@ y = 2;";
 kick = pulse(60);
 #{slot=9, color=rgb(0,128,255)}
 synth = saw(220);";
-        let bindings = parse_module::<u32>(input).unwrap();
+        let bindings = parse_module_successfully(input);
         assert_eq!(bindings.len(), 2);
         let slot0 = bindings[0]
             .annotations
@@ -2510,7 +2534,7 @@ open bar.baz;
 #{color=rgb(0,0,0)}
 open util.synths;
 x = 1;";
-        let bindings = parse_module::<u32>(input).unwrap();
+        let bindings = parse_module_successfully(input);
         assert_eq!(bindings.len(), 4);
 
         match &bindings[0].binding {
@@ -2546,7 +2570,7 @@ x = 1;";
 kick = pulse(60);
 #{sliders=[\"cutoff:800:200:4000\"]}
 synth = saw(220);";
-        let bindings = parse_module::<u32>(input).unwrap();
+        let bindings = parse_module_successfully(input);
         assert_eq!(bindings.len(), 2);
         assert!(matches!(bindings[0].binding, Binding::Definition(..)));
         assert_eq!(bindings[0].annotations.len(), 2);
@@ -2562,7 +2586,7 @@ synth = saw(220);";
         // binding now needs a structural re-emit — annotation lines + the
         // binding's own structural form.
         let input = "#{color=rgb(10,20,30)}\nx = 1;";
-        let mut bindings = parse_module::<u32>(input).unwrap();
+        let mut bindings = parse_module_successfully(input);
         assert_eq!(bindings.len(), 1);
         assert_eq!(bindings[0].annotations.len(), 1);
 
@@ -2666,7 +2690,7 @@ synth = saw(220);";
         // and confirm: the dirty binding emits structurally (`x = 99`), but
         // the other binding still splices its leading comment verbatim.
         let input = "x = 1;\n// leading for y\n y = 2;";
-        let mut bindings = parse_module::<u32>(input).unwrap();
+        let mut bindings = parse_module_successfully(input);
         match &mut bindings[0].binding {
             Binding::Definition(_pattern, expr) => *expr = SourceExpr::float(99.0),
             _ => panic!("expected first binding to be a Definition"),

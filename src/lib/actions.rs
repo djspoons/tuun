@@ -68,7 +68,13 @@ impl AppState {
         source: String,
         input_path: std::path::PathBuf,
     ) -> Result<AppState, Vec<parser::Error>> {
-        let bindings = parser::parse_module::<MarkId>(&source)?;
+        let mut message = String::new();
+        let (bindings, errors) = parser::parse_module::<MarkId>(&source)?;
+        // TODO sort of a bummer that we don't know which binding this error was
+        // in... some opportunity here to improve the type of parse_module.
+        if errors.len() > 0 {
+            message = format!("Parse errors: {}", &errors[0]);
+        }
         let total_slots = renderer::NUM_PROGRAM_BANKS * PROGRAMS_PER_BANK;
         let mut programs: Vec<renderer::Program> = (0..total_slots)
             .map(|i| renderer::Program {
@@ -110,7 +116,7 @@ impl AppState {
             repeat_after_measures: None,
             daw_pad_mode: DawPadMode::ClipLauncher,
             should_exit: false,
-            message: String::new(),
+            message,
         })
     }
 
@@ -339,11 +345,14 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
             program_index,
             start_at_next_measure,
             repeat_after_measures,
-        } => vec![Effect::PlayProgram {
-            program_index,
-            start_at_next_measure,
-            repeat_after_measures,
-        }],
+        } => vec![
+            Effect::PlayProgram {
+                program_index,
+                start_at_next_measure,
+                repeat_after_measures,
+            },
+            Effect::UpdateSource(program_index),
+        ],
         Action::StopProgram(i) => vec![
             Effect::StopProgram(i),
             Effect::ShowMessage(format!("Stopped program {}", state.programs[i].id)),

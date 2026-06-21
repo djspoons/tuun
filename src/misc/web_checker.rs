@@ -43,7 +43,10 @@ fn load_modules() -> HashMap<String, Bindings> {
     let mut out = HashMap::new();
     for (name, content) in modules::EMBEDDED_MODULES {
         match parser::parse_module::<renderer::MarkId>(content) {
-            Ok(mut bindings) => {
+            Ok((mut bindings, errors)) => {
+                if !errors.is_empty() {
+                    eprintln!("Warning: failed to parse module '{}': {:?}", name, errors);
+                }
                 bindings.insert(
                     0,
                     parser::Binding::Open(vec!["__prelude".to_string()]).into(),
