@@ -64,10 +64,184 @@ fn apply_note_function(
     }
 }
 
-/// Splices the given program's edited `text` back into `state.source`,
-/// re-parses the file to refresh `state.bindings`, realigns each program's
-/// `span`/`binding_index` (matching by `slot=N` annotation), and writes the new
-/// source to `state.input_path`.
+/// Float tolerance for "this hasn't moved" comparisons against parsed
+/// annotation values. Tighter than the source format's precision would
+/// matter (which would be confusing) and looser than encoder/MIDI noise.
+const ANNOTATION_EPSILON: f32 = 1e-4;
+
+/// Returns annotation-persistence edits for `program` against its parsed
+/// `binding`.
+///
+/// This includes one for `level_db` if the runtime level has diverged from what
+/// the binding's last `Level` annotation encodes, and one for `sliders` if any
+/// slider's current normalized value has diverged from its parsed initial
+/// value. Returns an empty list when nothing has changed.
+fn annotation_edits(
+    program: &renderer::Program,
+    binding: &parser::SourceBinding<MarkId>,
+    source: &str,
+) -> Vec<(std::ops::Range<usize>, String)> {
+    let mut edits = Vec::new();
+    if let Some(edit) = level_edit(program, binding, source) {
+        edits.push(edit);
+    }
+    if let Some(edit) = sliders_edit(program, binding) {
+        edits.push(edit);
+    }
+    edits
+}
+
+/// Returns the edit for the binding's `level_db` annotation, or `None` if
+/// the runtime level matches what the binding currently encodes.
+fn level_edit(
+    program: &renderer::Program,
+    binding: &parser::SourceBinding<MarkId>,
+    source: &str,
+) -> Option<(std::ops::Range<usize>, String)> {
+    let (parsed_value, parsed_span) = match last_annotation_of(binding, |a| match a {
+        parser::Annotation::Level(v) => Some(*v),
+        _ => None,
+    }) {
+        Some((v, span)) => (v, span),
+        None => (0.0, None),
+    };
+    if (program.level_db - parsed_value).abs() < ANNOTATION_EPSILON {
+        return None;
+    }
+    let annotation = parser::Annotation::Level(program.level_db);
+    let body = format!("{}", annotation);
+    match parsed_span {
+        Some(span) => Some((span, body)),
+        None => {
+            // Fall back to inserting a fresh `#{level_db=…}` line at the
+            // binding's start when no `Level` annotation exists in source yet.
+            let pos = binding
+                .span
+                .as_ref()
+                .expect("parsed binding has span")
+                .start;
+            Some(insert_annotation_line(pos, &body, source))
+        }
+    }
+}
+
+/// Builds an `(range, replacement)` edit that inserts a fresh `#{…}`
+/// annotation line at `pos`, prepending or appending `\n` only when
+/// needed so the inserted line doesn't collapse onto a neighbor.
+fn insert_annotation_line(
+    pos: usize,
+    body: &str,
+    source: &str,
+) -> (std::ops::Range<usize>, String) {
+    let bytes = source.as_bytes();
+    let prefix = if pos == 0 || bytes.get(pos - 1) == Some(&b'\n') {
+        ""
+    } else {
+        "\n"
+    };
+    let suffix = if bytes.get(pos) == Some(&b'\n') {
+        ""
+    } else {
+        "\n"
+    };
+    (pos..pos, format!("{}#{{{}}}{}", prefix, body, suffix))
+}
+
+/// Returns the edit for the binding's `sliders` annotation, or `None` if
+/// every slider's current normalized value matches its parsed initial.
+fn sliders_edit(
+    program: &renderer::Program,
+    binding: &parser::SourceBinding<MarkId>,
+) -> Option<(std::ops::Range<usize>, String)> {
+    if program.sliders.configs.is_empty() {
+        return None;
+    }
+    let diverged = program
+        .sliders
+        .configs
+        .iter()
+        .zip(&program.sliders.normalized_values)
+        .any(|(config, &current)| {
+            (current - parsed_normalized_value(&config.function)).abs() > ANNOTATION_EPSILON
+        });
+    if !diverged {
+        return None;
+    }
+    let (_, span) = last_annotation_of(binding, |a| match a {
+        parser::Annotation::Sliders(_) => Some(()),
+        _ => None,
+    })?;
+    let span = span?;
+    let updated: Vec<parser::Slider> = program
+        .sliders
+        .configs
+        .iter()
+        .zip(&program.sliders.normalized_values)
+        .map(|(config, &normalized)| {
+            let function = match &config.function {
+                parser::SliderFunction::Linear { min, max, .. } => parser::SliderFunction::Linear {
+                    initial_value: min + normalized * (max - min),
+                    min: *min,
+                    max: *max,
+                },
+                parser::SliderFunction::UserDefined {
+                    function_source, ..
+                } => parser::SliderFunction::UserDefined {
+                    normalized_initial_value: normalized,
+                    function_source: function_source.clone(),
+                },
+            };
+            parser::Slider {
+                label: config.label.clone(),
+                function,
+            }
+        })
+        .collect();
+    Some((span, format!("{}", parser::Annotation::Sliders(updated))))
+}
+
+/// Returns the (value, span) of the last annotation on `binding` that `pick`
+/// matches.
+///
+/// The reverse walk matches the parser's "last wins" semantics for repeated
+/// annotations of the same kind, so persisting onto the same span keeps the
+/// source authoritative.
+fn last_annotation_of<T, F>(
+    binding: &parser::SourceBinding<MarkId>,
+    mut pick: F,
+) -> Option<(T, Option<std::ops::Range<usize>>)>
+where
+    F: FnMut(&parser::Annotation) -> Option<T>,
+{
+    binding
+        .annotations
+        .iter()
+        .rev()
+        .find_map(|a| pick(&a.annotation).map(|v| (v, a.span.clone())))
+}
+
+/// Returns the normalized 0..1 position implied by a parsed slider's
+/// initial value, so it can be compared against the runtime's current
+/// `normalized_value` directly.
+fn parsed_normalized_value(function: &parser::SliderFunction) -> f32 {
+    match function {
+        parser::SliderFunction::Linear {
+            initial_value,
+            min,
+            max,
+        } => (initial_value - min) / (max - min),
+        parser::SliderFunction::UserDefined {
+            normalized_initial_value,
+            ..
+        } => *normalized_initial_value,
+    }
+}
+
+/// Splices the given program's edited `text` back into `state.source`, persists
+/// every program's changed state as annotation edits, re-parses the file to
+/// refresh `state.bindings`, realigns each program's `span`/`binding_index`
+/// (matching by `slot=N` annotation), and writes the new source to
+/// `state.input_path`.
 ///
 /// Programs whose `span` is empty (`0..0`) are treated as brand-new: a fresh
 /// `Definition` is appended at the end of source with a generated name and a
@@ -83,23 +257,55 @@ fn splice_program(state: &mut AppState, program_index: usize) -> Result<(), Stri
     let edited_text = state.programs[program_index].text.clone();
     let is_new = edited_span.start == edited_span.end;
 
-    let mut new_source = state.source.clone();
+    // Collect every edit we want to apply to `state.source` in one pass:
+    // the active program's expression splice (or a fresh-binding append)
+    // plus, for every program, annotation edits that bring level/slider
+    // state on disk in line with the runtime. Applying in reverse-position
+    // order keeps each remaining edit's span valid.
+    let mut edits: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+    let mut append: Option<String> = None;
     if is_new {
         if edited_text.trim().is_empty() {
             // Padding slot still empty after edit — nothing to do.
+            // TODO is this true? what about sliders/levels?
             return Ok(());
         }
-        // Append a fresh Definition with a `slot=N` annotation.
-        new_source.push_str(&format!("\n#{{slot={}}}\n_ = {};", slot, edited_text));
-    } else {
-        if edited_span.end > state.source.len() {
-            return Err(format!(
-                "program span {:?} is out of bounds for source of length {}",
-                edited_span,
-                state.source.len()
-            ));
+        // Build the appended binding inline: slot is mandatory; level_db
+        // gets added when the runtime has a non-default level (new
+        // programs have no sliders since their configs come from a
+        // parsed `sliders=…` annotation).
+        let mut annos: Vec<parser::Annotation> = vec![parser::Annotation::Slot(slot as u32)];
+        let level = state.programs[program_index].level_db;
+        if level.abs() > ANNOTATION_EPSILON {
+            annos.push(parser::Annotation::Level(level));
         }
-        new_source.replace_range(edited_span, &edited_text);
+        let anno_body = annos
+            .iter()
+            .map(|a| format!("{}", a))
+            .collect::<Vec<_>>()
+            .join(", ");
+        append = Some(format!("\n#{{{}}}\n_ = {};", anno_body, edited_text));
+    } else {
+        edits.push((edited_span, edited_text));
+    }
+
+    // Walk every program (active and not) and append annotation edits
+    // for level_db / sliders that have diverged from the parsed source.
+    // We use the *pre-splice* `state.bindings` so all spans line up with
+    // `state.source` before any of these edits land.
+    for program in &state.programs {
+        if let Some(binding) = state.bindings.get(program.binding_index) {
+            edits.extend(annotation_edits(program, binding, &state.source));
+        }
+    }
+
+    let mut new_source = state.source.clone();
+    edits.sort_by_key(|(span, _)| std::cmp::Reverse(span.start));
+    for (span, replacement) in edits {
+        new_source.replace_range(span, &replacement);
+    }
+    if let Some(text) = append {
+        new_source.push_str(&text);
     }
 
     let new_bindings = parser::parse_module::<MarkId>(&new_source)
@@ -551,7 +757,7 @@ fn sync_encoders(state: &AppState, launchkey: &mut launchkey::Launchkey) {
                 launchkey.set_encoder_display(
                     i as u8,
                     "level",
-                    &format!("{:.1} dB", program.level_db),
+                    &renderer::format_level_db(program.level_db),
                 );
             }
         }
@@ -679,5 +885,149 @@ kick = pulse(60);";
         // text is already empty; just splice.
         splice_program(&mut state, 4).unwrap();
         assert_eq!(state.source, before);
+    }
+
+    #[test]
+    fn changed_level_db_replaces_existing_annotation_in_place() {
+        // The existing `level_db=-6` annotation has its own span; the
+        // splice should land exactly on those bytes, leaving the rest
+        // of the binding (including its leading comment) untouched.
+        let source = "\
+#{slot=1, level_db=-6}
+// keep this comment
+kick = pulse(60);";
+        let mut state = state_from(source);
+        assert!((state.programs[0].level_db - -6.0).abs() < 1e-6);
+
+        state.programs[0].level_db = -3.5;
+        splice_program(&mut state, 0).unwrap();
+
+        assert_eq!(
+            state.source,
+            "\
+#{slot=1, level_db=-3.5}
+// keep this comment
+kick = pulse(60);"
+        );
+    }
+
+    #[test]
+    fn changed_level_db_inserts_fresh_annotation_when_none_exists() {
+        // No `level_db=…` in source. Add a new `#{level_db=…}` line just before
+        // the binding, preserving the existing annotation block and the
+        // pre-binding comment.
+        let source = "\
+// header comment
+#{slot=1}
+kick = pulse(60);";
+        let mut state = state_from(source);
+        assert!((state.programs[0].level_db - 0.0).abs() < 1e-6);
+
+        state.programs[0].level_db = -3.0;
+        splice_program(&mut state, 0).unwrap();
+
+        assert_eq!(
+            state.source,
+            "\
+#{level_db=-3}
+// header comment
+#{slot=1}
+kick = pulse(60);"
+        );
+    }
+
+    #[test]
+    fn changed_slider_value_rewrites_sliders_annotation() {
+        // Move the slider from its parsed initial 0.5 to 0.75. Only
+        // the `sliders=…` annotation's bytes change; the surrounding
+        // `slot=…` annotation and binding body stay verbatim.
+        let source = "\
+#{slot=1, sliders=[\"vol:0.5:0:1\"]}
+tone = saw(220);";
+        let mut state = state_from(source);
+        assert_eq!(state.programs[0].sliders.configs.len(), 1);
+        assert!((state.programs[0].sliders.normalized_values[0] - 0.5).abs() < 1e-6);
+
+        state.programs[0].sliders.normalized_values[0] = 0.75;
+        splice_program(&mut state, 0).unwrap();
+
+        // Linear slider: actual value = min + normalized * (max - min)
+        // = 0 + 0.75 * 1 = 0.75.
+        assert_eq!(
+            state.source,
+            "\
+#{slot=1, sliders=[\"vol:0.75:0:1\"]}
+tone = saw(220);"
+        );
+    }
+
+    #[test]
+    fn no_divergence_means_no_annotation_edits() {
+        // Splicing without any runtime divergence should round-trip
+        // the source exactly — even though splice_program walks every
+        // program looking for level/slider drift.
+        let source = "\
+#{slot=1, level_db=-6, sliders=[\"vol:0.25:0:1\"]}
+kick = pulse(60);
+#{slot=2}
+synth = saw(220);";
+        let mut state = state_from(source);
+        // No runtime mutations — same edit-mode-exit pattern but with
+        // the program's text unchanged from what parse_module produced.
+        splice_program(&mut state, 0).unwrap();
+        assert_eq!(state.source, source);
+    }
+
+    #[test]
+    fn non_active_program_divergence_persists_on_any_save() {
+        // The user adjusts level on program 2 via encoder, then edits
+        // program 1's text and hits Return. Both writes need to land.
+        let source = "\
+#{slot=1}
+kick = pulse(60);
+#{slot=2}
+synth = saw(220);";
+        let mut state = state_from(source);
+
+        // Program 2: level changed (encoder).
+        state.programs[1].level_db = -9.0;
+        // Program 1: text edited (active save target).
+        state.programs[0].set_text("pulse(80)".to_string());
+
+        splice_program(&mut state, 0).unwrap();
+
+        assert_eq!(
+            state.source,
+            "\
+#{slot=1}
+kick = pulse(80);
+#{level_db=-9}
+#{slot=2}
+synth = saw(220);"
+        );
+    }
+
+    #[test]
+    fn new_program_appends_level_db_when_set() {
+        // A brand-new program with a non-default runtime level should emit
+        // `level_db` alongside `slot` in its appended `#{…}` header so the file
+        // picks it up on the next parse.
+        let source = "\
+#{slot=1}
+kick = pulse(60);";
+        let mut state = state_from(source);
+        state.programs[4].set_text("saw(440)".to_string());
+        state.programs[4].level_db = -2.5;
+
+        splice_program(&mut state, 4).unwrap();
+
+        assert_eq!(
+            state.source,
+            "\
+#{slot=1}
+kick = pulse(60);
+#{slot=5, level_db=-2.5}
+_ = saw(440);"
+        );
     }
 }

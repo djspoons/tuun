@@ -993,6 +993,14 @@ pub enum Annotation {
     Slot(u32),
 }
 
+/// Renders a parameter value (`level_db`, slider `initial`/`min`/`max`, slider
+/// `normalized_initial_value`) as it should appear source annotations.
+pub fn format_param(value: f32) -> String {
+    // Default `{}` Display: shortest round-trip representation. Trims `5.0` →
+    // `5` and avoids unrolling noise from float arithmetic.
+    format!("{}", value)
+}
+
 impl Display for Slider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.function {
@@ -1000,14 +1008,23 @@ impl Display for Slider {
                 initial_value,
                 min,
                 max,
-            } => write!(f, "\"{}:{}:{}:{}\"", self.label, initial_value, min, max),
+            } => write!(
+                f,
+                "\"{}:{}:{}:{}\"",
+                self.label,
+                format_param(*initial_value),
+                format_param(*min),
+                format_param(*max)
+            ),
             SliderFunction::UserDefined {
                 normalized_initial_value,
                 function_source,
             } => write!(
                 f,
                 "\"{}:{}:{}\"",
-                self.label, normalized_initial_value, function_source
+                self.label,
+                format_param(*normalized_initial_value),
+                function_source
             ),
         }
     }
@@ -1017,7 +1034,7 @@ impl Display for Annotation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Annotation::Color(r, g, b) => write!(f, "color=rgb({},{},{})", r, g, b),
-            Annotation::Level(v) => write!(f, "level_db={}", v),
+            Annotation::Level(v) => write!(f, "level_db={}", format_param(*v)),
             Annotation::Slot(n) => write!(f, "slot={}", n),
             Annotation::Sliders(sliders) => {
                 write!(f, "sliders=[")?;

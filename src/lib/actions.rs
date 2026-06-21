@@ -486,7 +486,10 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
 
         Action::ShowMessage(message) => vec![Effect::ShowMessage(message)],
         Action::DumpActiveWaveform => vec![Effect::DumpActiveWaveform],
-        Action::Exit => vec![Effect::Exit],
+        Action::Exit => vec![
+            Effect::UpdateSource(state.active_program_index),
+            Effect::Exit,
+        ],
     }
 }
 
@@ -762,15 +765,16 @@ fn apply_level_db(state: &mut AppState, program_index: usize, level_db: f32) -> 
     // Bank-relative encoder index for the display update.
     let bank_start = program_index - (program_index % PROGRAMS_PER_BANK);
     let encoder_index = (program_index - bank_start) as u8;
+    let formatted_level = renderer::format_level_db(level_db);
     effects.push(Effect::SetEncoderDisplay {
         index: encoder_index,
         name: "level".to_string(),
-        value: format!("{:.1} dB", level_db),
+        value: formatted_level.clone(),
     });
     // TODO should be (program_id mod bank) here and elsewhere
     effects.push(Effect::ShowMessage(format!(
-        "level({}) = {:.1} dB",
-        program_id, level_db
+        "level({}) = {}",
+        program_id, formatted_level
     )));
     effects
 }

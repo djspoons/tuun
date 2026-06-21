@@ -319,6 +319,13 @@ impl Program {
 pub const PROGRAMS_PER_BANK: usize = 8;
 pub const NUM_PROGRAM_BANKS: usize = 8;
 
+/// Renders a `level_db` value the way the UI shows it: one decimal place
+/// followed by the unit, e.g. `-6.0 dB`. Single home for the format so
+/// every encoder display, status message, and tooltip stays in sync.
+pub fn format_level_db(level_db: f32) -> String {
+    format!("{:.1} dB", level_db)
+}
+
 pub fn format_sig_digits(val: f32, sig_figs: usize) -> String {
     if val == 0.0 || !val.is_finite() {
         return format!("{val:.precision$}", precision = sig_figs - 1);
