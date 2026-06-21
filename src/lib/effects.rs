@@ -579,33 +579,23 @@ impl EffectRunner {
                     Ok((mut note_on, note_off)) => {
                         let level_db = keys.level_db;
                         keys.note_off_waveforms.insert(key, note_off);
-                        // Seed the slider-update worker's `last_slider_values`
-                        // map for this new Key id. Without this, the next
-                        // PluginEncoderChange for the active keys program would
-                        // fail to look up a previous value when building the
-                        // slider ramp (and the renderer wouldn't have initial
-                        // values to show either).
-                        //
-                        // Also! The Marked(slider(...)) waveforms in note_on
-                        // have the initial values still (from when the
-                        // instrument was originally evaluated, not the
-                        // application just above). Manually update those here.
+                        // `note_on`'s `Marked(Slider(_))` nodes still hold the
+                        // values from when the instrument was originally
+                        // evaluated, so swap in the program's current runtime
+                        // values and at the same time collect the (label,
+                        // value) pairs we need to seed the slider worker for
+                        // this fresh `Key` id (so its next ramp has a sensible
+                        // "previous value" to start from).
                         let id = WaveformId::Key(key);
                         let program = &state.programs[renderer::index_from_id(keys.id)];
-                        let mut last_slider_values = HashMap::new();
-                        for (j, config) in program.sliders.configs.iter().enumerate() {
-                            let value = slider::denormalize(
-                                &config.function,
-                                program.sliders.normalized_values[j],
-                            )
-                            .unwrap_or(0.0);
-                            last_slider_values.insert((id.clone(), config.label.clone()), value);
-                            waveform::substitute(
+                        let last_slider_values: HashMap<(WaveformId, String), f32> =
+                            play_helper::substitute_current_slider_values(
                                 &mut note_on,
-                                &MarkId::Slider(config.label.clone()),
-                                &waveform::Waveform::Const(value),
-                            );
-                        }
+                                &program.sliders,
+                            )
+                            .into_iter()
+                            .map(|(label, value)| ((id.clone(), label), value))
+                            .collect();
                         let _ =
                             self.slider_sender
                                 .send(renderer::SliderEvent::UpdateInitialValues(

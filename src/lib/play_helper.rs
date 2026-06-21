@@ -18,6 +18,29 @@ pub fn db_to_amplitude(db: f32) -> f32 {
     10.0_f32.powf(db / 20.0)
 }
 
+/// Substitutes each slider's current value into every `Marked { id:
+/// Slider(label), … }` node in `waveform`.
+///
+/// Returns the per-slider `(label, value)` pairs so callers that need to seed
+/// the slider worker's `last_slider_values` map (e.g., for a fresh
+/// `WaveformId::Key`) can build their own keyed map without re-denormalizing.
+pub fn substitute_current_slider_values(
+    waveform: &mut waveform::Waveform<MarkId>,
+    sliders: &renderer::ProgramSliders,
+) -> Vec<(String, f32)> {
+    let mut values = Vec::with_capacity(sliders.configs.len());
+    for (config, &normalized) in sliders.configs.iter().zip(&sliders.normalized_values) {
+        let value = slider::denormalize(&config.function, normalized).unwrap_or(0.0);
+        values.push((config.label.clone(), value));
+        waveform::substitute(
+            waveform,
+            &MarkId::Slider(config.label.clone()),
+            &waveform::Waveform::Const(value),
+        );
+    }
+    values
+}
+
 /// One slot in [`PlayHelper`]'s module cache: the file's mtime at the time
 /// we parsed it, plus a leaked `&'static` slice of the parsed bindings.
 // See the field doc on `PlayHelper::modules` for the leak strategy.
@@ -153,7 +176,7 @@ impl PlayHelper {
             })?;
         if !errors.is_empty() {
             errors.into_iter().next().unwrap_or_else(|| {
-                return parser::Error::new(format!("Parse failed for {}", file_path.display()));
+                parser::Error::new(format!("Parse failed for {}", file_path.display()))
             });
         }
 
@@ -263,8 +286,12 @@ impl PlayHelper {
             None
         };
         if let Some(waveform) = program.cached_waveform.clone() {
-            let waveform = optimizer::optimize(waveform);
+            let mut waveform = optimizer::optimize(waveform);
             println!("optimizer::optimize returned: {}", &waveform);
+            // Substitute the program's current slider positions before handing
+            // the waveform to the tracker (since the ones in cached_waveform
+            // may be old).
+            substitute_current_slider_values(&mut waveform, &program.sliders);
             if start_at_next_measure {
                 &mut self.precomputing_command_sender
             } else {

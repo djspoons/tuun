@@ -72,7 +72,7 @@ impl AppState {
         let (bindings, errors) = parser::parse_module::<MarkId>(&source)?;
         // TODO sort of a bummer that we don't know which binding this error was
         // in... some opportunity here to improve the type of parse_module.
-        if errors.len() > 0 {
+        if !errors.is_empty() {
             message = format!("Parse errors: {}", &errors[0]);
         }
         let total_slots = renderer::NUM_PROGRAM_BANKS * PROGRAMS_PER_BANK;
