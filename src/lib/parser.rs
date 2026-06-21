@@ -428,7 +428,11 @@ fn parse_identifier(input: LocatedSpan) -> IResult<String> {
     let (rest, value) =
         alt((
             verify(recognize((
-                    alt((alphanumeric1, tag("_"))),
+                    alt((
+                        alphanumeric1,
+                        // One leading underscore is ok
+                        recognize((tag("_"), alphanumeric1)),
+                    )),
                     many0(alt((alphanumeric1, tag("_"), tag("#")))),
                 )),
                 |s: &LocatedSpan| *s.fragment() != "fn" &&
@@ -437,6 +441,8 @@ fn parse_identifier(input: LocatedSpan) -> IResult<String> {
                     *s.fragment() != "else" && *s.fragment() != "open",
             ),
             parse_unary_operator,
+            // A lonely underscore is also ok.
+            terminated(tag("_"), not(peek(alt((tag("_"),alphanumeric1))))),
         )).parse(input)?;
     Ok((rest, value.to_string()))
 }
@@ -625,8 +631,21 @@ fn parse_unary_application<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
 
 fn parse_variable<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
     let start = input.location_offset();
-    let (rest, name) = parse_identifier(input)?;
-    // TODO don't allow "_" as a variable
+    // Variables are the same as identifiers (i.e., trivial patterns) except:
+    //   "_" is only a identifier: it may be bound but *not* referenced
+    //   "__chord" and others with double-underscore prefixes may be
+    //     referenced but *not* bound
+    #[rustfmt::skip]
+    let (rest, name) = verify(
+        alt((
+            parse_identifier,
+            recognize((
+                tag("__"),
+                many0(alt((alphanumeric1, tag("_"), tag("#")))),
+            )).map(|v: LocatedSpan| v.fragment().to_string()),
+        )),
+        |name: &String| name != "_",
+    ).parse(input)?;
     let end = rest.location_offset();
     Ok((
         rest,
@@ -756,7 +775,7 @@ fn parse_chord<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
     ).parse(input)?;
     let end = rest.location_offset();
     let app = Expr::Application {
-        function: boxed(Expr::Variable("_chord".to_string())),
+        function: boxed(Expr::Variable("__chord".to_string())),
         argument: Box::new(inner),
     };
     Ok((rest, SourceExpr::with_span(app, start..end)))
@@ -772,7 +791,7 @@ fn parse_sequence<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
     ).parse(input)?;
     let end = rest.location_offset();
     let app = Expr::Application {
-        function: boxed(Expr::Variable("_sequence".to_string())),
+        function: boxed(Expr::Variable("__sequence".to_string())),
         argument: Box::new(inner),
     };
     Ok((rest, SourceExpr::with_span(app, start..end)))
@@ -1490,12 +1509,12 @@ where
                 // using surface syntax matching the parser, so the Display
                 // output round-trips.
                 if let Expr::Variable(name) = &function.expr {
-                    // `_chord` and `_sequence` aren't legal identifiers — they
-                    // can only be entered via the `{x}` / `<x>` sugar. Emit
-                    // the sugar so the output re-parses.
+                    // `__chord` and `__sequence` aren't legal identifiers —
+                    // they can only be entered via the `{x}` / `<x>` sugar.
+                    // Emit the sugar so the output re-parses.
                     match name.as_str() {
-                        "_chord" => return write!(f, "{{{}}}", argument),
-                        "_sequence" => return write!(f, "<{}>", argument),
+                        "__chord" => return write!(f, "{{{}}}", argument),
+                        "__sequence" => return write!(f, "<{}>", argument),
                         _ => {}
                     }
                     if let Expr::Tuple(args) = &argument.expr
@@ -2160,18 +2179,22 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_variable() {
+    fn test_parse_identifier_and_variable() {
         let result = parse_program::<u32>("fn");
         assert!(result.is_err());
+        let result = parse_program::<u32>("_");
+        assert!(result.is_err());
 
-        /*
-               TODO don't allow multiple underscores at the beginning
-               let result = parse_program::<u32>("__prelude");
-               assert!(result.is_err());
-        */
         assert_round_trip("my_var", "my_var");
         assert_round_trip("$", "$");
         assert_round_trip("_private", "_private");
+        assert_round_trip("__chord", "__chord");
+
+        // Double underscore identifiers are internal-only
+        let errors = RefCell::new(Vec::new());
+        let span = LocatedSpan::new_extra("__chord", ParseState(&errors));
+        let result = parse_identifier(span);
+        assert!(result.is_err());
     }
 
     #[test]

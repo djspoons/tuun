@@ -95,20 +95,20 @@ impl PlayHelper {
 
     /// Resolves a module path to its (parsed) bindings.
     ///
-    /// The special path `["_prelude"]` returns the in-memory prelude built by
+    /// The special path `["__prelude"]` returns the in-memory prelude built by
     /// [`PlayHelper::new`]. Other paths are mapped to a file under
     /// [`library_root`](Self::library_root): `["foo", "bar"]` →
     /// `<library_root>/foo/bar.tuun`.
     ///
     /// Each call stats the file and compares its mtime with the cached entry's.
     /// On a match we hand back the existing slice; on a mismatch or miss, we
-    /// re-read, re-parse, prepend an implicit `open _prelude`, leak the new
+    /// re-read, re-parse, prepend an implicit `open __prelude`, leak the new
     /// bindings, and replace the cache entry. The previous leaked allocation
     /// stays in memory — any borrows handed out before invalidation remain
     /// valid (essential for recursive resolve calls during one `evaluate`
     /// session).
     fn resolve(&self, path: &[String]) -> Result<&[parser::SourceBinding<MarkId>], parser::Error> {
-        if path.len() == 1 && path[0] == "_prelude" {
+        if path.len() == 1 && path[0] == "__prelude" {
             return Ok(&self.prelude);
         }
 
@@ -151,11 +151,11 @@ impl PlayHelper {
         })?;
 
         // Every loaded module implicitly opens the prelude as its first binding
-        // so it can reference prelude names without an explicit `open _prelude`
+        // so it can reference prelude names without an explicit `open __prelude`
         // line.
         bindings.insert(
             0,
-            parser::Binding::Open(vec!["_prelude".to_string()]).into(),
+            parser::Binding::Open(vec!["__prelude".to_string()]).into(),
         );
 
         // Leak the parsed bindings so we can hand out a stable
@@ -409,7 +409,7 @@ impl PlayHelper {
             Err(errors) => panic!("Error parsing beats waveform: {:?}", errors),
         };
         let bindings: Vec<parser::SourceBinding<MarkId>> =
-            vec![parser::Binding::Open(vec!["_prelude".to_string()]).into()];
+            vec![parser::Binding::Open(vec!["__prelude".to_string()]).into()];
         match parser::evaluate(|path| self.resolve(path), &bindings, expr).map(|s| s.expr) {
             Ok(parser::Expr::Seq { waveform, .. }) => match waveform.expr {
                 parser::Expr::Waveform(waveform) => waveform::Waveform::<MarkId>::Marked {

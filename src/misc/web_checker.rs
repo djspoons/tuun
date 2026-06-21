@@ -31,15 +31,14 @@ fn load_prelude() -> Bindings {
     bindings
 }
 
-/// Parses every embedded module ahead of time and indexes them by dotted
-/// path. The result feeds the `resolve` callback used by
-/// [`parser::evaluate`] when a `Binding::Open` is encountered.
+/// Parses every embedded module ahead of time and indexes them by dotted path.
+/// The result feeds the `resolve` callback used by [`parser::evaluate`] when a
+/// `Binding::Open` is encountered.
 ///
-/// Each module gets an implicit `open _prelude` prepended so its
-/// bindings can reference prelude names (`sample_rate`, `tempo`,
-/// built-ins) regardless of caller ordering. Mirrors
-/// `play_helper::PlayHelper::resolve` in the native runtime and
-/// `Wasm::new` in the wasm bindings.
+/// Each module gets an implicit `open __prelude` prepended so its bindings can
+/// reference prelude names (`sample_rate`, `tempo`, built-ins) regardless of
+/// caller ordering. Mirrors `play_helper::PlayHelper::resolve` in the native
+/// runtime and `Wasm::new` in the wasm bindings.
 fn load_modules() -> HashMap<String, Bindings> {
     let mut out = HashMap::new();
     for (name, content) in modules::EMBEDDED_MODULES {
@@ -47,7 +46,7 @@ fn load_modules() -> HashMap<String, Bindings> {
             Ok(mut bindings) => {
                 bindings.insert(
                     0,
-                    parser::Binding::Open(vec!["_prelude".to_string()]).into(),
+                    parser::Binding::Open(vec!["__prelude".to_string()]).into(),
                 );
                 out.insert((*name).to_string(), bindings);
             }
@@ -227,9 +226,9 @@ fn check_block(
     };
 
     // Build the bindings the same way the wasm runtime does:
-    // implicit `open _prelude` → opens → sliders → expression.
+    // implicit `open __prelude` → opens → sliders → expression.
     let mut bindings: Bindings = Vec::new();
-    bindings.push(parser::Binding::Open(vec!["_prelude".to_string()]).into());
+    bindings.push(parser::Binding::Open(vec!["__prelude".to_string()]).into());
     for path in opens {
         bindings.push(parser::Binding::Open(path).into());
     }
@@ -242,7 +241,7 @@ fn check_block(
 
     let resolve =
         |path: &[String]| -> Result<&[parser::SourceBinding<renderer::MarkId>], parser::Error> {
-            if path.len() == 1 && path[0] == "_prelude" {
+            if path.len() == 1 && path[0] == "__prelude" {
                 return Ok(prelude.as_slice());
             }
             let key = path.join(".");

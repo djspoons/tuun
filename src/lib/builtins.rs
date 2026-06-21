@@ -1000,8 +1000,8 @@ pub fn add_bindings<M: Debug + Clone + Display + PartialEq + 'static>(
         ("reset", reset),
         ("alt", alt),
         ("capture", capture),
-        ("_chord", chord),
-        ("_sequence", sequence),
+        ("__chord", chord),
+        ("__sequence", sequence),
     ];
     for (name, function) in builtins {
         bindings.push(def(

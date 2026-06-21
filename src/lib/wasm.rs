@@ -77,7 +77,7 @@ impl Wasm {
         // surfaces as a constructor error rather than a later evaluate
         // error, since modules are fixed at build time.
         //
-        // Each module gets an implicit `open _prelude` prepended so its
+        // Each module gets an implicit `open __prelude` prepended so its
         // bindings can reference prelude names (`sample_rate`, `tempo`,
         // built-ins) without depending on the caller having opened the
         // prelude first. Mirrors `play_helper::PlayHelper::resolve` in
@@ -88,7 +88,7 @@ impl Wasm {
                 .map_err(|errors| format!("Failed to parse module '{}': {:?}", name, errors))?;
             bindings.insert(
                 0,
-                parser::Binding::Open(vec!["_prelude".to_string()]).into(),
+                parser::Binding::Open(vec!["__prelude".to_string()]).into(),
             );
             modules.insert((*name).to_string(), bindings);
         }
@@ -130,11 +130,11 @@ impl Wasm {
         let opens = modules::parse_open_json(open_json)?;
 
         // Build the bindings vec passed to `evaluate`. Implicit
-        // `open _prelude` first so the user expression can reference
+        // `open __prelude` first so the user expression can reference
         // prelude names directly (same prefix each embedded module
         // gets). Then user-requested opens, then slider bindings.
         let mut bindings: Vec<parser::SourceBinding<MarkId>> = Vec::new();
-        bindings.push(parser::Binding::Open(vec!["_prelude".to_string()]).into());
+        bindings.push(parser::Binding::Open(vec!["__prelude".to_string()]).into());
         for path in opens {
             bindings.push(parser::Binding::Open(path).into());
         }
@@ -149,13 +149,13 @@ impl Wasm {
         }
 
         // Resolve `Open(path)` either to the in-memory prelude (for the
-        // special `_prelude` path used by modules) or to a dotted entry
+        // special `__prelude` path used by modules) or to a dotted entry
         // in the embedded module table. Borrowed for the duration of
         // `evaluate`.
         let prelude = &self.prelude;
         let modules = &self.modules;
         let resolve = |path: &[String]| -> Result<&[parser::SourceBinding<MarkId>], parser::Error> {
-            if path.len() == 1 && path[0] == "_prelude" {
+            if path.len() == 1 && path[0] == "__prelude" {
                 return Ok(prelude.as_slice());
             }
             let key = path.join(".");
