@@ -2,9 +2,9 @@
 // MATH
 
 // Define min and max in a waveform-compatible way.
-min = fn(x, y) => alt(x - y, y, x),
-max = fn(x, y) => alt(x - y, x, y),
-pi = 3.14159265,
+min = fn(x, y) => alt(x - y, y, x);
+max = fn(x, y) => alt(x - y, x, y);
+pi = 3.14159265;
 
 // WAVES
 // Periodic waveforms should start behave as if they have negative values before the origin 
@@ -12,76 +12,76 @@ pi = 3.14159265,
 // should when no offset is applied). This will ensure they work well with Reset.
 
 // `sin` is shorthand for sine with no angular frequency.
-sin = fn(phase) => sine(0, phase),
+sin = fn(phase) => sine(0, phase);
 // `$` computes a sine wave at the given frequency in hertz (which must be a float or waveform).
-$ = fn(freq_hz) => sine(2*pi * freq_hz, 0),
+$ = fn(freq_hz) => sine(2*pi * freq_hz, 0);
 // `sawtooth` computes a sawtooth wave at the given frequency in hertz.
-sawtooth = fn(freq_hz) => (reset($freq_hz, -freq_hz * time) + 0.5) * 2,
+sawtooth = fn(freq_hz) => (reset($freq_hz, -freq_hz * time) + 0.5) * 2;
 // `square` computes a square wave at the given frequency in hertz.
-square = fn(freq_hz) => alt($freq_hz, 1, -1),
+square = fn(freq_hz) => alt($freq_hz, 1, -1);
 // `triangle` computes a triangle wave at the given frequency in hertz.
 triangle = fn(freq_hz) => let
     t = $freq_hz,
     slope = 4 * freq_hz,
     a = time * slope - 1,
     b = time * -slope + 3
-  in alt(t, reset(t, a), reset(t, b)),
+  in alt(t, reset(t, a), reset(t, b));
 // Pulse computes a pulse wave with the given width. `width` should be a number (or waveform)
-// between 0.0 and 1.0, where 0.0 is a square wave (i.e., 50% duty cycle). If width isn't constant,
+// between 0.0 and 1.0, where 0.0 is a square wave (i.e., 50% duty cycle). If width isn't constant;
 // then this is a PWM oscillator.
 pulse = fn(width, freq_hz) =>
   let
     // Use a sawtooth wave (which is "lowered" by `width`) as the driver for the pulse.
     s = sawtooth(freq_hz)
   in
-    alt(s - width, 1, -1),
+    alt(s - width, 1, -1);
 
 
 // HELPERS
-amp = fn(level) => fn(w) => level * w,
-db = fn(db) => amp(pow(10.0, db / 20.0)),
+amp = fn(level) => fn(w) => level * w;
+db = fn(db) => amp(pow(10.0, db / 20.0));
 // slope is in terms of level-change per second
-linear = fn(initial, slope) => initial + (time * slope),
+linear = fn(initial, slope) => initial + (time * slope);
 // Convert from MIDI note numbers to frequency
-@ = fn(m) => pow(2, (m - 69) / 12) * 440,
+@ = fn(m) => pow(2, (m - 69) / 12) * 440;
 
 
 // ENVELOPES
 // Create waveforms for the four parts of the envelope.
-Aw = fn(dur) => linear(0.0, 1.0 / dur) | fin(time - dur) | seq(time - dur),
-Dw = fn(dur, level) => linear(1.0, (level - 1.0) / dur) | fin(time - dur) | seq(time - dur),
-Sw = fn(dur, level) => level | fin(time - dur) | seq(time - dur),
+Aw = fn(dur) => linear(0.0, 1.0 / dur) | fin(time - dur) | seq(time - dur);
+Dw = fn(dur, level) => linear(1.0, (level - 1.0) / dur) | fin(time - dur) | seq(time - dur);
+Sw = fn(dur, level) => level | fin(time - dur) | seq(time - dur);
 // N.B. that R and Rw are not seq, since they are assumed to be the last part of the envelope.
-Rw = fn(dur, level) => linear(level, -level / dur) | fin(time - dur),
+Rw = fn(dur, level) => linear(level, -level / dur) | fin(time - dur);
 // Combine them to create a new filter.
 ADSR = fn(attack_dur, decay_dur, sustain_level, sustain_dur, release_dur) =>
   fn(w) => w * <[Aw(attack_dur),
                  Dw(decay_dur, sustain_level),
                  Sw(sustain_dur, sustain_level),
-                 Rw(release_dur, sustain_level)]>,
+                 Rw(release_dur, sustain_level)]>;
 
 // Also, we can create component filters... though note that the first three
 // don't change the length, so they need to be combined with R (or fin).
-A = fn(dur) => fn(w) => w * (Aw(dur) \ 1),
-D = fn(dur, level) => fn(w) => w * (Dw(dur, level) \ 1),
-S = fn(dur, level) => fn(w) => w * (Sw(dur, level) \ 1),
-R = fn(dur, level) => fn(w) => w * Rw(dur, level),
+A = fn(dur) => fn(w) => w * (Aw(dur) \ 1);
+D = fn(dur, level) => fn(w) => w * (Dw(dur, level) \ 1);
+S = fn(dur, level) => fn(w) => w * (Sw(dur, level) \ 1);
+R = fn(dur, level) => fn(w) => w * Rw(dur, level);
 
-over = fn(freq) => fn(x) => $(freq*x) * (1/x),
+over = fn(freq) => fn(x) => $(freq*x) * (1/x);
 
-add_semitones = fn(freq, n) => pow(2, n/12) * freq,
-add_cents = fn(freq, n) => pow(2, n/1200) * freq,
+add_semitones = fn(freq, n) => pow(2, n/12) * freq;
+add_cents = fn(freq, n) => pow(2, n/1200) * freq;
 
-odd_hrm = fn(freq) => {map(over(freq), [1, 3, 5, 7, 9, 11])},
-just_third = fn(freq) => {[odd_hrm(freq), odd_hrm(freq * 5/4)]},
-equal_third = fn(freq) => {[odd_hrm(freq), odd_hrm(step(freq, 4))]},
+odd_hrm = fn(freq) => {map(over(freq), [1, 3, 5, 7, 9, 11])};
+just_third = fn(freq) => {[odd_hrm(freq), odd_hrm(freq * 5/4)]};
+equal_third = fn(freq) => {[odd_hrm(freq), odd_hrm(step(freq, 4))]};
 
 
 // FILTERS
 
 // Returns a moving average filter with the given order (i.e., with length n+1)
 moving_average = fn(n) =>
-  filter(unfold(fn(x) => 1/(n+1), 1/(n+1), n+1), []),
+  filter(unfold(fn(x) => 1/(n+1), 1/(n+1), n+1), []);
 
 // RBJ Cookbook
 lpf = fn(Q, fc) =>
@@ -95,7 +95,7 @@ lpf = fn(Q, fc) =>
     a1 = -2*cos(w0),
     a2 =  1 - alpha,
   in
-    filter([b0/a0, b1/a0, b2/a0], [a1/a0, a2/a0]),
+    filter([b0/a0, b1/a0, b2/a0], [a1/a0, a2/a0]);
 
 
 // INSTRUMENTS
@@ -110,64 +110,64 @@ harmonica = fn(dur, freq) =>
     a = 0.13,
     r = 0.33,
     d = max(0.33, dur - (a + r)),
-    s = max(dur - (a + d + r), 0)
+    s = max(dur - (a + d + r), 0),
   in
     osc
     | lpf(0.5, 1900)
     | ADSR(a, d, 0.5, s, r)
     | fin(time - dur) // redundant with the ADSR
-    | seq(time - dur),
+    | seq(time - dur);
 
 
 // Time and Rests
-duration_from_beats = fn(beats) => beats * (60 / tempo),
+duration_from_beats = fn(beats) => beats * (60 / tempo);
 
 // 4-4 time! (Move to 4-4 file...)
-beats_per_measure = 4,
+beats_per_measure = 4;
 // Note lengths in seconds
-W = duration_from_beats(beats_per_measure),
-H = W / 2,
-Q = W / 4,
-E = W / 8,
+W = duration_from_beats(beats_per_measure);
+H = W / 2;
+Q = W / 4;
+E = W / 8;
 
 // Notes as waveforms: use with *
-Ww = 1 | fin(time - W) | seq(time - W),
-Hw = 1 | fin(time - H) | seq(time - H),
-Qw = 1 | fin(time - Q) | seq(time - Q),
-Ew = 1 | fin(time - E) | seq(time - E),
+Ww = 1 | fin(time - W) | seq(time - W);
+Hw = 1 | fin(time - H) | seq(time - H);
+Qw = 1 | fin(time - Q) | seq(time - Q);
+Ew = 1 | fin(time - E) | seq(time - E);
 
 // Rests as waveforms: use with <> or \
-Wrw = 0 | fin(0) | seq(time - W),
-Hrw = 0 | fin(0) | seq(time - H),
-Qrw = 0 | fin(0) | seq(time - Q),
-Erw = 0 | fin(0) | seq(time - E),
+Wrw = 0 | fin(0) | seq(time - W);
+Hrw = 0 | fin(0) | seq(time - H);
+Qrw = 0 | fin(0) | seq(time - Q);
+Erw = 0 | fin(0) | seq(time - E);
 
 // Some explorations with chords below
 
 // These take the root as a MIDI note number
-major_triad = fn(root) => fn(fw) => [fw(@root), fw(@(root + 4)), fw(@(root + 7))],
-// major_triad = fn(root, dur, inst) => [inst(dur, @root), inst(dur, @(root + 4)), inst(dur, @(root + 7))],
-minor_triad = fn(root) => fn(fw) => [fw(@root), fw(@(root + 3)), fw(@(root + 7))],
+major_triad = fn(root) => fn(fw) => [fw(@root), fw(@(root + 4)), fw(@(root + 7))];
+// major_triad = fn(root, dur, inst) => [inst(dur, @root), inst(dur, @(root + 4)), inst(dur, @(root + 7))];
+minor_triad = fn(root) => fn(fw) => [fw(@root), fw(@(root + 3)), fw(@(root + 7))];
 // These get a little distorted... may need to scale a bit
-I = fn(key) => fn(inst) => fn(dur) => {map(amp(0.4), major_triad(key)(fn(freq) => inst(dur, freq)))} | seq(time - dur),
-II = fn(key) => fn(inst) => fn(dur) => {map(amp(0.4), major_triad(key + 2)(fn(freq) => inst(dur, freq)))} | seq(time - dur),
-III = fn(key) => fn(inst) => fn(dur) => {map(amp(0.4), major_triad(key + 4)(fn(freq) => inst(dur, freq)))} | seq(time - dur),
-i = fn(key) => fn(inst) => fn(dur) => {map(amp(0.4), minor_triad(key)(fn(freq) => inst(dur, freq)))} | seq(time - dur),
+I = fn(key) => fn(inst) => fn(dur) => {map(amp(0.4), major_triad(key)(fn(freq) => inst(dur, freq)))} | seq(time - dur);
+II = fn(key) => fn(inst) => fn(dur) => {map(amp(0.4), major_triad(key + 2)(fn(freq) => inst(dur, freq)))} | seq(time - dur);
+III = fn(key) => fn(inst) => fn(dur) => {map(amp(0.4), major_triad(key + 4)(fn(freq) => inst(dur, freq)))} | seq(time - dur);
+i = fn(key) => fn(inst) => fn(dur) => {map(amp(0.4), minor_triad(key)(fn(freq) => inst(dur, freq)))} | seq(time - dur);
 
 // In the key of C
-// I = I(60),
-// II = II(60),
-// III = III(60),
-// i = i(60),
+// I = I(60);
+// II = II(60);
+// III = III(60);
+// i = i(60);
 
 // Played on a harmonica
-// I = I(harmonica),
-// II = II(harmonica),
-// III = III(harmonica),
-// i = i(harmonica),
+// I = I(harmonica);
+// II = II(harmonica);
+// III = III(harmonica);
+// i = i(harmonica);
 
 // Just notes on harmonica
-// Hh = fn(freq) => harmonica(H, freq) | seq(time - H),
+// Hh = fn(freq) => harmonica(H, freq) | seq(time - H);
 
 // <[I H, III H, i H]>
 // <[Hh(@67), Hh(@69)]>
@@ -176,13 +176,13 @@ i = fn(key) => fn(inst) => fn(dur) => {map(amp(0.4), minor_triad(key)(fn(freq) =
 // should be non-decreasing and `w` should *not* be a sequence-able waveform.
 // For example: on_beats(bass(Q) | unseq(), [1, 2, 3, 4])
 on_beats = fn(w, bs) => let
-  f = fn((current_beat, prev, ws), play_at_beat) =>
-      if
-        play_at_beat < current_beat
-      then
-        (play_at_beat, w, append(ws, [prev | seq(0)]))
-      else
-        (play_at_beat, w, append(ws,
-          [prev | seq(time - (duration_from_beats(play_at_beat - current_beat)))])),
-  (current_beat, prev, ws) = reduce(f, (1, 0 | fin(0), []), bs),
-  in <append(ws, [prev])>,
+    f = fn((current_beat, prev, ws), play_at_beat) =>
+        if
+          play_at_beat < current_beat
+        then
+          (play_at_beat, w, append(ws, [prev | seq(0)]))
+        else
+          (play_at_beat, w, append(ws,
+            [prev | seq(time - (duration_from_beats(play_at_beat - current_beat)))])),
+    (current_beat, prev, ws) = reduce(f, (1, 0 | fin(0), []), bs),
+  in <append(ws, [prev])>;

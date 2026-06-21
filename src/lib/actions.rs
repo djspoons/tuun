@@ -61,14 +61,14 @@ pub struct AppState {
 impl AppState {
     /// Builds an `AppState` from the contents of a source file. Parses
     /// bindings, fills every UI slot with an empty padding program, then
-    /// overwrites slots whose `//#{slot=N}` `Definition` exists in source.
+    /// overwrites slots whose `#{slot=N}` `Definition` exists in source.
     /// `input_path` is the file the splice path writes back to (use an
     /// empty `PathBuf` to suppress the write, e.g. in tests).
     pub fn from_source(
         source: String,
         input_path: std::path::PathBuf,
     ) -> Result<AppState, Vec<parser::Error>> {
-        let bindings = parser::parse_file::<MarkId>(&source)?;
+        let bindings = parser::parse_module::<MarkId>(&source)?;
         let total_slots = renderer::NUM_PROGRAM_BANKS * PROGRAMS_PER_BANK;
         let mut programs: Vec<renderer::Program> = (0..total_slots)
             .map(|i| renderer::Program {

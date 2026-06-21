@@ -144,7 +144,7 @@ impl PlayHelper {
                 e
             ))
         })?;
-        let mut bindings = parser::parse_file::<MarkId>(&contents).map_err(|errors| {
+        let mut bindings = parser::parse_module::<MarkId>(&contents).map_err(|errors| {
             errors.into_iter().next().unwrap_or_else(|| {
                 parser::Error::new(format!("Parse failed for {}", file_path.display()))
             })

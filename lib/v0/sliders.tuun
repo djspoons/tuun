@@ -1,32 +1,32 @@
-open std,
+open std;
 
 // Amplitude
-//#{slot=1,color=rgb(255, 200, 80),sliders=["amplitude:0.5:0:1"]}
-_ = $220 * amplitude,
+#{slot=1,color=rgb(255, 200, 80),sliders=["amplitude:0.5:0:1"]}
+_ = $220 * amplitude;
 
 // Duration (best in 4 beats per measure)
-//#{slot=2,color=rgb(122, 167, 120),sliders=["scale:0.5:0:1"]}
-_ = let w = $220 | fin(time - (scale * duration_from_beats(1))) | seq(time - (duration_from_beats(2))) in <[w, w]>,
+#{slot=2,color=rgb(122, 167, 120),sliders=["scale:0.5:0:1"]}
+_ = let w = $220 | fin(time - (scale * duration_from_beats(1))) | seq(time - (duration_from_beats(2))) in <[w, w]>;
 
 // Pulse width modulation
-//#{slot=3,color=rgb(183, 230, 40),sliders=["width:0.5:0:1"]}
-_ = pulse(width, 220),
-//#{slot=4,color=rgb(110, 144, 255),sliders=["frequency:25:1:110","depth:0.5:0:1"]}
-_ = pulse($frequency * depth, 220),
+#{slot=3,color=rgb(183, 230, 40),sliders=["width:0.5:0:1"]}
+_ = pulse(width, 220);
+#{slot=4,color=rgb(110, 144, 255),sliders=["frequency:25:1:110","depth:0.5:0:1"]}
+_ = pulse($frequency * depth, 220);
 
 // Filters
-//#{slot=5,color=rgb(231, 130, 251),sliders=["Q:0.707:0.1:1","cutoff:0.637:fn(x) => 100 * pow(110, x)"]}
-_ = square(220) | lpf(Q, cutoff),
+#{slot=5,color=rgb(231, 130, 251),sliders=["Q:0.707:0.1:1","cutoff:0.637:fn(x) => 100 * pow(110, x)"]}
+_ = square(220) | lpf(Q, cutoff);
 // Frequency
-//#{slot=6,color=rgb(255, 185, 190),sliders=["frequency:0.463:fn(x) => 50 * pow(20, x)"]}
-_ = $(frequency),
+#{slot=6,color=rgb(255, 185, 190),sliders=["frequency:0.463:fn(x) => 50 * pow(20, x)"]}
+_ = $(frequency);
 
 // Amplitude envelope
-//#{slot=7,color=rgb(250, 132, 105),sliders=["attack:0.5:0:1","decay:0.5:0:1"]}
-_ = $220 | ADSR(attack, decay, 0, 0, 0),
-//#{slot=8,color=rgb(250, 82, 82),sliders=["sustain_level:0.5:0:1","release:0.5:0:1"]}
-_ = $220 | ADSR(0.0, 0.0, sustain_level, 0.5, release),
+#{slot=7,color=rgb(250, 132, 105),sliders=["attack:0.5:0:1","decay:0.5:0:1"]}
+_ = $220 | ADSR(attack, decay, 0, 0, 0);
+#{slot=8,color=rgb(250, 82, 82),sliders=["sustain_level:0.5:0:1","release:0.5:0:1"]}
+_ = $220 | ADSR(0.0, 0.0, sustain_level, 0.5, release);
 
 // Harmonics
-//#{slot=9,sliders=["depth:0.5:0:1"]}
-_ = let over = fn (x) => $(220*x) * (1/x * depth) in $220 + {map(over, [3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 33, 35, 37, 39])},
+#{slot=9,sliders=["depth:0.5:0:1"]}
+_ = let over = fn (x) => $(220*x) * (1/x * depth) in $220 + {map(over, [3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 33, 35, 37, 39])};

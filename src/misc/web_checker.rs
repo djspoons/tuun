@@ -43,7 +43,7 @@ fn load_prelude() -> Bindings {
 fn load_modules() -> HashMap<String, Bindings> {
     let mut out = HashMap::new();
     for (name, content) in modules::EMBEDDED_MODULES {
-        match parser::parse_file::<renderer::MarkId>(content) {
+        match parser::parse_module::<renderer::MarkId>(content) {
             Ok(mut bindings) => {
                 bindings.insert(
                     0,

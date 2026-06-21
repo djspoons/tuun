@@ -1,11 +1,11 @@
-open std,
+open std;
 
 // A pure PM synth. Note that any of I, D, or fc can control the length of the output.
 pure_pm_synth = fn(I, D) => fn(fc) =>
   let
     fm = D/2 * fc
   in 
-    sine(2*pi * fc, sine(2*pi * fm, 0) * I),
+    sine(2*pi * fc, sine(2*pi * fm, 0) * I);
 
 pm_synth_brass = fn(fc, dur) => let
   // Roughly from Chowning (1977)
@@ -23,7 +23,7 @@ pm_synth_brass = fn(fc, dur) => let
   // Build the instrument
   synth = pure_pm_synth(I, D)
 in 
-  synth(fc) | envelope,
+  synth(fc) | envelope;
 
 
 pm_synth = fn(I_max, D, a, d, s_level, r) => fn(fc, dur) =>
@@ -33,25 +33,25 @@ pm_synth = fn(I_max, D, a, d, s_level, r) => fn(fc, dur) =>
     I = I_max | envelope,
     fm = D/2 * fc
   in 
-    sine(2*pi * fc, sine(2*pi * fm, 0) * I) | envelope,
+    sine(2*pi * fc, sine(2*pi * fm, 0) * I) | envelope;
 
-pm_synth_brass = pm_synth(5, 1, 0.1, 0.1, 0.7, 0.1),
+pm_synth_brass = pm_synth(5, 1, 0.1, 0.1, 0.7, 0.1);
 
-//#{slot=1}
-_ = $220,
-//#{slot=2}
-_ = {map(over(220), [1,3,5,7,9,11,13,15,17,19,21])},
-//#{slot=3}
-_ = square(220),
-//#{slot=4}
-_ = sawtooth(220),
-//#{slot=5}
-_ = triangle(220),
-//#{slot=6}
-_ = pulse(0.8, 220),
+#{slot=1}
+_ = $220;
+#{slot=2}
+_ = {map(over(220), [1,3,5,7,9,11,13,15,17,19,21])};
+#{slot=3}
+_ = square(220);
+#{slot=4}
+_ = sawtooth(220);
+#{slot=5}
+_ = triangle(220);
+#{slot=6}
+_ = pulse(0.8, 220);
 // PWM
-//#{slot=7}
-_ = pulse($44, 220),
+#{slot=7}
+_ = pulse($44, 220);
 // PM
-//#{slot=8}
-_ = pure_pm_synth(linear(0,0.2), 3)(220)
+#{slot=8}
+_ = pure_pm_synth(linear(0,0.2), 3)(220);

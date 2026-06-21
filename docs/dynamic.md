@@ -29,9 +29,9 @@ For example, a slider with the label "Q" that starts at 0.707 and can range betw
 Q:0.707:0.1:1.1
 ```
 
-In the native app, sliders are written as annotations: special comments that appear on the line just before the expression that they annotate.
+In the native app, sliders are written as annotations that appear on the lines just before the binding that they annotate.
 ```
-//#{sliders=["Q:0.707:0.1:1.1"]}
+#{sliders=["Q:0.707:0.1:1.1"]}
 _ = square(220) | lpf(Q, 2000)
 ```
 If a MIDI controller is detected, sliders are mapped to encoders or faders. If no MIDI controller is detected, the first two sliders are mapped to the x- and y-axis of the mouse position.

@@ -217,9 +217,9 @@ impl Program {
     /// Builds a `Program` from a `SourceBinding` plus its position in the
     /// file's bindings vec.
     ///
-    /// Only `Definition`s carrying a `//#{slot=N}` annotation become
-    /// programs (the slot determines the UI position); other `Definition`s
-    /// are treated as library bindings and are not shown.
+    /// Only `Definition`s carrying a `#{slot=N}` annotation become programs
+    /// (the slot determines the UI position); other `Definition`s are treated
+    /// as library bindings and are not shown.
     pub fn from_source_binding(
         sb: &parser::SourceBinding<MarkId>,
         binding_index: usize,

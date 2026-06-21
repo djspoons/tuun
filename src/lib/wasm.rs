@@ -84,7 +84,7 @@ impl Wasm {
         // the native runtime.
         let mut modules: HashMap<String, Vec<parser::SourceBinding<MarkId>>> = HashMap::new();
         for (name, content) in modules::EMBEDDED_MODULES {
-            let mut bindings = parser::parse_file::<MarkId>(content)
+            let mut bindings = parser::parse_module::<MarkId>(content)
                 .map_err(|errors| format!("Failed to parse module '{}': {:?}", name, errors))?;
             bindings.insert(
                 0,

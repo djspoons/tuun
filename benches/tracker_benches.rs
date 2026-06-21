@@ -121,7 +121,7 @@ fn bench_marks(c: &mut Criterion) {
 fn bench_large(c: &mut Criterion) {
     let mut bindings: Vec<parser::SourceBinding<u32>> = Vec::new();
     builtins::add_bindings(&mut bindings);
-    match parser::parse_file::<u32>(
+    match parser::parse_module::<u32>(
         r#"
     pi = 3.14159265,
     $ = fn(freq_hz) => sine(2*pi * freq_hz, 0),

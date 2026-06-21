@@ -21,8 +21,7 @@ use crate::waveform;
 /// Applies a note function `expr` to the given `args`, expecting a pair
 /// of Waveforms as a result.
 ///
-/// The expressions `expr` and `args` may reference slider variables but
-/// should otherwise be closed.
+/// The expressions `expr` and `args` should be closed.
 fn apply_note_function(
     expr: &parser::SourceExpr<MarkId>,
     args: Vec<parser::SourceExpr<MarkId>>,
@@ -72,7 +71,7 @@ fn apply_note_function(
 ///
 /// Programs whose `span` is empty (`0..0`) are treated as brand-new: a fresh
 /// `Definition` is appended at the end of source with a generated name and a
-/// `//#{slot=N}` annotation so the file picks it up on re-parse. Existing
+/// `#{slot=N}` annotation so the file picks it up on re-parse. Existing
 /// programs are spliced in place.
 ///
 /// Returns a user-visible warning message if any step failed; in that case
@@ -90,20 +89,8 @@ fn splice_program(state: &mut AppState, program_index: usize) -> Result<(), Stri
             // Padding slot still empty after edit — nothing to do.
             return Ok(());
         }
-        // Append a fresh Definition with a `slot=N` annotation. `_` is
-        // the auto-generated name.
-        // TODO double check this comma logic
-        let separator = if new_source.is_empty() {
-            ""
-        } else if new_source.ends_with(',') || new_source.ends_with('\n') {
-            "\n"
-        } else {
-            ",\n"
-        };
-        new_source.push_str(&format!(
-            "{}//#{{slot={}}}\n_ = {}",
-            separator, slot, edited_text
-        ));
+        // Append a fresh Definition with a `slot=N` annotation.
+        new_source.push_str(&format!("\n#{{slot={}}}\n_ = {};", slot, edited_text));
     } else {
         if edited_span.end > state.source.len() {
             return Err(format!(
@@ -115,7 +102,7 @@ fn splice_program(state: &mut AppState, program_index: usize) -> Result<(), Stri
         new_source.replace_range(edited_span, &edited_text);
     }
 
-    let new_bindings = parser::parse_file::<MarkId>(&new_source)
+    let new_bindings = parser::parse_module::<MarkId>(&new_source)
         .map_err(|errs| format!("Warning: source re-parse failed: {:?}", errs))?;
 
     // Build a slot -> (binding_index, expr_span) map from the new bindings,
@@ -590,10 +577,10 @@ mod tests {
     #[test]
     fn editing_existing_program_splices_into_its_span() {
         let source = "\
-//#{slot=1}
-kick = pulse(60),
-//#{slot=2}
-synth = saw(220)";
+#{slot=1}
+kick = pulse(60);
+#{slot=2}
+synth = saw(220);";
         let mut state = state_from(source);
 
         // Slot 2 → index 1. Sanity-check the initial extraction.
@@ -608,10 +595,10 @@ synth = saw(220)";
         assert_eq!(
             state.source,
             "\
-//#{slot=1}
-kick = pulse(60),
-//#{slot=2}
-synth = saw(440)"
+#{slot=1}
+kick = pulse(60);
+#{slot=2}
+synth = saw(440);"
         );
         // Slot 1 untouched, slot 2's program now reflects the new text and
         // span.
@@ -625,10 +612,10 @@ synth = saw(440)"
         // binding, not a UI program. Editing a UI program must leave
         // library bindings (and `Open` directives) in place.
         let source = "\
-open util.synths,
-pi = 3.14159,
-//#{slot=1}
-tone = saw(440)";
+open util.synths;
+pi = 3.14159;
+#{slot=1}
+tone = saw(440);";
         let mut state = state_from(source);
         assert_eq!(state.programs[0].text, "saw(440)");
 
@@ -638,21 +625,21 @@ tone = saw(440)";
         assert_eq!(
             state.source,
             "\
-open util.synths,
-pi = 3.14159,
-//#{slot=1}
-tone = saw(220)"
+open util.synths;
+pi = 3.14159;
+#{slot=1}
+tone = saw(220);"
         );
     }
 
     #[test]
     fn new_program_is_appended_with_slot_annotation() {
         // Editing a previously-empty padding slot (span 0..0) should
-        // append a fresh `//#{slot=N}\n_ = <text>` Definition at the
+        // append a fresh `#{slot=N}\n_ = <text>` Definition at the
         // end of source rather than splicing at offset 0.
         let source = "\
-//#{slot=1}
-kick = pulse(60)";
+#{slot=1}
+kick = pulse(60);";
         let mut state = state_from(source);
         assert_eq!(state.programs[0].text, "pulse(60)");
         // Slot 5 is padding initially.
@@ -667,10 +654,10 @@ kick = pulse(60)";
         assert_eq!(
             state.source,
             "\
-//#{slot=1}
-kick = pulse(60),
-//#{slot=5}
-_ = saw(440)"
+#{slot=1}
+kick = pulse(60);
+#{slot=5}
+_ = saw(440);"
         );
         // The new binding is now part of the bindings vec, and the slot 5
         // program has a real span/text.
@@ -685,8 +672,8 @@ _ = saw(440)"
         // The user enters Edit on an empty slot, types nothing, hits
         // Return. We must not append a phantom `_ = ` definition.
         let source = "\
-//#{slot=1}
-kick = pulse(60)";
+#{slot=1}
+kick = pulse(60);";
         let mut state = state_from(source);
         let before = state.source.clone();
         // text is already empty; just splice.
