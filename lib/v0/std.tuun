@@ -38,9 +38,15 @@ pulse = fn(width, freq_hz) =>
 
 
 // HELPERS
-amp = fn(level) => fn(w) => level * w;
-db = fn(db) => amp(pow(10.0, db / 20.0));
-// slope is in terms of level-change per second
+
+// Filter which multiplies by the given amplitude
+amp = fn(a) => fn(w) => a * w;
+
+// Convert level to amplitude
+level2amp = fn(db) => pow(10.0, db / 20.0);
+
+// Returns a linear waveform
+// slope is in terms of amplitude-change per second
 linear = fn(initial, slope) => initial + (time * slope);
 // Convert from MIDI note numbers to frequency
 @ = fn(m) => pow(2, (m - 69) / 12) * 440;
@@ -49,8 +55,8 @@ linear = fn(initial, slope) => initial + (time * slope);
 // ENVELOPES
 // Create waveforms for the four parts of the envelope.
 Aw = fn(dur) => linear(0.0, 1.0 / dur) | fin(time - dur) | seq(time - dur);
-Dw = fn(dur, level) => linear(1.0, (level - 1.0) / dur) | fin(time - dur) | seq(time - dur);
-Sw = fn(dur, level) => level | fin(time - dur) | seq(time - dur);
+Dw = fn(dur, a) => linear(1.0, (a - 1.0) / dur) | fin(time - dur) | seq(time - dur);
+Sw = fn(dur, a) => a | fin(time - dur) | seq(time - dur);
 // N.B. that R and Rw are not seq, since they are assumed to be the last part of the envelope.
 Rw = fn(dur, level) => linear(level, -level / dur) | fin(time - dur);
 // Combine them to create a new filter.
@@ -59,12 +65,17 @@ ADSR = fn(attack_dur, decay_dur, sustain_level, sustain_dur, release_dur) =>
                  Dw(decay_dur, sustain_level),
                  Sw(sustain_dur, sustain_level),
                  Rw(release_dur, sustain_level)]>;
+ADS = fn(attack_dur, decay_dur, sustain_level) =>
+  fn(w) => w * <[Aw(attack_dur), Dw(decay_dur, sustain_level), sustain_level]>;
 
 // Also, we can create component filters... though note that the first three
 // don't change the length, so they need to be combined with R (or fin).
+
+// TODO These are little strange as filters, since once one is applied, the
+// others sort of can't...
 A = fn(dur) => fn(w) => w * (Aw(dur) \ 1);
-D = fn(dur, level) => fn(w) => w * (Dw(dur, level) \ 1);
-S = fn(dur, level) => fn(w) => w * (Sw(dur, level) \ 1);
+D = fn(dur, level) => fn(w) => w * (Dw(dur, level) \ 1); // XXX should this be "followed by 1" or "followed by level"?
+S = fn(dur, level) => fn(w) => w * (Sw(dur, level) \ 1); // XXX same here
 R = fn(dur, level) => fn(w) => w * Rw(dur, level);
 
 over = fn(freq) => fn(x) => $(freq*x) * (1/x);
