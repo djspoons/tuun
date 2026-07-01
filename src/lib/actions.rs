@@ -508,14 +508,37 @@ fn apply_select_program(state: &mut AppState, i: usize) -> Vec<Effect> {
     }
     let changed = state.active_program_index != i;
     state.active_program_index = i;
-    // Always clear the status message: navigation represents a fresh
-    // context, so any prior "Removed pending..." / "Playing..." etc.
-    // shouldn't carry over.
-    let mut effects = vec![Effect::ShowMessage(String::new())];
+    // Replace the previous status with the newly-selected program's name.
+    // Navigation represents a fresh context, so any prior
+    // "Removed pending..." / "Playing..." etc. shouldn't carry over.
+    let mut effects = vec![Effect::ShowMessage(program_name(
+        &state.programs[i],
+        &state.bindings,
+    ))];
     if changed {
         effects.push(Effect::SyncEncoders);
     }
     effects
+}
+
+/// Returns the name to show in the status line for `program`, derived
+/// from its binding's pattern:
+/// - `Definition` with an `Identifier("_")` → empty (anonymous, don't
+///   clutter the status line).
+/// - `Definition` with any other identifier or a tuple pattern → the
+///   pattern's `Display` form.
+/// - No binding (padding slot) or an `Open`/`Empty` binding → empty.
+fn program_name(program: &renderer::Program, bindings: &[parser::SourceBinding<MarkId>]) -> String {
+    let Some(binding) = bindings.get(program.binding_index) else {
+        return String::new();
+    };
+    match &binding.binding {
+        parser::Binding::Definition(pattern, _) => match pattern {
+            parser::Pattern::Identifier(name) if name == "_" => String::new(),
+            _ => format!("{}", pattern),
+        },
+        _ => String::new(),
+    }
 }
 
 fn apply_install_keys(state: &mut AppState, program_index: usize) -> Vec<Effect> {
@@ -888,6 +911,53 @@ mod tests {
             "expected an empty ShowMessage to clear the status, got {:?}",
             effects
         );
+    }
+
+    #[test]
+    fn select_program_shows_binding_name_on_navigate() {
+        // Named binding → status shows the identifier; anonymous `_`
+        // binding → status is left blank; a slot with no source binding
+        // (padding) → also blank.
+        let source = "\
+#{slot=1}
+kick = pulse(60);
+#{slot=2}
+_ = saw(220);";
+        let mut state = AppState::from_source(source.to_string(), std::path::PathBuf::new())
+            .expect("test source should parse");
+
+        // Slot 1: named `kick`.
+        let effects = apply(&mut state, Action::SelectProgram(0));
+        let msg = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::ShowMessage(s) => Some(s.clone()),
+                _ => None,
+            })
+            .expect("expected a ShowMessage");
+        assert_eq!(msg, "kick");
+
+        // Slot 2: anonymous `_` — status stays empty.
+        let effects = apply(&mut state, Action::SelectProgram(1));
+        let msg = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::ShowMessage(s) => Some(s.clone()),
+                _ => None,
+            })
+            .expect("expected a ShowMessage");
+        assert_eq!(msg, "");
+
+        // Slot 3: padding (no binding for this slot).
+        let effects = apply(&mut state, Action::SelectProgram(2));
+        let msg = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::ShowMessage(s) => Some(s.clone()),
+                _ => None,
+            })
+            .expect("expected a ShowMessage");
+        assert_eq!(msg, "");
     }
 
     #[test]
