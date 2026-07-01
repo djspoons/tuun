@@ -116,8 +116,15 @@ impl InputHandler {
         let ctrl = keymod.contains(Mod::LCTRLMOD) || keymod.contains(Mod::RCTRLMOD);
         let gui_mod = keymod.contains(Mod::LGUIMOD) || keymod.contains(Mod::RGUIMOD);
         // Keys mode: piano keystrokes → NoteOn (suppress on auto-repeat
-        // so a held key doesn't retrigger), Escape exits.
+        // so a held key doesn't retrigger), Escape exits. Ctrl+C still
+        // exits the app so the user can quit without first backing out
+        // to Select mode.
         if let Mode::Keys = mode {
+            if let Some(Scancode::C) = scancode
+                && ctrl
+            {
+                return Some(vec![Action::Exit]);
+            }
             if let Some(Scancode::Escape) = scancode {
                 return Some(vec![Action::EnterSelectMode]);
             }
@@ -399,6 +406,39 @@ mod tests {
             .classify_keydown(Some(Scancode::Escape), Mod::NOMOD, false, &state, &status)
             .expect("Escape in Keys mode should produce actions");
         assert!(matches!(actions[0], Action::EnterSelectMode));
+    }
+
+    #[test]
+    fn keys_mode_ctrl_c_exits() {
+        // Ctrl+C is a universal quit and must work even when in Keys
+        // mode (where Escape is bound to exiting the mode, not the app).
+        let handler = InputHandler::new(false, 800, 600);
+        let state = test_state(Mode::Keys);
+        let status = empty_status();
+        let actions = handler
+            .classify_keydown(Some(Scancode::C), Mod::LCTRLMOD, false, &state, &status)
+            .expect("Ctrl+C in Keys mode should produce actions");
+        assert!(
+            matches!(actions[0], Action::Exit),
+            "expected Exit, got {:?}",
+            actions[0]
+        );
+    }
+
+    #[test]
+    fn keys_mode_bare_c_still_emits_note_on() {
+        // Sanity check that the Ctrl+C carve-out didn't break piano C.
+        let handler = InputHandler::new(false, 800, 600);
+        let state = test_state(Mode::Keys);
+        let status = empty_status();
+        let actions = handler
+            .classify_keydown(Some(Scancode::C), Mod::NOMOD, false, &state, &status)
+            .expect("C in Keys mode should produce actions");
+        assert!(
+            matches!(actions[0], Action::NoteOn { key: 64, .. }),
+            "expected NoteOn(E4=64), got {:?}",
+            actions[0]
+        );
     }
 
     #[test]
