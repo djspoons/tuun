@@ -9,7 +9,6 @@ use std::sync::mpsc;
 use std::collections::HashMap;
 
 use crate::actions::{self, AppState, Effect};
-use crate::launchkey;
 use crate::midi_input::Keys;
 use crate::parser;
 use crate::play_helper;
@@ -17,6 +16,7 @@ use crate::renderer::{self, MarkId, PROGRAMS_PER_BANK, WaveformId};
 use crate::slider;
 use crate::tracker;
 use crate::waveform;
+use crate::{launchkey, optimizer};
 
 /// Applies a note function `expr` to the given `args`, expecting a pair
 /// of Waveforms as a result.
@@ -576,7 +576,9 @@ impl EffectRunner {
                     parser::SourceExpr::float(velocity as f32 / 127.0),
                 ];
                 match apply_note_function(&keys.function, args, &keys.sliders) {
-                    Ok((mut note_on, note_off)) => {
+                    Ok((note_on, note_off)) => {
+                        let mut note_on = optimizer::optimize(note_on);
+                        let note_off = optimizer::optimize(note_off);
                         let level_db = keys.level_db;
                         keys.note_off_waveforms.insert(key, note_off);
                         // `note_on`'s `Marked(Slider(_))` nodes still hold the
