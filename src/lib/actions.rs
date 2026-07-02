@@ -77,11 +77,10 @@ impl AppState {
         }
         let total_slots = renderer::NUM_PROGRAM_BANKS * PROGRAMS_PER_BANK;
         let mut programs: Vec<renderer::Program> = (0..total_slots)
-            .map(|i| renderer::Program {
+            .map(|_| renderer::Program {
                 text: String::new(),
                 span: 0..0,
                 binding_index: bindings.len(),
-                id: renderer::id_from_index(i),
                 sliders: renderer::ProgramSliders::default(),
                 color: None,
                 level_db: 0.0,
@@ -90,16 +89,15 @@ impl AppState {
             })
             .collect();
         for (binding_index, sb) in bindings.iter().enumerate() {
-            if let Some(program) =
+            if let Some((program_index, program)) =
                 renderer::Program::from_source_binding(sb, binding_index, &source)
             {
-                let slot = program.id as usize;
-                if slot >= 1 && slot <= programs.len() {
-                    programs[slot - 1] = program;
+                if program_index < programs.len() {
+                    programs[program_index] = program;
                 } else {
                     println!(
                         "Ignoring program with out-of-range slot {} (max {})",
-                        slot,
+                        program_index + 1,
                         programs.len()
                     );
                 }
@@ -355,13 +353,16 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
         ],
         Action::StopProgram(i) => vec![
             Effect::StopProgram(i),
-            Effect::ShowMessage(format!("Stopped program {}", state.programs[i].id)),
+            Effect::ShowMessage(format!(
+                "Stopped program {}",
+                program_display_name(state, i)
+            )),
         ],
         Action::RemovePendingProgram(i) => vec![
             Effect::RemovePendingProgram(i),
             Effect::ShowMessage(format!(
                 "Removed pending waveform for program {}",
-                state.programs[i].id
+                program_display_name(state, i)
             )),
         ],
 
@@ -541,11 +542,38 @@ fn program_name(program: &renderer::Program, bindings: &[parser::SourceBinding<M
     }
 }
 
+/// Returns a user-facing label for the program at `program_index`.
+///
+/// Prefers the binding's name (the identifier it was bound to in source).
+/// Falls back to a bank-relative address like `"B:3"` where the letter is
+/// the bank (A..H) and the digit is a 1-based position within the bank —
+/// the same digit the user would type to select it.
+///
+/// **Convention:** user-visible strings that refer to a program must go
+/// through this helper. Do NOT interpolate a raw program index (or
+/// `index + 1`) — the grid has 8 banks of 8 slots, so a raw index doesn't
+/// match the keystroke the user would use, and program indices don't
+/// survive future layout changes.
+pub fn program_display_name(state: &AppState, program_index: usize) -> String {
+    if state.programs.get(program_index).is_none() {
+        return String::new();
+    }
+    let bank = program_index / PROGRAMS_PER_BANK;
+    let slot_in_bank = (program_index % PROGRAMS_PER_BANK) + 1;
+    let bank_letter = (b'A' + bank as u8) as char;
+    let name = program_name(&state.programs[program_index], &state.bindings);
+    if name.is_empty() {
+        format!("{}:{}", bank_letter, slot_in_bank)
+    } else {
+        format!("{}:{} ({})", bank_letter, slot_in_bank, name)
+    }
+}
+
 fn apply_install_keys(state: &mut AppState, program_index: usize) -> Vec<Effect> {
     // Applying with the currently-installed program uninstalls it; for any
     // other program, tries to install that one in its place.
     if let Some(keys) = &state.keys
-        && renderer::index_from_id(keys.id) == program_index
+        && keys.id == program_index
     {
         state.keys = None;
         return vec![Effect::ShowMessage("Uninstalled keys".to_string())];
@@ -735,7 +763,7 @@ fn apply_slider(
     let actual_value = slider::denormalize(&config.function, normalized).unwrap_or(0.0);
 
     let mut effects = vec![Effect::UpdateSlider {
-        id: WaveformId::Program(program.id),
+        id: WaveformId::Program(program_index),
         slider: label.clone(),
         value: actual_value,
     }];
@@ -744,7 +772,7 @@ fn apply_slider(
     // slider value to every active key waveform. The runner will look up
     // active Key marks from the tracker status when handling this effect.
     if let Some(keys) = state.keys.as_mut()
-        && keys.id == program.id
+        && keys.id == program_index
     {
         keys.sliders.normalized_values[slider_index] = normalized;
         effects.push(Effect::UpdateActiveKeySliders {
@@ -778,17 +806,16 @@ fn apply_level_db(state: &mut AppState, program_index: usize, level_db: f32) -> 
     };
     program.level_db = level_db;
     let amplitude = play_helper::db_to_amplitude(level_db);
-    let program_id = program.id;
 
     let mut effects = vec![Effect::ModifyWaveform {
-        id: WaveformId::Program(program_id),
+        id: WaveformId::Program(program_index),
         mark_id: MarkId::Amplitude,
         waveform: waveform::Waveform::Const(amplitude),
     }];
 
     // Mirror onto installed keys.
     if let Some(keys) = state.keys.as_mut()
-        && keys.id == program_id
+        && keys.id == program_index
     {
         keys.level_db = level_db;
         effects.push(Effect::ModifyActiveKeysAmplitude { amplitude });
@@ -803,10 +830,10 @@ fn apply_level_db(state: &mut AppState, program_index: usize, level_db: f32) -> 
         name: "level".to_string(),
         value: formatted_level.clone(),
     });
-    // TODO should be (program_id mod bank) here and elsewhere
     effects.push(Effect::ShowMessage(format!(
         "level({}) = {}",
-        program_id, formatted_level
+        program_display_name(state, program_index),
+        formatted_level
     )));
     effects
 }
@@ -818,7 +845,7 @@ mod tests {
 
     fn test_state() -> AppState {
         AppState {
-            programs: vec![Program::from_string("test", 0, 1)],
+            programs: vec![Program::from_string("test", 0)],
             bindings: Vec::new(),
             source: String::new(),
             input_path: std::path::PathBuf::new(),
@@ -860,7 +887,7 @@ mod tests {
         // in `Mode::Edit.errors`, otherwise the renderer's per-character
         // highlighting goes stale.
         let mut state = AppState {
-            programs: vec![Program::from_string("", 0, 1)],
+            programs: vec![Program::from_string("", 0)],
             bindings: Vec::new(),
             source: String::new(),
             input_path: std::path::PathBuf::new(),
@@ -899,7 +926,7 @@ mod tests {
     fn advance_program_emits_empty_show_message_to_clear_status() {
         // Two programs so AdvanceProgram(1) actually moves the index.
         let mut state = test_state();
-        state.programs.push(Program::from_string("second", 1, 2));
+        state.programs.push(Program::from_string("second", 1));
         let effects = apply(&mut state, Action::AdvanceProgram(1));
         assert_eq!(state.active_program_index, 1);
         // The empty ShowMessage is what gets folded into Mode::Select to

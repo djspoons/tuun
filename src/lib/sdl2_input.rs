@@ -157,8 +157,7 @@ impl InputHandler {
                 Some(vec![Action::EnterMoveSlidersMode])
             }
             (Mode::Select, Some(Scancode::Escape)) => {
-                let program = &programs[active_program_index];
-                let id = WaveformId::Program(program.id);
+                let id = WaveformId::Program(active_program_index);
                 let now = Instant::now();
                 if gui_mod && status.has_active_mark(now, id.clone(), MarkId::TopLevel) {
                     Some(vec![Action::StopProgram(active_program_index)])
@@ -186,13 +185,12 @@ impl InputHandler {
                     } else {
                         Some(vec![Action::ShowMessage(format!(
                             "Program {} is not a valid waveform",
-                            active_program_index
+                            actions::program_display_name(state, active_program_index)
                         ))])
                     }
                 } else {
                     // Plain Return: remove any pending then enter Edit mode.
-                    let program = &programs[active_program_index];
-                    let id = WaveformId::Program(program.id);
+                    let id = WaveformId::Program(active_program_index);
                     let now = Instant::now();
                     let mut actions = Vec::new();
                     if status.has_pending_mark(now, id, MarkId::TopLevel) {
@@ -203,8 +201,7 @@ impl InputHandler {
                 }
             }
             (Mode::Edit { .. }, Some(Scancode::Escape)) => {
-                let program = &programs[active_program_index];
-                let id = WaveformId::Program(program.id);
+                let id = WaveformId::Program(active_program_index);
                 let now = Instant::now();
                 if gui_mod && status.has_active_mark(now, id, MarkId::TopLevel) {
                     // Cmd+Escape stops the active waveform but stays in Edit
@@ -335,7 +332,7 @@ mod tests {
 
     fn test_state(mode: Mode) -> AppState {
         AppState {
-            programs: vec![Program::from_string("test", 0, 1)],
+            programs: vec![Program::from_string("test", 0)],
             bindings: Vec::new(),
             source: String::new(),
             input_path: std::path::PathBuf::new(),

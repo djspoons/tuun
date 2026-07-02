@@ -12,7 +12,9 @@ use crate::waveform;
 //
 // TODO maybe move out of here since this isn't tied to MIDI input anymore
 pub struct Keys {
-    pub id: renderer::ProgramId,
+    /// 0-based index into `AppState.programs` of the program installed as
+    /// the keys instrument.
+    pub id: usize,
     /// A function which takes a pair (MIDI note, velocity) and returns a pair
     /// of Waveforms to be used for note-on and note-off events.
     ///
@@ -78,10 +80,10 @@ pub fn classify(
         Event::DAWTopPadDown { index } => match state.daw_pad_mode {
             actions::DawPadMode::ClipLauncher => {
                 let program_index = bank_start + *index as usize;
-                let program = programs.get(program_index)?;
-                let id = WaveformId::Program(program.id);
+                programs.get(program_index)?;
+                let id = WaveformId::Program(program_index);
                 let now = Instant::now();
-                let is_installed_keys = keys.as_ref().is_some_and(|k| k.id == program.id);
+                let is_installed_keys = keys.as_ref().is_some_and(|k| k.id == program_index);
                 if status.has_active_mark(now, id.clone(), MarkId::TopLevel) {
                     Some(vec![Action::StopProgram(program_index)])
                 } else if is_installed_keys {
@@ -100,10 +102,10 @@ pub fn classify(
         Event::DAWBottomPadDown { index } => match state.daw_pad_mode {
             actions::DawPadMode::ClipLauncher => {
                 let program_index = bank_start + *index as usize;
-                let program = programs.get(program_index)?;
-                let id = WaveformId::Program(program.id);
+                programs.get(program_index)?;
+                let id = WaveformId::Program(program_index);
                 let now = Instant::now();
-                let is_installed_keys = keys.as_ref().is_some_and(|k| k.id == program.id);
+                let is_installed_keys = keys.as_ref().is_some_and(|k| k.id == program_index);
                 if status.has_pending_mark(now, id.clone(), MarkId::TopLevel) {
                     Some(vec![Action::RemovePendingProgram(program_index)])
                 } else if is_installed_keys {
@@ -225,6 +227,7 @@ fn update_pads_clip_launcher(
         .iter()
         .enumerate()
     {
+        let program_index = bank_start + i;
         const U7_MAX: u8 = u8::MAX / 2;
         // 7-bit color values for the current program.
         let (red, blue, green) = match program.color {
@@ -232,9 +235,9 @@ fn update_pads_clip_launcher(
             None => (0, 127, 127),
         };
         // Top row is based on active waveforms
-        if status.has_active_mark(now, WaveformId::Program(program.id), MarkId::TopLevel)
+        if status.has_active_mark(now, WaveformId::Program(program_index), MarkId::TopLevel)
             || (if let Some(Keys { id, .. }) = &state.keys
-                && *id == program.id
+                && *id == program_index
             {
                 status
                     .marks
@@ -252,7 +255,7 @@ fn update_pads_clip_launcher(
             );
             launchkey.set_daw_top_pad_color(i as u8, 0, intensity, 0);
         } else if let Some(Keys { id, .. }) = &state.keys
-            && *id == program.id
+            && *id == program_index
         {
             // If it's the installed keys program, don't color the top pad (unless it's playing).
             launchkey.set_daw_top_pad_color(i as u8, 0, 0, 0);
@@ -263,10 +266,10 @@ fn update_pads_clip_launcher(
             launchkey.set_daw_top_pad_color(i as u8, 0, 0, 0);
         }
         // Bottom row is based on pending waveforms
-        if status.has_pending_mark(now, WaveformId::Program(program.id), MarkId::TopLevel) {
+        if status.has_pending_mark(now, WaveformId::Program(program_index), MarkId::TopLevel) {
             launchkey.set_daw_bottom_pad_color(i as u8, 0, 127, 0);
         } else if let Some(Keys { id, .. }) = &state.keys
-            && *id == program.id
+            && *id == program_index
         {
             // If it's the installed keys program, pulse the configured color.
             let intensity = now
@@ -299,14 +302,15 @@ fn update_pads_keys_installer(
     for i in 0..renderer::PROGRAMS_PER_BANK {
         launchkey.set_daw_top_pad_color(i as u8, 0, 0, 0);
 
-        let program = match state.programs.get(bank_start + i) {
+        let program_index = bank_start + i;
+        let program = match state.programs.get(program_index) {
             Some(p) => p,
             None => {
                 launchkey.set_daw_bottom_pad_color(i as u8, 0, 0, 0);
                 continue;
             }
         };
-        let installed = state.keys.as_ref().is_some_and(|k| k.id == program.id);
+        let installed = state.keys.as_ref().is_some_and(|k| k.id == program_index);
         // If this program is the installed keys instrument, light it up
         // regardless of whether the current text is still a valid keys
         // program — the installed function is what's actually playing.

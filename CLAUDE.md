@@ -21,3 +21,11 @@
 ## Primary Stack
 - Main language: Rust (use idiomatic patterns, prefer `Result` over panics, run `cargo fmt` and `cargo clippy` after each change).
 - Secondary: Ruby/Jekyll for docs/site work.
+
+## UI Conventions
+
+### Program identifiers in user-visible text
+- User-visible strings that name a program (log lines, status messages, `println!` output) must go through `actions::program_display_name(state, program_index)`. Do NOT interpolate a raw program index or `index + 1`.
+- The helper prefers the binding's name (e.g. `kick`) and falls back to a bank-relative address like `B:3` — the letter is the bank (A..H), the digit is the 1-based slot within the bank (matching the digit the user types to select it).
+- Rationale: raw indices span 1..64 across 8 banks of 8, so they don't match the keystroke the user would use (e.g. `1` on bank 2 is index 9). Bank-relative addresses are what the user expects to see in response.
+- Internal/debug logs about source parsing (e.g. "Ignoring program with out-of-range slot N") can still show the raw slot number — that's what the source file declares.

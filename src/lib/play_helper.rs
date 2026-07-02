@@ -261,10 +261,15 @@ impl PlayHelper {
     }
 
     /// Plays a program as a waveform. Returns the user-visible message on
-    /// success or failure.
+    /// success or failure. `program_index` is the 0-based position in
+    /// `state.programs` and doubles as the tracker's waveform id.
+    /// `display_name` is the user-facing label (see
+    /// `actions::program_display_name`).
     pub fn play_program_as_waveform(
         &mut self,
+        program_index: usize,
         program: &Program,
+        display_name: &str,
         status: &tracker::Status<WaveformId, MarkId>,
         start_at_next_measure: bool,
         repeat_after_measures: Option<u32>,
@@ -273,11 +278,11 @@ impl PlayHelper {
         let repeat_every;
         if let Some(measures) = repeat_after_measures {
             let beats = (measures * self.beats_per_measure) as u64;
-            message = format!("Looping waveform {} every {:?} beats", program.id, beats);
+            message = format!("Looping waveform {} every {:?} beats", display_name, beats);
             repeat_every = Some(duration_from_beats(self.tempo, beats));
         } else {
             // Otherwise, play it once
-            message = format!("Playing waveform {}", program.id);
+            message = format!("Playing waveform {}", display_name);
             repeat_every = None;
         }
         let start = if start_at_next_measure {
@@ -299,7 +304,7 @@ impl PlayHelper {
             }
             .send(tracker::Command::Play {
                 // TODO maybe extend the top-level mark to the full measure?
-                id: WaveformId::Program(program.id),
+                id: WaveformId::Program(program_index),
                 waveform: build_top_level_waveform(waveform, program.level_db),
                 start,
                 repeat_every,

@@ -24,14 +24,13 @@ use crate::waveform;
 // TODO: rename Program as Clip? Or make Clip a type of program?
 // And the other type is Key(channel, key_number)?
 
-pub type ProgramId = i32;
-
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum WaveformId {
     // Beats are silent waveforms that are used to keep time. The bool tracks whether
     // it is an odd or even measure (false == odd).
     Beats(bool),
-    Program(ProgramId),
+    /// A program identified by its 0-based index in `AppState.programs`.
+    Program(usize),
     /// Identifies a waveform playing in response to striking a key on a MIDI keyboard
     /// or equivalent controller.
     Key(u8),
@@ -41,16 +40,6 @@ impl WaveformId {
     pub fn is_beats(&self) -> bool {
         matches!(self, WaveformId::Beats(_))
     }
-}
-
-// These two functions allow for explicit conversion from index to id.
-
-pub fn index_from_id(id: ProgramId) -> usize {
-    (id - 1) as usize
-}
-
-pub fn id_from_index(index: usize) -> ProgramId {
-    (index + 1) as ProgramId
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -188,7 +177,6 @@ pub struct Program {
     pub span: Range<usize>,
     /// Index of the originating binding in the file's `Vec<SourceBinding>`.
     pub binding_index: usize,
-    pub id: ProgramId,
     pub sliders: ProgramSliders,
     pub color: Option<(u8, u8, u8)>,
     pub level_db: f32,
@@ -200,12 +188,11 @@ pub struct Program {
 
 impl Program {
     /// Builds a program from a string without attempting to parse it.
-    pub fn from_string(text: &str, binding_index: usize, program_index: usize) -> Program {
+    pub fn from_string(text: &str, binding_index: usize) -> Program {
         Program {
             text: text.to_string(),
             span: 0..0,
             binding_index,
-            id: id_from_index(program_index),
             sliders: ProgramSliders::default(),
             color: None,
             level_db: 0.0,
@@ -215,7 +202,8 @@ impl Program {
     }
 
     /// Builds a `Program` from a `SourceBinding` plus its position in the
-    /// file's bindings vec.
+    /// file's bindings vec. Returns the 0-based program index (derived from
+    /// the `#{slot=N}` annotation) alongside the constructed `Program`.
     ///
     /// Only `Definition`s carrying a `#{slot=N}` annotation become programs
     /// (the slot determines the UI position); other `Definition`s are treated
@@ -224,7 +212,7 @@ impl Program {
         sb: &parser::SourceBinding<MarkId>,
         binding_index: usize,
         source: &str,
-    ) -> Option<Program> {
+    ) -> Option<(usize, Program)> {
         // TODO NextBank is ignored!
         let mut sliders = ProgramSliders::default();
         let mut color: Option<(u8, u8, u8)> = None;
@@ -254,17 +242,20 @@ impl Program {
             {
                 let span = s.clone();
                 let text = source[s.clone()].to_string();
-                Some(Program {
-                    text,
-                    span,
-                    binding_index,
-                    id: slot as ProgramId,
-                    sliders,
-                    color,
-                    level_db,
-                    cached_waveform: None,
-                    cached_keys_instrument: None,
-                })
+                let program_index = (slot as usize).saturating_sub(1);
+                Some((
+                    program_index,
+                    Program {
+                        text,
+                        span,
+                        binding_index,
+                        sliders,
+                        color,
+                        level_db,
+                        cached_waveform: None,
+                        cached_keys_instrument: None,
+                    },
+                ))
             } else {
                 println!(
                     "Found source expression without span or invalid span: {:?}",
@@ -590,7 +581,7 @@ impl Renderer {
                 .unwrap_or(INACTIVE_COLOR);
             let color = match (
                 &mode,
-                status.has_active_mark(now, WaveformId::Program(program.id), MarkId::TopLevel),
+                status.has_active_mark(now, WaveformId::Program(index), MarkId::TopLevel),
             ) {
                 (_, true) => ACTIVE_COLOR,
                 (Mode::Edit { .. }, _) if index == active_program_index => EDIT_COLOR,
@@ -598,7 +589,7 @@ impl Renderer {
             };
             let number = char::from_u32(0x31 + i as u32).unwrap().to_string();
             let mut number_texture = make_texture(&font, color, &texture_creator, &number);
-            if status.has_active_mark(now, WaveformId::Program(program.id), MarkId::TopLevel) {
+            if status.has_active_mark(now, WaveformId::Program(index), MarkId::TopLevel) {
                 let intensity = (now
                     .duration_since(current_beat_start)
                     .div_duration_f32(current_beat_duration)
@@ -621,7 +612,7 @@ impl Renderer {
                     )),
                 )
                 .unwrap();
-            if status.has_pending_mark(now, WaveformId::Program(program.id), MarkId::TopLevel) {
+            if status.has_pending_mark(now, WaveformId::Program(index), MarkId::TopLevel) {
                 let circle = char::from_u32(0x25EF).unwrap().to_string();
                 let circle_texture =
                     make_texture(&circle_font, ACTIVE_COLOR, &texture_creator, &circle);
@@ -845,7 +836,7 @@ impl Renderer {
             for mark in status.marks.iter().rev() {
                 // Reverse so we draw earlier ones last
                 let program_index = match &mark.waveform_id {
-                    WaveformId::Program(id) => index_from_id(*id),
+                    WaveformId::Program(index) => *index,
                     _ => continue,
                 };
                 // Only draw Mark(1)
@@ -1207,7 +1198,7 @@ mod tests {
     #[test]
     fn edit_text_updates_text_and_invalidates_cache() {
         // Editing the list passed to `on_beats(...)` inside a program's text.
-        let mut program = Program::from_string("on_beats( // pattern\n [0, 1, 2, 3])", 0, 1);
+        let mut program = Program::from_string("on_beats( // pattern\n [0, 1, 2, 3])", 0);
         // Artificially set these so we can check them later.
         program.cached_waveform = Some(waveform::Waveform::Time(()));
         program.cached_keys_instrument = Some(parser::SourceExpr::float(1.0));
@@ -1227,7 +1218,7 @@ mod tests {
 
     #[test]
     fn edit_text_rejects_bad_edit_atomically() {
-        let mut program = Program::from_string("[1, 2, 3]", 0, 1);
+        let mut program = Program::from_string("[1, 2, 3]", 0);
         // Artificially set these so we can check them later.
         program.cached_waveform = Some(waveform::Waveform::Time(()));
         program.cached_keys_instrument = Some(parser::SourceExpr::float(1.0));

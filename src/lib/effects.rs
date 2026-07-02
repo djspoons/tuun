@@ -429,12 +429,15 @@ impl EffectRunner {
                 repeat_after_measures,
             } => {
                 // TODO do we need to get()/match here?
-                let program = match state.programs.get(program_index) {
-                    Some(p) => p,
-                    None => return,
-                };
+                if state.programs.get(program_index).is_none() {
+                    return;
+                }
+                let display_name = actions::program_display_name(state, program_index);
+                let program = &state.programs[program_index];
                 if let Some(message) = world.play_helper.play_program_as_waveform(
+                    program_index,
                     program,
+                    &display_name,
                     world.status,
                     start_at_next_measure,
                     repeat_after_measures,
@@ -443,21 +446,19 @@ impl EffectRunner {
                 }
             }
             Effect::StopProgram(program_index) => {
-                let program = match state.programs.get(program_index) {
-                    Some(p) => p,
-                    None => return,
-                };
+                if state.programs.get(program_index).is_none() {
+                    return;
+                }
                 world
                     .play_helper
-                    .stop_waveform(WaveformId::Program(program.id));
+                    .stop_waveform(WaveformId::Program(program_index));
             }
             Effect::RemovePendingProgram(program_index) => {
-                let program = match state.programs.get(program_index) {
-                    Some(p) => p,
-                    None => return,
-                };
+                if state.programs.get(program_index).is_none() {
+                    return;
+                }
                 let _ = self.command_sender.send(tracker::Command::RemovePending {
-                    id: WaveformId::Program(program.id),
+                    id: WaveformId::Program(program_index),
                 });
             }
             Effect::ModifyWaveform {
@@ -554,15 +555,17 @@ impl EffectRunner {
                 let program = &state.programs[program_index];
                 if let Some(expr) = &program.cached_keys_instrument {
                     let new_keys = Keys {
-                        id: program.id,
+                        id: program_index,
                         function: expr.clone(),
                         sliders: program.sliders.clone(),
                         level_db: program.level_db,
                         note_off_waveforms: HashMap::new(),
                     };
-                    let id = new_keys.id;
                     state.keys = Some(new_keys);
-                    state.message = format!("Installed keys from program {}", id);
+                    state.message = format!(
+                        "Installed keys from program {}",
+                        actions::program_display_name(state, program_index)
+                    );
                 }
             }
 
@@ -589,7 +592,7 @@ impl EffectRunner {
                         // this fresh `Key` id (so its next ramp has a sensible
                         // "previous value" to start from).
                         let id = WaveformId::Key(key);
-                        let program = &state.programs[renderer::index_from_id(keys.id)];
+                        let program = &state.programs[keys.id];
                         let last_slider_values: HashMap<(WaveformId, String), f32> =
                             play_helper::substitute_current_slider_values(
                                 &mut note_on,
@@ -703,13 +706,15 @@ impl EffectRunner {
             }
 
             Effect::DumpActiveWaveform => {
+                let program_index = state.active_program_index;
+                let display_name = actions::program_display_name(state, program_index);
                 let program = state.active_program();
                 if let Some(waveform) = &program.cached_waveform {
-                    println!("Waveform definition for program {}:", program.id);
+                    println!("Waveform definition for program {}:", display_name);
                     println!("{:#?}", waveform);
                     state.message = "Dumped waveform to console".to_string();
                 } else {
-                    println!("No waveform associated with program {}:", program.id);
+                    println!("No waveform associated with program {}:", display_name);
                     state.message = "No waveform associated with current program".to_string();
                 }
             }

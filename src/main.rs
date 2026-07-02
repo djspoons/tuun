@@ -103,19 +103,33 @@ pub fn main() {
             command_sender.clone(),
             command_sender,
         );
-        for program in state.programs.iter_mut() {
-            println!("Playing program {}: {}", program.id, program.text);
+        // Snapshot display names ahead of the mutable iteration below —
+        // `program_display_name` borrows `state` immutably, which would
+        // conflict with `state.programs.iter_mut()` if computed inline.
+        let display_names: Vec<String> = (0..state.programs.len())
+            .map(|i| actions::program_display_name(&state, i))
+            .collect();
+        for (program_index, program) in state.programs.iter_mut().enumerate() {
+            let display_name = &display_names[program_index];
+            println!("Playing program {}: {}", display_name, program.text);
             match play_helper.evaluate_program(&state.bindings, program) {
                 Ok(expr) => match expr.expr {
                     // TODO also need to handle Seq here
                     parser::Expr::Waveform(w) => {
                         program.cached_waveform = Some(w);
-                        play_helper.play_program_as_waveform(program, &status, false, None);
+                        play_helper.play_program_as_waveform(
+                            program_index,
+                            program,
+                            display_name,
+                            &status,
+                            false,
+                            None,
+                        );
                     }
                     other => {
                         println!(
                             "Program {} did not evaluate to a waveform: {}",
-                            program.id, other
+                            display_name, other
                         );
                     }
                 },
@@ -235,12 +249,12 @@ pub fn main() {
 
     // Copy initial values for each slider for all programs
     let mut last_slider_values: HashMap<(WaveformId, String), f32> = HashMap::new();
-    for program in state.programs.iter() {
+    for (program_index, program) in state.programs.iter().enumerate() {
         for (j, config) in program.sliders.configs.iter().enumerate() {
             let value = slider::denormalize(&config.function, program.sliders.normalized_values[j])
                 .unwrap_or(0.0);
             last_slider_values.insert(
-                (WaveformId::Program(program.id), config.label.clone()),
+                (WaveformId::Program(program_index), config.label.clone()),
                 value,
             );
         }
