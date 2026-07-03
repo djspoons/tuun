@@ -538,7 +538,7 @@ fn stop_program_effects(state: &AppState, ctx: &Context, i: usize) -> Vec<Effect
         Effect::StopProgram(i),
         Effect::ShowMessage(format!(
             "Stopped program {}",
-            program_display_name(state, i)
+            state.programs.display_name(i)
         )),
     ]
 }
@@ -556,7 +556,7 @@ fn remove_pending_effects(state: &AppState, ctx: &Context, i: usize) -> Vec<Effe
         Effect::RemovePendingProgram(i),
         Effect::ShowMessage(format!(
             "Removed pending waveform for program {}",
-            program_display_name(state, i)
+            state.programs.display_name(i)
         )),
     ]
 }
@@ -570,64 +570,11 @@ fn apply_select_program(state: &mut AppState, i: usize) -> Vec<Effect> {
     // Replace the previous status with the newly-selected program's name.
     // Navigation represents a fresh context, so any prior
     // "Removed pending..." / "Playing..." etc. shouldn't carry over.
-    let mut effects = vec![Effect::ShowMessage(program_name(
-        &state.programs.programs()[i],
-        &state.programs.bindings,
-    ))];
+    let mut effects = vec![Effect::ShowMessage(state.programs.name(i))];
     if changed {
         effects.push(Effect::SyncEncoders);
     }
     effects
-}
-
-/// Returns the name to show in the status line for `program`, derived
-/// from its binding's pattern:
-/// - `Definition` with an `Identifier("_")` → empty (anonymous, don't
-///   clutter the status line).
-/// - `Definition` with any other identifier or a tuple pattern → the
-///   pattern's `Display` form.
-/// - No binding (padding slot) or an `Open`/`Empty` binding → empty.
-fn program_name(program: &Program, bindings: &[parser::SourceBinding<MarkId>]) -> String {
-    let Some(binding) = bindings.get(program.binding_index()) else {
-        return String::new();
-    };
-    match &binding.binding {
-        parser::Binding::Definition(pattern, _) => match pattern {
-            parser::Pattern::Identifier(name) if name == "_" => String::new(),
-            _ => format!("{}", pattern),
-        },
-        _ => String::new(),
-    }
-}
-
-/// Returns a user-facing label for the program at `program_index`.
-///
-/// Prefers the binding's name (the identifier it was bound to in source).
-/// Falls back to a bank-relative address like `"B:3"` where the letter is
-/// the bank (A..H) and the digit is a 1-based position within the bank —
-/// the same digit the user would type to select it.
-///
-/// **Convention:** user-visible strings that refer to a program must go
-/// through this helper. Do NOT interpolate a raw program index (or
-/// `index + 1`) — the grid has 8 banks of 8 slots, so a raw index doesn't
-/// match the keystroke the user would use, and program indices don't
-/// survive future layout changes.
-pub fn program_display_name(state: &AppState, program_index: usize) -> String {
-    if state.programs.program(program_index).is_none() {
-        return String::new();
-    }
-    let bank = program_index / PROGRAMS_PER_BANK;
-    let slot_in_bank = (program_index % PROGRAMS_PER_BANK) + 1;
-    let bank_letter = (b'A' + bank as u8) as char;
-    let name = program_name(
-        &state.programs.programs()[program_index],
-        &state.programs.bindings,
-    );
-    if name.is_empty() {
-        format!("{}:{}", bank_letter, slot_in_bank)
-    } else {
-        format!("{}:{} ({})", bank_letter, slot_in_bank, name)
-    }
 }
 
 fn apply_install_keys(state: &mut AppState, program_index: usize) -> Vec<Effect> {
@@ -831,7 +778,7 @@ fn apply_level_db(state: &mut AppState, program_index: usize, level_db: f32) -> 
     });
     effects.push(Effect::ShowMessage(format!(
         "level({}) = {}",
-        program_display_name(state, program_index),
+        state.programs.display_name(program_index),
         formatted_level
     )));
     effects

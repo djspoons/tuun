@@ -106,7 +106,7 @@ pub fn main() {
             if state.programs.programs()[program_index].is_empty() {
                 continue;
             }
-            let display_name = actions::program_display_name(&state, program_index);
+            let display_name = state.programs.display_name(program_index);
             let program = &state.programs.programs()[program_index];
             println!("Playing program {}: {}", display_name, program.text());
             match play_helper.evaluate_program(&state.programs, program_index) {

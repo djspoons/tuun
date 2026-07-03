@@ -176,7 +176,7 @@ impl InputHandler {
                     } else {
                         Some(vec![Action::ShowMessage(format!(
                             "Program {} is not a valid waveform",
-                            actions::program_display_name(state, active_program_index)
+                            state.programs.display_name(active_program_index)
                         ))])
                     }
                 } else {

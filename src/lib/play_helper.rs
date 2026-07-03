@@ -218,8 +218,7 @@ impl PlayHelper {
         set: &ProgramSet,
         program_index: usize,
     ) -> Result<parser::SourceExpr<MarkId>, String> {
-        let program = &set.programs[program_index];
-        let expr = match parser::parse_program(program.text()) {
+        let expr = match parser::parse_program(set.programs()[program_index].text()) {
             Err(errors) => {
                 println!("Errors while parsing input: {:?}", errors);
                 let message = format!("Error: {}", errors[0]);
@@ -229,27 +228,7 @@ impl PlayHelper {
         };
         println!("parser::parse_program returned: {}", &expr);
 
-        let mut bindings: Vec<parser::SourceBinding<MarkId>> =
-            set.bindings[..program.binding_index()].to_vec();
-        // TODO this is a pretty big hack but there's an interesting question
-        // about what sliders in *other* bindings mean. To avoid answering that
-        // for the moment, just assume that only "_" bindings have sliders and
-        // that they can't be used so we can safely filter them out here. I
-        // think the right answer is that we should bind sliders uniquely in
-        // each binding... or at least those that have slots? (Otherwise, how
-        // can you modify the slider value?)
-        bindings.retain(|b| match &b.binding {
-            parser::Binding::Definition(p, _) => {
-                !matches!(p, parser::Pattern::Identifier(v) if v == "_")
-            }
-            _ => true,
-        });
-        slider::append_slider_bindings(
-            program.sliders().configs(),
-            program.sliders().normalized_values(),
-            MarkId::Slider,
-            &mut bindings,
-        );
+        let bindings = set.evaluation_bindings(program_index);
 
         let expr = match parser::evaluate(|path| self.resolve(path), &bindings, expr) {
             Err(error) => {
@@ -266,7 +245,7 @@ impl PlayHelper {
     /// success or failure. `program_index` is the 0-based position in
     /// `state.programs` and doubles as the tracker's waveform id.
     /// `display_name` is the user-facing label (see
-    /// `actions::program_display_name`).
+    /// `ProgramSet::display_name`).
     pub fn play_program_as_waveform(
         &mut self,
         program_index: usize,
