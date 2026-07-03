@@ -40,13 +40,8 @@ impl DawPadMode {
 /// Internal state of the application. The reducer takes `&mut AppState` and mutates it in
 /// place; `main` keeps a single instance for the lifetime of the program.
 pub struct AppState {
-    pub programs: Vec<Program>,
-    /// File-level bindings from the loaded source.
-    pub bindings: Vec<parser::SourceBinding<MarkId>>,
-    /// Current source-file contents, kept in sync with `bindings`.
-    pub source: String,
-    /// Path the source is read from / written back to.
-    pub input_path: std::path::PathBuf,
+    /// The programs and the source file backing them.
+    pub programs: programs::ProgramSet,
     pub active_program_index: usize,
     pub mode: Mode,
     pub keys: Option<midi_input::Keys>,
@@ -62,46 +57,16 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Builds an `AppState` from the contents of a source file. Parses
-    /// bindings, fills every UI slot with an empty padding program, then
-    /// overwrites slots whose `#{slot=N}` `Definition` exists in source.
-    /// `input_path` is the file the splice path writes back to (use an
-    /// empty `PathBuf` to suppress the write, e.g. in tests).
+    /// Builds an `AppState` from the contents of a source file. `input_path`
+    /// is the file the splice path writes back to (use an empty `PathBuf`
+    /// to suppress the write, e.g. in tests).
     pub fn from_source(
         source: String,
         input_path: std::path::PathBuf,
     ) -> Result<AppState, Vec<parser::Error>> {
-        let mut message = String::new();
-        let (bindings, errors) = parser::parse_module::<MarkId>(&source)?;
-        // TODO sort of a bummer that we don't know which binding this error was
-        // in... some opportunity here to improve the type of parse_module.
-        if !errors.is_empty() {
-            message = format!("Parse errors: {}", &errors[0]);
-        }
-        let total_slots = programs::NUM_PROGRAM_BANKS * PROGRAMS_PER_BANK;
-        let mut programs: Vec<Program> = (0..total_slots)
-            .map(|_| Program::from_string("", bindings.len()))
-            .collect();
-        for (binding_index, sb) in bindings.iter().enumerate() {
-            if let Some((program_index, program)) =
-                Program::from_source_binding(sb, binding_index, &source)
-            {
-                if program_index < programs.len() {
-                    programs[program_index] = program;
-                } else {
-                    println!(
-                        "Ignoring program with out-of-range slot {} (max {})",
-                        program_index + 1,
-                        programs.len()
-                    );
-                }
-            }
-        }
+        let (programs, message) = programs::ProgramSet::from_source(source, input_path)?;
         Ok(AppState {
             programs,
-            bindings,
-            source,
-            input_path,
             active_program_index: 0,
             mode: Mode::Select,
             keys: None,
@@ -117,7 +82,7 @@ impl AppState {
     }
 
     pub fn active_program(&self) -> &Program {
-        &self.programs[self.active_program_index]
+        &self.programs.programs()[self.active_program_index]
     }
 }
 
@@ -443,7 +408,7 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
 
         Action::SelectProgram(i) => apply_select_program(state, i),
         Action::AdvanceProgram(delta) => {
-            let len = state.programs.len() as i32;
+            let len = state.programs.programs().len() as i32;
             if len == 0 {
                 vec![]
             } else {
@@ -597,7 +562,7 @@ fn remove_pending_effects(state: &AppState, ctx: &Context, i: usize) -> Vec<Effe
 }
 
 fn apply_select_program(state: &mut AppState, i: usize) -> Vec<Effect> {
-    if i >= state.programs.len() {
+    if i >= state.programs.programs().len() {
         return vec![];
     }
     let changed = state.active_program_index != i;
@@ -606,8 +571,8 @@ fn apply_select_program(state: &mut AppState, i: usize) -> Vec<Effect> {
     // Navigation represents a fresh context, so any prior
     // "Removed pending..." / "Playing..." etc. shouldn't carry over.
     let mut effects = vec![Effect::ShowMessage(program_name(
-        &state.programs[i],
-        &state.bindings,
+        &state.programs.programs()[i],
+        &state.programs.bindings,
     ))];
     if changed {
         effects.push(Effect::SyncEncoders);
@@ -648,13 +613,16 @@ fn program_name(program: &Program, bindings: &[parser::SourceBinding<MarkId>]) -
 /// match the keystroke the user would use, and program indices don't
 /// survive future layout changes.
 pub fn program_display_name(state: &AppState, program_index: usize) -> String {
-    if state.programs.get(program_index).is_none() {
+    if state.programs.program(program_index).is_none() {
         return String::new();
     }
     let bank = program_index / PROGRAMS_PER_BANK;
     let slot_in_bank = (program_index % PROGRAMS_PER_BANK) + 1;
     let bank_letter = (b'A' + bank as u8) as char;
-    let name = program_name(&state.programs[program_index], &state.bindings);
+    let name = program_name(
+        &state.programs.programs()[program_index],
+        &state.programs.bindings,
+    );
     if name.is_empty() {
         format!("{}:{}", bank_letter, slot_in_bank)
     } else {
@@ -715,7 +683,10 @@ fn edit_text_op(
         } => *cursor_position,
         _ => return vec![],
     };
-    let program = &mut state.programs[state.active_program_index];
+    let program = state
+        .programs
+        .program_mut(state.active_program_index)
+        .unwrap();
     if let Some((new_text, new_cursor)) = f(program.text(), cursor) {
         program.set_text(new_text);
         if let Mode::Edit {
@@ -739,7 +710,7 @@ fn edit_cursor_op(state: &mut AppState, f: impl FnOnce(&str, usize) -> usize) ->
         } => *cursor_position,
         _ => return vec![],
     };
-    let text = state.programs[state.active_program_index].text();
+    let text = state.programs.programs()[state.active_program_index].text();
     let new_cursor = f(text, cursor).min(text.len());
     if let Mode::Edit {
         cursor_position, ..
@@ -762,7 +733,7 @@ fn prev_word_start(prefix: &str) -> usize {
 
 fn apply_mouse_slider(state: &mut AppState, axis: usize, delta: f32) -> Vec<Effect> {
     let program_index = state.active_program_index;
-    let program = &state.programs[program_index];
+    let program = &state.programs.programs()[program_index];
     if axis >= program.sliders().configs().len() {
         return vec![];
     }
@@ -777,7 +748,7 @@ fn apply_slider(
     slider_index: usize,
     normalized: f32,
 ) -> Vec<Effect> {
-    let program = match state.programs.get_mut(program_index) {
+    let program = match state.programs.program_mut(program_index) {
         Some(p) => p,
         None => return vec![],
     };
@@ -828,7 +799,7 @@ fn apply_slider(
 }
 
 fn apply_level_db(state: &mut AppState, program_index: usize, level_db: f32) -> Vec<Effect> {
-    let program = match state.programs.get_mut(program_index) {
+    let program = match state.programs.program_mut(program_index) {
         Some(p) => p,
         None => return vec![],
     };
@@ -907,20 +878,15 @@ mod tests {
         apply(state, &ctx, action)
     }
 
+    /// Builds a state whose slot 1 holds `_ = test;` (a program named by the
+    /// anonymous pattern, so navigation shows no name). `input_path` is empty
+    /// so splice never touches disk.
     fn test_state() -> AppState {
-        AppState {
-            programs: vec![Program::from_string("test", 0)],
-            bindings: Vec::new(),
-            source: String::new(),
-            input_path: std::path::PathBuf::new(),
-            active_program_index: 0,
-            mode: Mode::Select,
-            keys: None,
-            repeat_after_measures: None,
-            daw_pad_mode: DawPadMode::ClipLauncher,
-            should_exit: false,
-            message: String::new(),
-        }
+        AppState::from_source(
+            "#{slot=1}\n_ = test;".to_string(),
+            std::path::PathBuf::new(),
+        )
+        .expect("test source should parse")
     }
 
     #[test]
@@ -933,7 +899,7 @@ mod tests {
                 level_db: -6.0,
             },
         );
-        assert!((state.programs[0].level_db() - -6.0).abs() < 1e-6);
+        assert!((state.programs.programs()[0].level_db() - -6.0).abs() < 1e-6);
         assert!(matches!(
             effects[0],
             Effect::ModifyWaveform {
@@ -950,21 +916,11 @@ mod tests {
         // Typing a character that breaks the parse should be reflected
         // in `Mode::Edit.errors`, otherwise the renderer's per-character
         // highlighting goes stale.
-        let mut state = AppState {
-            programs: vec![Program::from_string("", 0)],
-            bindings: Vec::new(),
-            source: String::new(),
-            input_path: std::path::PathBuf::new(),
-            active_program_index: 0,
-            mode: Mode::Edit {
-                cursor_position: 0,
-                errors: vec![],
-            },
-            keys: None,
-            repeat_after_measures: None,
-            daw_pad_mode: DawPadMode::ClipLauncher,
-            should_exit: false,
-            message: String::new(),
+        let mut state =
+            AppState::from_source(String::new(), std::path::PathBuf::new()).expect("empty source");
+        state.mode = Mode::Edit {
+            cursor_position: 0,
+            errors: vec![],
         };
         apply_with_empty_status(&mut state, Action::InsertText("(".to_string()));
         let Mode::Edit { errors, .. } = &state.mode else {
@@ -989,8 +945,11 @@ mod tests {
     #[test]
     fn advance_program_emits_empty_show_message_to_clear_status() {
         // Two programs so AdvanceProgram(1) actually moves the index.
-        let mut state = test_state();
-        state.programs.push(Program::from_string("second", 1));
+        let mut state = AppState::from_source(
+            "#{slot=1}\n_ = test;\n#{slot=2}\n_ = second;".to_string(),
+            std::path::PathBuf::new(),
+        )
+        .expect("test source should parse");
         let effects = apply_with_empty_status(&mut state, Action::AdvanceProgram(1));
         assert_eq!(state.active_program_index, 1);
         // The empty ShowMessage is what gets folded into Mode::Select to

@@ -106,7 +106,7 @@ impl InputHandler {
     ) -> Option<Vec<actions::Action>> {
         let mode: &Mode = &state.mode;
         let active_program_index = state.active_program_index;
-        let programs: &[Program] = &state.programs;
+        let programs: &[Program] = state.programs.programs();
         use actions::Action;
         use sdl2::keyboard::{Mod, Scancode};
         let ctrl = keymod.contains(Mod::LCTRLMOD) || keymod.contains(Mod::RCTRLMOD);
@@ -297,19 +297,13 @@ mod tests {
     use sdl2::keyboard::{Mod, Scancode};
 
     fn test_state(mode: Mode) -> AppState {
-        AppState {
-            programs: vec![Program::from_string("test", 0)],
-            bindings: Vec::new(),
-            source: String::new(),
-            input_path: std::path::PathBuf::new(),
-            active_program_index: 0,
-            mode,
-            keys: None,
-            repeat_after_measures: None,
-            daw_pad_mode: actions::DawPadMode::ClipLauncher,
-            should_exit: false,
-            message: String::new(),
-        }
+        let mut state = AppState::from_source(
+            "#{slot=1}\n_ = test;".to_string(),
+            std::path::PathBuf::new(),
+        )
+        .expect("test source should parse");
+        state.mode = mode;
+        state
     }
 
     #[test]

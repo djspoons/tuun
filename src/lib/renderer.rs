@@ -270,7 +270,7 @@ impl Renderer {
         // Alias the AppState fields the body uses so the rest of this
         // function (still mostly written against unbound locals) keeps
         // working unchanged.
-        let programs = state.programs.as_slice();
+        let programs = state.programs.programs();
         let mode = &state.mode;
         let active_program_index = state.active_program_index;
         let message = state.message.as_str();

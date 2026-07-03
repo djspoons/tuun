@@ -79,8 +79,6 @@ pub fn main() {
 
     if !args.ui {
         println!("Starting in non-UI mode");
-        // Filter out any empty programs
-        state.programs.retain(|p| !p.is_empty());
 
         let mut tracker = tracker::Tracker::<WaveformId, MarkId>::new(
             args.sample_rate,
@@ -104,25 +102,27 @@ pub fn main() {
             command_sender.clone(),
             command_sender,
         );
-        // Snapshot display names ahead of the mutable iteration below —
-        // `program_display_name` borrows `state` immutably, which would
-        // conflict with `state.programs.iter_mut()` if computed inline.
-        let display_names: Vec<String> = (0..state.programs.len())
-            .map(|i| actions::program_display_name(&state, i))
-            .collect();
-        for (program_index, program) in state.programs.iter_mut().enumerate() {
-            let display_name = &display_names[program_index];
+        for program_index in 0..state.programs.programs().len() {
+            if state.programs.programs()[program_index].is_empty() {
+                continue;
+            }
+            let display_name = actions::program_display_name(&state, program_index);
+            let program = &state.programs.programs()[program_index];
             println!("Playing program {}: {}", display_name, program.text());
-            match play_helper.evaluate_program(&state.bindings, program) {
+            match play_helper.evaluate_program(&state.programs, program_index) {
                 Ok(expr) => match expr.expr {
                     // TODO also need to handle Seq here
                     parser::Expr::Waveform(w) => {
                         // Recording a Waveform evaluation never fails.
-                        let _ = program.record_evaluation(programs::Evaluation::Waveform(w));
+                        let _ = state
+                            .programs
+                            .program_mut(program_index)
+                            .unwrap()
+                            .record_evaluation(programs::Evaluation::Waveform(w));
                         play_helper.play_program_as_waveform(
                             program_index,
-                            program,
-                            display_name,
+                            &state.programs.programs()[program_index],
+                            &display_name,
                             &status,
                             false,
                             None,
@@ -251,7 +251,7 @@ pub fn main() {
 
     // Copy initial values for each slider for all programs
     let mut last_slider_values: HashMap<(WaveformId, String), f32> = HashMap::new();
-    for (program_index, program) in state.programs.iter().enumerate() {
+    for (program_index, program) in state.programs.programs().iter().enumerate() {
         for (j, config) in program.sliders().configs().iter().enumerate() {
             let value =
                 slider::denormalize(&config.function, program.sliders().normalized_values()[j])
@@ -398,8 +398,8 @@ pub fn main() {
     // Populate each program's cached_waveform / cached_keys_instrument from
     // its initial source so that playback and InstallKeys work without
     // needing to enter and exit Edit mode first.
-    for i in 0..state.programs.len() {
-        if state.programs[i].is_empty() {
+    for i in 0..state.programs.programs().len() {
+        if state.programs.programs()[i].is_empty() {
             continue;
         }
         run_effects(

@@ -8,7 +8,7 @@ use std::time;
 use crate::builtins;
 use crate::optimizer;
 use crate::parser;
-use crate::programs::{Program, ProgramSliders};
+use crate::programs::{Program, ProgramSet, ProgramSliders};
 use crate::renderer;
 use crate::renderer::{MarkId, WaveformId};
 use crate::slider;
@@ -206,18 +206,19 @@ impl PlayHelper {
         Ok(leaked)
     }
 
-    /// Evaluates a program in preparation for playback or for installing as the
-    /// keys instrument. Returns an expression if the program parses and
-    /// evaluates successfully; otherwise returns a message.
+    /// Evaluates the program at `program_index` in preparation for playback
+    /// or for installing as the keys instrument. Returns an expression if
+    /// the program parses and evaluates successfully; otherwise returns a
+    /// message.
     ///
     /// The program is evaluated in the context of the file-level bindings
-    /// preceding it (per its `binding_index`) plus its sliders. Bindings after
-    /// it are ignored.
+    /// preceding it plus its sliders. Bindings after it are ignored.
     pub fn evaluate_program(
         &mut self,
-        file_bindings: &[parser::SourceBinding<MarkId>],
-        program: &Program,
+        set: &ProgramSet,
+        program_index: usize,
     ) -> Result<parser::SourceExpr<MarkId>, String> {
+        let program = &set.programs[program_index];
         let expr = match parser::parse_program(program.text()) {
             Err(errors) => {
                 println!("Errors while parsing input: {:?}", errors);
@@ -229,7 +230,7 @@ impl PlayHelper {
         println!("parser::parse_program returned: {}", &expr);
 
         let mut bindings: Vec<parser::SourceBinding<MarkId>> =
-            file_bindings[..program.binding_index()].to_vec();
+            set.bindings[..program.binding_index()].to_vec();
         // TODO this is a pretty big hack but there's an interesting question
         // about what sliders in *other* bindings mean. To avoid answering that
         // for the moment, just assume that only "_" bindings have sliders and

@@ -239,11 +239,11 @@ fn parsed_normalized_value(function: &parser::SliderFunction) -> f32 {
     }
 }
 
-/// Splices the given program's edited `text` back into `state.source`, persists
+/// Splices the given program's edited `text` back into `state.programs.source`, persists
 /// every program's changed state as annotation edits, re-parses the file to
-/// refresh `state.bindings`, realigns each program's `span`/`binding_index`
+/// refresh `state.programs.bindings`, realigns each program's `span`/`binding_index`
 /// (matching by `slot=N` annotation), and writes the new source to
-/// `state.input_path`.
+/// `state.programs.input_path`.
 ///
 /// Programs whose `span` is empty (`0..0`) are treated as brand-new: a fresh
 /// `Definition` is appended at the end of source with a generated name and a
@@ -251,18 +251,18 @@ fn parsed_normalized_value(function: &parser::SliderFunction) -> f32 {
 /// programs are spliced in place.
 ///
 /// Returns a user-visible warning message if any step failed; in that case
-/// `state.bindings`, `state.source`, and the file on disk are all left
+/// `state.programs.bindings`, `state.programs.source`, and the file on disk are all left
 /// unchanged.
 fn splice_program(state: &mut AppState, program_index: usize) -> Result<(), String> {
     let slot = program_index + 1;
-    let edited_span = state.programs[program_index].span();
-    let mut edited_text = state.programs[program_index].text().to_string();
+    let edited_span = state.programs.programs()[program_index].span();
+    let mut edited_text = state.programs.programs()[program_index].text().to_string();
     // Remove any semicolons since these aren't valid within an expression and
     // can defeat parsing error recovery.
     edited_text.retain(|c| c != ';');
     let is_new = edited_span.start == edited_span.end;
 
-    // Collect every edit we want to apply to `state.source` in one pass:
+    // Collect every edit we want to apply to `state.programs.source` in one pass:
     // the active program's expression splice (or a fresh-binding append)
     // plus, for every program, annotation edits that bring level/slider
     // state on disk in line with the runtime. Applying in reverse-position
@@ -280,7 +280,7 @@ fn splice_program(state: &mut AppState, program_index: usize) -> Result<(), Stri
         // programs have no sliders since their configs come from a
         // parsed `sliders=…` annotation).
         let mut annos: Vec<parser::Annotation> = vec![parser::Annotation::Slot(slot as u32)];
-        let level = state.programs[program_index].level_db();
+        let level = state.programs.programs()[program_index].level_db();
         if level.abs() > ANNOTATION_EPSILON {
             annos.push(parser::Annotation::Level(level));
         }
@@ -296,15 +296,15 @@ fn splice_program(state: &mut AppState, program_index: usize) -> Result<(), Stri
 
     // Walk every program (active and not) and append annotation edits
     // for level_db / sliders that have diverged from the parsed source.
-    // We use the *pre-splice* `state.bindings` so all spans line up with
-    // `state.source` before any of these edits land.
-    for program in &state.programs {
-        if let Some(binding) = state.bindings.get(program.binding_index()) {
-            edits.extend(annotation_edits(program, binding, &state.source));
+    // We use the *pre-splice* `state.programs.bindings` so all spans line up with
+    // `state.programs.source` before any of these edits land.
+    for program in state.programs.programs() {
+        if let Some(binding) = state.programs.bindings.get(program.binding_index()) {
+            edits.extend(annotation_edits(program, binding, &state.programs.source));
         }
     }
 
-    let mut new_source = state.source.clone();
+    let mut new_source = state.programs.source.clone();
     edits.sort_by_key(|(span, _)| std::cmp::Reverse(span.start));
     for (span, replacement) in edits {
         new_source.replace_range(span, &replacement);
@@ -338,12 +338,12 @@ fn splice_program(state: &mut AppState, program_index: usize) -> Result<(), Stri
                 by_slot.insert(slot, (i, s.clone()));
             }
         }
-        (1..=state.programs.len() as u32)
+        (1..=state.programs.programs().len() as u32)
             .map(|slot| by_slot.remove(&slot))
             .collect()
     };
 
-    for (i, program) in state.programs.iter_mut().enumerate() {
+    for (i, program) in state.programs.programs.iter_mut().enumerate() {
         match &slot_lookup[i] {
             Some((binding_index, span)) => {
                 program.realign(*binding_index, span.clone(), &new_source);
@@ -357,18 +357,18 @@ fn splice_program(state: &mut AppState, program_index: usize) -> Result<(), Stri
 
     // Skip the file write when no path is set — tests use an empty
     // `PathBuf` so they can exercise the splice without touching disk.
-    if !state.input_path.as_os_str().is_empty()
-        && let Err(e) = std::fs::write(&state.input_path, &new_source)
+    if !state.programs.input_path.as_os_str().is_empty()
+        && let Err(e) = std::fs::write(&state.programs.input_path, &new_source)
     {
         return Err(format!(
             "Warning: failed to write {}: {}",
-            state.input_path.display(),
+            state.programs.input_path.display(),
             e
         ));
     }
 
-    state.source = new_source;
-    state.bindings = new_bindings;
+    state.programs.source = new_source;
+    state.programs.bindings = new_bindings;
     Ok(())
 }
 
@@ -432,7 +432,7 @@ impl EffectRunner {
                 repeat_after_measures,
             } => {
                 // TODO do we need to get()/match here?
-                let Some(program) = state.programs.get(program_index) else {
+                let Some(program) = state.programs.program(program_index) else {
                     return;
                 };
                 let display_name = actions::program_display_name(state, program_index);
@@ -448,7 +448,7 @@ impl EffectRunner {
                 }
             }
             Effect::StopProgram(program_index) => {
-                if state.programs.get(program_index).is_none() {
+                if state.programs.program(program_index).is_none() {
                     return;
                 }
                 world
@@ -456,7 +456,7 @@ impl EffectRunner {
                     .stop_waveform(WaveformId::Program(program_index));
             }
             Effect::RemovePendingProgram(program_index) => {
-                if state.programs.get(program_index).is_none() {
+                if state.programs.program(program_index).is_none() {
                     return;
                 }
                 let _ = self.command_sender.send(tracker::Command::RemovePending {
@@ -485,7 +485,7 @@ impl EffectRunner {
                 const NOT_A_PROGRAM: &str = "Program is not a waveform or keys instrument";
                 let evaluation = match world
                     .play_helper
-                    .evaluate_program(&state.bindings, &state.programs[program_index])
+                    .evaluate_program(&state.programs, program_index)
                 {
                     Err(message) => programs::Evaluation::Invalid(message),
                     Ok(expr) => match expr.expr {
@@ -506,7 +506,7 @@ impl EffectRunner {
                                     parser::SourceExpr::float(60.0),
                                     parser::SourceExpr::float(0.7),
                                 ],
-                                state.programs[program_index].sliders(),
+                                state.programs.programs()[program_index].sliders(),
                             ) {
                                 Ok(_) => programs::Evaluation::KeysInstrument(expr),
                                 Err(message) => programs::Evaluation::Invalid(message),
@@ -515,7 +515,12 @@ impl EffectRunner {
                         _ => programs::Evaluation::Invalid(NOT_A_PROGRAM.to_string()),
                     },
                 };
-                match state.programs[program_index].record_evaluation(evaluation) {
+                match state
+                    .programs
+                    .program_mut(program_index)
+                    .unwrap()
+                    .record_evaluation(evaluation)
+                {
                     Ok(()) => state.mode = renderer::Mode::Select,
                     Err(message) => {
                         state.message = message;
@@ -526,7 +531,7 @@ impl EffectRunner {
 
             Effect::UpdateSource(program_index) => {
                 // Splice the indicated program text back into the file-level
-                // source, re-parse to refresh `state.bindings`, realign each
+                // source, re-parse to refresh `state.programs.bindings`, realign each
                 // program's span/text with its (possibly shifted) binding, and
                 // persist the new source to disk.
                 if let Err(message) = splice_program(state, program_index) {
@@ -535,7 +540,7 @@ impl EffectRunner {
             }
 
             Effect::InstallKeys(program_index) => {
-                let program = &state.programs[program_index];
+                let program = &state.programs.programs()[program_index];
                 if let Some(expr) = program.keys_instrument() {
                     let new_keys = Keys {
                         id: program_index,
@@ -577,7 +582,7 @@ impl EffectRunner {
                         // this fresh `Key` id (so its next ramp has a sensible
                         // "previous value" to start from).
                         let id = WaveformId::Key(key);
-                        let program = &state.programs[keys.id];
+                        let program = &state.programs.programs()[keys.id];
                         let last_slider_values: HashMap<(WaveformId, String), f32> =
                             play_helper::substitute_current_slider_values(
                                 &mut note_on,
@@ -716,7 +721,7 @@ impl EffectRunner {
 fn sync_encoders(state: &AppState, launchkey: &mut launchkey::Launchkey) {
     match launchkey.encoder_mode {
         launchkey::EncoderMode::Plugin => {
-            let program = match state.programs.get(state.active_program_index) {
+            let program = match state.programs.program(state.active_program_index) {
                 Some(p) => p,
                 None => return,
             };
@@ -738,7 +743,7 @@ fn sync_encoders(state: &AppState, launchkey: &mut launchkey::Launchkey) {
         launchkey::EncoderMode::Mixer => {
             let bank_start = state.bank_start();
             for i in 0..PROGRAMS_PER_BANK {
-                let program = match state.programs.get(bank_start + i) {
+                let program = match state.programs.program(bank_start + i) {
                     Some(p) => p,
                     None => continue,
                 };
@@ -778,16 +783,20 @@ synth = saw(220);";
         let mut state = state_from(source);
 
         // Slot 2 → index 1. Sanity-check the initial extraction.
-        assert_eq!(state.programs[0].text(), "pulse(60)");
-        assert_eq!(state.programs[1].text(), "saw(220)");
+        assert_eq!(state.programs.programs()[0].text(), "pulse(60)");
+        assert_eq!(state.programs.programs()[1].text(), "saw(220)");
 
         // Simulate the Edit-mode flow: select slot 2, change the text.
-        state.programs[1].set_text("saw(440)".to_string());
+        state
+            .programs
+            .program_mut(1)
+            .unwrap()
+            .set_text("saw(440)".to_string());
 
         splice_program(&mut state, 1).expect("splice should succeed");
 
         assert_eq!(
-            state.source,
+            state.programs.source,
             "\
 #{slot=1}
 kick = pulse(60);
@@ -796,8 +805,8 @@ synth = saw(440);"
         );
         // Slot 1 untouched, slot 2's program now reflects the new text and
         // span.
-        assert_eq!(state.programs[0].text(), "pulse(60)");
-        assert_eq!(state.programs[1].text(), "saw(440)");
+        assert_eq!(state.programs.programs()[0].text(), "pulse(60)");
+        assert_eq!(state.programs.programs()[1].text(), "saw(440)");
     }
 
     #[test]
@@ -811,13 +820,17 @@ pi = 3.14159;
 #{slot=1}
 tone = saw(440);";
         let mut state = state_from(source);
-        assert_eq!(state.programs[0].text(), "saw(440)");
+        assert_eq!(state.programs.programs()[0].text(), "saw(440)");
 
-        state.programs[0].set_text("saw(220)".to_string());
+        state
+            .programs
+            .program_mut(0)
+            .unwrap()
+            .set_text("saw(220)".to_string());
         splice_program(&mut state, 0).unwrap();
 
         assert_eq!(
-            state.source,
+            state.programs.source,
             "\
 open util.synths;
 pi = 3.14159;
@@ -835,18 +848,22 @@ tone = saw(220);"
 #{slot=1}
 kick = pulse(60);";
         let mut state = state_from(source);
-        assert_eq!(state.programs[0].text(), "pulse(60)");
+        assert_eq!(state.programs.programs()[0].text(), "pulse(60)");
         // Slot 5 is padding initially.
-        assert_eq!(state.programs[4].text(), "");
-        assert_eq!(state.programs[4].span(), 0..0);
+        assert_eq!(state.programs.programs()[4].text(), "");
+        assert_eq!(state.programs.programs()[4].span(), 0..0);
 
         // Edit slot 5.
-        state.programs[4].set_text("saw(440)".to_string());
+        state
+            .programs
+            .program_mut(4)
+            .unwrap()
+            .set_text("saw(440)".to_string());
 
         splice_program(&mut state, 4).unwrap();
 
         assert_eq!(
-            state.source,
+            state.programs.source,
             "\
 #{slot=1}
 kick = pulse(60);
@@ -855,8 +872,10 @@ _ = saw(440);"
         );
         // The new binding is now part of the bindings vec, and the slot 5
         // program has a real span/text.
-        assert_eq!(state.programs[4].text(), "saw(440)");
-        assert!(state.programs[4].span().start < state.programs[4].span().end);
+        assert_eq!(state.programs.programs()[4].text(), "saw(440)");
+        assert!(
+            state.programs.programs()[4].span().start < state.programs.programs()[4].span().end
+        );
     }
 
     // TODO add a test where a new program is adding in the middle
@@ -869,10 +888,10 @@ _ = saw(440);"
 #{slot=1}
 kick = pulse(60);";
         let mut state = state_from(source);
-        let before = state.source.clone();
+        let before = state.programs.source.clone();
         // text is already empty; just splice.
         splice_program(&mut state, 4).unwrap();
-        assert_eq!(state.source, before);
+        assert_eq!(state.programs.source, before);
     }
 
     #[test]
@@ -885,13 +904,13 @@ kick = pulse(60);";
 // keep this comment
 kick = pulse(60);";
         let mut state = state_from(source);
-        assert!((state.programs[0].level_db() - -6.0).abs() < 1e-6);
+        assert!((state.programs.programs()[0].level_db() - -6.0).abs() < 1e-6);
 
-        state.programs[0].set_level_db(-3.5);
+        state.programs.program_mut(0).unwrap().set_level_db(-3.5);
         splice_program(&mut state, 0).unwrap();
 
         assert_eq!(
-            state.source,
+            state.programs.source,
             "\
 #{slot=1, level_db=-3.5}
 // keep this comment
@@ -909,13 +928,13 @@ kick = pulse(60);"
 #{slot=1}
 kick = pulse(60);";
         let mut state = state_from(source);
-        assert!((state.programs[0].level_db() - 0.0).abs() < 1e-6);
+        assert!((state.programs.programs()[0].level_db() - 0.0).abs() < 1e-6);
 
-        state.programs[0].set_level_db(-3.0);
+        state.programs.program_mut(0).unwrap().set_level_db(-3.0);
         splice_program(&mut state, 0).unwrap();
 
         assert_eq!(
-            state.source,
+            state.programs.source,
             "\
 #{level_db=-3}
 // header comment
@@ -933,16 +952,20 @@ kick = pulse(60);"
 #{slot=1, sliders=[\"vol:0.5:0:1\"]}
 tone = saw(220);";
         let mut state = state_from(source);
-        assert_eq!(state.programs[0].sliders().configs().len(), 1);
-        assert!((state.programs[0].sliders().normalized_values()[0] - 0.5).abs() < 1e-6);
+        assert_eq!(state.programs.programs()[0].sliders().configs().len(), 1);
+        assert!((state.programs.programs()[0].sliders().normalized_values()[0] - 0.5).abs() < 1e-6);
 
-        let _ = state.programs[0].set_slider_normalized(0, 0.75);
+        let _ = state
+            .programs
+            .program_mut(0)
+            .unwrap()
+            .set_slider_normalized(0, 0.75);
         splice_program(&mut state, 0).unwrap();
 
         // Linear slider: actual value = min + normalized * (max - min)
         // = 0 + 0.75 * 1 = 0.75.
         assert_eq!(
-            state.source,
+            state.programs.source,
             "\
 #{slot=1, sliders=[\"vol:0.75:0:1\"]}
 tone = saw(220);"
@@ -963,7 +986,7 @@ synth = saw(220);";
         // No runtime mutations — same edit-mode-exit pattern but with
         // the program's text unchanged from what parse_module produced.
         splice_program(&mut state, 0).unwrap();
-        assert_eq!(state.source, source);
+        assert_eq!(state.programs.source, source);
     }
 
     #[test]
@@ -978,14 +1001,18 @@ synth = saw(220);";
         let mut state = state_from(source);
 
         // Program 2: level changed (encoder).
-        state.programs[1].set_level_db(-9.0);
+        state.programs.program_mut(1).unwrap().set_level_db(-9.0);
         // Program 1: text edited (active save target).
-        state.programs[0].set_text("pulse(80)".to_string());
+        state
+            .programs
+            .program_mut(0)
+            .unwrap()
+            .set_text("pulse(80)".to_string());
 
         splice_program(&mut state, 0).unwrap();
 
         assert_eq!(
-            state.source,
+            state.programs.source,
             "\
 #{slot=1}
 kick = pulse(80);
@@ -1004,13 +1031,17 @@ synth = saw(220);"
 #{slot=1}
 kick = pulse(60);";
         let mut state = state_from(source);
-        state.programs[4].set_text("saw(440)".to_string());
-        state.programs[4].set_level_db(-2.5);
+        state
+            .programs
+            .program_mut(4)
+            .unwrap()
+            .set_text("saw(440)".to_string());
+        state.programs.program_mut(4).unwrap().set_level_db(-2.5);
 
         splice_program(&mut state, 4).unwrap();
 
         assert_eq!(
-            state.source,
+            state.programs.source,
             "\
 #{slot=1}
 kick = pulse(60);

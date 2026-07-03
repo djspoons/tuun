@@ -340,6 +340,91 @@ impl Program {
     }
 }
 
+/// The set of programs backed by a source file: the file's contents, its
+/// parsed bindings, and one `Program` per UI slot.
+///
+/// Owns the program ↔ source alignment: programs are created from
+/// `#{slot=N}` bindings and keep their `binding_index`/`span` pointing back
+/// into `bindings`/`source`.
+pub struct ProgramSet {
+    // TODO make these private once splice and the display-name helpers
+    // move into this module.
+    pub(crate) programs: Vec<Program>,
+    pub(crate) bindings: Vec<parser::SourceBinding<MarkId>>,
+    pub(crate) source: String,
+    pub(crate) input_path: std::path::PathBuf,
+}
+
+impl ProgramSet {
+    /// Builds a `ProgramSet` from the contents of a source file, along with
+    /// a warning message for recoverable parse errors (empty when the parse
+    /// was clean). Fills every UI slot with an empty padding program, then
+    /// overwrites slots whose `#{slot=N}` `Definition` exists in source.
+    ///
+    /// `input_path` is the file the splice path writes back to (use an
+    /// empty `PathBuf` to suppress the write, e.g. in tests).
+    pub fn from_source(
+        source: String,
+        input_path: std::path::PathBuf,
+    ) -> Result<(ProgramSet, String), Vec<parser::Error>> {
+        let mut message = String::new();
+        let (bindings, errors) = parser::parse_module::<MarkId>(&source)?;
+        // TODO sort of a bummer that we don't know which binding this error was
+        // in... some opportunity here to improve the type of parse_module.
+        if !errors.is_empty() {
+            message = format!("Parse errors: {}", &errors[0]);
+        }
+        let total_slots = NUM_PROGRAM_BANKS * PROGRAMS_PER_BANK;
+        let mut programs: Vec<Program> = (0..total_slots)
+            .map(|_| Program::from_string("", bindings.len()))
+            .collect();
+        for (binding_index, sb) in bindings.iter().enumerate() {
+            if let Some((program_index, program)) =
+                Program::from_source_binding(sb, binding_index, &source)
+            {
+                if program_index < programs.len() {
+                    programs[program_index] = program;
+                } else {
+                    println!(
+                        "Ignoring program with out-of-range slot {} (max {})",
+                        program_index + 1,
+                        programs.len()
+                    );
+                }
+            }
+        }
+        Ok((
+            ProgramSet {
+                programs,
+                bindings,
+                source,
+                input_path,
+            },
+            message,
+        ))
+    }
+
+    /// Returns all program slots in slot order.
+    pub fn programs(&self) -> &[Program] {
+        &self.programs
+    }
+
+    /// Returns the program at `index`, or `None` if the index is out of
+    /// range.
+    pub fn program(&self, index: usize) -> Option<&Program> {
+        self.programs.get(index)
+    }
+
+    /// Returns a mutable reference to the program at `index`, or `None` if
+    /// the index is out of range.
+    ///
+    /// Safe to hand out because `Program`'s fields are private — callers
+    /// can only mutate through `Program`'s invariant-preserving methods.
+    pub fn program_mut(&mut self, index: usize) -> Option<&mut Program> {
+        self.programs.get_mut(index)
+    }
+}
+
 /// A slider's user-facing state, formatted for the status line and slider
 /// overlays.
 pub struct SliderDisplay {

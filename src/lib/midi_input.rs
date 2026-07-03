@@ -37,7 +37,7 @@ pub fn classify(
     use actions::Action;
     use launchkey::Event;
     let active_program_index = state.active_program_index;
-    let programs: &[Program] = &state.programs;
+    let programs: &[Program] = state.programs.programs();
     let bank_start = state.bank_start();
     match event {
         Event::PluginEncoderChange { index, delta } => {
@@ -208,7 +208,7 @@ fn update_pads_clip_launcher(
     current_beat_duration: std::time::Duration,
     bank_start: usize,
 ) {
-    for (i, program) in state.programs[bank_start..bank_start + PROGRAMS_PER_BANK]
+    for (i, program) in state.programs.programs()[bank_start..bank_start + PROGRAMS_PER_BANK]
         .iter()
         .enumerate()
     {
@@ -273,7 +273,7 @@ fn update_pads_keys_installer(
         launchkey.set_daw_top_pad_color(i as u8, 0, 0, 0);
 
         let program_index = bank_start + i;
-        let program = match state.programs.get(program_index) {
+        let program = match state.programs.program(program_index) {
             Some(p) => p,
             None => {
                 launchkey.set_daw_bottom_pad_color(i as u8, 0, 0, 0);
