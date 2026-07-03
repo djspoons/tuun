@@ -19,7 +19,7 @@ pub mod launchkey;
 #[cfg(feature = "native")]
 pub mod midi_input;
 #[cfg(feature = "native")]
-pub mod play_helper;
+pub mod player;
 #[cfg(feature = "native")]
 pub mod programs;
 #[cfg(feature = "native")]

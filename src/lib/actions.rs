@@ -9,7 +9,7 @@ use std::time::Instant;
 use crate::launchkey;
 use crate::midi_input;
 use crate::parser;
-use crate::play_helper;
+use crate::player;
 use crate::programs::{self, PROGRAMS_PER_BANK, Program};
 use crate::renderer::{self, MarkId, Mode, WaveformId};
 use crate::tracker;
@@ -751,7 +751,7 @@ fn apply_level_db(state: &mut AppState, program_index: usize, level_db: f32) -> 
         None => return vec![],
     };
     program.set_level_db(level_db);
-    let amplitude = play_helper::db_to_amplitude(level_db);
+    let amplitude = player::db_to_amplitude(level_db);
 
     let mut effects = vec![Effect::ModifyWaveform {
         id: WaveformId::Program(program_index),

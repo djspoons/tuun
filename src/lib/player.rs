@@ -1,10 +1,18 @@
+//! Sends waveforms to the tracker — all tracker I/O lives here.
+//!
+//! `Player` owns the two command routes: `precompute_sender` goes through
+//! the precompute thread (used for playback scheduled at the next measure,
+//! where latency is hidden), and `fast_sender` goes straight to the
+//! tracker (used for immediate playback and note-on/off, where keystroke
+//! latency matters). All methods take `&self`.
+
 use std::sync::mpsc;
 use std::time;
 
 use crate::evaluator::Evaluator;
 use crate::optimizer;
 use crate::parser;
-use crate::programs::{Program, ProgramSet, ProgramSliders};
+use crate::programs::{ProgramSet, ProgramSliders};
 use crate::renderer::{MarkId, WaveformId};
 use crate::slider;
 use crate::tracker;
@@ -37,70 +45,46 @@ pub fn substitute_current_slider_values(
     values
 }
 
-pub struct PlayHelper {
+pub struct Player {
     tempo: u32,
     beats_per_measure: u32,
-    /// The evaluation environment (prelude + module cache).
-    evaluator: Evaluator,
-    precomputing_command_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
-    fast_command_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
+    precompute_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
+    fast_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
 }
 
-impl PlayHelper {
+impl Player {
     pub fn new(
-        sample_rate: u32,
         tempo: u32,
         beats_per_measure: u32,
-        library_root: std::path::PathBuf,
-        precomputing_command_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
-        fast_command_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
-    ) -> PlayHelper {
-        PlayHelper {
+        precompute_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
+        fast_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
+    ) -> Player {
+        Player {
             tempo,
             beats_per_measure,
-            evaluator: Evaluator::new(sample_rate, tempo, library_root),
-            precomputing_command_sender,
-            fast_command_sender,
+            precompute_sender,
+            fast_sender,
         }
     }
 
-    /// Returns the evaluation environment.
-    pub fn evaluator(&self) -> &Evaluator {
-        &self.evaluator
-    }
-
-    /// Evaluates the program at `program_index` in preparation for playback
-    /// or for installing as the keys instrument. Returns an expression if
-    /// the program parses and evaluates successfully; otherwise returns a
-    /// message.
+    /// Plays the program at `program_index` as a waveform, substituting its
+    /// current slider values. Returns the user-visible message, or `None`
+    /// when the program has no cached waveform (or the index is out of
+    /// range) and nothing was played.
     ///
-    /// The program is evaluated in the context of the file-level bindings
-    /// preceding it plus its sliders. Bindings after it are ignored.
-    pub fn evaluate_program(
+    /// `start_at_next_measure` routes through the precompute thread and
+    /// schedules the start at the next measure boundary; otherwise the
+    /// waveform plays immediately via the fast route.
+    pub fn play_program(
         &self,
         set: &ProgramSet,
         program_index: usize,
-    ) -> Result<parser::SourceExpr<MarkId>, String> {
-        self.evaluator.evaluate_source(
-            set.programs()[program_index].text(),
-            &set.evaluation_bindings(program_index),
-        )
-    }
-
-    /// Plays a program as a waveform. Returns the user-visible message on
-    /// success or failure. `program_index` is the 0-based position in
-    /// `state.programs` and doubles as the tracker's waveform id.
-    /// `display_name` is the user-facing label (see
-    /// `ProgramSet::display_name`).
-    pub fn play_program_as_waveform(
-        &mut self,
-        program_index: usize,
-        program: &Program,
-        display_name: &str,
         status: &tracker::Status<WaveformId, MarkId>,
         start_at_next_measure: bool,
         repeat_after_measures: Option<u32>,
     ) -> Option<String> {
+        let program = set.program(program_index)?;
+        let display_name = set.display_name(program_index);
         let message;
         let repeat_every;
         if let Some(measures) = repeat_after_measures {
@@ -117,36 +101,46 @@ impl PlayHelper {
         } else {
             None
         };
-        if let Some(waveform) = program.waveform().cloned() {
-            let mut waveform = optimizer::optimize(waveform);
-            println!("optimizer::optimize returned: {}", &waveform);
-            // Substitute the program's current slider positions before handing
-            // the waveform to the tracker (since the ones in cached_waveform
-            // may be old).
-            substitute_current_slider_values(&mut waveform, program.sliders());
-            if start_at_next_measure {
-                &mut self.precomputing_command_sender
-            } else {
-                &mut self.fast_command_sender
-            }
-            .send(tracker::Command::Play {
-                // TODO maybe extend the top-level mark to the full measure?
-                id: WaveformId::Program(program_index),
-                waveform: build_top_level_waveform(waveform, program.level_db()),
-                start,
-                repeat_every,
-            })
-            .unwrap();
-            Some(message)
+        let waveform = program.waveform().cloned()?;
+        let mut waveform = optimizer::optimize(waveform);
+        println!("optimizer::optimize returned: {}", &waveform);
+        // Substitute the program's current slider positions before handing
+        // the waveform to the tracker (since the cached ones may be old).
+        substitute_current_slider_values(&mut waveform, program.sliders());
+        if start_at_next_measure {
+            &self.precompute_sender
         } else {
-            None
+            &self.fast_sender
         }
+        .send(tracker::Command::Play {
+            // TODO maybe extend the top-level mark to the full measure?
+            id: WaveformId::Program(program_index),
+            waveform: build_top_level_waveform(waveform, program.level_db()),
+            start,
+            repeat_every,
+        })
+        .unwrap();
+        Some(message)
     }
 
-    pub fn stop_waveform(&mut self, id: WaveformId) {
+    /// Plays a note waveform under `WaveformId::Key(key)` immediately via
+    /// the fast route, wrapped with the top-level amplitude/terminator
+    /// marks at `level_db`.
+    pub fn play_note(&self, key: u8, waveform: waveform::Waveform<MarkId>, level_db: f32) {
+        let _ = self.fast_sender.send(tracker::Command::Play {
+            id: WaveformId::Key(key),
+            waveform: build_top_level_waveform(waveform, level_db),
+            start: None,
+            repeat_every: None,
+        });
+    }
+
+    /// Fades out the waveform with the given id over a short ramp. A no-op
+    /// if no matching waveform is playing.
+    pub fn stop_waveform(&self, id: WaveformId) {
         use waveform::{Operator, Waveform::*};
         const STOP_DURATION_SECS: f32 = 0.05;
-        self.fast_command_sender
+        self.fast_sender
             .send(tracker::Command::Modify {
                 id,
                 mark_id: MarkId::Terminator,
@@ -170,15 +164,36 @@ impl PlayHelper {
             .unwrap();
     }
 
+    /// Removes the pending (not-yet-started) waveform with the given id.
+    pub fn remove_pending(&self, id: WaveformId) {
+        let _ = self
+            .fast_sender
+            .send(tracker::Command::RemovePending { id });
+    }
+
+    /// Replaces the waveform under `mark_id` on the waveform with the given
+    /// id.
+    pub fn modify(&self, id: WaveformId, mark_id: MarkId, waveform: waveform::Waveform<MarkId>) {
+        let _ = self.fast_sender.send(tracker::Command::Modify {
+            id,
+            mark_id,
+            waveform,
+        });
+    }
+
+    /// Starts the two alternating Beats waveforms that keep time for the
+    /// rest of the runtime. Blocks on `status_receiver` until the first
+    /// Beats waveform is scheduled so the second can start a measure later.
     pub fn start_beats(
         &self,
+        evaluator: &Evaluator,
         status_receiver: &mpsc::Receiver<tracker::Status<WaveformId, MarkId>>,
     ) {
         // Play the odd Beats waveform starting immediately and repeating every two measures
-        self.precomputing_command_sender
+        self.precompute_sender
             .send(tracker::Command::Play {
                 id: WaveformId::Beats(false),
-                waveform: self.beats_waveform(),
+                waveform: self.beats_waveform(evaluator),
                 start: None,
                 repeat_every: Some(
                     duration_from_beats(self.tempo, self.beats_per_measure as u64) * 2,
@@ -192,10 +207,10 @@ impl PlayHelper {
                     if mark.waveform_id == WaveformId::Beats(false)
                         && mark.mark_id == MarkId::TopLevel
                     {
-                        self.precomputing_command_sender
+                        self.precompute_sender
                             .send(tracker::Command::Play {
                                 id: WaveformId::Beats(true),
-                                waveform: self.beats_waveform(),
+                                waveform: self.beats_waveform(evaluator),
                                 start: Some(mark.start + mark.duration),
                                 repeat_every: Some(
                                     duration_from_beats(self.tempo, self.beats_per_measure as u64)
@@ -213,7 +228,7 @@ impl PlayHelper {
     /// Builds the per-measure beats waveform — a sequence of `mark`-tagged
     /// short silences, one per beat — used to keep timing visible to the
     /// rest of the runtime.
-    pub fn beats_waveform(&self) -> waveform::Waveform<MarkId> {
+    fn beats_waveform(&self, evaluator: &Evaluator) -> waveform::Waveform<MarkId> {
         let seconds_per_beat = duration_from_beats(self.tempo, 1);
         let mut ws = Vec::new();
         for i in 0..self.beats_per_measure {
@@ -227,8 +242,7 @@ impl PlayHelper {
         let source = format!("<[{}]>", ws.join(", "));
         let bindings: Vec<parser::SourceBinding<MarkId>> =
             vec![parser::Binding::Open(vec!["__prelude".to_string()]).into()];
-        match self
-            .evaluator
+        match evaluator
             .evaluate_source(&source, &bindings)
             .map(|s| s.expr)
         {
@@ -245,7 +259,9 @@ impl PlayHelper {
     }
 }
 
-pub fn build_top_level_waveform(
+/// Wraps `waveform` with the standard top-level marks: an `Amplitude` mark
+/// at the amplitude for `level_db` and a `Terminator` mark used to stop it.
+fn build_top_level_waveform(
     waveform: waveform::Waveform<MarkId>,
     level_db: f32,
 ) -> waveform::Waveform<MarkId> {

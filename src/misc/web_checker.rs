@@ -37,7 +37,7 @@ fn load_prelude() -> Bindings {
 ///
 /// Each module gets an implicit `open __prelude` prepended so its bindings can
 /// reference prelude names (`sample_rate`, `tempo`, built-ins) regardless of
-/// caller ordering. Mirrors `play_helper::PlayHelper::resolve` in the native
+/// caller ordering. Mirrors `evaluator::Evaluator::resolve` in the native
 /// runtime and `Wasm::new` in the wasm bindings.
 fn load_modules() -> HashMap<String, Bindings> {
     let mut out = HashMap::new();

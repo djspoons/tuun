@@ -12,12 +12,13 @@ use sdl2::ttf::Sdl2TtfContext;
 
 use tuun::actions;
 use tuun::effects;
+use tuun::evaluator;
 use tuun::generator;
 use tuun::launchkey;
 use tuun::metric;
 use tuun::midi_input;
 use tuun::parser;
-use tuun::play_helper;
+use tuun::player;
 use tuun::programs;
 use tuun::renderer;
 use tuun::sdl2_input;
@@ -93,12 +94,14 @@ pub fn main() {
         // Call the callback to get at least one status update
         tracker.callback(&mut out);
         let status = status_receiver.recv().unwrap();
-        // Parse and send commands to play all of the waveforms.
-        let mut play_helper = play_helper::PlayHelper::new(
-            args.sample_rate,
+        // Parse and send commands to play all of the waveforms. There is
+        // no precompute thread in batch mode, so both Player routes go
+        // straight to the tracker.
+        let evaluator =
+            evaluator::Evaluator::new(args.sample_rate, args.tempo, args.library_root.clone());
+        let player = player::Player::new(
             args.tempo,
             args.beats_per_measure,
-            args.library_root.clone(),
             command_sender.clone(),
             command_sender,
         );
@@ -107,35 +110,25 @@ pub fn main() {
                 continue;
             }
             let display_name = state.programs.display_name(program_index);
-            let program = &state.programs.programs()[program_index];
-            println!("Playing program {}: {}", display_name, program.text());
-            match play_helper.evaluate_program(&state.programs, program_index) {
-                Ok(expr) => match expr.expr {
-                    // TODO also need to handle Seq here
-                    parser::Expr::Waveform(w) => {
-                        // Recording a Waveform evaluation never fails.
-                        let _ = state
-                            .programs
-                            .program_mut(program_index)
-                            .unwrap()
-                            .record_evaluation(programs::Evaluation::Waveform(w));
-                        play_helper.play_program_as_waveform(
-                            program_index,
-                            &state.programs.programs()[program_index],
-                            &display_name,
-                            &status,
-                            false,
-                            None,
-                        );
-                    }
-                    other => {
-                        println!(
-                            "Program {} did not evaluate to a waveform: {}",
-                            display_name, other
-                        );
-                    }
-                },
-                Err(message) => {
+            println!(
+                "Playing program {}: {}",
+                display_name,
+                state.programs.programs()[program_index].text()
+            );
+            match evaluator.evaluate_program(&state.programs, program_index) {
+                evaluation @ programs::Evaluation::Waveform(_) => {
+                    // Recording a Waveform evaluation never fails.
+                    let _ = state
+                        .programs
+                        .program_mut(program_index)
+                        .unwrap()
+                        .record_evaluation(evaluation);
+                    player.play_program(&state.programs, program_index, &status, false, None);
+                }
+                programs::Evaluation::KeysInstrument(_) => {
+                    println!("Program {} did not evaluate to a waveform", display_name);
+                }
+                programs::Evaluation::Invalid(message) => {
                     println!("{}", message);
                     process::exit(1);
                 }
@@ -180,21 +173,18 @@ pub fn main() {
         .unwrap();
     device.resume();
 
-    // Spin up the precompute thread so PlayHelpers can route their
-    // commands through it. The thread pre-computes `Command::Play` and
-    // passes everything else through unchanged.
+    // Spin up the precompute thread that sits in front of the tracker as
+    // the Player's `precompute_sender` route. The thread pre-computes
+    // `Command::Play` and passes everything else through unchanged.
     //
-    // What goes through (the two PlayHelpers wired to the returned
-    // sender below: `start_beats` and `effect_play_helper`):
-    //   - play_program_as_waveform with start_at_next_measure = true
+    // What goes through: playback scheduled at the next measure (the
+    // Beats waveforms and Player::play_program with
+    // start_at_next_measure), where the latency is hidden.
     //
-    // What bypasses entirely (uses `command_sender` directly):
-    //   - The slider thread's Modify ramps
-    //   - The effect runner's ModifyWaveform / ModifyActiveKeysAmplitude /
-    //     RemovePending
-    //   - Effect::PlayNoteOn — yes, this is a Command::Play but it
-    //     deliberately skips precompute to keep keystroke latency low
-    //   - play_helper's use of `fast_command_sender`
+    // What bypasses entirely (the Player's `fast_sender` plus direct
+    // `command_sender` clones): immediate playback, note-on/off, stop
+    // ramps, Modify / RemovePending, and the slider thread's ramps —
+    // everywhere keystroke latency matters.
     let precomputing_command_sender = {
         let play_command_sender = command_sender.clone();
         let (tx, play_receiver) = mpsc::channel();
@@ -238,16 +228,19 @@ pub fn main() {
         tx
     };
 
-    // Start the beats!
-    play_helper::PlayHelper::new(
-        args.sample_rate,
+    // One evaluation environment and one tracker-facing player for the
+    // whole UI session; both end up owned by the effect runner.
+    let evaluator =
+        evaluator::Evaluator::new(args.sample_rate, args.tempo, args.library_root.clone());
+    let player = player::Player::new(
         args.tempo,
         args.beats_per_measure,
-        args.library_root.clone(),
-        precomputing_command_sender.clone(),
+        precomputing_command_sender,
         command_sender.clone(),
-    )
-    .start_beats(&status_receiver);
+    );
+
+    // Start the beats!
+    player.start_beats(&evaluator, &status_receiver);
 
     // Copy initial values for each slider for all programs
     let mut last_slider_values: HashMap<(WaveformId, String), f32> = HashMap::new();
@@ -368,20 +361,7 @@ pub fn main() {
         sdl2_input::InputHandler::new(launchkey.is_err(), renderer.width, renderer.height);
 
     let mut launchkey = launchkey.ok();
-    let mut effect_runner =
-        effects::EffectRunner::new(command_sender.clone(), slider_sender.clone());
-    // A PlayHelper owned by the effect runner's "World" — used to dispatch
-    // Effect::PlayProgram and friends without going through the per-handler
-    // PlayHelpers. Routes through the precompute thread so `--precompute`
-    // actually takes effect on interactive playback.
-    let mut effect_play_helper = play_helper::PlayHelper::new(
-        args.sample_rate,
-        args.tempo,
-        args.beats_per_measure,
-        args.library_root.clone(),
-        precomputing_command_sender,
-        command_sender.clone(),
-    );
+    let mut effect_runner = effects::EffectRunner::new(player, evaluator, slider_sender.clone());
 
     let mut status = tracker::Status {
         buffer_start: Instant::now(),
@@ -407,7 +387,6 @@ pub fn main() {
             &mut state,
             launchkey.as_mut(),
             &status,
-            &mut effect_play_helper,
             vec![actions::Effect::EvaluateProgram {
                 program_index: i,
                 mode_on_failure: renderer::Mode::Select,
@@ -427,7 +406,6 @@ pub fn main() {
             &mut state,
             launchkey.as_mut(),
             &status,
-            &mut effect_play_helper,
             vec![
                 actions::Effect::SyncEncoders,
                 actions::Effect::SetDawModeDisplay(daw_mode_label),
@@ -446,7 +424,6 @@ pub fn main() {
                     &mut state,
                     launchkey.as_mut(),
                     &status,
-                    &mut effect_play_helper,
                     actions,
                 );
             } else {
@@ -466,7 +443,6 @@ pub fn main() {
                                 &mut state,
                                 Some(&mut *launchkey),
                                 &status,
-                                &mut effect_play_helper,
                                 actions,
                             );
                         } else {
@@ -536,14 +512,9 @@ fn run_effects(
     state: &mut actions::AppState,
     launchkey: Option<&mut launchkey::Launchkey>,
     status: &tracker::Status<WaveformId, MarkId>,
-    play_helper: &mut play_helper::PlayHelper,
     effects: Vec<actions::Effect>,
 ) {
-    let mut world = effects::World {
-        launchkey,
-        status,
-        play_helper,
-    };
+    let mut world = effects::World { launchkey, status };
     runner.run_all(state, &mut world, effects);
 }
 
@@ -554,14 +525,9 @@ fn dispatch_actions(
     state: &mut actions::AppState,
     launchkey: Option<&mut launchkey::Launchkey>,
     status: &tracker::Status<WaveformId, MarkId>,
-    play_helper: &mut play_helper::PlayHelper,
     actions: Vec<actions::Action>,
 ) {
-    let mut world = effects::World {
-        launchkey,
-        status,
-        play_helper,
-    };
+    let mut world = effects::World { launchkey, status };
     runner.dispatch(state, &mut world, actions);
 }
 

@@ -10,9 +10,10 @@ use std::time::Instant;
 use std::collections::HashMap;
 
 use crate::actions::{self, AppState, Effect};
+use crate::evaluator;
 use crate::midi_input::Keys;
 use crate::parser;
-use crate::play_helper;
+use crate::player;
 use crate::programs::PROGRAMS_PER_BANK;
 use crate::renderer::{self, MarkId, WaveformId};
 use crate::slider;
@@ -24,21 +25,23 @@ use crate::{launchkey, optimizer};
 pub struct World<'a> {
     pub launchkey: Option<&'a mut launchkey::Launchkey>,
     pub status: &'a tracker::Status<WaveformId, MarkId>,
-    pub play_helper: &'a mut play_helper::PlayHelper,
 }
 
 pub struct EffectRunner {
-    pub command_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
-    pub slider_sender: mpsc::Sender<renderer::SliderEvent>,
+    player: player::Player,
+    evaluator: evaluator::Evaluator,
+    slider_sender: mpsc::Sender<renderer::SliderEvent>,
 }
 
 impl EffectRunner {
     pub fn new(
-        command_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
+        player: player::Player,
+        evaluator: evaluator::Evaluator,
         slider_sender: mpsc::Sender<renderer::SliderEvent>,
     ) -> Self {
         Self {
-            command_sender,
+            player,
+            evaluator,
             slider_sender,
         }
     }
@@ -79,15 +82,9 @@ impl EffectRunner {
                 start_at_next_measure,
                 repeat_after_measures,
             } => {
-                // TODO do we need to get()/match here?
-                let Some(program) = state.programs.program(program_index) else {
-                    return;
-                };
-                let display_name = state.programs.display_name(program_index);
-                if let Some(message) = world.play_helper.play_program_as_waveform(
+                if let Some(message) = self.player.play_program(
+                    &state.programs,
                     program_index,
-                    program,
-                    &display_name,
                     world.status,
                     start_at_next_measure,
                     repeat_after_measures,
@@ -99,37 +96,30 @@ impl EffectRunner {
                 if state.programs.program(program_index).is_none() {
                     return;
                 }
-                world
-                    .play_helper
+                self.player
                     .stop_waveform(WaveformId::Program(program_index));
             }
             Effect::RemovePendingProgram(program_index) => {
                 if state.programs.program(program_index).is_none() {
                     return;
                 }
-                let _ = self.command_sender.send(tracker::Command::RemovePending {
-                    id: WaveformId::Program(program_index),
-                });
+                self.player
+                    .remove_pending(WaveformId::Program(program_index));
             }
             Effect::ModifyWaveform {
                 id,
                 mark_id,
                 waveform,
             } => {
-                let _ = self.command_sender.send(tracker::Command::Modify {
-                    id,
-                    mark_id,
-                    waveform,
-                });
+                self.player.modify(id, mark_id, waveform);
             }
 
             Effect::EvaluateProgram {
                 program_index,
                 mode_on_failure,
             } => {
-                let evaluation = world
-                    .play_helper
-                    .evaluator()
+                let evaluation = self
+                    .evaluator
                     .evaluate_program(&state.programs, program_index);
                 match state
                     .programs
@@ -180,11 +170,10 @@ impl EffectRunner {
                     // TODO use a marked waveform for velocity so we can implement after-touch
                     parser::SourceExpr::float(velocity as f32 / 127.0),
                 ];
-                match world.play_helper.evaluator().apply_note_function(
-                    &keys.function,
-                    args,
-                    &keys.sliders,
-                ) {
+                match self
+                    .evaluator
+                    .apply_note_function(&keys.function, args, &keys.sliders)
+                {
                     Ok((note_on, note_off)) => {
                         let mut note_on = optimizer::optimize(note_on);
                         let note_off = optimizer::optimize(note_off);
@@ -200,7 +189,7 @@ impl EffectRunner {
                         let id = WaveformId::Key(key);
                         let program = &state.programs.programs()[keys.id];
                         let last_slider_values: HashMap<(WaveformId, String), f32> =
-                            play_helper::substitute_current_slider_values(
+                            player::substitute_current_slider_values(
                                 &mut note_on,
                                 program.sliders(),
                             )
@@ -212,12 +201,7 @@ impl EffectRunner {
                                 .send(renderer::SliderEvent::UpdateInitialValues(
                                     last_slider_values,
                                 ));
-                        let _ = self.command_sender.send(tracker::Command::Play {
-                            id,
-                            waveform: play_helper::build_top_level_waveform(note_on, level_db),
-                            start: None,
-                            repeat_every: None,
-                        });
+                        self.player.play_note(key, note_on, level_db);
                     }
                     Err(message) => {
                         state.message = message;
@@ -229,17 +213,13 @@ impl EffectRunner {
                 if let Some(keys) = state.keys.as_mut()
                     && let Some(note_off) = keys.note_off_waveforms.remove(&key)
                 {
-                    let _ = self.command_sender.send(tracker::Command::Modify {
-                        id,
-                        mark_id: MarkId::Terminator,
-                        waveform: note_off,
-                    });
+                    self.player.modify(id, MarkId::Terminator, note_off);
                     return;
                 }
                 // No stored note-off (key wasn't NoteOn'd, or keys were
                 // uninstalled mid-note). Send a generic stop ramp; it's a
                 // no-op if there's no matching waveform on the tracker.
-                world.play_helper.stop_waveform(id);
+                self.player.stop_waveform(id);
             }
 
             Effect::UpdateSlider { id, slider, value } => {
@@ -264,11 +244,11 @@ impl EffectRunner {
                 use waveform::Waveform;
                 for mark in &world.status.marks {
                     if let WaveformId::Key(_) = mark.waveform_id {
-                        let _ = self.command_sender.send(tracker::Command::Modify {
-                            id: mark.waveform_id.clone(),
-                            mark_id: MarkId::Amplitude,
-                            waveform: Waveform::Const(amplitude),
-                        });
+                        self.player.modify(
+                            mark.waveform_id.clone(),
+                            MarkId::Amplitude,
+                            Waveform::Const(amplitude),
+                        );
                     }
                 }
             }

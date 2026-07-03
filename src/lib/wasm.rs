@@ -80,7 +80,7 @@ impl Wasm {
         // Each module gets an implicit `open __prelude` prepended so its
         // bindings can reference prelude names (`sample_rate`, `tempo`,
         // built-ins) without depending on the caller having opened the
-        // prelude first. Mirrors `play_helper::PlayHelper::resolve` in
+        // prelude first. Mirrors `evaluator::Evaluator::resolve` in
         // the native runtime.
         let mut modules: HashMap<String, Vec<parser::SourceBinding<MarkId>>> = HashMap::new();
         for (name, content) in modules::EMBEDDED_MODULES {
