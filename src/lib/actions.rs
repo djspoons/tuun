@@ -720,7 +720,6 @@ fn apply_slider(
     if let Some(keys) = state.keys.as_mut()
         && keys.id == program_index
     {
-        keys.sliders.set_normalized(slider_index, normalized);
         effects.push(Effect::UpdateActiveKeySliders {
             slider: label.clone(),
             value: actual_value,
@@ -763,7 +762,6 @@ fn apply_level_db(state: &mut AppState, program_index: usize, level_db: f32) -> 
     if let Some(keys) = state.keys.as_mut()
         && keys.id == program_index
     {
-        keys.level_db = level_db;
         effects.push(Effect::ModifyActiveKeysAmplitude { amplitude });
     }
 
@@ -978,8 +976,6 @@ _ = saw(220);";
         state.keys = Some(keys::Keys {
             id: 0,
             function: parser::SourceExpr::float(0.0),
-            sliders: ProgramSliders::default(),
-            level_db: 0.0,
             note_off_waveforms: Default::default(),
         });
     }

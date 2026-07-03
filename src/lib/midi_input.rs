@@ -1,13 +1,10 @@
-use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::actions;
 use crate::launchkey;
-use crate::parser;
-use crate::programs::{PROGRAMS_PER_BANK, Program, ProgramSliders};
+use crate::programs::{PROGRAMS_PER_BANK, Program};
 use crate::renderer::{self, MarkId, WaveformId};
 use crate::tracker;
-use crate::waveform;
 
 /// The number of rotations of the encoder that represents the full range.
 const ENCODER_ROTATIONS: f32 = 4.0;

@@ -86,8 +86,7 @@ impl ProgramSliders {
     /// Sets the slider at `index` to `normalized` (clamped to 0.0..=1.0)
     /// and returns the slider's label and new denormalized value, or `None`
     /// if there is no slider at `index`.
-    // TODO make private to this module once the Keys sliders mirror is gone.
-    pub(crate) fn set_normalized(&mut self, index: usize, normalized: f32) -> Option<SliderChange> {
+    fn set_normalized(&mut self, index: usize, normalized: f32) -> Option<SliderChange> {
         let config = self.configs.get(index)?;
         let normalized = normalized.clamp(0.0, 1.0);
         self.normalized_values[index] = normalized;

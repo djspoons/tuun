@@ -147,8 +147,6 @@ impl EffectRunner {
                     let new_keys = Keys {
                         id: program_index,
                         function: expr.clone(),
-                        sliders: program.sliders().clone(),
-                        level_db: program.level_db(),
                         note_off_waveforms: HashMap::new(),
                     };
                     state.keys = Some(new_keys);
@@ -165,6 +163,12 @@ impl EffectRunner {
                 let Some(keys) = state.keys.as_mut() else {
                     return;
                 };
+                // The instrument's sliders and level are read live from the
+                // source program (only the function is an install-time
+                // snapshot).
+                let Some(program) = state.programs.program(keys.id) else {
+                    return;
+                };
                 let args = vec![
                     parser::SourceExpr::float(key as f32),
                     // TODO use a marked waveform for velocity so we can implement after-touch
@@ -172,12 +176,11 @@ impl EffectRunner {
                 ];
                 match self
                     .evaluator
-                    .apply_note_function(&keys.function, args, &keys.sliders)
+                    .apply_note_function(&keys.function, args, program.sliders())
                 {
                     Ok((note_on, note_off)) => {
                         let mut note_on = optimizer::optimize(note_on);
                         let note_off = optimizer::optimize(note_off);
-                        let level_db = keys.level_db;
                         keys.note_off_waveforms.insert(key, note_off);
                         // `note_on`'s `Marked(Slider(_))` nodes still hold the
                         // values from when the instrument was originally
@@ -187,7 +190,6 @@ impl EffectRunner {
                         // this fresh `Key` id (so its next ramp has a sensible
                         // "previous value" to start from).
                         let id = WaveformId::Key(key);
-                        let program = &state.programs.programs()[keys.id];
                         let last_slider_values: HashMap<(WaveformId, String), f32> =
                             player::substitute_current_slider_values(
                                 &mut note_on,
@@ -201,7 +203,7 @@ impl EffectRunner {
                                 .send(renderer::SliderEvent::UpdateInitialValues(
                                     last_slider_values,
                                 ));
-                        self.player.play_note(key, note_on, level_db);
+                        self.player.play_note(key, note_on, program.level_db());
                     }
                     Err(message) => {
                         state.message = message;

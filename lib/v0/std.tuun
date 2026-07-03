@@ -72,7 +72,7 @@ ADS = fn(attack_dur, decay_dur, sustain_level) =>
 // don't change the length, so they need to be combined with R (or fin).
 
 // TODO These are little strange as filters, since once one is applied, the
-// others sort of can't...
+// others sort of can't... Should filters ever return a seq?
 A = fn(dur) => fn(w) => w * (Aw(dur) \ 1);
 D = fn(dur, level) => fn(w) => w * (Dw(dur, level) \ 1); // XXX should this be "followed by 1" or "followed by level"?
 S = fn(dur, level) => fn(w) => w * (Sw(dur, level) \ 1); // XXX same here
