@@ -9,23 +9,6 @@ use crate::renderer::{self, MarkId, WaveformId};
 use crate::tracker;
 use crate::waveform;
 
-/// Represents a program installed to respond to MIDI note-on/-off events.
-//
-// TODO maybe move out of here since this isn't tied to MIDI input anymore
-pub struct Keys {
-    /// 0-based index into `AppState.programs` of the program installed as
-    /// the keys instrument.
-    pub id: usize,
-    /// A function which takes a pair (MIDI note, velocity) and returns a pair
-    /// of Waveforms to be used for note-on and note-off events.
-    ///
-    /// Should be a closed value except for references to sliders.
-    pub function: parser::SourceExpr<MarkId>,
-    pub sliders: ProgramSliders,
-    pub level_db: f32,
-    pub note_off_waveforms: HashMap<u8, waveform::Waveform<MarkId>>, // keys are MIDI note numbers
-}
-
 /// The number of rotations of the encoder that represents the full range.
 const ENCODER_ROTATIONS: f32 = 4.0;
 

@@ -6,8 +6,8 @@
 
 use std::time::Instant;
 
+use crate::keys;
 use crate::launchkey;
-use crate::midi_input;
 use crate::parser;
 use crate::player;
 use crate::programs::{self, PROGRAMS_PER_BANK, Program};
@@ -44,7 +44,7 @@ pub struct AppState {
     pub programs: programs::ProgramSet,
     pub active_program_index: usize,
     pub mode: Mode,
-    pub keys: Option<midi_input::Keys>,
+    pub keys: Option<keys::Keys>,
     pub repeat_after_measures: Option<u32>,
     /// Active behavior for the DAW pad.
     pub daw_pad_mode: DawPadMode,
@@ -975,7 +975,7 @@ _ = saw(220);";
 
     /// Installs program 0 as the keys instrument with a dummy function.
     fn install_test_keys(state: &mut AppState) {
-        state.keys = Some(midi_input::Keys {
+        state.keys = Some(keys::Keys {
             id: 0,
             function: parser::SourceExpr::float(0.0),
             sliders: ProgramSliders::default(),

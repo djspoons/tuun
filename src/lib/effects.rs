@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use crate::actions::{self, AppState, Effect};
 use crate::evaluator;
-use crate::midi_input::Keys;
+use crate::keys::Keys;
 use crate::parser;
 use crate::player;
 use crate::programs::PROGRAMS_PER_BANK;
