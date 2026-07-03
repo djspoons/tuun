@@ -399,14 +399,12 @@ pub fn main() {
         if state.programs[i].text.is_empty() {
             continue;
         }
-        let mut world = effects::World {
-            launchkey: launchkey.as_mut(),
-            status: &status,
-            play_helper: &mut effect_play_helper,
-        };
-        effect_runner.run_all(
+        run_effects(
+            &mut effect_runner,
             &mut state,
-            &mut world,
+            launchkey.as_mut(),
+            &status,
+            &mut effect_play_helper,
             vec![actions::Effect::EvaluateProgram {
                 program_index: i,
                 mode_on_failure: renderer::Mode::Select,
@@ -421,14 +419,12 @@ pub fn main() {
     // if present.
     {
         let daw_mode_label = state.daw_pad_mode.display_name().to_string();
-        let mut world = effects::World {
-            launchkey: launchkey.as_mut(),
-            status: &status,
-            play_helper: &mut effect_play_helper,
-        };
-        effect_runner.run_all(
+        run_effects(
+            &mut effect_runner,
             &mut state,
-            &mut world,
+            launchkey.as_mut(),
+            &status,
+            &mut effect_play_helper,
             vec![
                 actions::Effect::SyncEncoders,
                 actions::Effect::SetDawModeDisplay(daw_mode_label),
@@ -440,14 +436,16 @@ pub fn main() {
             return;
         }
         for event in event_pump.poll_iter() {
-            let sdl_actions = sdl2_handler.classify(&event, &state, &status);
+            let sdl_actions = sdl2_handler.classify(&event, &state);
             if let Some(actions) = sdl_actions {
-                let mut world = effects::World {
-                    launchkey: launchkey.as_mut(),
-                    status: &status,
-                    play_helper: &mut effect_play_helper,
-                };
-                effect_runner.dispatch(&mut state, &mut world, actions);
+                dispatch_actions(
+                    &mut effect_runner,
+                    &mut state,
+                    launchkey.as_mut(),
+                    &status,
+                    &mut effect_play_helper,
+                    actions,
+                );
             } else {
                 // classify() should cover every SDL event we care about.
                 println!("Unhandled SDL event: {:?}", event);
@@ -458,14 +456,16 @@ pub fn main() {
             loop {
                 match launchkey.events.try_recv() {
                     Ok(event) => {
-                        let actions = midi_input::classify(&event, &state, &status);
+                        let actions = midi_input::classify(&event, &state);
                         if let Some(actions) = actions {
-                            let mut world = effects::World {
-                                launchkey: Some(launchkey),
-                                status: &status,
-                                play_helper: &mut effect_play_helper,
-                            };
-                            effect_runner.dispatch(&mut state, &mut world, actions);
+                            dispatch_actions(
+                                &mut effect_runner,
+                                &mut state,
+                                Some(&mut *launchkey),
+                                &status,
+                                &mut effect_play_helper,
+                                actions,
+                            );
                         } else {
                             // classify() should be exhaustive for launchkey
                             // events.
@@ -494,13 +494,7 @@ pub fn main() {
         loop {
             match status_receiver.try_recv() {
                 Ok(tracker_status) => {
-                    if let Some(ratio) = tracker_status.tracker_load {
-                        metrics.tracker_load.set(ratio);
-                    }
-                    if let Some(allocations) = tracker_status.allocations_per_sample {
-                        metrics.allocations_per_sample.set(allocations);
-                    }
-                    status = tracker_status;
+                    apply_status(tracker_status, &mut metrics, &mut status);
                     statuses_received += 1;
                 }
                 Err(mpsc::TryRecvError::Empty) => {
@@ -509,13 +503,7 @@ pub fn main() {
                     }
                     match status_receiver.recv_timeout(Duration::from_millis(10)) {
                         Ok(tracker_status) => {
-                            if let Some(ratio) = tracker_status.tracker_load {
-                                metrics.tracker_load.set(ratio);
-                            }
-                            if let Some(allocations) = tracker_status.allocations_per_sample {
-                                metrics.allocations_per_sample.set(allocations);
-                            }
-                            status = tracker_status;
+                            apply_status(tracker_status, &mut metrics, &mut status);
                             statuses_received += 1;
                         }
                         Err(mpsc::RecvTimeoutError::Timeout) => break,
@@ -525,11 +513,6 @@ pub fn main() {
                 Err(e) => println!("Error receiving status: {:?}", e),
             }
         }
-        /*
-        if statuses_received > 1 {
-            println!("Received {} statuses", statuses_received);
-        }
-        */
         renderer.render(
             &ttf_context,
             &state,
@@ -542,4 +525,55 @@ pub fn main() {
             midi_input::update_launchkey_state(&state, &status, launchkey);
         }
     }
+}
+
+/// Runs the `effects` against a `World` built from the given arguments.
+fn run_effects(
+    runner: &mut effects::EffectRunner,
+    state: &mut actions::AppState,
+    launchkey: Option<&mut launchkey::Launchkey>,
+    status: &tracker::Status<WaveformId, MarkId>,
+    play_helper: &mut play_helper::PlayHelper,
+    effects: Vec<actions::Effect>,
+) {
+    let mut world = effects::World {
+        launchkey,
+        status,
+        play_helper,
+    };
+    runner.run_all(state, &mut world, effects);
+}
+
+/// Dispatches `actions` through the reducer against a `World` built from the
+/// given arguments.
+fn dispatch_actions(
+    runner: &mut effects::EffectRunner,
+    state: &mut actions::AppState,
+    launchkey: Option<&mut launchkey::Launchkey>,
+    status: &tracker::Status<WaveformId, MarkId>,
+    play_helper: &mut play_helper::PlayHelper,
+    actions: Vec<actions::Action>,
+) {
+    let mut world = effects::World {
+        launchkey,
+        status,
+        play_helper,
+    };
+    runner.dispatch(state, &mut world, actions);
+}
+
+/// Applies a freshly received tracker status: folds its metrics into
+/// `metrics` and replaces `status` with it.
+fn apply_status(
+    new_status: tracker::Status<WaveformId, MarkId>,
+    metrics: &mut renderer::Metrics,
+    status: &mut tracker::Status<WaveformId, MarkId>,
+) {
+    if let Some(ratio) = new_status.tracker_load {
+        metrics.tracker_load.set(ratio);
+    }
+    if let Some(allocations) = new_status.allocations_per_sample {
+        metrics.allocations_per_sample.set(allocations);
+    }
+    *status = new_status;
 }

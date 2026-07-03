@@ -32,15 +32,11 @@ const ENCODER_ROTATIONS: f32 = 4.0;
 pub fn classify(
     event: &launchkey::Event,
     state: &actions::AppState,
-    status: &tracker::Status<WaveformId, MarkId>,
 ) -> Option<Vec<actions::Action>> {
     use actions::Action;
     use launchkey::Event;
-    use std::time::Instant;
     let active_program_index = state.active_program_index;
     let programs: &[Program] = &state.programs;
-    let keys: &Option<Keys> = &state.keys;
-    let repeat_after_measures: Option<u32> = state.repeat_after_measures;
     let bank_start = state.bank_start();
     match event {
         Event::PluginEncoderChange { index, delta } => {
@@ -81,51 +77,23 @@ pub fn classify(
             actions::DawPadMode::ClipLauncher => {
                 let program_index = bank_start + *index as usize;
                 programs.get(program_index)?;
-                let id = WaveformId::Program(program_index);
-                let now = Instant::now();
-                let is_installed_keys = keys.as_ref().is_some_and(|k| k.id == program_index);
-                if status.has_active_mark(now, id.clone(), MarkId::TopLevel) {
-                    Some(vec![Action::StopProgram(program_index)])
-                } else if is_installed_keys {
-                    Some(vec![]) // no-op
-                } else {
-                    Some(vec![Action::PlayProgram {
-                        program_index,
-                        start_at_next_measure: false,
-                        repeat_after_measures: None,
-                    }])
-                }
+                Some(vec![Action::ToggleProgramPlayback(program_index)])
             }
             // Top row does nothing in the keys-installer mode.
             actions::DawPadMode::KeysInstaller => Some(vec![]),
         },
-        Event::DAWBottomPadDown { index } => match state.daw_pad_mode {
-            actions::DawPadMode::ClipLauncher => {
-                let program_index = bank_start + *index as usize;
-                programs.get(program_index)?;
-                let id = WaveformId::Program(program_index);
-                let now = Instant::now();
-                let is_installed_keys = keys.as_ref().is_some_and(|k| k.id == program_index);
-                if status.has_pending_mark(now, id.clone(), MarkId::TopLevel) {
-                    Some(vec![Action::RemovePendingProgram(program_index)])
-                } else if is_installed_keys {
-                    Some(vec![]) // no-op
-                } else {
-                    Some(vec![Action::PlayProgram {
-                        program_index,
-                        start_at_next_measure: true,
-                        repeat_after_measures,
-                    }])
+        Event::DAWBottomPadDown { index } => {
+            let program_index = bank_start + *index as usize;
+            programs.get(program_index)?;
+            match state.daw_pad_mode {
+                actions::DawPadMode::ClipLauncher => {
+                    Some(vec![Action::ToggleProgramPendingPlayback(program_index)])
+                }
+                actions::DawPadMode::KeysInstaller => {
+                    Some(vec![Action::ToggleInstalledKeys(program_index)])
                 }
             }
-            // Bottom row picks which program to install/uninstall as
-            // keys.
-            actions::DawPadMode::KeysInstaller => {
-                let program_index = bank_start + *index as usize;
-                programs.get(program_index)?;
-                Some(vec![Action::InstallKeys(program_index)])
-            }
-        },
+        }
         Event::PadFunctionDown => Some(vec![Action::CycleRepeatAfterMeasures]),
 
         Event::NoteOn { key, velocity } => Some(vec![Action::NoteOn {
@@ -134,21 +102,10 @@ pub fn classify(
         }]),
         Event::NoteOff { key } => Some(vec![Action::NoteOff { key: *key }]),
 
-        // Re-selecting DAW pad mode while already in it cycles the
-        // sub-behavior. Returning to DAW from another pad mode (Drum,
-        // Custom, etc.) leaves the sub-mode alone, so the user picks up
-        // wherever they left off. Either way, announce the active
-        // sub-mode so the display strip and status message reflect it.
-        Event::PadModeChanged { previous, current } => {
-            let mut actions = vec![Action::SetPadMode(*current)];
-            if *current == launchkey::PadMode::DAW {
-                if *previous == launchkey::PadMode::DAW {
-                    actions.push(Action::CycleDawPadMode);
-                }
-                actions.push(Action::AnnounceDawPadMode);
-            }
-            Some(actions)
-        }
+        Event::PadModeChanged { previous, current } => Some(vec![Action::PadModeChanged {
+            previous: *previous,
+            current: *current,
+        }]),
     }
 }
 
@@ -214,6 +171,33 @@ pub fn update_launchkey_state(
     }
 }
 
+/// The maximum 7-bit color channel value the pads accept.
+const U7_MAX: u8 = u8::MAX / 2;
+
+/// Returns the 7-bit (red, green, blue) pad color for `program`: its configured
+/// color at half intensity or a cyan default when none is set.
+fn program_pad_color(program: &Program) -> (u8, u8, u8) {
+    match program.color {
+        Some((r, g, b)) => (r / 2, g / 2, b / 2),
+        None => (0, 127, 127),
+    }
+}
+
+/// Fades `color` toward black over the current beat: full intensity at the beat
+/// start, darkening as the beat progresses.
+fn pulsed(
+    color: (u8, u8, u8),
+    now: Instant,
+    beat_start: Instant,
+    beat_duration: std::time::Duration,
+) -> (u8, u8, u8) {
+    let fraction = now
+        .duration_since(beat_start)
+        .div_duration_f32(beat_duration);
+    let dim = |channel: u8| channel.saturating_sub((fraction * channel as f32) as u8);
+    (dim(color.0), dim(color.1), dim(color.2))
+}
+
 fn update_pads_clip_launcher(
     state: &actions::AppState,
     status: &tracker::Status<WaveformId, MarkId>,
@@ -228,39 +212,28 @@ fn update_pads_clip_launcher(
         .enumerate()
     {
         let program_index = bank_start + i;
-        const U7_MAX: u8 = u8::MAX / 2;
-        // 7-bit color values for the current program.
-        let (red, blue, green) = match program.color {
-            Some(color) => (color.0 / 2, color.1 / 2, color.2 / 2),
-            None => (0, 127, 127),
-        };
+        let (red, green, blue) = program_pad_color(program);
+        let is_installed_keys = state.keys.as_ref().is_some_and(|k| k.id == program_index);
         // Top row is based on active waveforms
         if status.has_active_mark(now, WaveformId::Program(program_index), MarkId::TopLevel)
-            || (if let Some(Keys { id, .. }) = &state.keys
-                && *id == program_index
-            {
-                status
+            || (is_installed_keys
+                && status
                     .marks
                     .iter()
-                    .any(|m| matches!(m.waveform_id, WaveformId::Key(_)))
-            } else {
-                false
-            })
+                    .any(|m| matches!(m.waveform_id, WaveformId::Key(_))))
         {
-            // Based on time since beginning of the current beat.
-            let intensity = U7_MAX.saturating_sub(
-                (now.duration_since(current_beat_start)
-                    .div_duration_f32(current_beat_duration)
-                    * U7_MAX as f32) as u8,
+            let (r, g, b) = pulsed(
+                (0, U7_MAX, 0),
+                now,
+                current_beat_start,
+                current_beat_duration,
             );
-            launchkey.set_daw_top_pad_color(i as u8, 0, intensity, 0);
-        } else if let Some(Keys { id, .. }) = &state.keys
-            && *id == program_index
-        {
+            launchkey.set_daw_top_pad_color(i as u8, r, g, b);
+        } else if is_installed_keys {
             // If it's the installed keys program, don't color the top pad (unless it's playing).
             launchkey.set_daw_top_pad_color(i as u8, 0, 0, 0);
         } else if program.cached_waveform.is_some() {
-            launchkey.set_daw_top_pad_color(i as u8, red, blue, green);
+            launchkey.set_daw_top_pad_color(i as u8, red, green, blue);
         } else {
             // empty
             launchkey.set_daw_top_pad_color(i as u8, 0, 0, 0);
@@ -268,21 +241,17 @@ fn update_pads_clip_launcher(
         // Bottom row is based on pending waveforms
         if status.has_pending_mark(now, WaveformId::Program(program_index), MarkId::TopLevel) {
             launchkey.set_daw_bottom_pad_color(i as u8, 0, 127, 0);
-        } else if let Some(Keys { id, .. }) = &state.keys
-            && *id == program_index
-        {
+        } else if is_installed_keys {
             // If it's the installed keys program, pulse the configured color.
-            let intensity = now
-                .duration_since(current_beat_start)
-                .div_duration_f32(current_beat_duration);
-            launchkey.set_daw_bottom_pad_color(
-                i as u8,
-                red.saturating_sub((intensity * red as f32) as u8),
-                green.saturating_sub((intensity * green as f32) as u8),
-                blue.saturating_sub((intensity * blue as f32) as u8),
+            let (r, g, b) = pulsed(
+                (red, green, blue),
+                now,
+                current_beat_start,
+                current_beat_duration,
             );
+            launchkey.set_daw_bottom_pad_color(i as u8, r, g, b);
         } else if program.cached_waveform.is_some() {
-            launchkey.set_daw_bottom_pad_color(i as u8, red, blue, green);
+            launchkey.set_daw_bottom_pad_color(i as u8, red, green, blue);
         } else {
             // empty
             launchkey.set_daw_bottom_pad_color(i as u8, 0, 0, 0);
@@ -319,22 +288,17 @@ fn update_pads_keys_installer(
             launchkey.set_daw_bottom_pad_color(i as u8, 0, 0, 0);
             continue;
         }
-        let (red, blue, green) = match program.color {
-            Some(color) => (color.0 / 2, color.1 / 2, color.2 / 2),
-            None => (0, 127, 127),
-        };
+        let (red, green, blue) = program_pad_color(program);
         if installed {
-            let intensity = now
-                .duration_since(current_beat_start)
-                .div_duration_f32(current_beat_duration);
-            launchkey.set_daw_bottom_pad_color(
-                i as u8,
-                red.saturating_sub((intensity * red as f32) as u8),
-                green.saturating_sub((intensity * green as f32) as u8),
-                blue.saturating_sub((intensity * blue as f32) as u8),
+            let (r, g, b) = pulsed(
+                (red, green, blue),
+                now,
+                current_beat_start,
+                current_beat_duration,
             );
+            launchkey.set_daw_bottom_pad_color(i as u8, r, g, b);
         } else {
-            launchkey.set_daw_bottom_pad_color(i as u8, red, blue, green);
+            launchkey.set_daw_bottom_pad_color(i as u8, red, green, blue);
         }
     }
 }

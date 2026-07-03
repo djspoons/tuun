@@ -4,17 +4,20 @@
 //! `Action`s. `apply` then mutates `AppState` and returns `Effect`s, which
 //! the runner in `effects.rs` executes against the outside world.
 
+use std::time::Instant;
+
 use crate::launchkey;
 use crate::midi_input;
 use crate::parser;
 use crate::play_helper;
 use crate::renderer::{self, MarkId, Mode, PROGRAMS_PER_BANK, WaveformId};
 use crate::slider;
+use crate::tracker;
 use crate::waveform;
 
 /// Behavior of the pads when the controller is in DAW pad mode. Cycled by
-/// `Action::CycleDawPadMode` on each `Event::PadModeChanged(DAW)` so the
-/// user can repurpose the pads by re-pressing the DAW pad-mode button.
+/// `Action::PadModeChanged` when the user re-presses the DAW pad-mode
+/// button while already in DAW mode, repurposing the pads.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DawPadMode {
     /// Top row plays or stops, bottom row queues or cancels.
@@ -131,6 +134,12 @@ impl AppState {
     }
 }
 
+/// Read-only snapshot of the world used by the reducer.
+pub struct Context<'a> {
+    pub status: &'a tracker::Status<WaveformId, MarkId>,
+    pub now: Instant,
+}
+
 /// Things that can happen, emitted by handlers as pure data.
 #[derive(Debug)]
 pub enum Action {
@@ -147,13 +156,21 @@ pub enum Action {
     /// Immediately stop playback of the program waveform if it's playing.
     /// Otherwise, do nothing.
     StopProgram(usize),
-    /// Remove any pending playback for the given program.
+    /// Remove any pending playback for the given program. Does nothing if no
+    /// playback is pending.
     RemovePendingProgram(usize),
+    /// Stop the program if it's playing; otherwise play it immediately. Does
+    /// nothing if the program isn't a waveform.
+    ToggleProgramPlayback(usize),
+    /// Remove the program's pending playback if there is one; otherwise queue
+    /// it to play at the beginning of next measure (repeating per the app-wide
+    /// default). Does nothing if the program isn't a waveform.
+    ToggleProgramPendingPlayback(usize),
 
     // --- MIDI keys ---
-    /// Install the program at `program_index` as the keys instrument. If
-    /// the program at the given index is already installed, uninstall it.
-    InstallKeys(usize),
+    /// Install the program at the given index as the keys instrument. If the
+    /// program at the given index is already installed, uninstall it.
+    ToggleInstalledKeys(usize),
     NoteOn {
         key: u8,
         velocity: u8,
@@ -163,18 +180,19 @@ pub enum Action {
     },
 
     // --- mode transitions ---
+    /// Enter Edit mode on the active program, first removing any pending
+    /// playback for it.
     EnterEditMode,
     /// Parse and evaluate the current program, updating its state and the
-    /// source file. On success, return to Select mode; otherwise set the
-    /// mode to `mode_on_failure`.
+    /// source file. On success, return to Select mode; otherwise set the mode
+    /// to `mode_on_failure`.
     EvaluateAndLeaveEditMode {
         mode_on_failure: Mode,
     },
     EnterSelectMode,
     EnterMoveSlidersMode,
-    /// Enter computer-keyboard piano mode. Caller (the classifier) is
-    /// responsible for only emitting this when `state.keys.is_some()` —
-    /// the reducer accepts unconditionally.
+    /// Enter computer-keyboard piano mode. Does nothing if a keys instrument is
+    /// not installed.
     EnterKeysMode,
 
     // --- navigation ---
@@ -217,16 +235,14 @@ pub enum Action {
     /// Encoder mode changed on the controller.
     SetEncoderMode(launchkey::EncoderMode),
     /// Pad mode changed on the controller.
-    SetPadMode(launchkey::PadMode),
-    /// Cycle the DAW-pad-mode sub-behavior.
     ///
-    /// Just toggles `state.daw_pad_mode`; the caller is responsible for
-    /// following up with `AnnounceDawPadMode` if it wants the display or
-    /// status message refreshed.
-    CycleDawPadMode,
-    /// Push the current DAW-pad sub-mode out to the controller display
-    /// and the in-app status message.
-    AnnounceDawPadMode,
+    /// Entering DAW mode announces the current DAW-pad sub-mode on the
+    /// controller display and in the status message; re-selecting DAW while
+    /// already in it cycles the sub-mode.
+    PadModeChanged {
+        previous: launchkey::PadMode,
+        current: launchkey::PadMode,
+    },
     /// Toggle the default repeat (cycle None -> Some(1) -> Some(2) -> None).
     CycleRepeatAfterMeasures,
 
@@ -334,41 +350,46 @@ pub enum Effect {
     Exit,
 }
 
-/// Pure reducer: applies an action to state, returns effects.
+/// Applies an action to state, returning effects for the runner to execute.
 ///
-/// No I/O. No MPSC sends. No closures.
-pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
+/// Performs only the state mutation that needs no I/O, reading nothing beyond
+/// `state` and `ctx`. Effects whose outcome depends on I/O (evaluating a
+/// program, splicing source, playing notes) mutate state in the runner instead.
+pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect> {
     match action {
         Action::PlayProgram {
             program_index,
             start_at_next_measure,
             repeat_after_measures,
-        } => vec![
-            Effect::PlayProgram {
-                program_index,
-                start_at_next_measure,
-                repeat_after_measures,
-            },
-            Effect::UpdateSource(program_index),
-        ],
-        Action::StopProgram(i) => vec![
-            Effect::StopProgram(i),
-            Effect::ShowMessage(format!(
-                "Stopped program {}",
-                program_display_name(state, i)
-            )),
-        ],
-        Action::RemovePendingProgram(i) => vec![
-            Effect::RemovePendingProgram(i),
-            Effect::ShowMessage(format!(
-                "Removed pending waveform for program {}",
-                program_display_name(state, i)
-            )),
-        ],
+        } => play_program_effects(program_index, start_at_next_measure, repeat_after_measures),
+        Action::StopProgram(i) => stop_program_effects(state, ctx, i),
+        Action::RemovePendingProgram(i) => remove_pending_effects(state, ctx, i),
+        Action::ToggleProgramPlayback(i) => {
+            if ctx
+                .status
+                .has_active_mark(ctx.now, WaveformId::Program(i), MarkId::TopLevel)
+            {
+                stop_program_effects(state, ctx, i)
+            } else if state.keys.as_ref().is_some_and(|k| k.id == i) {
+                vec![]
+            } else {
+                play_program_effects(i, false, None)
+            }
+        }
+        Action::ToggleProgramPendingPlayback(i) => {
+            if ctx
+                .status
+                .has_pending_mark(ctx.now, WaveformId::Program(i), MarkId::TopLevel)
+            {
+                remove_pending_effects(state, ctx, i)
+            } else if state.keys.as_ref().is_some_and(|k| k.id == i) {
+                vec![]
+            } else {
+                play_program_effects(i, true, state.repeat_after_measures)
+            }
+        }
 
-        Action::InstallKeys(i) => apply_install_keys(state, i),
-        // The runner does the parser work and the actual state mutation
-        // (storing note_off waveforms) for both of these.
+        Action::ToggleInstalledKeys(i) => apply_install_keys(state, i),
         Action::NoteOn { key, velocity } => {
             if state.keys.is_some() {
                 vec![Effect::PlayNoteOn { key, velocity }]
@@ -379,6 +400,10 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
         Action::NoteOff { key } => vec![Effect::PlayNoteOff { key }],
 
         Action::EnterEditMode => {
+            // Editing a program whose playback is still queued would be
+            // confusing (the stale waveform would start mid-edit), so cancel
+            // any pending playback on the way in.
+            let effects = remove_pending_effects(state, ctx, state.active_program_index);
             let program = state.active_program();
             let cursor = program.text.len();
             let errors = parse_program_errors(&program.text);
@@ -399,7 +424,7 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
                 cursor_position: cursor,
                 errors,
             };
-            vec![]
+            effects
         }
         Action::EvaluateAndLeaveEditMode { mode_on_failure } => {
             vec![
@@ -420,6 +445,11 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
             vec![]
         }
         Action::EnterKeysMode => {
+            if state.keys.is_none() {
+                return vec![Effect::ShowMessage(
+                    "No keys instrument installed".to_string(),
+                )];
+            }
             state.mode = Mode::Keys;
             vec![Effect::ShowMessage("Piano keys enabled".to_string())]
         }
@@ -436,16 +466,40 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
             }
         }
 
-        Action::InsertText(text) => apply_insert_text(state, &text),
-        Action::DeleteCharBeforeCursor => apply_delete_char(state),
-        Action::DeleteWordBeforeCursor => apply_delete_word(state),
-        Action::MoveCursorBy(delta) => apply_move_cursor_by(state, delta),
-        Action::MoveCursorToStart => apply_move_cursor_to(state, 0),
-        Action::MoveCursorToEnd => {
-            let len = state.active_program().text.len();
-            apply_move_cursor_to(state, len)
-        }
-        Action::MoveCursorToPreviousWord => apply_move_cursor_prev_word(state),
+        Action::InsertText(text) => edit_text_op(state, |current, cursor| {
+            let mut new_text = current.to_string();
+            new_text.insert_str(cursor, &text);
+            Some((new_text, cursor + text.len()))
+        }),
+        Action::DeleteCharBeforeCursor => edit_text_op(state, |current, cursor| {
+            if cursor == 0 {
+                return None;
+            }
+            let mut new_text = current.to_string();
+            new_text.remove(cursor - 1);
+            Some((new_text, cursor - 1))
+        }),
+        Action::DeleteWordBeforeCursor => edit_text_op(state, |current, cursor| {
+            if cursor == 0 {
+                return None;
+            }
+            let new_cursor = prev_word_start(&current[..cursor]);
+            let mut new_text = current.to_string();
+            new_text.replace_range(new_cursor..cursor, "");
+            Some((new_text, new_cursor))
+        }),
+        Action::MoveCursorBy(delta) => edit_cursor_op(state, |current, cursor| {
+            (cursor as i32 + delta).clamp(0, current.len() as i32) as usize
+        }),
+        Action::MoveCursorToStart => edit_cursor_op(state, |_, _| 0),
+        Action::MoveCursorToEnd => edit_cursor_op(state, |current, _| current.len()),
+        Action::MoveCursorToPreviousWord => edit_cursor_op(state, |current, cursor| {
+            if cursor == 0 {
+                0
+            } else {
+                prev_word_start(&current[..cursor])
+            }
+        }),
 
         Action::SetSliderNormalized {
             program,
@@ -462,20 +516,20 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
             // cache and re-syncs only if it actually changed.
             vec![Effect::SetLaunchkeyEncoderMode(new_mode)]
         }
-        Action::SetPadMode(new_mode) => vec![Effect::SetLaunchkeyPadMode(new_mode)],
-        Action::CycleDawPadMode => {
-            state.daw_pad_mode = match state.daw_pad_mode {
-                DawPadMode::ClipLauncher => DawPadMode::KeysInstaller,
-                DawPadMode::KeysInstaller => DawPadMode::ClipLauncher,
-            };
-            vec![]
-        }
-        Action::AnnounceDawPadMode => {
-            let label = state.daw_pad_mode.display_name().to_string();
-            vec![
-                Effect::SetDawModeDisplay(label.clone()),
-                Effect::ShowMessage(label),
-            ]
+        Action::PadModeChanged { previous, current } => {
+            let mut effects = vec![Effect::SetLaunchkeyPadMode(current)];
+            if current == launchkey::PadMode::DAW {
+                if previous == launchkey::PadMode::DAW {
+                    state.daw_pad_mode = match state.daw_pad_mode {
+                        DawPadMode::ClipLauncher => DawPadMode::KeysInstaller,
+                        DawPadMode::KeysInstaller => DawPadMode::ClipLauncher,
+                    };
+                }
+                let label = state.daw_pad_mode.display_name().to_string();
+                effects.push(Effect::SetDawModeDisplay(label.clone()));
+                effects.push(Effect::ShowMessage(label));
+            }
+            effects
         }
 
         Action::CycleRepeatAfterMeasures => {
@@ -501,6 +555,58 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
             Effect::Exit,
         ],
     }
+}
+
+/// Returns the effects that play the given program and persist its source.
+fn play_program_effects(
+    program_index: usize,
+    start_at_next_measure: bool,
+    repeat_after_measures: Option<u32>,
+) -> Vec<Effect> {
+    vec![
+        Effect::PlayProgram {
+            program_index,
+            start_at_next_measure,
+            repeat_after_measures,
+        },
+        Effect::UpdateSource(program_index),
+    ]
+}
+
+/// Returns the effects that stop the given program, or nothing if it isn't
+/// currently playing.
+fn stop_program_effects(state: &AppState, ctx: &Context, i: usize) -> Vec<Effect> {
+    if !ctx
+        .status
+        .has_active_mark(ctx.now, WaveformId::Program(i), MarkId::TopLevel)
+    {
+        return vec![];
+    }
+    vec![
+        Effect::StopProgram(i),
+        Effect::ShowMessage(format!(
+            "Stopped program {}",
+            program_display_name(state, i)
+        )),
+    ]
+}
+
+/// Returns the effects that remove the given program's pending playback, or
+/// nothing if no playback is pending.
+fn remove_pending_effects(state: &AppState, ctx: &Context, i: usize) -> Vec<Effect> {
+    if !ctx
+        .status
+        .has_pending_mark(ctx.now, WaveformId::Program(i), MarkId::TopLevel)
+    {
+        return vec![];
+    }
+    vec![
+        Effect::RemovePendingProgram(i),
+        Effect::ShowMessage(format!(
+            "Removed pending waveform for program {}",
+            program_display_name(state, i)
+        )),
+    ]
 }
 
 fn apply_select_program(state: &mut AppState, i: usize) -> Vec<Effect> {
@@ -606,7 +712,16 @@ fn refresh_edit_errors(state: &mut AppState) {
     }
 }
 
-fn apply_insert_text(state: &mut AppState, text: &str) -> Vec<Effect> {
+/// Applies a text edit to the active program's Edit-mode text.
+///
+/// Calls `f` with the current text and cursor position; when `f` returns a new
+/// (text, cursor) pair, writes both back, refreshes the Edit-mode parse errors,
+/// and clears the status message (whatever it described is stale once the text
+/// changes). Does nothing outside Edit mode or when `f` returns `None`.
+fn edit_text_op(
+    state: &mut AppState,
+    f: impl FnOnce(&str, usize) -> Option<(String, usize)>,
+) -> Vec<Effect> {
     let cursor = match &state.mode {
         Mode::Edit {
             cursor_position, ..
@@ -614,118 +729,48 @@ fn apply_insert_text(state: &mut AppState, text: &str) -> Vec<Effect> {
         _ => return vec![],
     };
     let program = &mut state.programs[state.active_program_index];
-    let mut new_text = program.text.clone();
-    new_text.insert_str(cursor, text);
-    program.set_text(new_text);
-    if let Mode::Edit {
-        cursor_position, ..
-    } = &mut state.mode
-    {
-        *cursor_position = cursor + text.len();
+    if let Some((new_text, new_cursor)) = f(&program.text, cursor) {
+        program.set_text(new_text);
+        if let Mode::Edit {
+            cursor_position, ..
+        } = &mut state.mode
+        {
+            *cursor_position = new_cursor;
+        }
+        refresh_edit_errors(state);
+        state.message.clear();
     }
-    refresh_edit_errors(state);
     vec![]
 }
 
-fn apply_delete_char(state: &mut AppState) -> Vec<Effect> {
+/// Moves the Edit-mode cursor: `f` maps (text, cursor) to the new position,
+/// which is clamped to the text's length. Does nothing outside Edit mode.
+fn edit_cursor_op(state: &mut AppState, f: impl FnOnce(&str, usize) -> usize) -> Vec<Effect> {
     let cursor = match &state.mode {
         Mode::Edit {
             cursor_position, ..
         } => *cursor_position,
         _ => return vec![],
     };
-    if cursor == 0 {
-        return vec![];
-    }
-    let program = &mut state.programs[state.active_program_index];
-    let mut new_text = program.text.clone();
-    new_text.remove(cursor - 1);
-    program.set_text(new_text);
-    if let Mode::Edit {
-        cursor_position, ..
-    } = &mut state.mode
-    {
-        *cursor_position = cursor - 1;
-    }
-    refresh_edit_errors(state);
-    vec![]
-}
-
-fn apply_delete_word(state: &mut AppState) -> Vec<Effect> {
-    let cursor = match &state.mode {
-        Mode::Edit {
-            cursor_position, ..
-        } => *cursor_position,
-        _ => return vec![],
-    };
-    if cursor == 0 {
-        return vec![];
-    }
-    let program = &mut state.programs[state.active_program_index];
-    let prefix = &program.text[..cursor];
-    let new_cursor = match prefix.trim_end().rfind(char::is_whitespace) {
-        Some(idx) => idx + 1,
-        None => 0,
-    };
-    let mut new_text = program.text.clone();
-    new_text.replace_range(new_cursor..cursor, "");
-    program.set_text(new_text);
+    let text = &state.programs[state.active_program_index].text;
+    let new_cursor = f(text, cursor).min(text.len());
     if let Mode::Edit {
         cursor_position, ..
     } = &mut state.mode
     {
         *cursor_position = new_cursor;
     }
-    refresh_edit_errors(state);
     vec![]
 }
 
-fn apply_move_cursor_by(state: &mut AppState, delta: i32) -> Vec<Effect> {
-    let len = state.active_program().text.len();
-    if let Mode::Edit {
-        cursor_position, ..
-    } = &mut state.mode
-    {
-        let new = (*cursor_position as i32 + delta).max(0).min(len as i32) as usize;
-        *cursor_position = new;
-    }
-    vec![]
-}
-
-fn apply_move_cursor_to(state: &mut AppState, pos: usize) -> Vec<Effect> {
-    let len = state.active_program().text.len();
-    if let Mode::Edit {
-        cursor_position, ..
-    } = &mut state.mode
-    {
-        *cursor_position = pos.min(len);
-    }
-    vec![]
-}
-
-fn apply_move_cursor_prev_word(state: &mut AppState) -> Vec<Effect> {
-    let cursor = match &state.mode {
-        Mode::Edit {
-            cursor_position, ..
-        } => *cursor_position,
-        _ => return vec![],
-    };
-    if cursor == 0 {
-        return vec![];
-    }
-    let program = state.active_program();
-    let prefix = &program.text[..cursor];
-    let new = match prefix.trim_end().rfind(char::is_whitespace) {
+/// Returns the byte offset where the word preceding the end of `prefix` starts:
+/// skips any trailing whitespace, then scans back to the previous whitespace
+/// boundary (or the start of the string).
+fn prev_word_start(prefix: &str) -> usize {
+    match prefix.trim_end().rfind(char::is_whitespace) {
         Some(idx) => idx + 1,
         None => 0,
-    };
-    if let Mode::Edit {
-        cursor_position, ..
-    } = &mut state.mode
-    {
-        *cursor_position = new;
     }
-    vec![]
 }
 
 fn apply_mouse_slider(state: &mut AppState, axis: usize, delta: f32) -> Vec<Effect> {
@@ -842,6 +887,42 @@ fn apply_level_db(state: &mut AppState, program_index: usize, level_db: f32) -> 
 mod tests {
     use super::*;
     use renderer::Program;
+    use std::time::Duration;
+
+    /// A tracker status with no marks at all — nothing active, nothing pending.
+    fn empty_status() -> tracker::Status<WaveformId, MarkId> {
+        tracker::Status {
+            buffer_start: Instant::now(),
+            marks: vec![],
+            buffer: None,
+            tracker_load: None,
+            allocations_per_sample: None,
+        }
+    }
+
+    /// A status with a single TopLevel mark for program 0 starting at `start`
+    /// (before `now` = active, after `now` = pending).
+    fn status_with_mark(start: Instant) -> tracker::Status<WaveformId, MarkId> {
+        let mut status = empty_status();
+        status.marks.push(tracker::Mark {
+            waveform_id: WaveformId::Program(0),
+            mark_id: MarkId::TopLevel,
+            start,
+            duration: Duration::from_secs(1),
+        });
+        status
+    }
+
+    /// Applies `action` against an empty tracker status.
+    fn apply_with_empty_status(state: &mut AppState, action: Action) -> Vec<Effect> {
+        let status = empty_status();
+        // XXX should we use Instant::now() or buffer_start?
+        let ctx = Context {
+            status: &status,
+            now: Instant::now(),
+        };
+        apply(state, &ctx, action)
+    }
 
     fn test_state() -> AppState {
         AppState {
@@ -862,7 +943,7 @@ mod tests {
     #[test]
     fn set_level_db_updates_state_and_emits_modify() {
         let mut state = test_state();
-        let effects = apply(
+        let effects = apply_with_empty_status(
             &mut state,
             Action::SetLevelDb {
                 program: 0,
@@ -902,7 +983,7 @@ mod tests {
             should_exit: false,
             message: String::new(),
         };
-        apply(&mut state, Action::InsertText("(".to_string()));
+        apply_with_empty_status(&mut state, Action::InsertText("(".to_string()));
         let Mode::Edit { errors, .. } = &state.mode else {
             panic!("expected Edit mode after InsertText");
         };
@@ -911,7 +992,7 @@ mod tests {
             "expected parse errors after inserting an unbalanced '('"
         );
         // Now type the closing paren — errors should clear.
-        apply(&mut state, Action::InsertText("1)".to_string()));
+        apply_with_empty_status(&mut state, Action::InsertText("1)".to_string()));
         let Mode::Edit { errors, .. } = &state.mode else {
             panic!("expected Edit mode after second InsertText");
         };
@@ -927,7 +1008,7 @@ mod tests {
         // Two programs so AdvanceProgram(1) actually moves the index.
         let mut state = test_state();
         state.programs.push(Program::from_string("second", 1));
-        let effects = apply(&mut state, Action::AdvanceProgram(1));
+        let effects = apply_with_empty_status(&mut state, Action::AdvanceProgram(1));
         assert_eq!(state.active_program_index, 1);
         // The empty ShowMessage is what gets folded into Mode::Select to
         // wipe any stale "Removed pending..." / "Playing..." text.
@@ -954,7 +1035,7 @@ _ = saw(220);";
             .expect("test source should parse");
 
         // Slot 1: named `kick`.
-        let effects = apply(&mut state, Action::SelectProgram(0));
+        let effects = apply_with_empty_status(&mut state, Action::SelectProgram(0));
         let msg = effects
             .iter()
             .find_map(|e| match e {
@@ -965,7 +1046,7 @@ _ = saw(220);";
         assert_eq!(msg, "kick");
 
         // Slot 2: anonymous `_` — status stays empty.
-        let effects = apply(&mut state, Action::SelectProgram(1));
+        let effects = apply_with_empty_status(&mut state, Action::SelectProgram(1));
         let msg = effects
             .iter()
             .find_map(|e| match e {
@@ -976,7 +1057,7 @@ _ = saw(220);";
         assert_eq!(msg, "");
 
         // Slot 3: padding (no binding for this slot).
-        let effects = apply(&mut state, Action::SelectProgram(2));
+        let effects = apply_with_empty_status(&mut state, Action::SelectProgram(2));
         let msg = effects
             .iter()
             .find_map(|e| match e {
@@ -990,7 +1071,7 @@ _ = saw(220);";
     #[test]
     fn set_encoder_mode_emits_set_launchkey_encoder_mode() {
         let mut state = test_state();
-        let effects = apply(
+        let effects = apply_with_empty_status(
             &mut state,
             Action::SetEncoderMode(launchkey::EncoderMode::Mixer),
         );
@@ -1001,5 +1082,134 @@ _ = saw(220);";
             effects[0],
             Effect::SetLaunchkeyEncoderMode(launchkey::EncoderMode::Mixer)
         ));
+    }
+
+    /// Installs program 0 as the keys instrument with a dummy function.
+    fn install_test_keys(state: &mut AppState) {
+        state.keys = Some(midi_input::Keys {
+            id: 0,
+            function: parser::SourceExpr::float(0.0),
+            sliders: renderer::ProgramSliders::default(),
+            level_db: 0.0,
+            note_off_waveforms: Default::default(),
+        });
+    }
+
+    #[test]
+    fn toggle_program_playback_stops_when_active() {
+        let mut state = test_state();
+        let now = Instant::now();
+        let status = status_with_mark(now - Duration::from_secs(1));
+        let ctx = Context {
+            status: &status,
+            now,
+        };
+        let effects = apply(&mut state, &ctx, Action::ToggleProgramPlayback(0));
+        assert!(
+            matches!(effects[0], Effect::StopProgram(0)),
+            "expected StopProgram, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn toggle_program_playback_plays_immediately_when_idle() {
+        let mut state = test_state();
+        let effects = apply_with_empty_status(&mut state, Action::ToggleProgramPlayback(0));
+        assert!(
+            matches!(
+                effects[0],
+                Effect::PlayProgram {
+                    program_index: 0,
+                    start_at_next_measure: false,
+                    repeat_after_measures: None,
+                }
+            ),
+            "expected an immediate PlayProgram, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn toggle_program_playback_ignores_installed_keys_program() {
+        let mut state = test_state();
+        install_test_keys(&mut state);
+        let effects = apply_with_empty_status(&mut state, Action::ToggleProgramPlayback(0));
+        assert!(
+            effects.is_empty(),
+            "expected no effects for the installed keys program, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn toggle_queued_program_removes_pending_when_queued() {
+        let mut state = test_state();
+        let now = Instant::now();
+        let status = status_with_mark(now + Duration::from_secs(1));
+        let ctx = Context {
+            status: &status,
+            now,
+        };
+        let effects = apply(&mut state, &ctx, Action::ToggleProgramPendingPlayback(0));
+        assert!(
+            matches!(effects[0], Effect::RemovePendingProgram(0)),
+            "expected RemovePendingProgram, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn toggle_queued_program_queues_with_default_repeat_when_idle() {
+        let mut state = test_state();
+        state.repeat_after_measures = Some(2);
+        let effects = apply_with_empty_status(&mut state, Action::ToggleProgramPendingPlayback(0));
+        assert!(
+            matches!(
+                effects[0],
+                Effect::PlayProgram {
+                    program_index: 0,
+                    start_at_next_measure: true,
+                    repeat_after_measures: Some(2),
+                }
+            ),
+            "expected a queued PlayProgram with the default repeat, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn stop_and_remove_pending_are_no_ops_when_nothing_is_playing() {
+        // Their doc comments promise "otherwise, do nothing" — in
+        // particular no stale "Stopped program …" status message.
+        let mut state = test_state();
+        let effects = apply_with_empty_status(&mut state, Action::StopProgram(0));
+        assert!(effects.is_empty(), "expected no effects, got {:?}", effects);
+        let effects = apply_with_empty_status(&mut state, Action::RemovePendingProgram(0));
+        assert!(effects.is_empty(), "expected no effects, got {:?}", effects);
+    }
+
+    #[test]
+    fn enter_edit_mode_removes_pending_playback() {
+        let mut state = test_state();
+        let now = Instant::now();
+        let status = status_with_mark(now + Duration::from_secs(1));
+        let ctx = Context {
+            status: &status,
+            now,
+        };
+        let effects = apply(&mut state, &ctx, Action::EnterEditMode);
+        assert!(
+            matches!(state.mode, Mode::Edit { .. }),
+            "expected Edit mode, got {:?}",
+            state.mode
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::RemovePendingProgram(0))),
+            "expected the pending playback to be removed, got {:?}",
+            effects
+        );
     }
 }

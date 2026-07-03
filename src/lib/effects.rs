@@ -5,6 +5,7 @@
 //! stays pure and easy to test.
 
 use std::sync::mpsc;
+use std::time::Instant;
 
 use std::collections::HashMap;
 
@@ -413,9 +414,13 @@ impl EffectRunner {
         actions: Vec<actions::Action>,
     ) {
         //println!("dispatch: actions = {:?}", actions);
+        let ctx = actions::Context {
+            status: world.status,
+            now: Instant::now(),
+        };
         let mut all_effects = Vec::new();
         for action in actions {
-            all_effects.extend(actions::apply(state, action));
+            all_effects.extend(actions::apply(state, &ctx, action));
         }
         //println!("  -> effects = {:?}", all_effects);
         self.run_all(state, world, all_effects);
@@ -429,11 +434,10 @@ impl EffectRunner {
                 repeat_after_measures,
             } => {
                 // TODO do we need to get()/match here?
-                if state.programs.get(program_index).is_none() {
+                let Some(program) = state.programs.get(program_index) else {
                     return;
-                }
+                };
                 let display_name = actions::program_display_name(state, program_index);
-                let program = &state.programs[program_index];
                 if let Some(message) = world.play_helper.play_program_as_waveform(
                     program_index,
                     program,
@@ -566,6 +570,8 @@ impl EffectRunner {
                         "Installed keys from program {}",
                         actions::program_display_name(state, program_index)
                     );
+                } else {
+                    state.message = "Not a valid keys instrument".to_string();
                 }
             }
 
