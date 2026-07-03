@@ -1,15 +1,10 @@
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::fs;
-use std::path;
 use std::sync::mpsc;
 use std::time;
 
-use crate::builtins;
+use crate::evaluator::Evaluator;
 use crate::optimizer;
 use crate::parser;
 use crate::programs::{Program, ProgramSet, ProgramSliders};
-use crate::renderer;
 use crate::renderer::{MarkId, WaveformId};
 use crate::slider;
 use crate::tracker;
@@ -42,36 +37,11 @@ pub fn substitute_current_slider_values(
     values
 }
 
-/// One slot in [`PlayHelper`]'s module cache: the file's mtime at the time
-/// we parsed it, plus a leaked `&'static` slice of the parsed bindings.
-// See the field doc on `PlayHelper::modules` for the leak strategy.
-struct ModuleCacheEntry {
-    mtime: time::SystemTime,
-    bindings: &'static [parser::SourceBinding<MarkId>],
-}
-
 pub struct PlayHelper {
     tempo: u32,
     beats_per_measure: u32,
-
-    /// Built-ins + environment-derived definitions; implicitly opened at
-    /// the top of every other loaded module — see [`PlayHelper::resolve`].
-    prelude: Vec<parser::SourceBinding<MarkId>>,
-    /// Filesystem root for module resolution. A module path
-    /// `["foo", "bar"]` is looked up as `<library_root>/foo/bar.tuun`.
-    library_root: path::PathBuf,
-    /// Cache of loaded modules, keyed by module path.
-    ///
-    /// Each entry pairs the file's last-seen mtime with a leaked `&'static`
-    /// slice of bindings. On `resolve`, we stat the file and re-read+re-parse
-    /// if the mtime has changed; otherwise we hand back the cached slice.
-    ///
-    /// Because previously-returned borrows must stay valid for the duration of
-    /// an evaluate session, invalidation does NOT free the old allocation — the
-    /// stale leak stays in memory until process exit. That's bounded by `(files
-    /// loaded) * (edits per file)`, which is fine for tuun's interactive
-    /// workflow.
-    modules: RefCell<HashMap<Vec<String>, ModuleCacheEntry>>,
+    /// The evaluation environment (prelude + module cache).
+    evaluator: Evaluator,
     precomputing_command_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
     fast_command_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
 }
@@ -81,129 +51,22 @@ impl PlayHelper {
         sample_rate: u32,
         tempo: u32,
         beats_per_measure: u32,
-        library_root: path::PathBuf,
+        library_root: std::path::PathBuf,
         precomputing_command_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
         fast_command_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
     ) -> PlayHelper {
-        // Construct the prelude from the built-ins and any environment specific bindings.
-        let mut prelude = Vec::new();
-        builtins::add_bindings(&mut prelude);
-
-        use parser::SourceExpr;
-        fn def<M>(id: &str, expr: SourceExpr<M>) -> parser::SourceBinding<M> {
-            use parser::Binding;
-            use parser::Pattern;
-            Binding::Definition(Pattern::Identifier(id.to_string()), expr).into()
-        }
-        prelude.push(def("tempo", SourceExpr::float(tempo as f32)));
-        prelude.push(def("sample_rate", SourceExpr::float(sample_rate as f32)));
-
-        prelude.push(def(
-            "mark",
-            SourceExpr::from(parser::Expr::BuiltIn {
-                name: "mark".to_string(),
-                function: parser::BuiltInFn(std::rc::Rc::new(renderer::mark)),
-            }),
-        ));
-
         PlayHelper {
             tempo,
             beats_per_measure,
-            prelude,
-            library_root,
-            modules: RefCell::new(HashMap::new()),
+            evaluator: Evaluator::new(sample_rate, tempo, library_root),
             precomputing_command_sender,
             fast_command_sender,
         }
     }
 
-    /// Resolves a module path to its (parsed) bindings.
-    ///
-    /// The special path `["__prelude"]` returns the in-memory prelude built by
-    /// [`PlayHelper::new`]. Other paths are mapped to a file under
-    /// [`library_root`](Self::library_root): `["foo", "bar"]` →
-    /// `<library_root>/foo/bar.tuun`.
-    ///
-    /// Each call stats the file and compares its mtime with the cached entry's.
-    /// On a match we hand back the existing slice; on a mismatch or miss, we
-    /// re-read, re-parse, prepend an implicit `open __prelude`, leak the new
-    /// bindings, and replace the cache entry. The previous leaked allocation
-    /// stays in memory — any borrows handed out before invalidation remain
-    /// valid (essential for recursive resolve calls during one `evaluate`
-    /// session).
-    fn resolve(&self, path: &[String]) -> Result<&[parser::SourceBinding<MarkId>], parser::Error> {
-        if path.len() == 1 && path[0] == "__prelude" {
-            return Ok(&self.prelude);
-        }
-
-        // Build the file path: <library_root>/<path components>.tuun.
-        let mut file_path = self.library_root.clone();
-        for part in path {
-            file_path.push(part);
-        }
-        file_path.set_extension("tuun");
-
-        // Stat the file once. If the cache has a matching mtime, return the
-        // cached slice without re-reading or re-parsing.
-        let current_mtime = fs::metadata(&file_path)
-            .and_then(|m| m.modified())
-            .map_err(|e| {
-                parser::Error::new(format!(
-                    "Failed to stat module {}: {}",
-                    file_path.display(),
-                    e
-                ))
-            })?;
-        if let Some(entry) = self.modules.borrow().get(path)
-            && entry.mtime == current_mtime
-        {
-            return Ok(entry.bindings);
-        }
-
-        // Cache miss or stale — reload.
-        let contents = fs::read_to_string(&file_path).map_err(|e| {
-            parser::Error::new(format!(
-                "Failed to read module {}: {}",
-                file_path.display(),
-                e
-            ))
-        })?;
-        // TODO these two error cases are a little hard to unravel, but :shrug:
-        let (mut bindings, errors) =
-            parser::parse_module::<MarkId>(&contents).map_err(|errors| {
-                errors.into_iter().next().unwrap_or_else(|| {
-                    parser::Error::new(format!("Parse failed for {}", file_path.display()))
-                })
-            })?;
-        if !errors.is_empty() {
-            errors.into_iter().next().unwrap_or_else(|| {
-                parser::Error::new(format!("Parse failed for {}", file_path.display()))
-            });
-        }
-
-        // Every loaded module implicitly opens the prelude as its first binding
-        // so it can reference prelude names without an explicit `open __prelude`
-        // line.
-        bindings.insert(
-            0,
-            parser::Binding::Open(vec!["__prelude".to_string()]).into(),
-        );
-
-        // Leak the parsed bindings so we can hand out a stable
-        // `&[SourceBinding]` reference. On a stale-cache reload, the previous
-        // leak isn't freed — any borrows from before the reload (e.g. earlier
-        // in the same evaluate session) remain valid.
-        // TODO consider other ways of caching that don't depend on leak
-        let leaked: &'static [parser::SourceBinding<MarkId>] =
-            Box::leak(bindings.into_boxed_slice());
-        self.modules.borrow_mut().insert(
-            path.to_vec(),
-            ModuleCacheEntry {
-                mtime: current_mtime,
-                bindings: leaked,
-            },
-        );
-        Ok(leaked)
+    /// Returns the evaluation environment.
+    pub fn evaluator(&self) -> &Evaluator {
+        &self.evaluator
     }
 
     /// Evaluates the program at `program_index` in preparation for playback
@@ -214,31 +77,14 @@ impl PlayHelper {
     /// The program is evaluated in the context of the file-level bindings
     /// preceding it plus its sliders. Bindings after it are ignored.
     pub fn evaluate_program(
-        &mut self,
+        &self,
         set: &ProgramSet,
         program_index: usize,
     ) -> Result<parser::SourceExpr<MarkId>, String> {
-        let expr = match parser::parse_program(set.programs()[program_index].text()) {
-            Err(errors) => {
-                println!("Errors while parsing input: {:?}", errors);
-                let message = format!("Error: {}", errors[0]);
-                return Err(message);
-            }
-            Ok(expr) => expr,
-        };
-        println!("parser::parse_program returned: {}", &expr);
-
-        let bindings = set.evaluation_bindings(program_index);
-
-        let expr = match parser::evaluate(|path| self.resolve(path), &bindings, expr) {
-            Err(error) => {
-                println!("Errors while evaluating input: {:?}", error);
-                return Err(format!("Error: {}", error));
-            }
-            Ok(expr) => expr,
-        };
-        println!("parser::evaluate returned: {}", &expr);
-        Ok(expr)
+        self.evaluator.evaluate_source(
+            set.programs()[program_index].text(),
+            &set.evaluation_bindings(program_index),
+        )
     }
 
     /// Plays a program as a waveform. Returns the user-visible message on
@@ -363,6 +209,40 @@ impl PlayHelper {
             }
         }
     }
+
+    /// Builds the per-measure beats waveform — a sequence of `mark`-tagged
+    /// short silences, one per beat — used to keep timing visible to the
+    /// rest of the runtime.
+    pub fn beats_waveform(&self) -> waveform::Waveform<MarkId> {
+        let seconds_per_beat = duration_from_beats(self.tempo, 1);
+        let mut ws = Vec::new();
+        for i in 0..self.beats_per_measure {
+            ws.push(format!(
+                "0 | fin(time - {}) | seq(time - {}) | mark({})",
+                seconds_per_beat.as_secs_f32(),
+                seconds_per_beat.as_secs_f32(),
+                i + 1
+            ));
+        }
+        let source = format!("<[{}]>", ws.join(", "));
+        let bindings: Vec<parser::SourceBinding<MarkId>> =
+            vec![parser::Binding::Open(vec!["__prelude".to_string()]).into()];
+        match self
+            .evaluator
+            .evaluate_source(&source, &bindings)
+            .map(|s| s.expr)
+        {
+            Ok(parser::Expr::Seq { waveform, .. }) => match waveform.expr {
+                parser::Expr::Waveform(waveform) => waveform::Waveform::<MarkId>::Marked {
+                    id: MarkId::TopLevel,
+                    waveform: Box::new(optimizer::optimize(waveform)),
+                },
+                expr => panic!("Error creating beats waveform with seq, got {}", expr),
+            },
+            Ok(expr) => panic!("Error creating beats waveform, got {}", expr),
+            Err(message) => panic!("Error evaluating beats waveform: {}", message),
+        }
+    }
 }
 
 pub fn build_top_level_waveform(
@@ -407,39 +287,4 @@ fn next_measure_start(status: &tracker::Status<WaveformId, MarkId>) -> time::Ins
 
 fn duration_from_beats(tempo: u32, beats: u64) -> time::Duration {
     time::Duration::from_secs_f32(beats as f32 * 60.0 / tempo as f32)
-}
-
-impl PlayHelper {
-    /// Builds the per-measure beats waveform — a sequence of `mark`-tagged
-    /// short silences, one per beat — used to keep timing visible to the
-    /// rest of the runtime.
-    pub fn beats_waveform(&self) -> waveform::Waveform<MarkId> {
-        let seconds_per_beat = duration_from_beats(self.tempo, 1);
-        let mut ws = Vec::new();
-        for i in 0..self.beats_per_measure {
-            ws.push(format!(
-                "0 | fin(time - {}) | seq(time - {}) | mark({})",
-                seconds_per_beat.as_secs_f32(),
-                seconds_per_beat.as_secs_f32(),
-                i + 1
-            ));
-        }
-        let expr = match parser::parse_program(&format!("<[{}]>", ws.join(", "))) {
-            Ok(expr) => expr,
-            Err(errors) => panic!("Error parsing beats waveform: {:?}", errors),
-        };
-        let bindings: Vec<parser::SourceBinding<MarkId>> =
-            vec![parser::Binding::Open(vec!["__prelude".to_string()]).into()];
-        match parser::evaluate(|path| self.resolve(path), &bindings, expr).map(|s| s.expr) {
-            Ok(parser::Expr::Seq { waveform, .. }) => match waveform.expr {
-                parser::Expr::Waveform(waveform) => waveform::Waveform::<MarkId>::Marked {
-                    id: MarkId::TopLevel,
-                    waveform: Box::new(optimizer::optimize(waveform)),
-                },
-                expr => panic!("Error creating beats waveform with seq, got {}", expr),
-            },
-            Ok(expr) => panic!("Error creating beats waveform, got {}", expr),
-            Err(errors) => panic!("Error evaluating beats waveform: {:?}", errors),
-        }
-    }
 }

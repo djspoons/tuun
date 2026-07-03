@@ -13,58 +13,12 @@ use crate::actions::{self, AppState, Effect};
 use crate::midi_input::Keys;
 use crate::parser;
 use crate::play_helper;
-use crate::programs::{self, PROGRAMS_PER_BANK};
+use crate::programs::PROGRAMS_PER_BANK;
 use crate::renderer::{self, MarkId, WaveformId};
 use crate::slider;
 use crate::tracker;
 use crate::waveform;
 use crate::{launchkey, optimizer};
-
-/// Applies a note function `expr` to the given `args`, expecting a pair
-/// of Waveforms as a result.
-///
-/// The expressions `expr` and `args` should be closed.
-fn apply_note_function(
-    expr: &parser::SourceExpr<MarkId>,
-    args: Vec<parser::SourceExpr<MarkId>>,
-    sliders: &programs::ProgramSliders,
-) -> Result<(waveform::Waveform<MarkId>, waveform::Waveform<MarkId>), String> {
-    use parser::Expr::{Tuple, Waveform};
-    let expr = parser::SourceExpr::from(parser::Expr::Application {
-        function: Box::new(expr.clone()),
-        argument: Box::new(parser::SourceExpr::from(Tuple(args))),
-    });
-    let mut bindings = vec![];
-    slider::append_slider_bindings(
-        sliders.configs(),
-        sliders.normalized_values(),
-        MarkId::Slider,
-        &mut bindings,
-    );
-    let resolve = |_: &[String]| {
-        Err(parser::Error::new(
-            "Didn't expect to resolve in apply_note_function".to_string(),
-        ))
-    };
-    let expr = parser::evaluate(resolve, &bindings, expr).map_err(|e| e.to_string());
-    match expr.map(|s| s.expr) {
-        Ok(Tuple(mut exprs)) => {
-            if exprs.len() != 2 {
-                return Err(format!(
-                    "Expected 2 waveforms for note, got {} elements",
-                    exprs.len()
-                ));
-            }
-            match (exprs.remove(0).expr, exprs.remove(0).expr) {
-                (Waveform(note_on), Waveform(note_off)) => Ok((note_on, note_off)),
-                (expr, Waveform(_)) => Err(format!("Expected waveform for note-on, got: {}", expr)),
-                (_, expr) => Err(format!("Expected waveform for note-off, got: {}", expr)),
-            }
-        }
-        Ok(expr) => Err(format!("Expected 2 waveforms for note, got: {}", expr)),
-        Err(e) => Err(format!("Error evaluating note: {}", e)),
-    }
-}
 
 /// External handles the runner needs but doesn't own.
 pub struct World<'a> {
@@ -173,42 +127,10 @@ impl EffectRunner {
                 program_index,
                 mode_on_failure,
             } => {
-                // Parse and evaluate the program's text, then classify the
-                // result. (Classification moves into the evaluator once it
-                // exists as its own type.)
-                const NOT_A_PROGRAM: &str = "Program is not a waveform or keys instrument";
-                let evaluation = match world
+                let evaluation = world
                     .play_helper
-                    .evaluate_program(&state.programs, program_index)
-                {
-                    Err(message) => programs::Evaluation::Invalid(message),
-                    Ok(expr) => match expr.expr {
-                        parser::Expr::Waveform(w) => programs::Evaluation::Waveform(w),
-                        parser::Expr::Seq { waveform, .. } => {
-                            if let parser::Expr::Waveform(w) = waveform.expr {
-                                programs::Evaluation::Waveform(w)
-                            } else {
-                                programs::Evaluation::Invalid(NOT_A_PROGRAM.to_string())
-                            }
-                        }
-                        parser::Expr::Function { .. } | parser::Expr::BuiltIn { .. } => {
-                            // Sanity check: actually invoke with dummy args.
-                            // TODO use a waveform for velocity
-                            match apply_note_function(
-                                &expr,
-                                vec![
-                                    parser::SourceExpr::float(60.0),
-                                    parser::SourceExpr::float(0.7),
-                                ],
-                                state.programs.programs()[program_index].sliders(),
-                            ) {
-                                Ok(_) => programs::Evaluation::KeysInstrument(expr),
-                                Err(message) => programs::Evaluation::Invalid(message),
-                            }
-                        }
-                        _ => programs::Evaluation::Invalid(NOT_A_PROGRAM.to_string()),
-                    },
-                };
+                    .evaluator()
+                    .evaluate_program(&state.programs, program_index);
                 match state
                     .programs
                     .program_mut(program_index)
@@ -258,7 +180,11 @@ impl EffectRunner {
                     // TODO use a marked waveform for velocity so we can implement after-touch
                     parser::SourceExpr::float(velocity as f32 / 127.0),
                 ];
-                match apply_note_function(&keys.function, args, &keys.sliders) {
+                match world.play_helper.evaluator().apply_note_function(
+                    &keys.function,
+                    args,
+                    &keys.sliders,
+                ) {
                     Ok((note_on, note_off)) => {
                         let mut note_on = optimizer::optimize(note_on);
                         let note_off = optimizer::optimize(note_off);
