@@ -836,6 +836,80 @@ mod tests {
     }
 
     #[test]
+    fn set_slider_normalized_clamps_and_rejects_out_of_range() {
+        let source = "#{slot=1, sliders=[\"vol:0.5:0:1\"]}\ntone = saw(220);";
+        let mut set = state_from(source);
+        // No slider at index 1 → None, nothing changed.
+        assert!(
+            set.program_mut(0)
+                .unwrap()
+                .set_slider_normalized(1, 0.5)
+                .is_none()
+        );
+        // Values above the range clamp to 1.0.
+        let change = set
+            .program_mut(0)
+            .unwrap()
+            .set_slider_normalized(0, 1.5)
+            .unwrap();
+        assert_eq!(change.label, "vol");
+        assert!((change.value - 1.0).abs() < 1e-6);
+        assert!((set.programs()[0].sliders().normalized_values()[0] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn record_evaluation_replaces_both_caches() {
+        let mut program = Program::from_string("x", 0);
+        assert!(
+            program
+                .record_evaluation(Evaluation::Waveform(waveform::Waveform::Const(1.0)))
+                .is_ok()
+        );
+        assert!(program.waveform().is_some());
+        assert!(program.keys_instrument().is_none());
+
+        assert!(
+            program
+                .record_evaluation(Evaluation::KeysInstrument(parser::SourceExpr::float(1.0)))
+                .is_ok()
+        );
+        assert!(program.waveform().is_none());
+        assert!(program.keys_instrument().is_some());
+
+        // Invalid clears both caches and hands back the message.
+        assert_eq!(
+            program.record_evaluation(Evaluation::Invalid("nope".to_string())),
+            Err("nope".to_string())
+        );
+        assert!(program.waveform().is_none());
+        assert!(program.keys_instrument().is_none());
+    }
+
+    #[test]
+    fn evaluation_bindings_filters_anonymous_and_appends_sliders() {
+        let source = "\
+pi = 3.14;
+#{slot=1}
+_ = pulse(60);
+#{slot=2, sliders=[\"vol:0.5:0:1\"]}
+tone = saw(220);";
+        let set = state_from(source);
+        let names: Vec<String> = set
+            .evaluation_bindings(1)
+            .iter()
+            .filter_map(|b| match &b.binding {
+                parser::Binding::Definition(parser::Pattern::Identifier(name), _) => {
+                    Some(name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        // `pi` precedes the program and survives; the anonymous `_` slot-1
+        // definition is filtered; the program's own slider is appended.
+        assert_eq!(names, vec!["pi".to_string(), "vol".to_string()]);
+    }
+
+    #[test]
     fn editing_existing_program_splices_into_its_span() {
         let source = "\
 #{slot=1}
