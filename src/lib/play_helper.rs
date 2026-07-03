@@ -8,8 +8,9 @@ use std::time;
 use crate::builtins;
 use crate::optimizer;
 use crate::parser;
+use crate::programs::{Program, ProgramSliders};
 use crate::renderer;
-use crate::renderer::{MarkId, Program, WaveformId};
+use crate::renderer::{MarkId, WaveformId};
 use crate::slider;
 use crate::tracker;
 use crate::waveform;
@@ -26,10 +27,10 @@ pub fn db_to_amplitude(db: f32) -> f32 {
 /// `WaveformId::Key`) can build their own keyed map without re-denormalizing.
 pub fn substitute_current_slider_values(
     waveform: &mut waveform::Waveform<MarkId>,
-    sliders: &renderer::ProgramSliders,
+    sliders: &ProgramSliders,
 ) -> Vec<(String, f32)> {
-    let mut values = Vec::with_capacity(sliders.configs.len());
-    for (config, &normalized) in sliders.configs.iter().zip(&sliders.normalized_values) {
+    let mut values = Vec::with_capacity(sliders.configs().len());
+    for (config, &normalized) in sliders.configs().iter().zip(sliders.normalized_values()) {
         let value = slider::denormalize(&config.function, normalized).unwrap_or(0.0);
         values.push((config.label.clone(), value));
         waveform::substitute(
@@ -217,7 +218,7 @@ impl PlayHelper {
         file_bindings: &[parser::SourceBinding<MarkId>],
         program: &Program,
     ) -> Result<parser::SourceExpr<MarkId>, String> {
-        let expr = match parser::parse_program(&program.text) {
+        let expr = match parser::parse_program(program.text()) {
             Err(errors) => {
                 println!("Errors while parsing input: {:?}", errors);
                 let message = format!("Error: {}", errors[0]);
@@ -228,7 +229,7 @@ impl PlayHelper {
         println!("parser::parse_program returned: {}", &expr);
 
         let mut bindings: Vec<parser::SourceBinding<MarkId>> =
-            file_bindings[..program.binding_index].to_vec();
+            file_bindings[..program.binding_index()].to_vec();
         // TODO this is a pretty big hack but there's an interesting question
         // about what sliders in *other* bindings mean. To avoid answering that
         // for the moment, just assume that only "_" bindings have sliders and
@@ -243,8 +244,8 @@ impl PlayHelper {
             _ => true,
         });
         slider::append_slider_bindings(
-            &program.sliders.configs,
-            &program.sliders.normalized_values,
+            program.sliders().configs(),
+            program.sliders().normalized_values(),
             MarkId::Slider,
             &mut bindings,
         );
@@ -290,13 +291,13 @@ impl PlayHelper {
         } else {
             None
         };
-        if let Some(waveform) = program.cached_waveform.clone() {
+        if let Some(waveform) = program.waveform().cloned() {
             let mut waveform = optimizer::optimize(waveform);
             println!("optimizer::optimize returned: {}", &waveform);
             // Substitute the program's current slider positions before handing
             // the waveform to the tracker (since the ones in cached_waveform
             // may be old).
-            substitute_current_slider_values(&mut waveform, &program.sliders);
+            substitute_current_slider_values(&mut waveform, program.sliders());
             if start_at_next_measure {
                 &mut self.precomputing_command_sender
             } else {
@@ -305,7 +306,7 @@ impl PlayHelper {
             .send(tracker::Command::Play {
                 // TODO maybe extend the top-level mark to the full measure?
                 id: WaveformId::Program(program_index),
-                waveform: build_top_level_waveform(waveform, program.level_db),
+                waveform: build_top_level_waveform(waveform, program.level_db()),
                 start,
                 repeat_every,
             })

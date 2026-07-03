@@ -18,6 +18,7 @@ use tuun::metric;
 use tuun::midi_input;
 use tuun::parser;
 use tuun::play_helper;
+use tuun::programs;
 use tuun::renderer;
 use tuun::sdl2_input;
 use tuun::slider;
@@ -79,7 +80,7 @@ pub fn main() {
     if !args.ui {
         println!("Starting in non-UI mode");
         // Filter out any empty programs
-        state.programs.retain(|p| !p.text.is_empty());
+        state.programs.retain(|p| !p.is_empty());
 
         let mut tracker = tracker::Tracker::<WaveformId, MarkId>::new(
             args.sample_rate,
@@ -111,12 +112,13 @@ pub fn main() {
             .collect();
         for (program_index, program) in state.programs.iter_mut().enumerate() {
             let display_name = &display_names[program_index];
-            println!("Playing program {}: {}", display_name, program.text);
+            println!("Playing program {}: {}", display_name, program.text());
             match play_helper.evaluate_program(&state.bindings, program) {
                 Ok(expr) => match expr.expr {
                     // TODO also need to handle Seq here
                     parser::Expr::Waveform(w) => {
-                        program.cached_waveform = Some(w);
+                        // Recording a Waveform evaluation never fails.
+                        let _ = program.record_evaluation(programs::Evaluation::Waveform(w));
                         play_helper.play_program_as_waveform(
                             program_index,
                             program,
@@ -250,9 +252,10 @@ pub fn main() {
     // Copy initial values for each slider for all programs
     let mut last_slider_values: HashMap<(WaveformId, String), f32> = HashMap::new();
     for (program_index, program) in state.programs.iter().enumerate() {
-        for (j, config) in program.sliders.configs.iter().enumerate() {
-            let value = slider::denormalize(&config.function, program.sliders.normalized_values[j])
-                .unwrap_or(0.0);
+        for (j, config) in program.sliders().configs().iter().enumerate() {
+            let value =
+                slider::denormalize(&config.function, program.sliders().normalized_values()[j])
+                    .unwrap_or(0.0);
             last_slider_values.insert(
                 (WaveformId::Program(program_index), config.label.clone()),
                 value,
@@ -396,7 +399,7 @@ pub fn main() {
     // its initial source so that playback and InstallKeys work without
     // needing to enter and exit Edit mode first.
     for i in 0..state.programs.len() {
-        if state.programs[i].text.is_empty() {
+        if state.programs[i].is_empty() {
             continue;
         }
         run_effects(

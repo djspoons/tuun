@@ -1,5 +1,6 @@
 use crate::actions;
-use crate::renderer::{Mode, PROGRAMS_PER_BANK, Program};
+use crate::programs::{PROGRAMS_PER_BANK, Program};
+use crate::renderer::Mode;
 
 /// Maps a QWERTY scancode to a MIDI note number for Keys (piano) mode.
 /// Lower row plays white keys starting at C4 (MIDI 60); the row above
@@ -166,7 +167,7 @@ impl InputHandler {
                 if gui_mod {
                     // Cmd+Return: play with repeat (Shift=2, otherwise 1).
                     let measures = if shift { 2 } else { 1 };
-                    if programs[active_program_index].cached_waveform.is_some() {
+                    if programs[active_program_index].waveform().is_some() {
                         Some(vec![Action::PlayProgram {
                             program_index: active_program_index,
                             start_at_next_measure: true,

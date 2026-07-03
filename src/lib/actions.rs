@@ -10,8 +10,8 @@ use crate::launchkey;
 use crate::midi_input;
 use crate::parser;
 use crate::play_helper;
-use crate::renderer::{self, MarkId, Mode, PROGRAMS_PER_BANK, WaveformId};
-use crate::slider;
+use crate::programs::{self, PROGRAMS_PER_BANK, Program};
+use crate::renderer::{self, MarkId, Mode, WaveformId};
 use crate::tracker;
 use crate::waveform;
 
@@ -40,7 +40,7 @@ impl DawPadMode {
 /// Internal state of the application. The reducer takes `&mut AppState` and mutates it in
 /// place; `main` keeps a single instance for the lifetime of the program.
 pub struct AppState {
-    pub programs: Vec<renderer::Program>,
+    pub programs: Vec<Program>,
     /// File-level bindings from the loaded source.
     pub bindings: Vec<parser::SourceBinding<MarkId>>,
     /// Current source-file contents, kept in sync with `bindings`.
@@ -78,22 +78,13 @@ impl AppState {
         if !errors.is_empty() {
             message = format!("Parse errors: {}", &errors[0]);
         }
-        let total_slots = renderer::NUM_PROGRAM_BANKS * PROGRAMS_PER_BANK;
-        let mut programs: Vec<renderer::Program> = (0..total_slots)
-            .map(|_| renderer::Program {
-                text: String::new(),
-                span: 0..0,
-                binding_index: bindings.len(),
-                sliders: renderer::ProgramSliders::default(),
-                color: None,
-                level_db: 0.0,
-                cached_waveform: None,
-                cached_keys_instrument: None,
-            })
+        let total_slots = programs::NUM_PROGRAM_BANKS * PROGRAMS_PER_BANK;
+        let mut programs: Vec<Program> = (0..total_slots)
+            .map(|_| Program::from_string("", bindings.len()))
             .collect();
         for (binding_index, sb) in bindings.iter().enumerate() {
             if let Some((program_index, program)) =
-                renderer::Program::from_source_binding(sb, binding_index, &source)
+                Program::from_source_binding(sb, binding_index, &source)
             {
                 if program_index < programs.len() {
                     programs[program_index] = program;
@@ -125,12 +116,8 @@ impl AppState {
         self.active_program_index - (self.active_program_index % PROGRAMS_PER_BANK)
     }
 
-    pub fn active_program(&self) -> &renderer::Program {
+    pub fn active_program(&self) -> &Program {
         &self.programs[self.active_program_index]
-    }
-
-    pub fn active_program_mut(&mut self) -> &mut renderer::Program {
-        &mut self.programs[self.active_program_index]
     }
 }
 
@@ -405,13 +392,13 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             // any pending playback on the way in.
             let effects = remove_pending_effects(state, ctx, state.active_program_index);
             let program = state.active_program();
-            let cursor = program.text.len();
-            let errors = parse_program_errors(&program.text);
+            let cursor = program.text().len();
+            let errors = parse_program_errors(program.text());
             state.message = if !errors.is_empty() {
                 format!("Error: {}", errors[0])
-            } else if !program.sliders.configs.is_empty() {
+            } else if !program.sliders().configs().is_empty() {
                 program
-                    .sliders
+                    .sliders()
                     .slider_display()
                     .iter()
                     .map(|s| format!("{}", s))
@@ -635,8 +622,8 @@ fn apply_select_program(state: &mut AppState, i: usize) -> Vec<Effect> {
 /// - `Definition` with any other identifier or a tuple pattern → the
 ///   pattern's `Display` form.
 /// - No binding (padding slot) or an `Open`/`Empty` binding → empty.
-fn program_name(program: &renderer::Program, bindings: &[parser::SourceBinding<MarkId>]) -> String {
-    let Some(binding) = bindings.get(program.binding_index) else {
+fn program_name(program: &Program, bindings: &[parser::SourceBinding<MarkId>]) -> String {
+    let Some(binding) = bindings.get(program.binding_index()) else {
         return String::new();
     };
     match &binding.binding {
@@ -706,7 +693,7 @@ fn parse_program_errors(text: &str) -> Vec<crate::parser::Error> {
 /// syntax highlighting stays in sync. Leaves `cursor_position` and
 /// `message` untouched.
 fn refresh_edit_errors(state: &mut AppState) {
-    let new_errors = parse_program_errors(&state.active_program().text);
+    let new_errors = parse_program_errors(state.active_program().text());
     if let Mode::Edit { errors, .. } = &mut state.mode {
         *errors = new_errors;
     }
@@ -729,7 +716,7 @@ fn edit_text_op(
         _ => return vec![],
     };
     let program = &mut state.programs[state.active_program_index];
-    if let Some((new_text, new_cursor)) = f(&program.text, cursor) {
+    if let Some((new_text, new_cursor)) = f(program.text(), cursor) {
         program.set_text(new_text);
         if let Mode::Edit {
             cursor_position, ..
@@ -752,7 +739,7 @@ fn edit_cursor_op(state: &mut AppState, f: impl FnOnce(&str, usize) -> usize) ->
         } => *cursor_position,
         _ => return vec![],
     };
-    let text = &state.programs[state.active_program_index].text;
+    let text = state.programs[state.active_program_index].text();
     let new_cursor = f(text, cursor).min(text.len());
     if let Mode::Edit {
         cursor_position, ..
@@ -776,10 +763,10 @@ fn prev_word_start(prefix: &str) -> usize {
 fn apply_mouse_slider(state: &mut AppState, axis: usize, delta: f32) -> Vec<Effect> {
     let program_index = state.active_program_index;
     let program = &state.programs[program_index];
-    if axis >= program.sliders.configs.len() {
+    if axis >= program.sliders().configs().len() {
         return vec![];
     }
-    let current = program.sliders.normalized_values[axis];
+    let current = program.sliders().normalized_values()[axis];
     let new = (current + delta).clamp(0.0, 1.0);
     apply_slider(state, program_index, axis, new)
 }
@@ -790,22 +777,18 @@ fn apply_slider(
     slider_index: usize,
     normalized: f32,
 ) -> Vec<Effect> {
-    let normalized = normalized.clamp(0.0, 1.0);
     let program = match state.programs.get_mut(program_index) {
         Some(p) => p,
         None => return vec![],
     };
-    let ps = &mut program.sliders;
-    if slider_index >= ps.configs.len() {
+    let Some(change) = program.set_slider_normalized(slider_index, normalized) else {
         return vec![Effect::ShowMessage(format!(
             "No slider with index {}",
             slider_index
         ))];
-    }
-    ps.normalized_values[slider_index] = normalized;
-    let config = &ps.configs[slider_index];
-    let label = config.label.clone();
-    let actual_value = slider::denormalize(&config.function, normalized).unwrap_or(0.0);
+    };
+    let label = change.label;
+    let actual_value = change.value;
 
     let mut effects = vec![Effect::UpdateSlider {
         id: WaveformId::Program(program_index),
@@ -819,7 +802,7 @@ fn apply_slider(
     if let Some(keys) = state.keys.as_mut()
         && keys.id == program_index
     {
-        keys.sliders.normalized_values[slider_index] = normalized;
+        keys.sliders.set_normalized(slider_index, normalized);
         effects.push(Effect::UpdateActiveKeySliders {
             slider: label.clone(),
             value: actual_value,
@@ -849,7 +832,7 @@ fn apply_level_db(state: &mut AppState, program_index: usize, level_db: f32) -> 
         Some(p) => p,
         None => return vec![],
     };
-    program.level_db = level_db;
+    program.set_level_db(level_db);
     let amplitude = play_helper::db_to_amplitude(level_db);
 
     let mut effects = vec![Effect::ModifyWaveform {
@@ -886,7 +869,7 @@ fn apply_level_db(state: &mut AppState, program_index: usize, level_db: f32) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use renderer::Program;
+    use crate::programs::ProgramSliders;
     use std::time::Duration;
 
     /// A tracker status with no marks at all — nothing active, nothing pending.
@@ -950,7 +933,7 @@ mod tests {
                 level_db: -6.0,
             },
         );
-        assert!((state.programs[0].level_db - -6.0).abs() < 1e-6);
+        assert!((state.programs[0].level_db() - -6.0).abs() < 1e-6);
         assert!(matches!(
             effects[0],
             Effect::ModifyWaveform {
@@ -1089,7 +1072,7 @@ _ = saw(220);";
         state.keys = Some(midi_input::Keys {
             id: 0,
             function: parser::SourceExpr::float(0.0),
-            sliders: renderer::ProgramSliders::default(),
+            sliders: ProgramSliders::default(),
             level_db: 0.0,
             note_off_waveforms: Default::default(),
         });

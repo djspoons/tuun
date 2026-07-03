@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use sdl2::Sdl;
@@ -17,7 +16,7 @@ use crate::builtins;
 use crate::launchkey;
 use crate::metric::Metric;
 use crate::parser;
-use crate::slider;
+use crate::programs::PROGRAMS_PER_BANK;
 use crate::tracker;
 use crate::waveform;
 
@@ -114,202 +113,6 @@ pub enum WaveformOrError {
     Error(ParseError),
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct ProgramSliders {
-    pub configs: Vec<parser::Slider>,
-    /// Normalized values in 0.0..1.0, parallel to configs.
-    pub normalized_values: Vec<f32>,
-}
-
-impl ProgramSliders {
-    /// Builds a `ProgramSliders` from a list of source-level slider configs.
-    pub fn from_slider_configs(configs: Vec<parser::Slider>) -> Self {
-        use parser::SliderFunction;
-        let normalized_values = configs
-            .iter()
-            .map(|c| match &c.function {
-                SliderFunction::Linear {
-                    initial_value,
-                    min,
-                    max,
-                } => ((initial_value - min) / (max - min)).clamp(0.0, 1.0),
-                SliderFunction::UserDefined {
-                    normalized_initial_value,
-                    ..
-                } => normalized_initial_value.clamp(0.0, 1.0),
-            })
-            .collect();
-        ProgramSliders {
-            configs,
-            normalized_values,
-        }
-    }
-
-    // TODO this method only works for mouse-based sliders
-    pub fn slider_display(&self) -> Vec<SliderDisplay> {
-        self.configs
-            .iter()
-            .enumerate()
-            .map(|(j, config)| {
-                let norm = self.normalized_values[j];
-                SliderDisplay {
-                    label: config.label.clone(),
-                    // TODO this is wrong for encoders
-                    axis: if j == 0 {
-                        "X".to_string()
-                    } else {
-                        "Y".to_string()
-                    },
-                    normalized_value: norm,
-                    actual_value: slider::denormalize(&config.function, norm).unwrap_or(0.0),
-                }
-            })
-            .collect()
-    }
-}
-
-// TODO maybe Program should live in play_helper? (Which should be renamed?)
-#[derive(Debug, Clone)]
-pub struct Program {
-    // Changes to `text` should also invalid the cache below.
-    pub text: String,
-    // The span in the source file from which this program came.
-    pub span: Range<usize>,
-    /// Index of the originating binding in the file's `Vec<SourceBinding>`.
-    pub binding_index: usize,
-    pub sliders: ProgramSliders,
-    pub color: Option<(u8, u8, u8)>,
-    pub level_db: f32,
-    // Set if the current text evaluates to a valid waveform.
-    pub cached_waveform: Option<waveform::Waveform<MarkId>>,
-    // Set if the current text evaluates to a valid keys instrument.
-    pub cached_keys_instrument: Option<parser::SourceExpr<MarkId>>,
-}
-
-impl Program {
-    /// Builds a program from a string without attempting to parse it.
-    pub fn from_string(text: &str, binding_index: usize) -> Program {
-        Program {
-            text: text.to_string(),
-            span: 0..0,
-            binding_index,
-            sliders: ProgramSliders::default(),
-            color: None,
-            level_db: 0.0,
-            cached_waveform: None,
-            cached_keys_instrument: None,
-        }
-    }
-
-    /// Builds a `Program` from a `SourceBinding` plus its position in the
-    /// file's bindings vec. Returns the 0-based program index (derived from
-    /// the `#{slot=N}` annotation) alongside the constructed `Program`.
-    ///
-    /// Only `Definition`s carrying a `#{slot=N}` annotation become programs
-    /// (the slot determines the UI position); other `Definition`s are treated
-    /// as library bindings and are not shown.
-    pub fn from_source_binding(
-        sb: &parser::SourceBinding<MarkId>,
-        binding_index: usize,
-        source: &str,
-    ) -> Option<(usize, Program)> {
-        // TODO NextBank is ignored!
-        let mut sliders = ProgramSliders::default();
-        let mut color: Option<(u8, u8, u8)> = None;
-        let mut level_db: f32 = 0.0;
-        let mut slot: Option<u32> = None;
-        for sa in &sb.annotations {
-            match &sa.annotation {
-                parser::Annotation::Sliders(configs) => {
-                    sliders = ProgramSliders::from_slider_configs(configs.clone());
-                }
-                parser::Annotation::Color(r, g, b) => {
-                    color = Some((*r, *g, *b));
-                }
-                parser::Annotation::Level(v) => {
-                    level_db = *v;
-                }
-                parser::Annotation::Slot(n) => {
-                    slot = Some(*n);
-                }
-            }
-        }
-        // No slot → not a UI program.
-        let slot = slot?;
-        if let parser::Binding::Definition(_, expr) = &sb.binding {
-            if let Some(s) = &expr.span
-                && s.end <= source.len()
-            {
-                let span = s.clone();
-                let text = source[s.clone()].to_string();
-                let program_index = (slot as usize).saturating_sub(1);
-                Some((
-                    program_index,
-                    Program {
-                        text,
-                        span,
-                        binding_index,
-                        sliders,
-                        color,
-                        level_db,
-                        cached_waveform: None,
-                        cached_keys_instrument: None,
-                    },
-                ))
-            } else {
-                println!(
-                    "Found source expression without span or invalid span: {:?}",
-                    &sb
-                );
-                None
-            }
-        } else {
-            // Nothing to do for other binding types.
-            None
-        }
-    }
-
-    /// Replaces the program's `text` and invalidates both cached
-    /// evaluations. Callers that mutate `text` directly must keep the
-    /// caches in sync themselves; routing through this method makes that
-    /// the default.
-    pub fn set_text(&mut self, text: String) {
-        self.text = text;
-        self.cached_waveform = None;
-        self.cached_keys_instrument = None;
-    }
-
-    /// Atomically replace `text[target_span]` with `new_text`, validating
-    /// the result by re-parsing.
-    ///
-    /// XXX update comment
-    /// On success, `text` is updated and any cached results are discarded.
-    /// On parse failure (the proposed edit produces an
-    /// un-parseable program), nothing is changed and the errors are
-    /// returned.
-    ///
-    /// This is the AST-aware editor primitive that lifts
-    /// [`parser::replace_at`] to operate on a `Program`. The save path
-    /// (`Effect::SaveProgramsToFile`) emits `program.text` verbatim, so as
-    /// long as edits flow through here (rather than direct `text =` writes)
-    /// the saved file round-trips byte-for-byte for the program body —
-    /// comments, whitespace, formatting all preserved.
-    pub fn edit_text(
-        &mut self,
-        target_span: std::ops::Range<usize>,
-        new_text: &str,
-    ) -> Result<(), Vec<parser::Error>> {
-        let mut ast = parser::parse_program::<MarkId>(&self.text)?;
-        parser::replace_at(&mut ast, target_span, new_text, &mut self.text)?;
-        self.cached_waveform = None;
-        self.cached_keys_instrument = None;
-        Ok(())
-    }
-}
-
-pub const PROGRAMS_PER_BANK: usize = 8;
-pub const NUM_PROGRAM_BANKS: usize = 8;
-
 /// Renders a `level_db` value the way the UI shows it: one decimal place
 /// followed by the unit, e.g. `-6.0 dB`. Single home for the format so
 /// every encoder display, status message, and tooltip stays in sync.
@@ -335,25 +138,6 @@ pub fn format_sig_digits(val: f32, sig_figs: usize) -> String {
         let scale = 10.0f32.powi(precision as i32);
         let rounded = (val * scale).round() / scale;
         format!("{rounded:.0}")
-    }
-}
-
-pub struct SliderDisplay {
-    pub label: String,
-    pub axis: String, // "X" or "Y" or an index
-    pub normalized_value: f32,
-    pub actual_value: f32,
-}
-
-impl fmt::Display for SliderDisplay {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}({}) = {}",
-            self.label,
-            self.axis,
-            format_sig_digits(self.actual_value, 3),
-        )
     }
 }
 
@@ -576,7 +360,7 @@ impl Renderer {
         {
             let index = bank_start + i;
             let program_color = program
-                .color
+                .color()
                 .map(|(r, g, b)| Color::RGB(r, g, b))
                 .unwrap_or(INACTIVE_COLOR);
             let color = match (
@@ -641,13 +425,9 @@ impl Renderer {
                     ref errors,
                     ..
                 } => {
-                    if active_program_index != index && !program.text.is_empty() {
-                        let text_texture = make_texture(
-                            &font,
-                            program_color,
-                            &texture_creator,
-                            program.text.as_str(),
-                        );
+                    if active_program_index != index && !program.is_empty() {
+                        let text_texture =
+                            make_texture(&font, program_color, &texture_creator, program.text());
                         let TextureQuery {
                             width: text_width,
                             height: text_height,
@@ -669,7 +449,7 @@ impl Renderer {
                         // Loop over each character in program and check to see if it's in any of the error
                         // ranges
                         let mut x = self.nav_width as i32;
-                        for (j, c) in program.text.chars().enumerate() {
+                        for (j, c) in program.text().chars().enumerate() {
                             let color = if errors
                                 .iter()
                                 .any(|e| matches!(e.range(), Some(range) if range.contains(&j)))
@@ -697,7 +477,7 @@ impl Renderer {
                                 .unwrap();
                             x += char_width as i32;
                         }
-                        if cursor_position == program.text.len() {
+                        if cursor_position == program.text().len() {
                             // Draw the cursor at the end of the line
                             let color = if !errors.is_empty() {
                                 ERROR_COLOR
@@ -729,13 +509,9 @@ impl Renderer {
                             .unwrap();
                     }
 
-                    if !program.text.is_empty() {
-                        let text_texture = make_texture(
-                            &font,
-                            program_color,
-                            &texture_creator,
-                            program.text.as_str(),
-                        );
+                    if !program.is_empty() {
+                        let text_texture =
+                            make_texture(&font, program_color, &texture_creator, program.text());
                         let TextureQuery {
                             width: text_width,
                             height: text_height,
@@ -763,8 +539,8 @@ impl Renderer {
         // gets the top/left edge bars; when the controller is connected
         // the encoder visualization below covers the same data more
         // completely.
-        let slider_display: Vec<SliderDisplay> =
-            programs[active_program_index].sliders.slider_display();
+        let slider_display: Vec<crate::programs::SliderDisplay> =
+            programs[active_program_index].sliders().slider_display();
         if encoder_mode.is_none() {
             let slider_color = if let Mode::MoveSliders = mode {
                 ACTIVE_COLOR
@@ -851,7 +627,7 @@ impl Renderer {
                 }
                 let row = program_index % PROGRAMS_PER_BANK;
                 let mut program_color = programs[program_index]
-                    .color
+                    .color()
                     .map(|(r, g, b)| Color::RGB(r, g, b))
                     .unwrap_or(INACTIVE_COLOR);
                 program_color.a = 128;
@@ -899,11 +675,11 @@ impl Renderer {
                 let (normalized, color) = match encoder_mode {
                     launchkey::EncoderMode::Plugin => {
                         let program = &programs[active_program_index];
-                        let Some(&normalized) = program.sliders.normalized_values.get(i) else {
+                        let Some(&normalized) = program.sliders().normalized_values().get(i) else {
                             continue;
                         };
                         let color = program
-                            .color
+                            .color()
                             .map(|(r, g, b)| Color::RGB(r, g, b))
                             .unwrap_or(INACTIVE_COLOR);
                         (normalized, color)
@@ -912,13 +688,13 @@ impl Renderer {
                         let Some(program) = programs.get(bank_start + i) else {
                             continue;
                         };
-                        if program.text.is_empty() {
+                        if program.is_empty() {
                             continue;
                         }
                         // level_db ∈ [-60, +6] → [0, 1].
-                        let normalized = ((program.level_db + 60.0) / 66.0).clamp(0.0, 1.0);
+                        let normalized = ((program.level_db() + 60.0) / 66.0).clamp(0.0, 1.0);
                         let color = program
-                            .color
+                            .color()
                             .map(|(r, g, b)| Color::RGB(r, g, b))
                             .unwrap_or(INACTIVE_COLOR);
                         (normalized, color)
@@ -1177,61 +953,4 @@ pub fn current_beat_info(
         );
     }
     (current_beat, current_beat_start, current_beat_duration)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn find_first_list_span(node: &parser::SourceExpr<MarkId>) -> Option<std::ops::Range<usize>> {
-        if let parser::Expr::List(_) = &node.expr {
-            return node.span.clone();
-        }
-        match &node.expr {
-            parser::Expr::Application { function, argument } => {
-                find_first_list_span(function).or_else(|| find_first_list_span(argument))
-            }
-            _ => None,
-        }
-    }
-
-    #[test]
-    fn edit_text_updates_text_and_invalidates_cache() {
-        // Editing the list passed to `on_beats(...)` inside a program's text.
-        let mut program = Program::from_string("on_beats( // pattern\n [0, 1, 2, 3])", 0);
-        // Artificially set these so we can check them later.
-        program.cached_waveform = Some(waveform::Waveform::Time(()));
-        program.cached_keys_instrument = Some(parser::SourceExpr::float(1.0));
-
-        let ast = parser::parse_program::<MarkId>(&program.text).unwrap();
-        let list_span = find_first_list_span(&ast).expect("should find a list");
-
-        program.edit_text(list_span, "[0, 2]").unwrap();
-
-        // `program.text` is what `SaveProgramsToFile` emits verbatim, so the
-        // round-tripped file preserves the inter-call comment.
-        assert_eq!(program.text, "on_beats( // pattern\n [0, 2])");
-        // Edit invalidated the keys-validity cache.
-        assert!(program.cached_waveform.is_none());
-        assert!(program.cached_keys_instrument.is_none());
-    }
-
-    #[test]
-    fn edit_text_rejects_bad_edit_atomically() {
-        let mut program = Program::from_string("[1, 2, 3]", 0);
-        // Artificially set these so we can check them later.
-        program.cached_waveform = Some(waveform::Waveform::Time(()));
-        program.cached_keys_instrument = Some(parser::SourceExpr::float(1.0));
-
-        let ast = parser::parse_program::<MarkId>(&program.text).unwrap();
-        let list_span = ast.span.clone().unwrap();
-
-        // Replacing the list with malformed text fails.
-        let result = program.edit_text(list_span, "[1,");
-        assert!(result.is_err());
-        // Neither the text nor the cache moved.
-        assert_eq!(program.text, "[1, 2, 3]");
-        assert!(program.cached_waveform.is_some());
-        assert!(program.cached_keys_instrument.is_some());
-    }
 }

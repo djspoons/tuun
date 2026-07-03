@@ -4,7 +4,8 @@ use std::time::Instant;
 use crate::actions;
 use crate::launchkey;
 use crate::parser;
-use crate::renderer::{self, MarkId, PROGRAMS_PER_BANK, Program, WaveformId};
+use crate::programs::{PROGRAMS_PER_BANK, Program, ProgramSliders};
+use crate::renderer::{self, MarkId, WaveformId};
 use crate::tracker;
 use crate::waveform;
 
@@ -20,7 +21,7 @@ pub struct Keys {
     ///
     /// Should be a closed value except for references to sliders.
     pub function: parser::SourceExpr<MarkId>,
-    pub sliders: renderer::ProgramSliders,
+    pub sliders: ProgramSliders,
     pub level_db: f32,
     pub note_off_waveforms: HashMap<u8, waveform::Waveform<MarkId>>, // keys are MIDI note numbers
 }
@@ -44,7 +45,7 @@ pub fn classify(
             // unit. Map that to a fraction of the slider's full range.
             let slider_index = *index as usize;
             let program = programs.get(active_program_index)?;
-            let current = *program.sliders.normalized_values.get(slider_index)?;
+            let current = *program.sliders().normalized_values().get(slider_index)?;
             let normalized_delta = *delta as f32 / (ENCODER_ROTATIONS * 128.0);
             let normalized = (current + normalized_delta).clamp(0.0, 1.0);
             Some(vec![Action::SetSliderNormalized {
@@ -58,7 +59,7 @@ pub fn classify(
             let program = programs.get(program_index)?;
             // ~0.5 dB per detent; spans the -60..+6 range in roughly four full turns.
             let db_delta = *delta as f32 * 0.25;
-            let level_db = (program.level_db + db_delta).clamp(-60.0, 6.0);
+            let level_db = (program.level_db() + db_delta).clamp(-60.0, 6.0);
             Some(vec![Action::SetLevelDb {
                 program: program_index,
                 level_db,
@@ -177,7 +178,7 @@ const U7_MAX: u8 = u8::MAX / 2;
 /// Returns the 7-bit (red, green, blue) pad color for `program`: its configured
 /// color at half intensity or a cyan default when none is set.
 fn program_pad_color(program: &Program) -> (u8, u8, u8) {
-    match program.color {
+    match program.color() {
         Some((r, g, b)) => (r / 2, g / 2, b / 2),
         None => (0, 127, 127),
     }
@@ -207,7 +208,7 @@ fn update_pads_clip_launcher(
     current_beat_duration: std::time::Duration,
     bank_start: usize,
 ) {
-    for (i, program) in state.programs[bank_start..bank_start + renderer::PROGRAMS_PER_BANK]
+    for (i, program) in state.programs[bank_start..bank_start + PROGRAMS_PER_BANK]
         .iter()
         .enumerate()
     {
@@ -232,7 +233,7 @@ fn update_pads_clip_launcher(
         } else if is_installed_keys {
             // If it's the installed keys program, don't color the top pad (unless it's playing).
             launchkey.set_daw_top_pad_color(i as u8, 0, 0, 0);
-        } else if program.cached_waveform.is_some() {
+        } else if program.waveform().is_some() {
             launchkey.set_daw_top_pad_color(i as u8, red, green, blue);
         } else {
             // empty
@@ -250,7 +251,7 @@ fn update_pads_clip_launcher(
                 current_beat_duration,
             );
             launchkey.set_daw_bottom_pad_color(i as u8, r, g, b);
-        } else if program.cached_waveform.is_some() {
+        } else if program.waveform().is_some() {
             launchkey.set_daw_bottom_pad_color(i as u8, red, green, blue);
         } else {
             // empty
@@ -268,7 +269,7 @@ fn update_pads_keys_installer(
     current_beat_duration: std::time::Duration,
     bank_start: usize,
 ) {
-    for i in 0..renderer::PROGRAMS_PER_BANK {
+    for i in 0..PROGRAMS_PER_BANK {
         launchkey.set_daw_top_pad_color(i as u8, 0, 0, 0);
 
         let program_index = bank_start + i;
@@ -284,7 +285,7 @@ fn update_pads_keys_installer(
         // regardless of whether the current text is still a valid keys
         // program — the installed function is what's actually playing.
         // Otherwise only color pads that can be installed right now.
-        if !installed && program.cached_keys_instrument.is_none() {
+        if !installed && program.keys_instrument().is_none() {
             launchkey.set_daw_bottom_pad_color(i as u8, 0, 0, 0);
             continue;
         }
