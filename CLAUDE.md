@@ -15,7 +15,7 @@
 - TODO comments should *not* be removed unless the code has been changed to address those cases or optimizations.
 
 ## Build & Test Verification
-- After any Rust code changes, run `cargo build`, `cargo test`, `cargo fmt`, and `cargo clippy` before declaring work complete.
+- After any Rust code changes, run `cargo build`, `cargo build --benches`, `cargo test`, `cargo fmt`, and `cargo clippy` before declaring work complete. (Benches are not compiled by `cargo build` or `cargo test`, so they break silently without the `--benches` check.)
 - For Jekyll/Ruby changes, run `bundle exec jekyll build` to verify clean build.
 
 ## Primary Stack

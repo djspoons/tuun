@@ -14,7 +14,7 @@ use crate::evaluator;
 use crate::keys::Keys;
 use crate::parser;
 use crate::player;
-use crate::programs::PROGRAMS_PER_BANK;
+use crate::programs::{self, PROGRAMS_PER_BANK};
 use crate::renderer::{self, MarkId, WaveformId};
 use crate::slider;
 use crate::tracker;
@@ -118,14 +118,9 @@ impl EffectRunner {
                 program_index,
                 mode_on_failure,
             } => {
-                let evaluation = self
-                    .evaluator
-                    .evaluate_program(&state.programs, program_index);
                 match state
                     .programs
-                    .program_mut(program_index)
-                    .unwrap()
-                    .record_evaluation(evaluation)
+                    .evaluate_and_record(&self.evaluator, program_index)
                 {
                     Ok(()) => state.mode = renderer::Mode::Select,
                     Err(message) => {
@@ -331,7 +326,7 @@ fn sync_encoders(state: &AppState, launchkey: &mut launchkey::Launchkey) {
                     launchkey.set_encoder_display(
                         i,
                         &config.label,
-                        &renderer::format_sig_digits(actual_value, 3).to_string(),
+                        &programs::format_sig_digits(actual_value, 3).to_string(),
                     );
                 } else {
                     launchkey.set_encoder_display(i, "", "");
@@ -348,7 +343,7 @@ fn sync_encoders(state: &AppState, launchkey: &mut launchkey::Launchkey) {
                 launchkey.set_encoder_display(
                     i as u8,
                     "level",
-                    &renderer::format_level_db(program.level_db()),
+                    &programs::format_level_db(program.level_db()),
                 );
             }
         }

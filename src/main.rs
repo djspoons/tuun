@@ -18,7 +18,6 @@ use tuun::launchkey;
 use tuun::metric;
 use tuun::midi_input;
 use tuun::player;
-use tuun::programs;
 use tuun::renderer;
 use tuun::sdl2_input;
 use tuun::slider;
@@ -114,20 +113,21 @@ pub fn main() {
                 display_name,
                 state.programs.programs()[program_index].text()
             );
-            match evaluator.evaluate_program(&state.programs, program_index) {
-                evaluation @ programs::Evaluation::Waveform(_) => {
-                    // Recording a Waveform evaluation never fails.
-                    let _ = state
-                        .programs
-                        .program_mut(program_index)
-                        .unwrap()
-                        .record_evaluation(evaluation);
-                    player.play_program(&state.programs, program_index, &status, false, None);
+            match state
+                .programs
+                .evaluate_and_record(&evaluator, program_index)
+            {
+                Ok(()) => {
+                    if state.programs.programs()[program_index]
+                        .waveform()
+                        .is_some()
+                    {
+                        player.play_program(&state.programs, program_index, &status, false, None);
+                    } else {
+                        println!("Program {} did not evaluate to a waveform", display_name);
+                    }
                 }
-                programs::Evaluation::KeysInstrument(_) => {
-                    println!("Program {} did not evaluate to a waveform", display_name);
-                }
-                programs::Evaluation::Invalid(message) => {
+                Err(message) => {
                     println!("{}", message);
                     process::exit(1);
                 }
@@ -172,18 +172,18 @@ pub fn main() {
         .unwrap();
     device.resume();
 
-    // Spin up the precompute thread that sits in front of the tracker as
-    // the Player's `precompute_sender` route. The thread pre-computes
+    // Spin up the precompute thread that sits in front of the tracker as the
+    // Player's `precompute_sender` route. The thread pre-computes
     // `Command::Play` and passes everything else through unchanged.
     //
-    // What goes through: playback scheduled at the next measure (the
-    // Beats waveforms and Player::play_program with
+    // What goes through this sender: playback scheduled at the next measure
+    // (the Beats waveforms and Player::play_program with
     // start_at_next_measure), where the latency is hidden.
     //
-    // What bypasses entirely (the Player's `fast_sender` plus direct
-    // `command_sender` clones): immediate playback, note-on/off, stop
-    // ramps, Modify / RemovePending, and the slider thread's ramps —
-    // everywhere keystroke latency matters.
+    // What bypasses entirely this sender (the Player's `fast_sender` plus
+    // direct `command_sender` clones): immediate playback, note-on/off, stop
+    // ramps, Modify / RemovePending, and the slider thread's ramps — everywhere
+    // latency matters.
     let precomputing_command_sender = {
         let play_command_sender = command_sender.clone();
         let (tx, play_receiver) = mpsc::channel();

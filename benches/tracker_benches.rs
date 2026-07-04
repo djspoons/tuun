@@ -3,9 +3,10 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use std::sync::mpsc;
 
 use tuun::builtins;
+use tuun::evaluator;
 use tuun::generator;
 use tuun::parser;
-use tuun::play_helper;
+use tuun::player;
 use tuun::waveform;
 
 fn bench_filter(c: &mut Criterion) {
@@ -91,18 +92,13 @@ fn bench_marks(c: &mut Criterion) {
         b.iter(|| {
             const SAMPLE_RATE: u32 = 44100;
             let (tx, _rx) = mpsc::channel();
-            let helper = play_helper::PlayHelper::new(
-                SAMPLE_RATE,
-                120,
-                4,
-                std::path::PathBuf::from("./lib"),
-                tx.clone(),
-                tx,
-            );
+            let evaluator =
+                evaluator::Evaluator::new(SAMPLE_RATE, 120, std::path::PathBuf::from("./lib"));
+            let player = player::Player::new(120, 4, tx.clone(), tx);
             let mut generator = generator::Generator::new(SAMPLE_RATE);
             let mut ws = Vec::new();
             for _ in 0..40 {
-                ws.push(helper.beats_waveform());
+                ws.push(player.beats_waveform(&evaluator));
             }
             let w = ws
                 .into_iter()
@@ -123,12 +119,12 @@ fn bench_large(c: &mut Criterion) {
     builtins::add_bindings(&mut bindings);
     match parser::parse_module::<u32>(
         r#"
-    pi = 3.14159265,
-    $ = fn(freq_hz) => sine(2*pi * freq_hz, 0),
-    triangle = fn(freq_hz) => let t = $freq_hz, slope = 4 * freq_hz, a = time * slope - 1, b = time * -slope + 3 in alt(t, reset(t, a), reset(t, b)),
-    linear = fn(initial, slope) => initial + (time * slope),
-    Rw = fn(dur, level) => linear(level, -level / dur) | fin(time - dur),
-    R = fn(dur, level) => fn(w) => w * Rw(dur, level),"#,
+    pi = 3.14159265;
+    $ = fn(freq_hz) => sine(2*pi * freq_hz, 0);
+    triangle = fn(freq_hz) => let t = $freq_hz, slope = 4 * freq_hz, a = time * slope - 1, b = time * -slope + 3 in alt(t, reset(t, a), reset(t, b));
+    linear = fn(initial, slope) => initial + (time * slope);
+    Rw = fn(dur, level) => linear(level, -level / dur) | fin(time - dur);
+    R = fn(dur, level) => fn(w) => w * Rw(dur, level);"#,
     ) {
         Ok((parsed, _errors)) => bindings.extend(parsed),
         Err(e) => panic!("Failed to parse context: {:?}", e),

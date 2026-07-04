@@ -202,6 +202,7 @@ impl Evaluator {
     /// Keys-instrument candidates (functions) are sanity-checked by
     /// actually invoking them with dummy note/velocity arguments.
     pub fn evaluate_program(&self, set: &ProgramSet, index: usize) -> Evaluation {
+        // TODO could improve error messages here
         const NOT_A_PROGRAM: &str = "Program is not a waveform or keys instrument";
         let bindings = set.evaluation_bindings(index);
         let expr = match self.evaluate_source(set.programs()[index].text(), &bindings) {

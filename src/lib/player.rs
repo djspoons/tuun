@@ -228,7 +228,7 @@ impl Player {
     /// Builds the per-measure beats waveform — a sequence of `mark`-tagged
     /// short silences, one per beat — used to keep timing visible to the
     /// rest of the runtime.
-    fn beats_waveform(&self, evaluator: &Evaluator) -> waveform::Waveform<MarkId> {
+    pub fn beats_waveform(&self, evaluator: &Evaluator) -> waveform::Waveform<MarkId> {
         let seconds_per_beat = duration_from_beats(self.tempo, 1);
         let mut ws = Vec::new();
         for i in 0..self.beats_per_measure {

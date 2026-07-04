@@ -113,34 +113,6 @@ pub enum WaveformOrError {
     Error(ParseError),
 }
 
-/// Renders a `level_db` value the way the UI shows it: one decimal place
-/// followed by the unit, e.g. `-6.0 dB`. Single home for the format so
-/// every encoder display, status message, and tooltip stays in sync.
-pub fn format_level_db(level_db: f32) -> String {
-    format!("{:.1} dB", level_db)
-}
-
-pub fn format_sig_digits(val: f32, sig_figs: usize) -> String {
-    if val == 0.0 || !val.is_finite() {
-        return format!("{val:.precision$}", precision = sig_figs - 1);
-    }
-
-    // Calculate the position of the first significant digit
-    let digits_before_decimal = val.abs().log10().floor() + 1.0;
-
-    // Determine required fractional precision
-    let precision = (sig_figs as f32 - digits_before_decimal) as isize;
-
-    if precision >= 0 {
-        format!("{val:.precision$}", precision = precision as usize)
-    } else {
-        // If the number is large, round to the nearest tens/hundreds/etc.
-        let scale = 10.0f32.powi(precision as i32);
-        let rounded = (val * scale).round() / scale;
-        format!("{rounded:.0}")
-    }
-}
-
 pub enum SliderEvent {
     UpdateSlider {
         id: WaveformId,

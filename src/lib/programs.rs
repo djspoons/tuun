@@ -1,15 +1,10 @@
 //! Programs and their state: text, sliders, level, and evaluation caches.
-//!
-//! `Program` exposes a narrow API — fields are private so the rest of the
-//! UI (renderer, input handlers, reducer, effect runner) can only observe
-//! programs through getters and mutate them through methods that preserve
-//! the internal invariants.
 
 use std::fmt;
 use std::ops::Range;
 
 use crate::parser;
-use crate::renderer::{MarkId, format_sig_digits};
+use crate::renderer::MarkId;
 use crate::slider;
 use crate::waveform;
 
@@ -97,6 +92,33 @@ impl ProgramSliders {
     }
 }
 
+/// Renders a `level_db` value the way the UI shows it: one decimal place
+/// followed by the unit, e.g. `-6.0 dB`.
+pub fn format_level_db(level_db: f32) -> String {
+    format!("{:.1} dB", level_db)
+}
+
+pub fn format_sig_digits(val: f32, sig_figs: usize) -> String {
+    if val == 0.0 || !val.is_finite() {
+        return format!("{val:.precision$}", precision = sig_figs - 1);
+    }
+
+    // Calculate the position of the first significant digit
+    let digits_before_decimal = val.abs().log10().floor() + 1.0;
+
+    // Determine required fractional precision
+    let precision = (sig_figs as f32 - digits_before_decimal) as isize;
+
+    if precision >= 0 {
+        format!("{val:.precision$}", precision = precision as usize)
+    } else {
+        // If the number is large, round to the nearest tens/hundreds/etc.
+        let scale = 10.0f32.powi(precision as i32);
+        let rounded = (val * scale).round() / scale;
+        format!("{rounded:.0}")
+    }
+}
+
 /// A slider mutation's user-visible result: the slider's label and its new
 /// denormalized value.
 pub struct SliderChange {
@@ -117,6 +139,11 @@ pub enum Evaluation {
 
 /// One program slot: its source text, sliders, level, color, and the
 /// cached results of its last evaluation.
+//
+// `Program` exposes a narrow API — fields are private so the rest of the
+// UI (renderer, input handlers, reducer, effect runner) can only observe
+// programs through getters and mutate them through methods that preserve
+// the internal invariants.
 #[derive(Debug, Clone)]
 pub struct Program {
     /// The program's source expression text. Kept in sync with the caches
@@ -163,7 +190,6 @@ impl Program {
         binding_index: usize,
         source: &str,
     ) -> Option<(usize, Program)> {
-        // TODO NextBank is ignored!
         let mut sliders = ProgramSliders::default();
         let mut color: Option<(u8, u8, u8)> = None;
         let mut level_db: f32 = 0.0;
@@ -279,14 +305,14 @@ impl Program {
         self.sliders.set_normalized(slider_index, normalized)
     }
 
-    /// Records the result of evaluating the program's current text,
-    /// replacing both caches. Returns the user-visible message as an error
-    /// when the evaluation was invalid.
+    /// Records the result of evaluating the program's current text, replacing
+    /// both caches. Returns the user-visible message as an error when the
+    /// evaluation was invalid.
     ///
-    /// An `Invalid` evaluation still clears both caches: even though
-    /// editing already clears them, the failure may have come from a
-    /// changed dependency rather than this program's own text.
-    pub fn record_evaluation(&mut self, evaluation: Evaluation) -> Result<(), String> {
+    /// An `Invalid` evaluation still clears both caches: even though editing
+    /// already clears them, the failure may have come from a changed dependency
+    /// rather than this program's own text.
+    fn record_evaluation(&mut self, evaluation: Evaluation) -> Result<(), String> {
         match evaluation {
             Evaluation::Waveform(w) => {
                 self.cached_waveform = Some(w);
@@ -313,7 +339,7 @@ impl Program {
     /// Deliberately does NOT invalidate the evaluation caches — the text is
     /// unchanged semantically, only its location in the file moved. This is
     /// the one sanctioned way to rewrite `text` without clearing caches.
-    pub(crate) fn realign(&mut self, binding_index: usize, span: Range<usize>, source: &str) {
+    fn realign(&mut self, binding_index: usize, span: Range<usize>, source: &str) {
         self.binding_index = binding_index;
         self.text = source[span.clone()].to_string();
         self.span = span;
@@ -321,7 +347,7 @@ impl Program {
 
     /// Marks the program as a padding slot with no binding: the binding
     /// index points one past the end of the bindings and the span is empty.
-    pub(crate) fn mark_padding(&mut self, binding_count: usize) {
+    fn mark_padding(&mut self, binding_count: usize) {
         self.binding_index = binding_count;
         self.span = 0..0;
     }
@@ -487,6 +513,18 @@ impl ProgramSet {
             &mut bindings,
         );
         bindings
+    }
+
+    /// Evaluates the program at `index` and records the result in its
+    /// evaluation caches. Returns the user-visible message as an error when the
+    /// evaluation was invalid (the caches are still cleared in that case).
+    pub fn evaluate_and_record(
+        &mut self,
+        evaluator: &crate::evaluator::Evaluator,
+        index: usize,
+    ) -> Result<(), String> {
+        let evaluation = evaluator.evaluate_program(self, index);
+        self.programs[index].record_evaluation(evaluation)
     }
 }
 

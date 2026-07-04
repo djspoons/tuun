@@ -11,7 +11,7 @@ use crate::launchkey;
 use crate::parser;
 use crate::player;
 use crate::programs::{self, PROGRAMS_PER_BANK, Program};
-use crate::renderer::{self, MarkId, Mode, WaveformId};
+use crate::renderer::{MarkId, Mode, WaveformId};
 use crate::tracker;
 use crate::waveform;
 
@@ -726,7 +726,7 @@ fn apply_slider(
         });
     }
 
-    let formatted_value = renderer::format_sig_digits(actual_value, 3);
+    let formatted_value = programs::format_sig_digits(actual_value, 3);
 
     // Refresh the controller's display for this encoder. In Plugin mode
     // the 8 encoders map 1:1 to the active program's sliders, so the
@@ -768,7 +768,7 @@ fn apply_level_db(state: &mut AppState, program_index: usize, level_db: f32) -> 
     // Bank-relative encoder index for the display update.
     let bank_start = program_index - (program_index % PROGRAMS_PER_BANK);
     let encoder_index = (program_index - bank_start) as u8;
-    let formatted_level = renderer::format_level_db(level_db);
+    let formatted_level = programs::format_level_db(level_db);
     effects.push(Effect::SetEncoderDisplay {
         index: encoder_index,
         name: "level".to_string(),
