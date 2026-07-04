@@ -286,3 +286,81 @@ impl Evaluator {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::player::substitute_current_slider_values;
+    use std::path::PathBuf;
+
+    /// Walks `waveform` and collects the `Const` value under every
+    /// `Marked(Slider(label), …)` node.
+    fn slider_mark_values(waveform: &waveform::Waveform<MarkId>, found: &mut Vec<(String, f32)>) {
+        use waveform::Waveform;
+        match waveform {
+            Waveform::Marked { id, waveform } => {
+                if let MarkId::Slider(label) = id
+                    && let Waveform::Const(v) = **waveform
+                {
+                    found.push((label.clone(), v));
+                }
+                slider_mark_values(waveform, found);
+            }
+            Waveform::BinaryPointOp(_, a, b) => {
+                slider_mark_values(a, found);
+                slider_mark_values(b, found);
+            }
+            Waveform::Fin { length, waveform } => {
+                slider_mark_values(length, found);
+                slider_mark_values(waveform, found);
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn keys_note_on_reflects_current_slider_value() {
+        // The function body needs no built-ins: the slider binding `vol` is
+        // itself a (marked) waveform, so `(vol, vol)` is a valid
+        // (note-on, note-off) pair.
+        let (mut set, _) = ProgramSet::from_source(
+            "#{slot=1, sliders=[\"vol:0.5:0:1\"]}\nk = fn(note, vel) => (vol, vol);".to_string(),
+            PathBuf::new(),
+        )
+        .expect("test source should parse");
+        let evaluator = Evaluator::new(44100, 90, PathBuf::new());
+
+        // The program classifies as a keys instrument.
+        let Evaluation::KeysInstrument(function) = evaluator.evaluate_program(&set, 0) else {
+            panic!("expected a keys instrument");
+        };
+
+        // A note played at the initial slider position carries vol = 0.5.
+        let args = vec![
+            parser::SourceExpr::float(60.0),
+            parser::SourceExpr::float(0.5),
+        ];
+        let (mut note_on, _note_off) = evaluator
+            .apply_note_function(&function, args.clone(), set.programs()[0].sliders())
+            .expect("note function should apply");
+        let seeded = substitute_current_slider_values(&mut note_on, set.programs()[0].sliders());
+        assert_eq!(seeded, vec![("vol".to_string(), 0.5)]);
+        let mut marks = Vec::new();
+        slider_mark_values(&note_on, &mut marks);
+        assert_eq!(marks, vec![("vol".to_string(), 0.5)]);
+
+        // Move the slider; the next note carries the new value.
+        set.program_mut(0)
+            .unwrap()
+            .set_slider_normalized(0, 1.0)
+            .expect("program has a vol slider");
+        let (mut note_on, _note_off) = evaluator
+            .apply_note_function(&function, args, set.programs()[0].sliders())
+            .expect("note function should apply");
+        let seeded = substitute_current_slider_values(&mut note_on, set.programs()[0].sliders());
+        assert_eq!(seeded, vec![("vol".to_string(), 1.0)]);
+        let mut marks = Vec::new();
+        slider_mark_values(&note_on, &mut marks);
+        assert_eq!(marks, vec![("vol".to_string(), 1.0)]);
+    }
+}

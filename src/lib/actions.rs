@@ -785,7 +785,6 @@ fn apply_level_db(state: &mut AppState, program_index: usize, level_db: f32) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::programs::ProgramSliders;
     use std::time::Duration;
 
     /// A tracker status with no marks at all — nothing active, nothing pending.
@@ -978,6 +977,44 @@ _ = saw(220);";
             function: parser::SourceExpr::float(0.0),
             note_off_waveforms: Default::default(),
         });
+    }
+
+    #[test]
+    fn slider_change_on_keys_program_propagates_to_active_keys() {
+        let mut state = AppState::from_source(
+            "#{slot=1, sliders=[\"vol:0.5:0:1\"]}\nk = fn(note, vel) => (vol, vol);".to_string(),
+            std::path::PathBuf::new(),
+        )
+        .expect("test source should parse");
+        install_test_keys(&mut state);
+        let effects = apply_with_empty_status(
+            &mut state,
+            Action::SetSliderNormalized {
+                program: 0,
+                slider_index: 0,
+                normalized: 0.8,
+            },
+        );
+        // The program's own waveform gets the update...
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::UpdateSlider {
+                    id: WaveformId::Program(0),
+                    ..
+                }
+            )),
+            "expected UpdateSlider, got {:?}",
+            effects
+        );
+        // ...and so does every active key waveform of the installed instrument.
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::UpdateActiveKeySliders { .. })),
+            "expected UpdateActiveKeySliders, got {:?}",
+            effects
+        );
     }
 
     #[test]
