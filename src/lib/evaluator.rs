@@ -340,9 +340,12 @@ mod tests {
             parser::SourceExpr::float(60.0),
             parser::SourceExpr::float(0.5),
         ];
-        let (mut note_on, _note_off) = evaluator
+        let (note_on, _note_off) = evaluator
             .apply_note_function(&function, args.clone(), set.programs()[0].sliders())
             .expect("note function should apply");
+        // Optimize first, exactly as Effect::PlayNoteOn does — the marks
+        // must survive optimization for substitution and live updates.
+        let mut note_on = crate::optimizer::optimize(note_on);
         let seeded = substitute_current_slider_values(&mut note_on, set.programs()[0].sliders());
         assert_eq!(seeded, vec![("vol".to_string(), 0.5)]);
         let mut marks = Vec::new();
@@ -354,13 +357,56 @@ mod tests {
             .unwrap()
             .set_slider_normalized(0, 1.0)
             .expect("program has a vol slider");
-        let (mut note_on, _note_off) = evaluator
+        let (note_on, _note_off) = evaluator
             .apply_note_function(&function, args, set.programs()[0].sliders())
             .expect("note function should apply");
+        let mut note_on = crate::optimizer::optimize(note_on);
         let seeded = substitute_current_slider_values(&mut note_on, set.programs()[0].sliders());
         assert_eq!(seeded, vec![("vol".to_string(), 1.0)]);
         let mut marks = Vec::new();
         slider_mark_values(&note_on, &mut marks);
         assert_eq!(marks, vec![("vol".to_string(), 1.0)]);
+    }
+
+    #[test]
+    fn keys_note_on_slider_marks_survive_optimizer_for_realistic_instrument() {
+        // Uses the real std library so the instrument shape (let-bindings,
+        // filters, envelopes, seq/fin) matches live usage.
+        let (mut set, warning) = ProgramSet::from_source(
+            "open std;\n#{slot=1, sliders=[\"vol:0.5:0:1\"]}\nk = fn(note, vel) => ((harmonica(H, @note) | unseq()) * vol, (harmonica(H, @note) | unseq()) * vol);"
+                .to_string(),
+            std::path::PathBuf::new(),
+        )
+        .expect("test source should parse");
+        assert_eq!(warning, "");
+        let evaluator = Evaluator::new(44100, 90, std::path::PathBuf::from("./lib/v0"));
+
+        let function = match evaluator.evaluate_program(&set, 0) {
+            Evaluation::KeysInstrument(function) => function,
+            Evaluation::Invalid(message) => panic!("invalid: {}", message),
+            Evaluation::Waveform(_) => panic!("classified as waveform"),
+        };
+        set.program_mut(0)
+            .unwrap()
+            .set_slider_normalized(0, 1.0)
+            .expect("program has a vol slider");
+
+        let args = vec![
+            parser::SourceExpr::float(60.0),
+            parser::SourceExpr::float(0.5),
+        ];
+        let (note_on, _note_off) = evaluator
+            .apply_note_function(&function, args, set.programs()[0].sliders())
+            .expect("note function should apply");
+        let mut note_on = crate::optimizer::optimize(note_on);
+        let seeded = substitute_current_slider_values(&mut note_on, set.programs()[0].sliders());
+        assert_eq!(seeded, vec![("vol".to_string(), 1.0)]);
+        let mut marks = Vec::new();
+        slider_mark_values(&note_on, &mut marks);
+        assert!(
+            marks.contains(&("vol".to_string(), 1.0)),
+            "expected a surviving vol mark at 1.0, got {:?}",
+            marks
+        );
     }
 }
