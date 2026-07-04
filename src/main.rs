@@ -25,8 +25,9 @@ use tuun::tracker;
 use tuun::waveform;
 
 use metric::Metric;
-use renderer::{MarkId, Renderer, WaveformId};
+use renderer::Renderer;
 use tracker::Command;
+use tuun::ids::{MarkId, WaveformId};
 
 #[derive(ClapParser, Debug)]
 #[command(version, about, long_about = None)]
@@ -257,7 +258,7 @@ pub fn main() {
     // Spawn a thread that batches slider updates, sending them approximately once per audio buffer
     let buffer_duration =
         Duration::from_secs_f32(args.buffer_size as f32 / args.sample_rate as f32);
-    let (slider_sender, slider_receiver) = mpsc::channel::<renderer::SliderEvent>();
+    let (slider_sender, slider_receiver) = mpsc::channel::<effects::SliderEvent>();
     let slider_command_sender = command_sender.clone();
     thread::spawn(move || {
         let mut last_slider_values = last_slider_values;
@@ -267,7 +268,7 @@ pub fn main() {
 
             // Idle: block until the first slider update event arrives.
             loop {
-                use renderer::SliderEvent;
+                use effects::SliderEvent;
                 match slider_receiver.recv() {
                     Ok(SliderEvent::UpdateSlider { id, slider, value }) => {
                         pending.insert((id, slider), value);
@@ -293,7 +294,7 @@ pub fn main() {
                 if remaining.is_zero() {
                     break;
                 }
-                use renderer::SliderEvent;
+                use effects::SliderEvent;
                 match slider_receiver.recv_timeout(remaining) {
                     Ok(SliderEvent::UpdateSlider { id, slider, value }) => {
                         pending.insert((id, slider), value);
@@ -388,7 +389,7 @@ pub fn main() {
             &status,
             vec![actions::Effect::EvaluateProgram {
                 program_index: i,
-                mode_on_failure: renderer::Mode::Select,
+                mode_on_failure: actions::Mode::Select,
             }],
         );
     }

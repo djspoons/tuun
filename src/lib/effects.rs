@@ -11,15 +11,27 @@ use std::collections::HashMap;
 
 use crate::actions::{self, AppState, Effect};
 use crate::evaluator;
+use crate::ids::{MarkId, WaveformId};
 use crate::keys::Keys;
 use crate::parser;
 use crate::player;
 use crate::programs::{self, PROGRAMS_PER_BANK};
-use crate::renderer::{self, MarkId, WaveformId};
 use crate::slider;
 use crate::tracker;
 use crate::waveform;
 use crate::{launchkey, optimizer};
+
+/// Events for the slider worker thread, which coalesces them per audio
+/// quantum into tracker `Modify` ramps.
+pub enum SliderEvent {
+    UpdateSlider {
+        id: WaveformId,
+        slider: String,
+        value: f32,
+    },
+    SetInitialValues(HashMap<(WaveformId, String), f32>),
+    UpdateInitialValues(HashMap<(WaveformId, String), f32>),
+}
 
 /// External handles the runner needs but doesn't own.
 pub struct World<'a> {
@@ -30,14 +42,14 @@ pub struct World<'a> {
 pub struct EffectRunner {
     player: player::Player,
     evaluator: evaluator::Evaluator,
-    slider_sender: mpsc::Sender<renderer::SliderEvent>,
+    slider_sender: mpsc::Sender<SliderEvent>,
 }
 
 impl EffectRunner {
     pub fn new(
         player: player::Player,
         evaluator: evaluator::Evaluator,
-        slider_sender: mpsc::Sender<renderer::SliderEvent>,
+        slider_sender: mpsc::Sender<SliderEvent>,
     ) -> Self {
         Self {
             player,
@@ -122,7 +134,7 @@ impl EffectRunner {
                     .programs
                     .evaluate_and_record(&self.evaluator, program_index)
                 {
-                    Ok(()) => state.mode = renderer::Mode::Select,
+                    Ok(()) => state.mode = actions::Mode::Select,
                     Err(message) => {
                         state.message = message;
                         state.mode = mode_on_failure;
@@ -193,11 +205,9 @@ impl EffectRunner {
                             .into_iter()
                             .map(|(label, value)| ((id.clone(), label), value))
                             .collect();
-                        let _ =
-                            self.slider_sender
-                                .send(renderer::SliderEvent::UpdateInitialValues(
-                                    last_slider_values,
-                                ));
+                        let _ = self
+                            .slider_sender
+                            .send(SliderEvent::UpdateInitialValues(last_slider_values));
                         self.player.play_note(key, note_on, program.level_db());
                     }
                     Err(message) => {
@@ -222,18 +232,16 @@ impl EffectRunner {
             Effect::UpdateSlider { id, slider, value } => {
                 let _ = self
                     .slider_sender
-                    .send(renderer::SliderEvent::UpdateSlider { id, slider, value });
+                    .send(SliderEvent::UpdateSlider { id, slider, value });
             }
             Effect::UpdateActiveKeySliders { slider, value } => {
                 for mark in &world.status.marks {
                     if let WaveformId::Key(_) = mark.waveform_id {
-                        let _ = self
-                            .slider_sender
-                            .send(renderer::SliderEvent::UpdateSlider {
-                                id: mark.waveform_id.clone(),
-                                slider: slider.clone(),
-                                value,
-                            });
+                        let _ = self.slider_sender.send(SliderEvent::UpdateSlider {
+                            id: mark.waveform_id.clone(),
+                            slider: slider.clone(),
+                            value,
+                        });
                     }
                 }
             }

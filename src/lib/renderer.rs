@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-use std::fmt;
 use std::time::{Duration, Instant};
 
 use sdl2::Sdl;
@@ -11,93 +9,14 @@ use sdl2::video::WindowContext;
 use realfft::RealFftPlanner;
 use realfft::num_complex::{Complex, ComplexFloat};
 
-use crate::actions::AppState;
-use crate::builtins;
+use crate::actions::{AppState, Mode};
+use crate::ids::{MarkId, WaveformId};
 use crate::launchkey;
 use crate::metric::Metric;
 use crate::parser;
 use crate::programs::PROGRAMS_PER_BANK;
 use crate::tracker;
 use crate::waveform;
-
-// TODO: rename Program as Clip? Or make Clip a type of program?
-// And the other type is Key(channel, key_number)?
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum WaveformId {
-    // Beats are silent waveforms that are used to keep time. The bool tracks whether
-    // it is an odd or even measure (false == odd).
-    Beats(bool),
-    /// A program identified by its 0-based index in `AppState.programs`.
-    Program(usize),
-    /// Identifies a waveform playing in response to striking a key on a MIDI keyboard
-    /// or equivalent controller.
-    Key(u8),
-}
-
-impl WaveformId {
-    pub fn is_beats(&self) -> bool {
-        matches!(self, WaveformId::Beats(_))
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum MarkId {
-    TopLevel, // a mark for the whole Program
-    Slider(String),
-    Amplitude,  // use to set top-level amplitude
-    Terminator, // used to stop programs
-    UserDefined(u32),
-    // TODO consider replacing "UserDefined" with cases that better describe the cases
-    //VisualizeTiming, // How mark(1) is currently used
-    //ShowSample(String), // For debugging filter params, etc.
-}
-
-impl fmt::Display for MarkId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            MarkId::TopLevel => write!(f, "top-level"),
-            MarkId::Slider(name) => write!(f, "slider({:?})", name),
-            MarkId::Amplitude => write!(f, "amplitude"),
-            MarkId::Terminator => write!(f, "terminator"),
-            MarkId::UserDefined(id) => write!(f, "{:?}", id),
-        }
-    }
-}
-
-// Additional built-in for use with the above type
-pub fn mark(arguments: Vec<parser::Expr<MarkId>>) -> parser::Expr<MarkId> {
-    match &arguments[..] {
-        [parser::Expr::Float(id)] if *id >= 1.0 && id.fract() == 0.0 => {
-            let id = id.round() as u32;
-            parser::Expr::BuiltIn {
-                name: format!("mark({})", id),
-                function: builtins::curry(move |waveform: Box<waveform::Waveform<MarkId>>| {
-                    waveform::Waveform::Marked {
-                        id: MarkId::UserDefined(id),
-                        waveform,
-                    }
-                }),
-            }
-        }
-        _ => parser::Expr::Error("Invalid argument for mark".to_string()),
-    }
-}
-
-#[derive(Debug, Clone)]
-// `active_program_index` should be the index of the active program in the `programs` array
-pub enum Mode {
-    Select,
-    Edit {
-        // TODO unicode!!
-        cursor_position: usize, // Cursor is located before the character this position
-        errors: Vec<parser::Error>,
-    },
-    MoveSliders,
-    /// Computer-keyboard piano: lower QWERTY row plays white keys, row above
-    /// plays sharps. Only reachable when `state.keys` is installed.
-    Keys,
-}
 
 /// A parse / evaluate failure with both a user-visible message and the underlying
 /// error list.
@@ -111,16 +30,6 @@ pub struct ParseError {
 pub enum WaveformOrError {
     Waveform(waveform::Waveform<MarkId>),
     Error(ParseError),
-}
-
-pub enum SliderEvent {
-    UpdateSlider {
-        id: WaveformId,
-        slider: String,
-        value: f32,
-    },
-    SetInitialValues(HashMap<(WaveformId, String), f32>),
-    UpdateInitialValues(HashMap<(WaveformId, String), f32>),
 }
 
 fn make_texture<'a>(

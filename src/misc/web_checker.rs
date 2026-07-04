@@ -3,7 +3,7 @@ use std::fs;
 
 use clap::Parser as ClapParser;
 
-use tuun::{builtins, modules, parser, renderer, slider};
+use tuun::{builtins, ids, modules, parser, slider};
 
 #[derive(ClapParser, Debug)]
 #[command(version, about = "Check tuun-synth expressions in .md and .html files")]
@@ -12,16 +12,13 @@ struct Args {
     input_files: Vec<String>,
 }
 
-type Bindings = Vec<parser::SourceBinding<renderer::MarkId>>;
+type Bindings = Vec<parser::SourceBinding<ids::MarkId>>;
 
 /// Builds the always-in-scope prelude: `sample_rate`, `tempo`, plus the
 /// built-in definitions. Mirrors the wasm runtime's prelude so the
 /// checker evaluates expressions the same way the browser would.
 fn load_prelude() -> Bindings {
-    fn def(
-        id: &str,
-        expr: parser::SourceExpr<renderer::MarkId>,
-    ) -> parser::SourceBinding<renderer::MarkId> {
+    fn def(id: &str, expr: parser::SourceExpr<ids::MarkId>) -> parser::SourceBinding<ids::MarkId> {
         parser::Binding::Definition(parser::Pattern::Identifier(id.to_string()), expr).into()
     }
     let mut bindings: Bindings = Vec::new();
@@ -42,7 +39,7 @@ fn load_prelude() -> Bindings {
 fn load_modules() -> HashMap<String, Bindings> {
     let mut out = HashMap::new();
     for (name, content) in modules::EMBEDDED_MODULES {
-        match parser::parse_module::<renderer::MarkId>(content) {
+        match parser::parse_module::<ids::MarkId>(content) {
             Ok((mut bindings, errors)) => {
                 if !errors.is_empty() {
                     eprintln!("Warning: failed to parse module '{}': {:?}", name, errors);
@@ -196,7 +193,7 @@ fn check_block(
         }
     };
 
-    let expr = match parser::parse_program::<renderer::MarkId>(&expression) {
+    let expr = match parser::parse_program::<ids::MarkId>(&expression) {
         Ok(e) => e,
         Err(errors) => {
             return CheckResult::Fail(format!("[FAIL] \"{}\" parse errors: {:?}", label, errors));
@@ -238,12 +235,12 @@ fn check_block(
     slider::append_slider_bindings(
         &slider_configs,
         &vec![0.0; slider_configs.len()],
-        renderer::MarkId::Slider,
+        ids::MarkId::Slider,
         &mut bindings,
     );
 
     let resolve =
-        |path: &[String]| -> Result<&[parser::SourceBinding<renderer::MarkId>], parser::Error> {
+        |path: &[String]| -> Result<&[parser::SourceBinding<ids::MarkId>], parser::Error> {
             if path.len() == 1 && path[0] == "__prelude" {
                 return Ok(prelude.as_slice());
             }

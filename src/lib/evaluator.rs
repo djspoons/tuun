@@ -12,11 +12,31 @@ use std::path;
 use std::time;
 
 use crate::builtins;
+use crate::ids::MarkId;
 use crate::parser;
 use crate::programs::{Evaluation, ProgramSet, ProgramSliders};
-use crate::renderer::{self, MarkId};
 use crate::slider;
 use crate::waveform;
+
+/// The `mark(N)` built-in: wraps a waveform in a `MarkId::UserDefined`
+/// mark.
+fn mark(arguments: Vec<parser::Expr<MarkId>>) -> parser::Expr<MarkId> {
+    match &arguments[..] {
+        [parser::Expr::Float(id)] if *id >= 1.0 && id.fract() == 0.0 => {
+            let id = id.round() as u32;
+            parser::Expr::BuiltIn {
+                name: format!("mark({})", id),
+                function: builtins::curry(move |waveform: Box<waveform::Waveform<MarkId>>| {
+                    waveform::Waveform::Marked {
+                        id: MarkId::UserDefined(id),
+                        waveform,
+                    }
+                }),
+            }
+        }
+        _ => parser::Expr::Error("Invalid argument for mark".to_string()),
+    }
+}
 
 /// One slot in [`Evaluator`]'s module cache: the file's mtime at the time
 /// we parsed it, plus a leaked `&'static` slice of the parsed bindings.
@@ -68,7 +88,7 @@ impl Evaluator {
             "mark",
             SourceExpr::from(parser::Expr::BuiltIn {
                 name: "mark".to_string(),
-                function: parser::BuiltInFn(std::rc::Rc::new(renderer::mark)),
+                function: parser::BuiltInFn(std::rc::Rc::new(mark)),
             }),
         ));
 

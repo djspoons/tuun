@@ -3,8 +3,8 @@
 
 use std::collections::HashMap;
 
+use crate::ids::MarkId;
 use crate::parser;
-use crate::renderer::MarkId;
 use crate::waveform;
 
 /// A program installed to respond to MIDI note-on/-off events.

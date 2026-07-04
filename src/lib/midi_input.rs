@@ -1,9 +1,10 @@
 use std::time::Instant;
 
 use crate::actions;
+use crate::ids::{MarkId, WaveformId};
 use crate::launchkey;
 use crate::programs::{PROGRAMS_PER_BANK, Program};
-use crate::renderer::{self, MarkId, WaveformId};
+use crate::renderer;
 use crate::tracker;
 
 /// The number of rotations of the encoder that represents the full range.

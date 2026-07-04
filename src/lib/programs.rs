@@ -3,8 +3,8 @@
 use std::fmt;
 use std::ops::Range;
 
+use crate::ids::MarkId;
 use crate::parser;
-use crate::renderer::MarkId;
 use crate::slider;
 use crate::waveform;
 

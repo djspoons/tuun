@@ -15,6 +15,8 @@ pub mod effects;
 #[cfg(feature = "native")]
 pub mod evaluator;
 #[cfg(feature = "native")]
+pub mod ids;
+#[cfg(feature = "native")]
 pub mod keys;
 #[cfg(feature = "native")]
 pub mod launchkey;

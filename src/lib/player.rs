@@ -10,10 +10,10 @@ use std::sync::mpsc;
 use std::time;
 
 use crate::evaluator::Evaluator;
+use crate::ids::{MarkId, WaveformId};
 use crate::optimizer;
 use crate::parser;
 use crate::programs::{ProgramSet, ProgramSliders};
-use crate::renderer::{MarkId, WaveformId};
 use crate::slider;
 use crate::tracker;
 use crate::waveform;

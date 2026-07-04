@@ -1,6 +1,6 @@
 use crate::actions;
+use crate::actions::Mode;
 use crate::programs::{PROGRAMS_PER_BANK, Program};
-use crate::renderer::Mode;
 
 /// Maps a QWERTY scancode to a MIDI note number for Keys (piano) mode.
 /// Lower row plays white keys starting at C4 (MIDI 60); the row above

@@ -6,14 +6,30 @@
 
 use std::time::Instant;
 
+use crate::ids::{MarkId, WaveformId};
 use crate::keys;
 use crate::launchkey;
 use crate::parser;
 use crate::player;
 use crate::programs::{self, PROGRAMS_PER_BANK, Program};
-use crate::renderer::{MarkId, Mode, WaveformId};
 use crate::tracker;
 use crate::waveform;
+
+/// The app's interaction mode, driving which inputs the classifiers
+/// accept and how the renderer draws the active program.
+#[derive(Debug, Clone)]
+pub enum Mode {
+    Select,
+    Edit {
+        // TODO unicode!!
+        cursor_position: usize, // Cursor is located before the character this position
+        errors: Vec<parser::Error>,
+    },
+    MoveSliders,
+    /// Computer-keyboard piano: lower QWERTY row plays white keys, row above
+    /// plays sharps. Only reachable when `state.keys` is installed.
+    Keys,
+}
 
 /// Behavior of the pads when the controller is in DAW pad mode. Cycled by
 /// `Action::PadModeChanged` when the user re-presses the DAW pad-mode
