@@ -1006,9 +1006,9 @@ pub enum Annotation {
     Sliders(Vec<Slider>),
     Color(u8, u8, u8),
     Level(f32),
-    /// 1-indexed UI slot this `Definition` occupies. Definitions without a
-    /// `Slot` annotation are not shown in the UI.
-    Slot(u32),
+    /// Number of empty UI slots to leave before this `Definition`'s implicit
+    /// slot. Omitting the annotation is equivalent to `skip_slots=0`.
+    SkipSlots(u32),
 }
 
 /// Renders a parameter value (`level_db`, slider `initial`/`min`/`max`, slider
@@ -1053,7 +1053,7 @@ impl Display for Annotation {
         match self {
             Annotation::Color(r, g, b) => write!(f, "color=rgb({},{},{})", r, g, b),
             Annotation::Level(v) => write!(f, "level_db={}", format_param(*v)),
-            Annotation::Slot(n) => write!(f, "slot={}", n),
+            Annotation::SkipSlots(n) => write!(f, "skip_slots={}", n),
             Annotation::Sliders(sliders) => {
                 write!(f, "sliders=[")?;
                 for (i, s) in sliders.iter().enumerate() {
@@ -1191,10 +1191,10 @@ fn parse_level(input: LocatedSpan) -> IResult<f32> {
     Ok((rest, value))
 }
 
-/// Parses `slot=<positive integer>` (e.g., `slot=3`).
-fn parse_slot(input: LocatedSpan) -> IResult<u32> {
+/// Parses `skip_slots=<non-negative integer>` (e.g., `skip_slots=3`).
+fn parse_skip_slots(input: LocatedSpan) -> IResult<u32> {
     // TODO combinators
-    let (rest, _) = tag("slot=").parse(input)?;
+    let (rest, _) = tag("skip_slots=").parse(input)?;
     let (rest, digits) = character::digit1(rest)?;
     let value = digits
         .fragment()
@@ -1212,7 +1212,7 @@ fn parse_annotation(input: LocatedSpan) -> IResult<SourceAnnotation> {
         parse_sliders_internal.map(Annotation::Sliders),
         parse_color.map(|(r, g, b)| Annotation::Color(r, g, b)),
         parse_level.map(Annotation::Level),
-        parse_slot.map(Annotation::Slot),
+        parse_skip_slots.map(Annotation::SkipSlots),
     ))
     .parse(input)?;
     let end = rest.location_offset();
@@ -2495,32 +2495,31 @@ y = 2;";
     }
 
     #[test]
-    fn test_parse_slot_annotation() {
-        // `slot=N` is a 1-indexed UI slot annotation. Survives round-trip
-        // through `print_preserving_module`.
+    fn test_parse_skip_slots_annotation() {
+        // `skip_slots=N` is a non-negative UI-gap annotation. Survives
+        // round-trip through `print_preserving_module`.
         let input = "\
-#{slot=1}
 kick = pulse(60);
-#{slot=9, color=rgb(0,128,255)}
+#{skip_slots=7, color=rgb(0,128,255)}
 synth = saw(220);";
         let bindings = parse_module_successfully(input);
         assert_eq!(bindings.len(), 2);
-        let slot0 = bindings[0]
+        let skip0 = bindings[0]
             .annotations
             .iter()
             .find_map(|a| match &a.annotation {
-                Annotation::Slot(n) => Some(*n),
+                Annotation::SkipSlots(n) => Some(*n),
                 _ => None,
             });
-        assert_eq!(slot0, Some(1));
-        let slot1 = bindings[1]
+        assert_eq!(skip0, None);
+        let skip1 = bindings[1]
             .annotations
             .iter()
             .find_map(|a| match &a.annotation {
-                Annotation::Slot(n) => Some(*n),
+                Annotation::SkipSlots(n) => Some(*n),
                 _ => None,
             });
-        assert_eq!(slot1, Some(9));
+        assert_eq!(skip1, Some(7));
         assert_eq!(print_preserving_module(&bindings, input), input);
     }
 
@@ -2821,12 +2820,13 @@ synth = saw(220);";
         assert!(matches!(annos[0], Annotation::Sliders(_)));
 
         // Two annotations on one line.
-        let annos = parse_one_annotation_set(r#"#{sliders=["volume:0.75:0:1"],slot=2}"#).unwrap();
+        let annos =
+            parse_one_annotation_set(r#"#{sliders=["volume:0.75:0:1"],skip_slots=2}"#).unwrap();
         assert_eq!(annos.len(), 2);
-        assert!(matches!(annos[1], Annotation::Slot(2)));
+        assert!(matches!(annos[1], Annotation::SkipSlots(2)));
 
         // Missing closing brace.
-        assert!(parse_one_annotation_set("#{slot=1").is_err());
+        assert!(parse_one_annotation_set("#{skip_slots=1").is_err());
         // Unknown key.
         assert!(parse_one_annotation_set("#{bad_key=[]}").is_err());
         // Not an annotation line at all.
@@ -2848,8 +2848,8 @@ synth = saw(220);";
         let annos = parse_one_annotation_set("#{level_db=6.0}").unwrap();
         assert!(matches!(annos[0], Annotation::Level(v) if (v - 6.0).abs() < 0.01));
 
-        // Slot alone.
-        let annos = parse_one_annotation_set("#{slot=5}").unwrap();
-        assert!(matches!(annos[0], Annotation::Slot(5)));
+        // SkipSlots alone.
+        let annos = parse_one_annotation_set("#{skip_slots=5}").unwrap();
+        assert!(matches!(annos[0], Annotation::SkipSlots(5)));
     }
 }

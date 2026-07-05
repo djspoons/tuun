@@ -21,8 +21,11 @@ use crate::waveform;
 pub enum Mode {
     Select,
     Edit {
-        // TODO unicode!!
-        cursor_position: usize, // Cursor is located before the character this position
+        /// Byte offset into the program text; the cursor sits before the
+        /// character starting here. Always lies on a `char` boundary — every
+        /// cursor op moves over whole characters (see `prev_char_boundary` /
+        /// `next_char_boundary`).
+        cursor_position: usize,
         errors: Vec<parser::Error>,
     },
     MoveSliders,
@@ -443,9 +446,10 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             if cursor == 0 {
                 return None;
             }
+            let start = prev_char_boundary(current, cursor);
             let mut new_text = current.to_string();
-            new_text.remove(cursor - 1);
-            Some((new_text, cursor - 1))
+            new_text.replace_range(start..cursor, "");
+            Some((new_text, start))
         }),
         Action::DeleteWordBeforeCursor => edit_text_op(state, |current, cursor| {
             if cursor == 0 {
@@ -457,7 +461,15 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             Some((new_text, new_cursor))
         }),
         Action::MoveCursorBy(delta) => edit_cursor_op(state, |current, cursor| {
-            (cursor as i32 + delta).clamp(0, current.len() as i32) as usize
+            let mut cursor = cursor;
+            for _ in 0..delta.unsigned_abs() {
+                cursor = if delta < 0 {
+                    prev_char_boundary(current, cursor)
+                } else {
+                    next_char_boundary(current, cursor)
+                };
+            }
+            cursor
         }),
         Action::MoveCursorToStart => edit_cursor_op(state, |_, _| 0),
         Action::MoveCursorToEnd => edit_cursor_op(state, |current, _| current.len()),
@@ -609,7 +621,8 @@ fn apply_install_keys(state: &mut AppState, program_index: usize) -> Vec<Effect>
 /// as a clean parse (renderer would have nothing to highlight anyway).
 fn parse_program_errors(text: &str) -> Vec<crate::parser::Error> {
     use crate::parser;
-    if text.is_empty() {
+    // Empty (or whitespace-only) text is a pending deletion, not a parse error.
+    if text.trim().is_empty() {
         Vec::new()
     } else {
         match parser::parse_program::<MarkId>(text) {
@@ -684,12 +697,36 @@ fn edit_cursor_op(state: &mut AppState, f: impl FnOnce(&str, usize) -> usize) ->
     vec![]
 }
 
+/// Returns the byte offset of the start of the character before `cursor`, or 0
+/// when the cursor is at the start of `text`.
+///
+/// `cursor` must lie on a char boundary of `text`.
+fn prev_char_boundary(text: &str, cursor: usize) -> usize {
+    text[..cursor]
+        .chars()
+        .next_back()
+        .map_or(0, |c| cursor - c.len_utf8())
+}
+
+/// Returns the byte offset just past the character at `cursor`, or `text.len()`
+/// when the cursor is already at the end of `text`.
+///
+/// `cursor` must lie on a char boundary of `text`.
+fn next_char_boundary(text: &str, cursor: usize) -> usize {
+    text[cursor..]
+        .chars()
+        .next()
+        .map_or(text.len(), |c| cursor + c.len_utf8())
+}
+
 /// Returns the byte offset where the word preceding the end of `prefix` starts:
 /// skips any trailing whitespace, then scans back to the previous whitespace
 /// boundary (or the start of the string).
 fn prev_word_start(prefix: &str) -> usize {
     match prefix.trim_end().rfind(char::is_whitespace) {
-        Some(idx) => idx + 1,
+        // `rfind` returns the byte offset of the whitespace char's start;
+        // skip past the full char (it may be multi-byte, e.g. U+00A0).
+        Some(idx) => next_char_boundary(prefix, idx),
         None => 0,
     }
 }
@@ -843,7 +880,7 @@ mod tests {
     /// so splice never touches disk.
     fn test_state() -> AppState {
         AppState::from_source(
-            "#{slot=1}\n_ = test;".to_string(),
+            "#{level_db=0}\n_ = test;".to_string(),
             std::path::PathBuf::new(),
         )
         .expect("test source should parse")
@@ -903,10 +940,71 @@ mod tests {
     }
 
     #[test]
+    fn cursor_ops_respect_multibyte_char_boundaries() {
+        // Arrow keys must move over whole characters, not bytes:
+        // stepping left over a 2-byte char and typing used to panic
+        // in `insert_str` with a mid-char cursor.
+        let mut state =
+            AppState::from_source(String::new(), std::path::PathBuf::new()).expect("empty source");
+        state.mode = Mode::Edit {
+            cursor_position: 0,
+            errors: vec![],
+        };
+        apply_with_empty_status(&mut state, Action::InsertText("π".to_string()));
+        apply_with_empty_status(&mut state, Action::MoveCursorBy(-1));
+        let Mode::Edit {
+            cursor_position, ..
+        } = state.mode
+        else {
+            panic!("expected Edit mode");
+        };
+        assert_eq!(cursor_position, 0);
+        apply_with_empty_status(&mut state, Action::InsertText("x".to_string()));
+        assert_eq!(state.active_program().text(), "xπ");
+    }
+
+    #[test]
+    fn backspace_removes_whole_multibyte_char() {
+        // Backspace after a 2-byte char must remove the whole char
+        // (removing at `cursor - 1` bytes used to panic mid-char).
+        let mut state =
+            AppState::from_source(String::new(), std::path::PathBuf::new()).expect("empty source");
+        state.mode = Mode::Edit {
+            cursor_position: 0,
+            errors: vec![],
+        };
+        apply_with_empty_status(&mut state, Action::InsertText("aπ".to_string()));
+        apply_with_empty_status(&mut state, Action::DeleteCharBeforeCursor);
+        assert_eq!(state.active_program().text(), "a");
+        let Mode::Edit {
+            cursor_position, ..
+        } = state.mode
+        else {
+            panic!("expected Edit mode");
+        };
+        assert_eq!(cursor_position, 1);
+    }
+
+    #[test]
+    fn delete_word_handles_multibyte_whitespace() {
+        // `prev_word_start` must skip past the full whitespace char
+        // even when it's multi-byte (e.g. a non-breaking space).
+        let mut state =
+            AppState::from_source(String::new(), std::path::PathBuf::new()).expect("empty source");
+        state.mode = Mode::Edit {
+            cursor_position: 0,
+            errors: vec![],
+        };
+        apply_with_empty_status(&mut state, Action::InsertText("a\u{a0}bc".to_string()));
+        apply_with_empty_status(&mut state, Action::DeleteWordBeforeCursor);
+        assert_eq!(state.active_program().text(), "a\u{a0}");
+    }
+
+    #[test]
     fn advance_program_emits_empty_show_message_to_clear_status() {
         // Two programs so AdvanceProgram(1) actually moves the index.
         let mut state = AppState::from_source(
-            "#{slot=1}\n_ = test;\n#{slot=2}\n_ = second;".to_string(),
+            "#{level_db=0}\n_ = test;\n#{level_db=0}\n_ = second;".to_string(),
             std::path::PathBuf::new(),
         )
         .expect("test source should parse");
@@ -929,9 +1027,9 @@ mod tests {
         // binding → status is left blank; a slot with no source binding
         // (padding) → also blank.
         let source = "\
-#{slot=1}
+#{level_db=0}
 kick = pulse(60);
-#{slot=2}
+#{level_db=0}
 _ = saw(220);";
         let mut state = AppState::from_source(source.to_string(), std::path::PathBuf::new())
             .expect("test source should parse");
@@ -998,7 +1096,7 @@ _ = saw(220);";
     #[test]
     fn slider_change_on_keys_program_propagates_to_active_keys() {
         let mut state = AppState::from_source(
-            "#{slot=1, sliders=[\"vol:0.5:0:1\"]}\nk = fn(note, vel) => (vol, vol);".to_string(),
+            "#{sliders=[\"vol:0.5:0:1\"]}\nk = fn(note, vel) => (vol, vol);".to_string(),
             std::path::PathBuf::new(),
         )
         .expect("test source should parse");

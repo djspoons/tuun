@@ -328,9 +328,10 @@ impl Renderer {
                             .unwrap();
                     } else if active_program_index == index {
                         // Loop over each character in program and check to see if it's in any of the error
-                        // ranges
+                        // ranges. `char_indices` yields byte offsets, matching
+                        // both `cursor_position` and the errors' byte ranges.
                         let mut x = self.nav_width as i32;
-                        for (j, c) in program.text().chars().enumerate() {
+                        for (j, c) in program.text().char_indices() {
                             let color = if errors
                                 .iter()
                                 .any(|e| matches!(e.range(), Some(range) if range.contains(&j)))

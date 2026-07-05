@@ -298,7 +298,7 @@ mod tests {
 
     fn test_state(mode: Mode) -> AppState {
         let mut state = AppState::from_source(
-            "#{slot=1}\n_ = test;".to_string(),
+            "#{level_db=0}\n_ = test;".to_string(),
             std::path::PathBuf::new(),
         )
         .expect("test source should parse");

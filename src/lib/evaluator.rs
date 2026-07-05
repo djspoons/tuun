@@ -345,7 +345,7 @@ mod tests {
         // itself a (marked) waveform, so `(vol, vol)` is a valid
         // (note-on, note-off) pair.
         let (mut set, _) = ProgramSet::from_source(
-            "#{slot=1, sliders=[\"vol:0.5:0:1\"]}\nk = fn(note, vel) => (vol, vol);".to_string(),
+            "#{sliders=[\"vol:0.5:0:1\"]}\nk = fn(note, vel) => (vol, vol);".to_string(),
             PathBuf::new(),
         )
         .expect("test source should parse");
@@ -394,7 +394,7 @@ mod tests {
         // Uses the real std library so the instrument shape (let-bindings,
         // filters, envelopes, seq/fin) matches live usage.
         let (mut set, warning) = ProgramSet::from_source(
-            "open std;\n#{slot=1, sliders=[\"vol:0.5:0:1\"]}\nk = fn(note, vel) => ((harmonica(H, @note) | unseq()) * vol, (harmonica(H, @note) | unseq()) * vol);"
+            "open std;\n#{sliders=[\"vol:0.5:0:1\"]}\nk = fn(note, vel) => ((harmonica(H, @note) | unseq()) * vol, (harmonica(H, @note) | unseq()) * vol);"
                 .to_string(),
             std::path::PathBuf::new(),
         )

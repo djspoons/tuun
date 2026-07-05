@@ -1,0 +1,49 @@
+open std;
+
+// A pure PM synth. Note that any of I, D, or fc can control the length of the output.
+pure_pm_synth = fn(I, D) => fn(fc) =>
+  let
+    fm = D/2 * fc
+  in
+    sine(2*pi * fc, sine(2*pi * fm, 0) * I);
+
+pure_pm_brass = fn(fc, dur) => let
+  // Roughly from Chowning (1977)
+  D = 1,
+  I_max = 5,
+  // Envelope
+  a = 0.1,
+  d = 0.1,
+  r = 0.1,
+  s = max(dur - (a + d + r), 0),
+  s_level = 0.75,
+  envelope = ADSR(a, d, s_level, s, r),
+  I = I_max | envelope,
+
+  // Build the instrument
+  synth = pure_pm_synth(I, D)
+in
+  synth(fc) | envelope;
+
+
+pm_synth = fn(I_max, D, a, d, s_level, r) => fn(fc, dur) =>
+  let
+    s = max(dur - (a + d + r), 0),
+    envelope = ADSR(a, d, s_level, s, r),
+    I = I_max | envelope,
+    fm = D/2 * fc
+  in
+    sine(2*pi * fc, sine(2*pi * fm, 0) * I) | envelope;
+
+pm_synth_keys = fn(I_max, D, attack, decay, sustain_level) => fn(k, v) =>
+  let
+    fc = @k,
+    envelope = ADS(attack, decay, sustain_level),
+    I = I_max | envelope,
+    fm = D/2 * fc,
+    osc = v * sine(2*pi * fc, sine(2*pi * fm, 0) * I)
+  in
+    osc | envelope;
+
+
+pm_brass = pm_synth(5, 1, 0.1, 0.1, 0.7, 0.1);
