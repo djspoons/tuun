@@ -13,24 +13,8 @@ use crate::actions::{AppState, Mode};
 use crate::ids::{MarkId, WaveformId};
 use crate::launchkey;
 use crate::metric::Metric;
-use crate::parser;
 use crate::programs::PROGRAMS_PER_BANK;
 use crate::tracker;
-use crate::waveform;
-
-/// A parse / evaluate failure with both a user-visible message and the underlying
-/// error list.
-//
-// TODO rename to something other than "Parse" since it also contains evaluation errors.
-pub struct ParseError {
-    pub message: String,
-    pub errors: Vec<parser::Error>,
-}
-
-pub enum WaveformOrError {
-    Waveform(waveform::Waveform<MarkId>),
-    Error(ParseError),
-}
 
 fn make_texture<'a>(
     font: &Font<'a, 'static>,
@@ -632,8 +616,10 @@ impl Renderer {
         }
         self.last_message = message.to_string();
         if !message.is_empty() {
-            if message.len() > 45 {
-                message = &message[..45];
+            // Truncate to 45 chars, not bytes — a byte slice can panic
+            // mid-character on multi-byte input.
+            if let Some((limit, _)) = message.char_indices().nth(45) {
+                message = &message[..limit];
             }
             let message_texture = make_texture(&font, INACTIVE_COLOR, &texture_creator, message);
             let TextureQuery {

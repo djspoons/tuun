@@ -49,6 +49,15 @@ fn def_binding(id: &str, expr: parser::SourceExpr<MarkId>) -> parser::SourceBind
     parser::Binding::Definition(parser::Pattern::Identifier(id.to_string()), expr).into()
 }
 
+/// Joins parse errors into a single user-visible string.
+fn join_errors(errors: &[parser::Error]) -> String {
+    errors
+        .iter()
+        .map(|e| e.to_string())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 #[wasm_bindgen(js_class = "Tuun")]
 impl Wasm {
     /// Creates a new Tuun instance with the specified sample rate and tempo.
@@ -84,8 +93,23 @@ impl Wasm {
         // the native runtime.
         let mut modules: HashMap<String, Vec<parser::SourceBinding<MarkId>>> = HashMap::new();
         for (name, content) in modules::EMBEDDED_MODULES {
-            let mut bindings = parser::parse_module::<MarkId>(content)
-                .map_err(|errors| format!("Failed to parse module '{}': {:?}", name, errors))?;
+            let (mut bindings, errors) =
+                parser::parse_module::<MarkId>(content).map_err(|errors| {
+                    format!(
+                        "Failed to parse module '{}': {}",
+                        name,
+                        join_errors(&errors)
+                    )
+                })?;
+            // Embedded modules are fixed at build time, so recoverable parse
+            // errors mean the build itself is broken — fail loudly.
+            if !errors.is_empty() {
+                return Err(format!(
+                    "Failed to parse module '{}': {}",
+                    name,
+                    join_errors(&errors)
+                ));
+            }
             bindings.insert(
                 0,
                 parser::Binding::Open(vec!["__prelude".to_string()]).into(),
@@ -125,7 +149,7 @@ impl Wasm {
         open_json: &str,
     ) -> Result<(), String> {
         let parsed_expr = parser::parse_program::<MarkId>(expression)
-            .map_err(|errors| format!("Parse errors: {:?}", errors))?;
+            .map_err(|errors| format!("Parse errors: {}", join_errors(&errors)))?;
         let sliders = parse_json(slider_json)?;
         let opens = modules::parse_open_json(open_json)?;
 
@@ -166,7 +190,7 @@ impl Wasm {
         };
 
         let expr = parser::evaluate(resolve, &bindings, parsed_expr)
-            .map_err(|e| format!("Evaluate error: {:?}", e))?;
+            .map_err(|e| format!("Evaluate error: {}", e))?;
 
         // TODO Do we want to precompute here?
 
@@ -300,13 +324,8 @@ fn parse_json(json: &str) -> Result<HashMap<String, f32>, String> {
 /// Returns an error string if parsing fails.
 #[wasm_bindgen(js_name = "parseSliders")]
 pub fn parse_sliders(input: &str) -> Result<String, String> {
-    let sliders = parser::parse_sliders(&format!("sliders={}", input)).map_err(|errors| {
-        errors
-            .iter()
-            .map(|e| e.to_string())
-            .collect::<Vec<_>>()
-            .join("; ")
-    })?;
+    let sliders = parser::parse_sliders(&format!("sliders={}", input))
+        .map_err(|errors| join_errors(&errors))?;
 
     // Manually build JSON since we don't have serde
     let entries: Vec<String> = sliders

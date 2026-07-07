@@ -894,22 +894,12 @@ fn parse_expr<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
 fn translate_parse_result<T>(result: IResult<T>) -> Result<T, Vec<Error>> {
     match result {
         Ok((_, a)) => Ok(a),
-        Err(nom::Err::Error(e)) => {
-            //println!("Error on parsing input: {:?}", e);
-            Err(vec![Error::new_from_span(
-                &e.input,
-                "unable to parse input".to_string(),
-            )])
-        }
+        Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => Err(vec![Error::new_from_span(
+            &e.input,
+            "unable to parse input".to_string(),
+        )]),
         Err(nom::Err::Incomplete(_)) => {
             panic!("Incomplete error on input");
-        }
-        Err(nom::Err::Failure(e)) => {
-            println!("Failed to parse input: {:?}", e);
-            Err(vec![Error::new_from_span(
-                &e.input,
-                "unable to parse input".to_string(),
-            )])
         }
     }
 }
@@ -1260,7 +1250,8 @@ where
     M: Clone,
 {
     use Expr::{
-        Application, Bool, BuiltIn, Float, Function, IfThenElse, List, String, Tuple, Variable,
+        Application, Bool, BuiltIn, Error, Float, Function, IfThenElse, List, String, Tuple,
+        Variable,
     };
     let SourceExpr { expr, span } = expr;
     match expr {
@@ -1292,7 +1283,10 @@ where
                     return value.clone();
                 }
             }
-            SourceExpr::error(format!("Variable '{}' not found in context", name))
+            SourceExpr {
+                expr: Error(format!("Variable '{}' not found in context", name)),
+                span,
+            }
         }
         IfThenElse {
             condition,
@@ -1322,7 +1316,10 @@ where
         List(exprs) => SourceExpr::from(Expr::List(
             exprs.into_iter().map(|e| substitute(context, e)).collect(),
         )),
-        Expr::Error(s) => SourceExpr::error(s),
+        Error(s) => SourceExpr {
+            expr: Error(s),
+            span,
+        },
     }
 }
 
@@ -1984,20 +1981,26 @@ where
         }
         (Pattern::Tuple(patterns), Expr::Tuple(arguments)) => {
             if patterns.len() != arguments.len() {
-                return Err(Error::new(format!(
-                    "Mismatched number of elements in pattern {:?} and arguments {:?}",
-                    patterns, arguments
-                )));
+                return Err(Error::with_range(
+                    format!(
+                        "Mismatched number of elements in pattern {:?} and arguments {:?}",
+                        patterns, arguments
+                    ),
+                    argument.span.clone(),
+                ));
             }
             for (pattern, argument) in patterns.iter().zip(arguments) {
                 extend_context(context, pattern, argument)?;
             }
             Ok(())
         }
-        _ => Err(Error::new(format!(
-            "Pattern {:?} does not match actual expression {:?}",
-            pattern, argument.expr
-        ))),
+        _ => Err(Error::with_range(
+            format!(
+                "Pattern {:?} does not match actual expression {:?}",
+                pattern, argument.expr
+            ),
+            argument.span.clone(),
+        )),
     }
 }
 
@@ -2022,10 +2025,10 @@ where
             // TODO is that true for functions?
             Ok(SourceExpr { expr, span })
         }
-        Variable(name) => Err(Error::new(format!(
-            "Variable '{}' not found in context",
-            name
-        ))),
+        Variable(name) => Err(Error::with_range(
+            format!("Variable '{}' not found in context", name),
+            span,
+        )),
         Seq { offset, waveform } => {
             let offset = evaluate_closed(*offset)?;
             let waveform = evaluate_closed(*waveform)?;
@@ -2042,11 +2045,19 @@ where
             condition,
             then,
             else_,
-        } => match evaluate_closed(*condition)?.expr {
-            Bool(true) => evaluate_closed(*then),
-            Bool(false) => evaluate_closed(*else_),
-            _ => Err(Error::new("Expected boolean condition".to_string())),
-        },
+        } => {
+            // Evaluation may drop the condition's span, so capture it up
+            // front to point the error at the original condition.
+            let condition_span = condition.span.clone();
+            match evaluate_closed(*condition)?.expr {
+                Bool(true) => evaluate_closed(*then),
+                Bool(false) => evaluate_closed(*else_),
+                _ => Err(Error::with_range(
+                    "Expected boolean condition".to_string(),
+                    condition_span,
+                )),
+            }
+        }
         Application { function, argument } => {
             let function = evaluate_closed(*function)?;
             let argument = evaluate_closed(*argument)?;
@@ -2091,7 +2102,7 @@ where
                 .map(|e| evaluate_closed(e))
                 .collect::<Result<Vec<_>, _>>()?,
         ))),
-        Expr::Error(s) => Err(Error::new(s)),
+        Expr::Error(s) => Err(Error::with_range(s, span)),
     }
 }
 

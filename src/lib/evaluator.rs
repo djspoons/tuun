@@ -38,6 +38,15 @@ fn mark(arguments: Vec<parser::Expr<MarkId>>) -> parser::Expr<MarkId> {
     }
 }
 
+/// Returns a user-visible error for a failed module parse, naming the file
+/// and including the first parse error when there is one.
+fn module_parse_error(file_path: &path::Path, errors: Vec<parser::Error>) -> parser::Error {
+    match errors.into_iter().next() {
+        Some(error) => parser::Error::new(format!("{}: {}", file_path.display(), error)),
+        None => parser::Error::new(format!("Parse failed for {}", file_path.display())),
+    }
+}
+
 /// One slot in [`Evaluator`]'s module cache: the file's mtime at the time
 /// we parsed it, plus a leaked `&'static` slice of the parsed bindings.
 // See the field doc on `Evaluator::modules` for the leak strategy.
@@ -150,17 +159,12 @@ impl Evaluator {
                 e
             ))
         })?;
-        // TODO these two error cases are a little hard to unravel, but :shrug:
-        let (mut bindings, errors) =
-            parser::parse_module::<MarkId>(&contents).map_err(|errors| {
-                errors.into_iter().next().unwrap_or_else(|| {
-                    parser::Error::new(format!("Parse failed for {}", file_path.display()))
-                })
-            })?;
+        // A module that parses with recoverable errors is still broken —
+        // report it rather than evaluating with error placeholders.
+        let (mut bindings, errors) = parser::parse_module::<MarkId>(&contents)
+            .map_err(|errors| module_parse_error(&file_path, errors))?;
         if !errors.is_empty() {
-            errors.into_iter().next().unwrap_or_else(|| {
-                parser::Error::new(format!("Parse failed for {}", file_path.display()))
-            });
+            return Err(module_parse_error(&file_path, errors));
         }
 
         // Every loaded module implicitly opens the prelude as its first binding
@@ -196,24 +200,12 @@ impl Evaluator {
         bindings: &[parser::SourceBinding<MarkId>],
     ) -> Result<parser::SourceExpr<MarkId>, String> {
         let expr = match parser::parse_program(text) {
-            Err(errors) => {
-                println!("Errors while parsing input: {:?}", errors);
-                return Err(format!("Error: {}", errors[0]));
-            }
+            Err(errors) => return Err(format!("Error: {}", errors[0])),
             Ok(expr) => expr,
         };
-        println!("parser::parse_program returned: {}", &expr);
 
-        match parser::evaluate(|path| self.resolve(path), bindings, expr) {
-            Err(error) => {
-                println!("Errors while evaluating input: {:?}", error);
-                Err(format!("Error: {}", error))
-            }
-            Ok(expr) => {
-                println!("parser::evaluate returned: {}", &expr);
-                Ok(expr)
-            }
-        }
+        parser::evaluate(|path| self.resolve(path), bindings, expr)
+            .map_err(|error| format!("Error: {}", error))
     }
 
     /// Evaluates the program at `index` and classifies the result as a
