@@ -218,8 +218,18 @@ impl EffectRunner {
             Effect::PlayNoteOff { key } => {
                 let id = WaveformId::Key(key);
                 if let Some(keys) = state.keys.as_mut()
-                    && let Some(note_off) = keys.note_off_waveforms.remove(&key)
+                    && let Some(mut note_off) = keys.note_off_waveforms.remove(&key)
                 {
+                    // The stored note-off's `Marked(Slider(_))` nodes still
+                    // hold the values baked in when the instrument was
+                    // evaluated: `PlayNoteOn` substitutes fresh values into the
+                    // note-on only, and slider moves made while the note was
+                    // held reach the tracker's active waveform, not this map.
+                    // Swap in the program's current values so the release
+                    // doesn't snap back to stale ones.
+                    if let Some(program) = state.programs.program(keys.id) {
+                        player::substitute_current_slider_values(&mut note_off, program.sliders());
+                    }
                     self.player.modify(id, MarkId::Terminator, note_off);
                     return;
                 }
@@ -355,5 +365,120 @@ fn sync_encoders(state: &AppState, launchkey: &mut launchkey::Launchkey) {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_status() -> tracker::Status<WaveformId, MarkId> {
+        tracker::Status {
+            buffer_start: Instant::now(),
+            marks: vec![],
+            buffer: None,
+            tracker_load: None,
+            allocations_per_sample: None,
+        }
+    }
+
+    /// Walks `waveform` and collects the `Const` value under every
+    /// `Marked(Slider(label), …)` node.
+    fn slider_mark_values(waveform: &waveform::Waveform<MarkId>, found: &mut Vec<(String, f32)>) {
+        use waveform::Waveform;
+        match waveform {
+            Waveform::Marked { id, waveform } => {
+                if let MarkId::Slider(label) = id
+                    && let Waveform::Const(v) = **waveform
+                {
+                    found.push((label.clone(), v));
+                }
+                slider_mark_values(waveform, found);
+            }
+            Waveform::BinaryPointOp(_, a, b) => {
+                slider_mark_values(a, found);
+                slider_mark_values(b, found);
+            }
+            Waveform::Fin { length, waveform } => {
+                slider_mark_values(length, found);
+                slider_mark_values(waveform, found);
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn note_off_reflects_slider_value_at_release_time() {
+        // Slider moves made after install (and while a note is held) must reach
+        // the note-off waveform spliced in at release — not the values baked in
+        // when the instrument was evaluated.
+        let (precompute_sender, _precompute_receiver) = mpsc::channel();
+        let (fast_sender, fast_receiver) = mpsc::channel();
+        let (slider_sender, _slider_receiver) = mpsc::channel();
+        let player = player::Player::new(90, 4, precompute_sender, fast_sender);
+        let evaluator = evaluator::Evaluator::new(44100, 90, std::path::PathBuf::new());
+        let mut runner = EffectRunner::new(player, evaluator, slider_sender);
+
+        let mut state = AppState::from_source(
+            "#{sliders=[\"vol:0.5:0:1\"]}\nk = fn(note, vel) => (vol, vol);".to_string(),
+            std::path::PathBuf::new(),
+        )
+        .expect("test source should parse");
+        let status = empty_status();
+        let mut world = World {
+            launchkey: None,
+            status: &status,
+        };
+        runner.run_one(
+            &mut state,
+            &mut world,
+            Effect::EvaluateProgram {
+                program_index: 0,
+                mode_on_failure: actions::Mode::Select,
+            },
+        );
+        runner.run_one(&mut state, &mut world, Effect::InstallKeys(0));
+        assert!(
+            state.keys.is_some(),
+            "keys should install: {}",
+            state.message
+        );
+
+        runner.run_one(
+            &mut state,
+            &mut world,
+            Effect::PlayNoteOn {
+                key: 60,
+                velocity: 127,
+            },
+        );
+
+        // Move the slider while the note is held.
+        state
+            .programs
+            .program_mut(0)
+            .unwrap()
+            .set_slider_normalized(0, 1.0)
+            .expect("program has a vol slider");
+
+        runner.run_one(&mut state, &mut world, Effect::PlayNoteOff { key: 60 });
+
+        // The release splice is the Modify command on the note's terminator
+        // mark.
+        let mut note_off = None;
+        while let Ok(command) = fast_receiver.try_recv() {
+            if let tracker::Command::Modify {
+                id: WaveformId::Key(60),
+                mark_id: MarkId::Terminator,
+                waveform,
+            } = command
+            {
+                note_off = Some(waveform);
+            }
+        }
+        let note_off = note_off.expect("expected a Terminator Modify command");
+        let mut marks = Vec::new();
+        slider_mark_values(&note_off, &mut marks);
+        assert_eq!(marks, vec![("vol".to_string(), 1.0)]);
     }
 }
