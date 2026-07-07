@@ -148,8 +148,13 @@ impl Wasm {
         slider_json: &str,
         open_json: &str,
     ) -> Result<(), String> {
-        let parsed_expr = parser::parse_program::<MarkId>(expression)
-            .map_err(|errors| format!("Parse errors: {}", join_errors(&errors)))?;
+        let parsed_expr = parser::parse_program::<MarkId>(expression).map_err(|errors| {
+            let rendered: Vec<String> = errors
+                .iter()
+                .map(|e| e.display_with_source(expression))
+                .collect();
+            format!("Parse errors: {}", rendered.join("; "))
+        })?;
         let sliders = parse_json(slider_json)?;
         let opens = modules::parse_open_json(open_json)?;
 

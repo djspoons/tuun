@@ -63,9 +63,44 @@ impl Error {
         self.range.clone()
     }
 
-    // pub fn line(&self) -> u32 { self.span().location_line() }
+    /// Renders the error as `line:col: message` against `source`, the text
+    /// this error's range indexes; falls back to the bare message when the
+    /// error has no range.
+    pub fn display_with_source(&self, source: &str) -> String {
+        match &self.range {
+            Some(range) => {
+                let (line, col) = line_col(source, range.start);
+                format!("{}:{}: {}", line, col, self.message)
+            }
+            None => self.message.clone(),
+        }
+    }
+}
 
-    // pub fn offset(&self) -> usize { self.span().location_offset() }
+/// Returns the 1-based (line, column) of byte `offset` in `source`.
+///
+/// The column counts characters, not bytes. Offsets past the end of `source`
+/// are clamped to the end.
+///
+/// # Example
+/// `line_col("ab\ncd", 4)` is `(2, 2)` — the `d` on the second line.
+pub fn line_col(source: &str, offset: usize) -> (usize, usize) {
+    let offset = offset.min(source.len());
+    let prefix = &source.as_bytes()[..offset];
+    let line = prefix.iter().filter(|&&b| b == b'\n').count() + 1;
+    let line_start = prefix
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    // A caller-supplied offset may not land on a char boundary; fall back to
+    // a byte count rather than panicking on the slice.
+    let col = source
+        .get(line_start..offset)
+        .map(|s| s.chars().count())
+        .unwrap_or(offset - line_start)
+        + 1;
+    (line, col)
 }
 
 impl<'a> nom::error::ParseError<LocatedSpan<'a>> for Error {
@@ -2164,6 +2199,34 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_line_col() {
+        let source = "ab\ncd\n";
+        assert_eq!(line_col(source, 0), (1, 1));
+        assert_eq!(line_col(source, 1), (1, 2));
+        assert_eq!(line_col(source, 2), (1, 3)); // the newline itself
+        assert_eq!(line_col(source, 3), (2, 1));
+        assert_eq!(line_col(source, 4), (2, 2));
+        assert_eq!(line_col(source, 6), (3, 1)); // offset == len, past last newline
+        assert_eq!(line_col(source, 100), (3, 1)); // clamps to len
+
+        // Columns count chars, not bytes: 'é' is 2 bytes.
+        let source = "é = 1\nx";
+        assert_eq!(line_col(source, 2), (1, 2)); // the space after 'é'
+        assert_eq!(line_col(source, 7), (2, 1)); // 'x': 'é' is bytes 0..2, '\n' is byte 6
+
+        assert_eq!(line_col("", 0), (1, 1));
+    }
+
+    #[test]
+    fn test_display_with_source() {
+        let source = "a = 1;\nb = nope;\n";
+        let error = Error::with_range("bad".to_string(), Some(11..15));
+        assert_eq!(error.display_with_source(source), "2:5: bad");
+        let error = Error::new("bad".to_string());
+        assert_eq!(error.display_with_source(source), "bad");
+    }
 
     /// Parse `input`, format the AST, assert the result equals `expected`,
     /// and confirm the formatted form re-parses to the same Display output

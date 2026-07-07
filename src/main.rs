@@ -74,8 +74,15 @@ pub fn main() {
     let input = fs::read_to_string(&input_path)
         .unwrap_or_else(|_| panic!("Failed to read input_file: {}", args.input_file));
     // TODO we don't want to ever fail here:
-    let mut state = actions::AppState::from_source(input, input_path)
-        .unwrap_or_else(|errors| panic!("Failed to parse {}: {:?}", args.input_file, errors));
+    let mut state = match actions::AppState::from_source(input.clone(), input_path) {
+        Ok(state) => state,
+        Err(errors) => {
+            for error in &errors {
+                eprintln!("{}:{}", args.input_file, error.display_with_source(&input));
+            }
+            process::exit(1);
+        }
+    };
 
     if !args.ui {
         println!("Starting in non-UI mode");

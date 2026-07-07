@@ -379,7 +379,7 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             let cursor = program.text().len();
             let errors = parse_program_errors(program.text());
             state.message = if !errors.is_empty() {
-                format!("Error: {}", errors[0])
+                format!("Error: {}", errors[0].display_with_source(program.text()))
             } else if !program.sliders().configs().is_empty() {
                 program
                     .sliders()

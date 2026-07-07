@@ -200,7 +200,7 @@ impl Evaluator {
         bindings: &[parser::SourceBinding<MarkId>],
     ) -> Result<parser::SourceExpr<MarkId>, String> {
         let expr = match parser::parse_program(text) {
-            Err(errors) => return Err(format!("Error: {}", errors[0])),
+            Err(errors) => return Err(format!("Error: {}", errors[0].display_with_source(text))),
             Ok(expr) => expr,
         };
 

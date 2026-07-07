@@ -421,7 +421,7 @@ impl ProgramSet {
         // TODO sort of a bummer that we don't know which binding this error was
         // in... some opportunity here to improve the type of parse_module.
         if !errors.is_empty() {
-            message = format!("Parse errors: {}", &errors[0]);
+            message = format!("Parse errors: {}", errors[0].display_with_source(&source));
         }
         let total_slots = NUM_PROGRAM_BANKS * PROGRAMS_PER_BANK;
         let mut programs: Vec<Program> = (0..total_slots)
