@@ -554,6 +554,17 @@ impl ProgramSet {
         bindings
     }
 
+    /// Maps byte `offset` in the backing source to its 1-based
+    /// (line, column).
+    ///
+    /// Returns `None` when `offset` falls outside the source.
+    pub fn source_position(&self, offset: usize) -> Option<(usize, usize)> {
+        if offset > self.source.len() {
+            return None;
+        }
+        Some(parser::line_col(&self.source, offset))
+    }
+
     /// Evaluates the program at `index` and records the result in its
     /// evaluation caches. Returns the user-visible message as an error when the
     /// evaluation was invalid (the caches are still cleared in that case).
@@ -1110,6 +1121,15 @@ mod tests {
         ProgramSet::from_source(source.to_string(), PathBuf::new())
             .expect("test source should parse")
             .0
+    }
+
+    #[test]
+    fn source_position_maps_offsets_to_line_and_column() {
+        let set = state_from("#{level_db=0}\ntone = saw(220);");
+        assert_eq!(set.source_position(0), Some((1, 1)));
+        // Offset 21 is the `s` of `saw(220)` on line 2.
+        assert_eq!(set.source_position(21), Some((2, 8)));
+        assert!(set.source_position(1000).is_none());
     }
 
     #[test]

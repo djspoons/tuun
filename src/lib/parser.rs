@@ -36,6 +36,9 @@ impl<'a> ToRange for LocatedSpan<'a> {
 pub struct Error {
     range: Option<Range<usize>>,
     message: String,
+    /// Path of the `open`ed module this error originated in, when known;
+    /// `None` for errors local to the text being parsed or evaluated.
+    origin: Option<Vec<String>>,
 }
 
 impl Error {
@@ -43,24 +46,51 @@ impl Error {
         Self {
             range: None,
             message,
+            origin: None,
         }
     }
     /// Construct an `Error` with the given byte range. Use when a non-parser
     /// caller (e.g. the evaluator) wants to attach a source location to an
     /// error it didn't itself produce.
     pub fn with_range(message: String, range: Option<Range<usize>>) -> Self {
-        Self { range, message }
+        Self {
+            range,
+            message,
+            origin: None,
+        }
     }
     fn new_from_span(span: &LocatedSpan, message: String) -> Self {
         Self {
             range: Some(span.to_range()),
             message,
+            origin: None,
         }
     }
 
     //pub fn span(&self) -> &Span { &self.span }
     pub fn range(&self) -> Option<Range<usize>> {
         self.range.clone()
+    }
+
+    /// The error message, without any location rendering.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Returns this error tagged as originating in the module at `path`, unless
+    /// an origin is already set: the innermost module wins, so nested `open`s
+    /// attribute errors to the module that actually contains them.
+    pub fn in_module(mut self, path: &[String]) -> Self {
+        if self.origin.is_none() {
+            self.origin = Some(path.to_vec());
+        }
+        self
+    }
+
+    /// The path of the `open`ed module this error originated in, or `None` for
+    /// errors local to the text being parsed or evaluated.
+    pub fn origin(&self) -> Option<&[String]> {
+        self.origin.as_deref()
     }
 
     /// Renders the error as `line:col: message` against `source`, the text
@@ -2161,14 +2191,31 @@ where
 {
     let mut context: Vec<(String, SourceExpr<M>)> = Vec::new();
     build_context(&resolve, bindings, &mut context)?;
-    let expr = substitute(&context, expr);
+    evaluate_with_context(&context, expr)
+}
+
+/// Substitutes `context` into `expr` and reduces the result to a value.
+///
+/// Use with [`build_context`] when the two phases' errors need different
+/// handling; [`evaluate`] combines them.
+pub fn evaluate_with_context<M>(
+    context: &[(String, SourceExpr<M>)],
+    expr: SourceExpr<M>,
+) -> Result<SourceExpr<M>, Error>
+where
+    M: Clone + Display + Debug,
+{
+    let expr = substitute(context, expr);
     evaluate_closed(expr)
 }
 
 /// Walks `bindings`, accumulating evaluated entries into `context`. `Open`
 /// bindings recurse through `resolve` to pull in their referenced module's
 /// bindings.
-fn build_context<'a, M, F>(
+///
+/// Errors raised while processing an `open`ed module's bindings are tagged with
+/// that module's path (see [`Error::origin`]).
+pub fn build_context<'a, M, F>(
     resolve: &F,
     bindings: &'a [SourceBinding<M>],
     context: &mut Vec<(String, SourceExpr<M>)>,
@@ -2181,7 +2228,7 @@ where
         match &source_binding.binding {
             Binding::Open(path) => {
                 let module = resolve(path)?;
-                build_context(resolve, module, context)?;
+                build_context(resolve, module, context).map_err(|e| e.in_module(path))?;
             }
             Binding::Definition(pattern, def_expr) => {
                 let substituted = substitute(context, def_expr.clone());

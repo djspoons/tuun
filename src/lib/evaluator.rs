@@ -12,6 +12,7 @@ use std::path;
 use std::time;
 
 use crate::builtins;
+use crate::diagnostics::Diagnostic;
 use crate::ids::MarkId;
 use crate::parser;
 use crate::programs::{Evaluation, ProgramSet, ProgramSliders};
@@ -38,20 +39,53 @@ fn mark(arguments: Vec<parser::Expr<MarkId>>) -> parser::Expr<MarkId> {
     }
 }
 
-/// Returns a user-visible error for a failed module parse, naming the file
-/// and including the first parse error when there is one.
-fn module_parse_error(file_path: &path::Path, errors: Vec<parser::Error>) -> parser::Error {
+/// Returns a user-visible error for a failed module parse, rendering the
+/// first parse error as `file:line:col: message` when there is one.
+///
+/// `display_path` is the module's path as shown to the user (relative to
+/// the library root).
+fn module_parse_error(
+    display_path: &path::Path,
+    source: &str,
+    errors: Vec<parser::Error>,
+) -> parser::Error {
     match errors.into_iter().next() {
-        Some(error) => parser::Error::new(format!("{}: {}", file_path.display(), error)),
-        None => parser::Error::new(format!("Parse failed for {}", file_path.display())),
+        Some(error) => parser::Error::new(format!(
+            "{}:{}",
+            display_path.display(),
+            error.display_with_source(source)
+        )),
+        None => parser::Error::new(format!("Parse failed for {}", display_path.display())),
     }
 }
 
-/// One slot in [`Evaluator`]'s module cache: the file's mtime at the time
-/// we parsed it, plus a leaked `&'static` slice of the parsed bindings.
+/// Returns the module's display path relative to the library root:
+/// `foo/bar.tuun` for `["foo", "bar"]`. Used in user-visible messages,
+/// which omit the library root.
+fn module_display_path(path: &[String]) -> path::PathBuf {
+    let mut display_path = path::PathBuf::new();
+    for part in path {
+        display_path.push(part);
+    }
+    display_path.set_extension("tuun");
+    display_path
+}
+
+/// Which text a local (module-origin-less) error's byte range indexes: a
+/// program slot's text, or the whole backing source file.
+#[derive(Clone, Copy)]
+enum LocalCoords {
+    Program { index: usize },
+    SourceFile,
+}
+
+/// One slot in [`Evaluator`]'s module cache: the file's mtime at the time we
+/// parsed it, the source text (for resolving error offsets to line and column),
+/// plus a leaked `&'static` slice of the parsed bindings.
 // See the field doc on `Evaluator::modules` for the leak strategy.
 struct ModuleCacheEntry {
     mtime: time::SystemTime,
+    source: String,
     bindings: &'static [parser::SourceBinding<MarkId>],
 }
 
@@ -127,12 +161,9 @@ impl Evaluator {
             return Ok(&self.prelude);
         }
 
-        // Build the file path: <library_root>/<path components>.tuun.
-        let mut file_path = self.library_root.clone();
-        for part in path {
-            file_path.push(part);
-        }
-        file_path.set_extension("tuun");
+        let file_path = self.module_file_path(path);
+        // User-visible messages name the module relative to the library root.
+        let display_path = module_display_path(path);
 
         // Stat the file once. If the cache has a matching mtime, return the
         // cached slice without re-reading or re-parsing.
@@ -141,7 +172,7 @@ impl Evaluator {
             .map_err(|e| {
                 parser::Error::new(format!(
                     "Failed to stat module {}: {}",
-                    file_path.display(),
+                    display_path.display(),
                     e
                 ))
             })?;
@@ -155,16 +186,16 @@ impl Evaluator {
         let contents = fs::read_to_string(&file_path).map_err(|e| {
             parser::Error::new(format!(
                 "Failed to read module {}: {}",
-                file_path.display(),
+                display_path.display(),
                 e
             ))
         })?;
         // A module that parses with recoverable errors is still broken —
         // report it rather than evaluating with error placeholders.
         let (mut bindings, errors) = parser::parse_module::<MarkId>(&contents)
-            .map_err(|errors| module_parse_error(&file_path, errors))?;
+            .map_err(|errors| module_parse_error(&display_path, &contents, errors))?;
         if !errors.is_empty() {
-            return Err(module_parse_error(&file_path, errors));
+            return Err(module_parse_error(&display_path, &contents, errors));
         }
 
         // Every loaded module implicitly opens the prelude as its first binding
@@ -185,10 +216,94 @@ impl Evaluator {
             path.to_vec(),
             ModuleCacheEntry {
                 mtime: current_mtime,
+                source: contents,
                 bindings: leaked,
             },
         );
         Ok(leaked)
+    }
+
+    /// Returns the file backing the module at `path`:
+    /// `<library_root>/<path components>.tuun`.
+    fn module_file_path(&self, path: &[String]) -> path::PathBuf {
+        self.library_root.join(module_display_path(path))
+    }
+
+    /// Returns the module's display path (relative to the library root) and
+    /// the 1-based (line, column) of byte `offset` in its cached source.
+    ///
+    /// Returns `None` for the in-memory `__prelude` and for modules that
+    /// haven't been loaded. After an mtime reload, the position is computed
+    /// against the newest source text, which can drift from the leaked bindings
+    /// an in-flight error came from — the same staleness the binding cache
+    /// already accepts.
+    pub fn module_location(
+        &self,
+        path: &[String],
+        offset: usize,
+    ) -> Option<(path::PathBuf, usize, usize)> {
+        let modules = self.modules.borrow();
+        let entry = modules.get(path)?;
+        let (line, col) = parser::line_col(&entry.source, offset);
+        Some((module_display_path(path), line, col))
+    }
+
+    /// Resolves `error` into a [`Diagnostic`] for a program of `set`.
+    ///
+    /// Module-origin errors carry their module's display file and position;
+    /// local errors carry a bare position — relative to the program's own
+    /// text for `Program` coordinates (matching the editor's display), or to
+    /// the whole source file for `SourceFile` coordinates.
+    fn diagnose(&self, error: &parser::Error, set: &ProgramSet, coords: LocalCoords) -> Diagnostic {
+        if let Some(origin) = error.origin() {
+            let location = error
+                .range()
+                .and_then(|range| self.module_location(origin, range.start));
+            let (file, position, message) = match location {
+                Some((file, line, col)) => {
+                    (Some(file), Some((line, col)), error.message().to_string())
+                }
+                // Without a resolvable position, at least name the module.
+                None => (
+                    None,
+                    None,
+                    format!("in {}: {}", origin.join("."), error.message()),
+                ),
+            };
+            return Diagnostic {
+                file,
+                position,
+                program_range: None,
+                message,
+            };
+        }
+        // TODO spans don't record which text they index; an error raised from a
+        // module-defined function body applied here carries module-file
+        // offsets, and when those happen to fit inside the program text it
+        // locates incorrectly. Fixing this needs source provenance on spans.
+        // The bounds checks below at least drop clearly-foreign offsets.
+        let (position, program_range) = match coords {
+            LocalCoords::Program { index } => {
+                let text = set.programs()[index].text();
+                let in_bounds = error.range().filter(|range| range.end <= text.len());
+                let position = in_bounds
+                    .as_ref()
+                    .map(|range| parser::line_col(text, range.start));
+                (position, in_bounds)
+            }
+            LocalCoords::SourceFile => (
+                error
+                    .range()
+                    .and_then(|range| set.source_position(range.start)),
+                None,
+            ),
+        };
+        Diagnostic {
+            file: None,
+            position,
+            program_range,
+            message: error.message().to_string(),
+        }
     }
 
     /// Parses and evaluates `text` under `bindings`, resolving `open`
@@ -217,8 +332,34 @@ impl Evaluator {
         // TODO could improve error messages here
         const NOT_A_PROGRAM: &str = "Program is not a waveform or keys instrument";
         let bindings = set.evaluation_bindings(index);
-        let expr = match self.evaluate_source(set.programs()[index].text(), &bindings) {
-            Err(message) => return Evaluation::Invalid(message),
+        let text = set.programs()[index].text();
+
+        // The three phases are run separately (rather than through
+        // `evaluate_source`) because their errors index different texts: parse
+        // and reduction errors index the program's own text, while context
+        // errors index the backing source file (sibling bindings) or an opened
+        // module's file.
+        let expr = match parser::parse_program(text) {
+            Err(errors) => {
+                let diagnostic = self.diagnose(&errors[0], set, LocalCoords::Program { index });
+                return Evaluation::Invalid(format!("Error: {}", diagnostic));
+            }
+            Ok(expr) => expr,
+        };
+        let mut context = Vec::new();
+        if let Err(error) = parser::build_context(
+            &|path: &[String]| self.resolve(path),
+            &bindings,
+            &mut context,
+        ) {
+            let diagnostic = self.diagnose(&error, set, LocalCoords::SourceFile);
+            return Evaluation::Invalid(format!("Error: {}", diagnostic));
+        }
+        let expr = match parser::evaluate_with_context(&context, expr) {
+            Err(error) => {
+                let diagnostic = self.diagnose(&error, set, LocalCoords::Program { index });
+                return Evaluation::Invalid(format!("Error: {}", diagnostic));
+            }
             Ok(expr) => expr,
         };
         match expr.expr {
@@ -420,6 +561,60 @@ mod tests {
             marks.contains(&("vol".to_string(), 1.0)),
             "expected a surviving vol mark at 1.0, got {:?}",
             marks
+        );
+    }
+
+    #[test]
+    fn diagnose_locates_module_and_program_errors() {
+        let (set, warning) = ProgramSet::from_source(
+            "open std;\n#{level_db=0}\nbad = nope;\n".to_string(),
+            PathBuf::from("song.tuun"),
+        )
+        .expect("test source should parse");
+        assert_eq!(warning, "");
+        let evaluator = Evaluator::new(44100, 90, PathBuf::from("./lib/v0"));
+
+        // A program-local error shows a bare position relative to the
+        // program's own text (matching the editor's display), no file.
+        let error = parser::Error::with_range("boom".to_string(), Some(0..4));
+        let diagnostic = evaluator.diagnose(&error, &set, LocalCoords::Program { index: 0 });
+        assert_eq!(diagnostic.to_string(), "1:1: boom");
+        assert_eq!(diagnostic.program_range, Some(0..4));
+        assert!(diagnostic.file.is_none());
+
+        // A module-origin error names the module file relative to the
+        // library root and locates into its cached source.
+        evaluator
+            .resolve(&["std".to_string()])
+            .expect("std resolves");
+        let error = parser::Error::with_range("boom".to_string(), Some(0..1))
+            .in_module(&["std".to_string()]);
+        let diagnostic = evaluator.diagnose(&error, &set, LocalCoords::Program { index: 0 });
+        assert_eq!(diagnostic.to_string(), "std.tuun:1:1: boom");
+        assert!(diagnostic.program_range.is_none());
+
+        // An origin whose module isn't cached still names the module.
+        let error = parser::Error::new("boom".to_string()).in_module(&["ghost".to_string()]);
+        let diagnostic = evaluator.diagnose(&error, &set, LocalCoords::Program { index: 0 });
+        assert!(diagnostic.file.is_none());
+        assert!(diagnostic.position.is_none());
+        assert_eq!(diagnostic.message, "in ghost: boom");
+    }
+
+    #[test]
+    fn evaluate_program_reports_position_for_unbound_variable() {
+        let (set, _) = ProgramSet::from_source(
+            "#{level_db=0}\nbad = (1, undefined_name);\n".to_string(),
+            PathBuf::from("song.tuun"),
+        )
+        .expect("test source should parse");
+        let evaluator = Evaluator::new(44100, 90, PathBuf::new());
+        let Evaluation::Invalid(message) = evaluator.evaluate_program(&set, 0) else {
+            panic!("expected an invalid evaluation");
+        };
+        assert_eq!(
+            message,
+            "Error: 1:5: Variable 'undefined_name' not found in context"
         );
     }
 }

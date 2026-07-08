@@ -11,6 +11,8 @@ pub mod waveform;
 #[cfg(feature = "native")]
 pub mod actions;
 #[cfg(feature = "native")]
+pub mod diagnostics;
+#[cfg(feature = "native")]
 pub mod effects;
 #[cfg(feature = "native")]
 pub mod evaluator;
