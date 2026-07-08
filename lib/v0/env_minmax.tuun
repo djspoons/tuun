@@ -1,0 +1,12 @@
+// Envelope waveforms that use min and max.
+
+open std;
+
+ADS = fn(attack_dur, decay_dur, sustain_level) =>
+  let
+    attack_level = linear(0.0, 1/attack_dur),
+    decay_slope = (sustain_level-1)/decay_dur,
+    decay_level = linear(1-attack_dur*decay_slope, decay_slope),
+    env = min(attack_level, max(decay_level, sustain_level))
+  in
+    fn(w) => w * env;

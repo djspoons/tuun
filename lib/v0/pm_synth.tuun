@@ -5,7 +5,7 @@ pure_pm_synth = fn(I, D) => fn(fc) =>
   let
     fm = D/2 * fc
   in
-    sine(2*pi * fc, sine(2*pi * fm, 0) * I);
+    sine(2*pi * fc, I * sine(2*pi * fm, 0));
 
 pure_pm_brass = fn(fc, dur) => let
   // Roughly from Chowning (1977)
@@ -35,15 +35,43 @@ pm_synth = fn(I_max, D, a, d, s_level, r) => fn(fc, dur) =>
   in
     sine(2*pi * fc, sine(2*pi * fm, 0) * I) | envelope;
 
-pm_synth_keys = fn(I_max, D, attack, decay, sustain_level) => fn(k, v) =>
-  let
-    fc = @k,
-    envelope = ADS(attack, decay, sustain_level),
-    I = I_max | envelope,
-    fm = D/2 * fc,
-    osc = v * sine(2*pi * fc, sine(2*pi * fm, 0) * I)
-  in
-    osc | envelope;
-
-
 pm_brass = pm_synth(5, 1, 0.1, 0.1, 0.7, 0.1);
+
+open env_minmax;
+
+pm_piano_keys = fn(k, v) =>
+  let
+    I1_max = 6,
+    amp_attack = 0.01,
+    amp_decay = 0.55,
+    amp_sustain_level = 0.65,
+    amp_release = 0.2,
+
+    I2_max = 10,
+    ratio2 = 2.98, // Slightly inharmonic
+    attack2 = 0.01,
+    decay2 = 0.33,
+    sustain_level2 = 0.2,
+    osc_mix = 0.73,
+
+    fc = @k,
+    // First stack: ratio of 1:1
+    envelope1 = ADS(amp_attack, amp_decay, amp_sustain_level),
+    I1 = I1_max | envelope1,
+    osc1 = v * sine(2*pi * fc, I1 * sine(2*pi * fc, 0)) | envelope1,
+
+    // Second stack
+    envelope2 = ADS(attack2, decay2, sustain_level2),
+    I2 = I2_max | envelope2,
+    fc2 = fc * 1.01, // A little detune
+    fm2 = ratio2 * fc2,
+    // Non-linear response to key velocity for the second oscillator.
+    osc2 = v * v * sine(2*pi * fc2, I2 * sine(2*pi * fm2, 0)) | envelope2,
+    note_on = osc_mix * osc1 + (1 - osc_mix) * osc2,
+
+    // Something better combination of the two envelopes?
+    // This doesn't allow for I2 to change as part of the release
+    note_off = Rw(amp_release, 1.0)
+  in
+    (note_on, note_off);
+
