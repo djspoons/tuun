@@ -128,15 +128,30 @@ impl EffectRunner {
 
             Effect::EvaluateProgram {
                 program_index,
-                mode_on_failure,
+                mut mode_on_failure,
             } => {
                 match state
                     .programs
                     .evaluate_and_record(&self.evaluator, program_index)
                 {
                     Ok(()) => state.mode = actions::Mode::Select,
-                    Err(message) => {
-                        state.message = message;
+                    Err(diagnostics) => {
+                        state.message = match diagnostics.len() {
+                            1 => format!("Error: {}", diagnostics[0]),
+                            n => format!("Error: {} (+{} more)", diagnostics[0], n - 1),
+                        };
+                        // Hand the diagnostics' program ranges to the editor
+                        // so evaluation errors highlight like parse errors do.
+                        if let actions::Mode::Edit { errors, .. } = &mut mode_on_failure {
+                            *errors = diagnostics
+                                .iter()
+                                .filter_map(|d| {
+                                    d.program_range.clone().map(|range| {
+                                        parser::Error::with_range(d.message.clone(), Some(range))
+                                    })
+                                })
+                                .collect();
+                        }
                         state.mode = mode_on_failure;
                     }
                 }

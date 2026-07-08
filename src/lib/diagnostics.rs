@@ -10,6 +10,7 @@ use std::path::PathBuf;
 /// from `open`ed modules carry a file (relative to the library root);
 /// errors in the program being evaluated render as a bare `line:col`,
 /// matching the editor's own display.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Diagnostic {
     /// The module file the error occurred in, relative to the library
     /// root. `None` for errors local to the program or its source file.
@@ -21,6 +22,19 @@ pub struct Diagnostic {
     /// highlighting. `None` when the error originated elsewhere.
     pub program_range: Option<Range<usize>>,
     pub message: String,
+}
+
+impl Diagnostic {
+    /// Builds a diagnostic that carries only a message, with no position
+    /// information.
+    pub fn message_only(message: String) -> Diagnostic {
+        Diagnostic {
+            file: None,
+            position: None,
+            program_range: None,
+            message,
+        }
+    }
 }
 
 impl fmt::Display for Diagnostic {

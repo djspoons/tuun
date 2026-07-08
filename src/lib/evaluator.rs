@@ -341,8 +341,12 @@ impl Evaluator {
         // module's file.
         let expr = match parser::parse_program(text) {
             Err(errors) => {
-                let diagnostic = self.diagnose(&errors[0], set, LocalCoords::Program { index });
-                return Evaluation::Invalid(format!("Error: {}", diagnostic));
+                return Evaluation::Invalid(
+                    errors
+                        .iter()
+                        .map(|error| self.diagnose(error, set, LocalCoords::Program { index }))
+                        .collect(),
+                );
             }
             Ok(expr) => expr,
         };
@@ -352,13 +356,15 @@ impl Evaluator {
             &bindings,
             &mut context,
         ) {
-            let diagnostic = self.diagnose(&error, set, LocalCoords::SourceFile);
-            return Evaluation::Invalid(format!("Error: {}", diagnostic));
+            return Evaluation::Invalid(vec![self.diagnose(&error, set, LocalCoords::SourceFile)]);
         }
         let expr = match parser::evaluate_with_context(&context, expr) {
             Err(error) => {
-                let diagnostic = self.diagnose(&error, set, LocalCoords::Program { index });
-                return Evaluation::Invalid(format!("Error: {}", diagnostic));
+                return Evaluation::Invalid(vec![self.diagnose(
+                    &error,
+                    set,
+                    LocalCoords::Program { index },
+                )]);
             }
             Ok(expr) => expr,
         };
@@ -368,7 +374,7 @@ impl Evaluator {
                 if let parser::Expr::Waveform(w) = waveform.expr {
                     Evaluation::Waveform(w)
                 } else {
-                    Evaluation::Invalid(NOT_A_PROGRAM.to_string())
+                    Evaluation::Invalid(vec![Diagnostic::message_only(NOT_A_PROGRAM.to_string())])
                 }
             }
             parser::Expr::Function { .. } | parser::Expr::BuiltIn { .. } => {
@@ -383,10 +389,10 @@ impl Evaluator {
                     set.programs()[index].sliders(),
                 ) {
                     Ok(_) => Evaluation::KeysInstrument(expr),
-                    Err(message) => Evaluation::Invalid(message),
+                    Err(message) => Evaluation::Invalid(vec![Diagnostic::message_only(message)]),
                 }
             }
-            _ => Evaluation::Invalid(NOT_A_PROGRAM.to_string()),
+            _ => Evaluation::Invalid(vec![Diagnostic::message_only(NOT_A_PROGRAM.to_string())]),
         }
     }
 
@@ -537,7 +543,7 @@ mod tests {
 
         let function = match evaluator.evaluate_program(&set, 0) {
             Evaluation::KeysInstrument(function) => function,
-            Evaluation::Invalid(message) => panic!("invalid: {}", message),
+            Evaluation::Invalid(diagnostics) => panic!("invalid: {:?}", diagnostics),
             Evaluation::Waveform(_) => panic!("classified as waveform"),
         };
         set.program_mut(0)
@@ -609,12 +615,16 @@ mod tests {
         )
         .expect("test source should parse");
         let evaluator = Evaluator::new(44100, 90, PathBuf::new());
-        let Evaluation::Invalid(message) = evaluator.evaluate_program(&set, 0) else {
+        let Evaluation::Invalid(diagnostics) = evaluator.evaluate_program(&set, 0) else {
             panic!("expected an invalid evaluation");
         };
+        assert_eq!(diagnostics.len(), 1);
         assert_eq!(
-            message,
-            "Error: 1:5: Variable 'undefined_name' not found in context"
+            diagnostics[0].to_string(),
+            "1:5: Variable 'undefined_name' not found in context"
         );
+        // The range is available for editor highlighting: `undefined_name`
+        // spans bytes 4..18 of the program text `(1, undefined_name)`.
+        assert_eq!(diagnostics[0].program_range, Some(4..18));
     }
 }

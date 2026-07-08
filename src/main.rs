@@ -135,8 +135,10 @@ pub fn main() {
                         println!("Program {} did not evaluate to a waveform", display_name);
                     }
                 }
-                Err(message) => {
-                    println!("{}", message);
+                Err(diagnostics) => {
+                    for diagnostic in &diagnostics {
+                        println!("Error: {}", diagnostic);
+                    }
                     process::exit(1);
                 }
             }
@@ -385,6 +387,7 @@ pub fn main() {
     // Populate each program's cached_waveform / cached_keys_instrument from
     // its initial source so that playback and InstallKeys work without
     // needing to enter and exit Edit mode first.
+    let mut failed_programs: Vec<usize> = Vec::new();
     for i in 0..state.programs.programs().len() {
         if state.programs.programs()[i].is_empty() {
             continue;
@@ -399,7 +402,28 @@ pub fn main() {
                 mode_on_failure: actions::Mode::Select,
             }],
         );
+        // A failed evaluation leaves both caches empty.
+        let program = &state.programs.programs()[i];
+        if program.waveform().is_none() && program.keys_instrument().is_none() {
+            failed_programs.push(i);
+        }
     }
+    // Errors from the initial parse and this sweep would sit in the status
+    // line with nothing saying which program they came from — replace them
+    // with a pointer to the failing programs; each error resurfaces when
+    // its program is evaluated interactively.
+    state.message = if failed_programs.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "Errors in {}",
+            failed_programs
+                .iter()
+                .map(|&i| state.programs.display_name(i))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
 
     const BUFFER_REFRESH_INTERVAL: Duration = Duration::from_millis(200);
     let mut next_buffer_refresh = Instant::now();

@@ -3,6 +3,7 @@
 use std::fmt;
 use std::ops::Range;
 
+use crate::diagnostics::Diagnostic;
 use crate::ids::MarkId;
 use crate::parser;
 use crate::slider;
@@ -133,8 +134,8 @@ pub enum Evaluation {
     /// The program evaluated to a function usable as a keys instrument.
     KeysInstrument(parser::SourceExpr<MarkId>),
     /// The program failed to parse or evaluate; holds the user-visible
-    /// message.
-    Invalid(String),
+    /// diagnostics.
+    Invalid(Vec<Diagnostic>),
 }
 
 /// One program slot: its source text, sliders, level, color, and the
@@ -300,13 +301,13 @@ impl Program {
     }
 
     /// Records the result of evaluating the program's current text, replacing
-    /// both caches. Returns the user-visible message as an error when the
+    /// both caches. Returns the user-visible diagnostics as an error when the
     /// evaluation was invalid.
     ///
     /// An `Invalid` evaluation still clears both caches: even though editing
     /// already clears them, the failure may have come from a changed dependency
     /// rather than this program's own text.
-    fn record_evaluation(&mut self, evaluation: Evaluation) -> Result<(), String> {
+    fn record_evaluation(&mut self, evaluation: Evaluation) -> Result<(), Vec<Diagnostic>> {
         match evaluation {
             Evaluation::Waveform(w) => {
                 self.cached_waveform = Some(w);
@@ -318,10 +319,10 @@ impl Program {
                 self.cached_keys_instrument = Some(expr);
                 Ok(())
             }
-            Evaluation::Invalid(message) => {
+            Evaluation::Invalid(diagnostics) => {
                 self.cached_waveform = None;
                 self.cached_keys_instrument = None;
-                Err(message)
+                Err(diagnostics)
             }
         }
     }
@@ -566,13 +567,14 @@ impl ProgramSet {
     }
 
     /// Evaluates the program at `index` and records the result in its
-    /// evaluation caches. Returns the user-visible message as an error when the
-    /// evaluation was invalid (the caches are still cleared in that case).
+    /// evaluation caches. Returns the user-visible diagnostics as an error
+    /// when the evaluation was invalid (the caches are still cleared in that
+    /// case).
     pub fn evaluate_and_record(
         &mut self,
         evaluator: &crate::evaluator::Evaluator,
         index: usize,
-    ) -> Result<(), String> {
+    ) -> Result<(), Vec<Diagnostic>> {
         // An empty program is a deletion, not a parse error: clear both caches
         // and succeed so the editor can leave Edit mode (the splice that
         // follows removes the binding from source).
@@ -1173,10 +1175,12 @@ mod tests {
         assert!(program.waveform().is_none());
         assert!(program.keys_instrument().is_some());
 
-        // Invalid clears both caches and hands back the message.
+        // Invalid clears both caches and hands back the diagnostics.
         assert_eq!(
-            program.record_evaluation(Evaluation::Invalid("nope".to_string())),
-            Err("nope".to_string())
+            program.record_evaluation(Evaluation::Invalid(vec![Diagnostic::message_only(
+                "nope".to_string()
+            )])),
+            Err(vec![Diagnostic::message_only("nope".to_string())])
         );
         assert!(program.waveform().is_none());
         assert!(program.keys_instrument().is_none());
