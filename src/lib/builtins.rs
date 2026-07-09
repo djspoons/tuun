@@ -1,9 +1,10 @@
 use std::fmt::{Debug, Display};
 use std::rc::Rc;
 
+use crate::eval;
+use crate::expr;
+use crate::expr::{BuiltInFn, Expr, SourceExpr, boxed};
 use crate::optimizer;
-use crate::parser;
-use crate::parser::{BuiltInFn, Expr, SourceExpr, boxed};
 use crate::waveform::{Operator, Waveform};
 use Expr::{Application, Bool, BuiltIn, Error, Float, List, Seq, Tuple};
 
@@ -453,12 +454,12 @@ where
         [function, List(exprs)] => {
             let mut results: Vec<SourceExpr<M>> = Vec::new();
             let resolve = |_: &[String]| {
-                Err(parser::Error::new(
+                Err(expr::Error::new(
                     "Didn't expect to resolve in map()".to_string(),
                 ))
             };
             for expr in exprs {
-                let result = parser::evaluate(
+                let result = eval::evaluate(
                     resolve,
                     &[],
                     SourceExpr::from(Application {
@@ -485,12 +486,12 @@ where
         [function, acc, List(exprs)] => {
             let mut acc: SourceExpr<M> = SourceExpr::from(acc.clone());
             let resolve = |_: &[String]| {
-                Err(parser::Error::new(
+                Err(expr::Error::new(
                     "Didn't expect to resolve in reduce()".to_string(),
                 ))
             };
             for expr in exprs {
-                let result = parser::evaluate(
+                let result = eval::evaluate(
                     resolve,
                     &[],
                     SourceExpr::from(Application {
@@ -518,14 +519,14 @@ where
             let mut results: Vec<SourceExpr<M>> = Vec::new();
             let mut current: SourceExpr<M> = SourceExpr::from(seed.clone());
             let resolve = |_: &[String]| {
-                Err(parser::Error::new(
+                Err(expr::Error::new(
                     "Didn't expect to resolve in unfold()".to_string(),
                 ))
             };
 
             for _ in 0..(*n as u32) {
                 results.push(current.clone());
-                let result = parser::evaluate(
+                let result = eval::evaluate(
                     resolve,
                     &[],
                     SourceExpr::from(Application {
@@ -950,11 +951,11 @@ where
 
 /// Adds all of the built-ins to `bindings`.
 pub fn add_bindings<M: Debug + Clone + Display + PartialEq + 'static>(
-    bindings: &mut Vec<parser::SourceBinding<M>>,
+    bindings: &mut Vec<expr::SourceBinding<M>>,
 ) {
-    fn def<M>(id: &str, expr: parser::SourceExpr<M>) -> parser::SourceBinding<M> {
-        use parser::Binding;
-        use parser::Pattern;
+    fn def<M>(id: &str, expr: expr::SourceExpr<M>) -> expr::SourceBinding<M> {
+        use crate::expr::Binding;
+        use crate::expr::Pattern;
         Binding::Definition(Pattern::Identifier(id.to_string()), expr).into()
     }
     bindings.push(def("true", SourceExpr::bool(true)));

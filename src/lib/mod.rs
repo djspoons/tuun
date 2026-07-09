@@ -1,4 +1,6 @@
 pub mod builtins;
+pub mod eval;
+pub mod expr;
 pub mod generator;
 pub mod metric;
 pub mod modules;

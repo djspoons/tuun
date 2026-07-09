@@ -11,9 +11,9 @@ use std::collections::HashMap;
 
 use crate::actions::{self, AppState, Effect};
 use crate::evaluator;
+use crate::expr;
 use crate::ids::{MarkId, WaveformId};
 use crate::keys::Keys;
-use crate::parser;
 use crate::player;
 use crate::programs::{self, PROGRAMS_PER_BANK};
 use crate::slider;
@@ -147,7 +147,7 @@ impl EffectRunner {
                                 .iter()
                                 .filter_map(|d| {
                                     d.program_range.clone().map(|range| {
-                                        parser::Error::with_range(d.message.clone(), Some(range))
+                                        expr::Error::with_range(d.message.clone(), Some(range))
                                     })
                                 })
                                 .collect();
@@ -192,9 +192,9 @@ impl EffectRunner {
                     return;
                 };
                 let args = vec![
-                    parser::SourceExpr::float(key as f32),
+                    expr::SourceExpr::float(key as f32),
                     // TODO use a marked waveform for velocity so we can implement after-touch
-                    parser::SourceExpr::float(velocity as f32 / 127.0),
+                    expr::SourceExpr::float(velocity as f32 / 127.0),
                 ];
                 match self
                     .evaluator

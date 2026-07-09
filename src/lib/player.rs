@@ -10,9 +10,9 @@ use std::sync::mpsc;
 use std::time;
 
 use crate::evaluator::Evaluator;
+use crate::expr;
 use crate::ids::{MarkId, WaveformId};
 use crate::optimizer;
-use crate::parser;
 use crate::programs::{ProgramSet, ProgramSliders};
 use crate::slider;
 use crate::tracker;
@@ -240,14 +240,14 @@ impl Player {
             ));
         }
         let source = format!("<[{}]>", ws.join(", "));
-        let bindings: Vec<parser::SourceBinding<MarkId>> =
-            vec![parser::Binding::Open(vec!["__prelude".to_string()]).into()];
+        let bindings: Vec<expr::SourceBinding<MarkId>> =
+            vec![expr::Binding::Open(vec!["__prelude".to_string()]).into()];
         match evaluator
             .evaluate_source(&source, &bindings)
             .map(|s| s.expr)
         {
-            Ok(parser::Expr::Seq { waveform, .. }) => match waveform.expr {
-                parser::Expr::Waveform(waveform) => waveform::Waveform::<MarkId>::Marked {
+            Ok(expr::Expr::Seq { waveform, .. }) => match waveform.expr {
+                expr::Expr::Waveform(waveform) => waveform::Waveform::<MarkId>::Marked {
                     id: MarkId::TopLevel,
                     waveform: Box::new(optimizer::optimize(waveform)),
                 },

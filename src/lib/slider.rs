@@ -1,7 +1,7 @@
 use std::fmt::Display;
 
 use crate::waveform;
-use crate::{builtins, parser};
+use crate::{builtins, eval, expr, parser};
 
 use waveform::Operator;
 use waveform::Waveform::{Append, BinaryPointOp, Const, Fin, Time};
@@ -22,8 +22,8 @@ impl Display for NoMark {
 ///
 /// For `Linear`, this is `min + normalized * (max - min)`.
 /// For `UserDefined`, this evaluates the user-provided function expression.
-pub fn denormalize(function: &parser::SliderFunction, normalized: f32) -> Result<f32, String> {
-    use parser::SliderFunction;
+pub fn denormalize(function: &expr::SliderFunction, normalized: f32) -> Result<f32, String> {
+    use expr::SliderFunction;
     match function {
         SliderFunction::Linear { min, max, .. } => Ok(min + normalized * (max - min)),
         SliderFunction::UserDefined {
@@ -35,14 +35,14 @@ pub fn denormalize(function: &parser::SliderFunction, normalized: f32) -> Result
             let mut bindings = Vec::new();
             builtins::add_bindings(&mut bindings);
             let resolve = |_: &[String]| {
-                Err(parser::Error::new(
+                Err(expr::Error::new(
                     "didn't expect to resolve inside of slider function".to_string(),
                 ))
             };
-            let result = parser::evaluate(resolve, &bindings, expr)
+            let result = eval::evaluate(resolve, &bindings, expr)
                 .map_err(|e| format!("slider function eval error: {}", e))?;
             match result.expr {
-                parser::Expr::Float(v) => Ok(v),
+                expr::Expr::Float(v) => Ok(v),
                 other => Err(format!(
                     "slider function did not return a number, got: {:?}",
                     other
@@ -53,10 +53,10 @@ pub fn denormalize(function: &parser::SliderFunction, normalized: f32) -> Result
 }
 
 pub fn append_slider_bindings<M, F>(
-    configs: &[parser::Slider],
+    configs: &[expr::Slider],
     normalized_values: &[f32],
     mark_id: F,
-    bindings: &mut Vec<parser::SourceBinding<M>>,
+    bindings: &mut Vec<expr::SourceBinding<M>>,
 ) where
     F: Fn(String) -> M,
 {
@@ -66,9 +66,9 @@ pub fn append_slider_bindings<M, F>(
             .zip(normalized_values)
             .map(|(config, normalized_value)| {
                 let value = denormalize(&config.function, *normalized_value).unwrap_or(0.0);
-                parser::SourceBinding::definition(
-                    parser::Pattern::Identifier(config.label.clone()),
-                    parser::SourceExpr::from(parser::Expr::Waveform(waveform::Waveform::Marked {
+                expr::SourceBinding::definition(
+                    expr::Pattern::Identifier(config.label.clone()),
+                    expr::SourceExpr::from(expr::Expr::Waveform(waveform::Waveform::Marked {
                         id: mark_id(config.label.clone()),
                         waveform: Box::new(waveform::Waveform::Const(value)),
                     })),

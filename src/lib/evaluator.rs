@@ -13,6 +13,8 @@ use std::time;
 
 use crate::builtins;
 use crate::diagnostics::Diagnostic;
+use crate::eval;
+use crate::expr;
 use crate::ids::MarkId;
 use crate::parser;
 use crate::programs::{Evaluation, ProgramSet, ProgramSliders};
@@ -21,11 +23,11 @@ use crate::waveform;
 
 /// The `mark(N)` built-in: wraps a waveform in a `MarkId::UserDefined`
 /// mark.
-fn mark(arguments: Vec<parser::Expr<MarkId>>) -> parser::Expr<MarkId> {
+fn mark(arguments: Vec<expr::Expr<MarkId>>) -> expr::Expr<MarkId> {
     match &arguments[..] {
-        [parser::Expr::Float(id)] if *id >= 1.0 && id.fract() == 0.0 => {
+        [expr::Expr::Float(id)] if *id >= 1.0 && id.fract() == 0.0 => {
             let id = id.round() as u32;
-            parser::Expr::BuiltIn {
+            expr::Expr::BuiltIn {
                 name: format!("mark({})", id),
                 function: builtins::curry(move |waveform: Box<waveform::Waveform<MarkId>>| {
                     waveform::Waveform::Marked {
@@ -35,7 +37,7 @@ fn mark(arguments: Vec<parser::Expr<MarkId>>) -> parser::Expr<MarkId> {
                 }),
             }
         }
-        _ => parser::Expr::Error("Invalid argument for mark".to_string()),
+        _ => expr::Expr::Error("Invalid argument for mark".to_string()),
     }
 }
 
@@ -47,15 +49,15 @@ fn mark(arguments: Vec<parser::Expr<MarkId>>) -> parser::Expr<MarkId> {
 fn module_parse_error(
     display_path: &path::Path,
     source: &str,
-    errors: Vec<parser::Error>,
-) -> parser::Error {
+    errors: Vec<expr::Error>,
+) -> expr::Error {
     match errors.into_iter().next() {
-        Some(error) => parser::Error::new(format!(
+        Some(error) => expr::Error::new(format!(
             "{}:{}",
             display_path.display(),
             error.display_with_source(source)
         )),
-        None => parser::Error::new(format!("Parse failed for {}", display_path.display())),
+        None => expr::Error::new(format!("Parse failed for {}", display_path.display())),
     }
 }
 
@@ -86,13 +88,13 @@ enum LocalCoords {
 struct ModuleCacheEntry {
     mtime: time::SystemTime,
     source: String,
-    bindings: &'static [parser::SourceBinding<MarkId>],
+    bindings: &'static [expr::SourceBinding<MarkId>],
 }
 
 pub struct Evaluator {
     /// Built-ins + environment-derived definitions; implicitly opened at
     /// the top of every other loaded module — see [`Evaluator::resolve`].
-    prelude: Vec<parser::SourceBinding<MarkId>>,
+    prelude: Vec<expr::SourceBinding<MarkId>>,
     /// Filesystem root for module resolution. A module path
     /// `["foo", "bar"]` is looked up as `<library_root>/foo/bar.tuun`.
     library_root: path::PathBuf,
@@ -118,10 +120,10 @@ impl Evaluator {
         let mut prelude = Vec::new();
         builtins::add_bindings(&mut prelude);
 
-        use parser::SourceExpr;
-        fn def<M>(id: &str, expr: SourceExpr<M>) -> parser::SourceBinding<M> {
-            use parser::Binding;
-            use parser::Pattern;
+        use expr::SourceExpr;
+        fn def<M>(id: &str, expr: SourceExpr<M>) -> expr::SourceBinding<M> {
+            use expr::Binding;
+            use expr::Pattern;
             Binding::Definition(Pattern::Identifier(id.to_string()), expr).into()
         }
         prelude.push(def("tempo", SourceExpr::float(tempo as f32)));
@@ -129,9 +131,9 @@ impl Evaluator {
 
         prelude.push(def(
             "mark",
-            SourceExpr::from(parser::Expr::BuiltIn {
+            SourceExpr::from(expr::Expr::BuiltIn {
                 name: "mark".to_string(),
-                function: parser::BuiltInFn(std::rc::Rc::new(mark)),
+                function: expr::BuiltInFn(std::rc::Rc::new(mark)),
             }),
         ));
 
@@ -156,7 +158,7 @@ impl Evaluator {
     /// stays in memory — any borrows handed out before invalidation remain
     /// valid (essential for recursive resolve calls during one `evaluate`
     /// session).
-    fn resolve(&self, path: &[String]) -> Result<&[parser::SourceBinding<MarkId>], parser::Error> {
+    fn resolve(&self, path: &[String]) -> Result<&[expr::SourceBinding<MarkId>], expr::Error> {
         if path.len() == 1 && path[0] == "__prelude" {
             return Ok(&self.prelude);
         }
@@ -170,7 +172,7 @@ impl Evaluator {
         let current_mtime = fs::metadata(&file_path)
             .and_then(|m| m.modified())
             .map_err(|e| {
-                parser::Error::new(format!(
+                expr::Error::new(format!(
                     "Failed to stat module {}: {}",
                     display_path.display(),
                     e
@@ -184,7 +186,7 @@ impl Evaluator {
 
         // Cache miss or stale — reload.
         let contents = fs::read_to_string(&file_path).map_err(|e| {
-            parser::Error::new(format!(
+            expr::Error::new(format!(
                 "Failed to read module {}: {}",
                 display_path.display(),
                 e
@@ -201,17 +203,13 @@ impl Evaluator {
         // Every loaded module implicitly opens the prelude as its first binding
         // so it can reference prelude names without an explicit `open __prelude`
         // line.
-        bindings.insert(
-            0,
-            parser::Binding::Open(vec!["__prelude".to_string()]).into(),
-        );
+        bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
 
         // Leak the parsed bindings so we can hand out a stable
         // `&[SourceBinding]` reference. On a stale-cache reload, the previous
         // leak isn't freed — any borrows from before the reload (e.g. earlier
         // in the same evaluate session) remain valid.
-        let leaked: &'static [parser::SourceBinding<MarkId>] =
-            Box::leak(bindings.into_boxed_slice());
+        let leaked: &'static [expr::SourceBinding<MarkId>] = Box::leak(bindings.into_boxed_slice());
         self.modules.borrow_mut().insert(
             path.to_vec(),
             ModuleCacheEntry {
@@ -244,7 +242,7 @@ impl Evaluator {
     ) -> Option<(path::PathBuf, usize, usize)> {
         let modules = self.modules.borrow();
         let entry = modules.get(path)?;
-        let (line, col) = parser::line_col(&entry.source, offset);
+        let (line, col) = expr::line_col(&entry.source, offset);
         Some((module_display_path(path), line, col))
     }
 
@@ -254,7 +252,7 @@ impl Evaluator {
     /// local errors carry a bare position — relative to the program's own
     /// text for `Program` coordinates (matching the editor's display), or to
     /// the whole source file for `SourceFile` coordinates.
-    fn diagnose(&self, error: &parser::Error, set: &ProgramSet, coords: LocalCoords) -> Diagnostic {
+    fn diagnose(&self, error: &expr::Error, set: &ProgramSet, coords: LocalCoords) -> Diagnostic {
         if let Some(origin) = error.origin() {
             let location = error
                 .range()
@@ -288,7 +286,7 @@ impl Evaluator {
                 let in_bounds = error.range().filter(|range| range.end <= text.len());
                 let position = in_bounds
                     .as_ref()
-                    .map(|range| parser::line_col(text, range.start));
+                    .map(|range| expr::line_col(text, range.start));
                 (position, in_bounds)
             }
             LocalCoords::SourceFile => (
@@ -312,14 +310,14 @@ impl Evaluator {
     pub fn evaluate_source(
         &self,
         text: &str,
-        bindings: &[parser::SourceBinding<MarkId>],
-    ) -> Result<parser::SourceExpr<MarkId>, String> {
+        bindings: &[expr::SourceBinding<MarkId>],
+    ) -> Result<expr::SourceExpr<MarkId>, String> {
         let expr = match parser::parse_program(text) {
             Err(errors) => return Err(format!("Error: {}", errors[0].display_with_source(text))),
             Ok(expr) => expr,
         };
 
-        parser::evaluate(|path| self.resolve(path), bindings, expr)
+        eval::evaluate(|path| self.resolve(path), bindings, expr)
             .map_err(|error| format!("Error: {}", error))
     }
 
@@ -351,14 +349,14 @@ impl Evaluator {
             Ok(expr) => expr,
         };
         let mut context = Vec::new();
-        if let Err(error) = parser::build_context(
+        if let Err(error) = eval::build_context(
             &|path: &[String]| self.resolve(path),
             &bindings,
             &mut context,
         ) {
             return Evaluation::Invalid(vec![self.diagnose(&error, set, LocalCoords::SourceFile)]);
         }
-        let expr = match parser::evaluate_with_context(&context, expr) {
+        let expr = match eval::evaluate_with_context(&context, expr) {
             Err(error) => {
                 return Evaluation::Invalid(vec![self.diagnose(
                     &error,
@@ -369,23 +367,20 @@ impl Evaluator {
             Ok(expr) => expr,
         };
         match expr.expr {
-            parser::Expr::Waveform(w) => Evaluation::Waveform(w),
-            parser::Expr::Seq { waveform, .. } => {
-                if let parser::Expr::Waveform(w) = waveform.expr {
+            expr::Expr::Waveform(w) => Evaluation::Waveform(w),
+            expr::Expr::Seq { waveform, .. } => {
+                if let expr::Expr::Waveform(w) = waveform.expr {
                     Evaluation::Waveform(w)
                 } else {
                     Evaluation::Invalid(vec![Diagnostic::message_only(NOT_A_PROGRAM.to_string())])
                 }
             }
-            parser::Expr::Function { .. } | parser::Expr::BuiltIn { .. } => {
+            expr::Expr::Function { .. } | expr::Expr::BuiltIn { .. } => {
                 // Sanity check: actually invoke with dummy args.
                 // TODO use a waveform for velocity
                 match self.apply_note_function(
                     &expr,
-                    vec![
-                        parser::SourceExpr::float(60.0),
-                        parser::SourceExpr::float(0.7),
-                    ],
+                    vec![expr::SourceExpr::float(60.0), expr::SourceExpr::float(0.7)],
                     set.programs()[index].sliders(),
                 ) {
                     Ok(_) => Evaluation::KeysInstrument(expr),
@@ -403,14 +398,14 @@ impl Evaluator {
     /// references to `sliders`, which are bound at their current values.
     pub fn apply_note_function(
         &self,
-        expr: &parser::SourceExpr<MarkId>,
-        args: Vec<parser::SourceExpr<MarkId>>,
+        expr: &expr::SourceExpr<MarkId>,
+        args: Vec<expr::SourceExpr<MarkId>>,
         sliders: &ProgramSliders,
     ) -> Result<(waveform::Waveform<MarkId>, waveform::Waveform<MarkId>), String> {
-        use parser::Expr::{Tuple, Waveform};
-        let expr = parser::SourceExpr::from(parser::Expr::Application {
+        use expr::Expr::{Tuple, Waveform};
+        let expr = expr::SourceExpr::from(expr::Expr::Application {
             function: Box::new(expr.clone()),
-            argument: Box::new(parser::SourceExpr::from(Tuple(args))),
+            argument: Box::new(expr::SourceExpr::from(Tuple(args))),
         });
         let mut bindings = vec![];
         slider::append_slider_bindings(
@@ -420,11 +415,11 @@ impl Evaluator {
             &mut bindings,
         );
         let resolve = |_: &[String]| {
-            Err(parser::Error::new(
+            Err(expr::Error::new(
                 "Didn't expect to resolve in apply_note_function".to_string(),
             ))
         };
-        let expr = parser::evaluate(resolve, &bindings, expr).map_err(|e| e.to_string());
+        let expr = eval::evaluate(resolve, &bindings, expr).map_err(|e| e.to_string());
         match expr.map(|s| s.expr) {
             Ok(Tuple(mut exprs)) => {
                 if exprs.len() != 2 {
@@ -496,10 +491,7 @@ mod tests {
         };
 
         // A note played at the initial slider position carries vol = 0.5.
-        let args = vec![
-            parser::SourceExpr::float(60.0),
-            parser::SourceExpr::float(0.5),
-        ];
+        let args = vec![expr::SourceExpr::float(60.0), expr::SourceExpr::float(0.5)];
         let (note_on, _note_off) = evaluator
             .apply_note_function(&function, args.clone(), set.programs()[0].sliders())
             .expect("note function should apply");
@@ -551,10 +543,7 @@ mod tests {
             .set_slider_normalized(0, 1.0)
             .expect("program has a vol slider");
 
-        let args = vec![
-            parser::SourceExpr::float(60.0),
-            parser::SourceExpr::float(0.5),
-        ];
+        let args = vec![expr::SourceExpr::float(60.0), expr::SourceExpr::float(0.5)];
         let (note_on, _note_off) = evaluator
             .apply_note_function(&function, args, set.programs()[0].sliders())
             .expect("note function should apply");
@@ -582,7 +571,7 @@ mod tests {
 
         // A program-local error shows a bare position relative to the
         // program's own text (matching the editor's display), no file.
-        let error = parser::Error::with_range("boom".to_string(), Some(0..4));
+        let error = expr::Error::with_range("boom".to_string(), Some(0..4));
         let diagnostic = evaluator.diagnose(&error, &set, LocalCoords::Program { index: 0 });
         assert_eq!(diagnostic.to_string(), "1:1: boom");
         assert_eq!(diagnostic.program_range, Some(0..4));
@@ -593,14 +582,14 @@ mod tests {
         evaluator
             .resolve(&["std".to_string()])
             .expect("std resolves");
-        let error = parser::Error::with_range("boom".to_string(), Some(0..1))
-            .in_module(&["std".to_string()]);
+        let error =
+            expr::Error::with_range("boom".to_string(), Some(0..1)).in_module(&["std".to_string()]);
         let diagnostic = evaluator.diagnose(&error, &set, LocalCoords::Program { index: 0 });
         assert_eq!(diagnostic.to_string(), "std.tuun:1:1: boom");
         assert!(diagnostic.program_range.is_none());
 
         // An origin whose module isn't cached still names the module.
-        let error = parser::Error::new("boom".to_string()).in_module(&["ghost".to_string()]);
+        let error = expr::Error::new("boom".to_string()).in_module(&["ghost".to_string()]);
         let diagnostic = evaluator.diagnose(&error, &set, LocalCoords::Program { index: 0 });
         assert!(diagnostic.file.is_none());
         assert!(diagnostic.position.is_none());

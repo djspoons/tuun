@@ -6,10 +6,10 @@
 
 use std::time::Instant;
 
+use crate::expr;
 use crate::ids::{MarkId, WaveformId};
 use crate::keys;
 use crate::launchkey;
-use crate::parser;
 use crate::player;
 use crate::programs::{self, PROGRAMS_PER_BANK, Program};
 use crate::tracker;
@@ -26,7 +26,7 @@ pub enum Mode {
         /// cursor op moves over whole characters (see `prev_char_boundary` /
         /// `next_char_boundary`).
         cursor_position: usize,
-        errors: Vec<parser::Error>,
+        errors: Vec<expr::Error>,
     },
     MoveSliders,
     /// Computer-keyboard piano: lower QWERTY row plays white keys, row above
@@ -82,7 +82,7 @@ impl AppState {
     pub fn from_source(
         source: String,
         input_path: std::path::PathBuf,
-    ) -> Result<AppState, Vec<parser::Error>> {
+    ) -> Result<AppState, Vec<expr::Error>> {
         let (programs, message) = programs::ProgramSet::from_source(source, input_path)?;
         Ok(AppState {
             programs,
@@ -619,7 +619,7 @@ fn apply_install_keys(state: &mut AppState, program_index: usize) -> Vec<Effect>
 
 /// Re-parses `text` and returns the syntax errors. Empty `text` is treated
 /// as a clean parse (renderer would have nothing to highlight anyway).
-fn parse_program_errors(text: &str) -> Vec<crate::parser::Error> {
+fn parse_program_errors(text: &str) -> Vec<crate::expr::Error> {
     use crate::parser;
     // Empty (or whitespace-only) text is a pending deletion, not a parse error.
     if text.trim().is_empty() {
@@ -1088,7 +1088,7 @@ _ = saw(220);";
     fn install_test_keys(state: &mut AppState) {
         state.keys = Some(keys::Keys {
             id: 0,
-            function: parser::SourceExpr::float(0.0),
+            function: expr::SourceExpr::float(0.0),
             note_off_waveforms: Default::default(),
         });
     }

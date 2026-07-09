@@ -3,7 +3,9 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use std::sync::mpsc;
 
 use tuun::builtins;
+use tuun::eval;
 use tuun::evaluator;
+use tuun::expr;
 use tuun::generator;
 use tuun::parser;
 use tuun::player;
@@ -115,7 +117,7 @@ fn bench_marks(c: &mut Criterion) {
 }
 
 fn bench_large(c: &mut Criterion) {
-    let mut bindings: Vec<parser::SourceBinding<u32>> = Vec::new();
+    let mut bindings: Vec<expr::SourceBinding<u32>> = Vec::new();
     builtins::add_bindings(&mut bindings);
     match parser::parse_module::<u32>(
         r#"
@@ -131,7 +133,7 @@ fn bench_large(c: &mut Criterion) {
     }
 
     let resolve = |_: &[String]| {
-        Err(parser::Error::new(
+        Err(expr::Error::new(
             "didn't expect to resolve in bench_large".to_string(),
         ))
     };
@@ -140,9 +142,9 @@ fn bench_large(c: &mut Criterion) {
         b.iter(|| {
             let program = "triangle(55) + (noise * 0.2) | R(1.0, 1.0)";
             match parser::parse_program(program) {
-                Ok(expr) => match parser::evaluate(resolve, &bindings, expr) {
+                Ok(expr) => match eval::evaluate(resolve, &bindings, expr) {
                     Ok(expr) => {
-                        if let parser::Expr::Waveform(waveform) = expr.expr {
+                        if let expr::Expr::Waveform(waveform) = expr.expr {
                             let mut generator = generator::Generator::new(44100);
                             let mut w = generator::initialize_state(waveform);
                             let mut out = vec![0.0; 1024];

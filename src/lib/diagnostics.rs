@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 /// A user-visible error with its source position resolved, where known.
 ///
-/// Produced from a `parser::Error` at the evaluator boundary. Only errors
+/// Produced from an `expr::Error` at the evaluator boundary. Only errors
 /// from `open`ed modules carry a file (relative to the library root);
 /// errors in the program being evaluated render as a bare `line:col`,
 /// matching the editor's own display.

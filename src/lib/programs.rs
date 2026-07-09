@@ -4,6 +4,7 @@ use std::fmt;
 use std::ops::Range;
 
 use crate::diagnostics::Diagnostic;
+use crate::expr;
 use crate::ids::MarkId;
 use crate::parser;
 use crate::slider;
@@ -19,14 +20,14 @@ pub const NUM_PROGRAM_BANKS: usize = 8;
 /// lies in 0.0..=1.0.
 #[derive(Debug, Clone, Default)]
 pub struct ProgramSliders {
-    configs: Vec<parser::Slider>,
+    configs: Vec<expr::Slider>,
     normalized_values: Vec<f32>,
 }
 
 impl ProgramSliders {
     /// Builds a `ProgramSliders` from a list of source-level slider configs.
-    pub fn from_slider_configs(configs: Vec<parser::Slider>) -> Self {
-        use parser::SliderFunction;
+    pub fn from_slider_configs(configs: Vec<expr::Slider>) -> Self {
+        use expr::SliderFunction;
         let normalized_values = configs
             .iter()
             .map(|c| match &c.function {
@@ -48,7 +49,7 @@ impl ProgramSliders {
     }
 
     /// Returns the source-level slider configs.
-    pub fn configs(&self) -> &[parser::Slider] {
+    pub fn configs(&self) -> &[expr::Slider] {
         &self.configs
     }
 
@@ -132,7 +133,7 @@ pub enum Evaluation {
     /// The program evaluated to a playable waveform.
     Waveform(waveform::Waveform<MarkId>),
     /// The program evaluated to a function usable as a keys instrument.
-    KeysInstrument(parser::SourceExpr<MarkId>),
+    KeysInstrument(expr::SourceExpr<MarkId>),
     /// The program failed to parse or evaluate; holds the user-visible
     /// diagnostics.
     Invalid(Vec<Diagnostic>),
@@ -161,7 +162,7 @@ pub struct Program {
     /// Set if the current text evaluates to a valid waveform.
     cached_waveform: Option<waveform::Waveform<MarkId>>,
     /// Set if the current text evaluates to a valid keys instrument.
-    cached_keys_instrument: Option<parser::SourceExpr<MarkId>>,
+    cached_keys_instrument: Option<expr::SourceExpr<MarkId>>,
 }
 
 impl Program {
@@ -185,7 +186,7 @@ impl Program {
     /// Only `Definition`s with at least one annotation become programs.
     /// `Definition`s with no annotations are not returned.
     pub(crate) fn from_source_binding(
-        sb: &parser::SourceBinding<MarkId>,
+        sb: &expr::SourceBinding<MarkId>,
         binding_index: usize,
         source: &str,
     ) -> Option<Program> {
@@ -197,21 +198,21 @@ impl Program {
         let mut level_db: f32 = 0.0;
         for sa in &sb.annotations {
             match &sa.annotation {
-                parser::Annotation::Sliders(configs) => {
+                expr::Annotation::Sliders(configs) => {
                     sliders = ProgramSliders::from_slider_configs(configs.clone());
                 }
-                parser::Annotation::Color(r, g, b) => {
+                expr::Annotation::Color(r, g, b) => {
                     color = Some((*r, *g, *b));
                 }
-                parser::Annotation::Level(v) => {
+                expr::Annotation::Level(v) => {
                     level_db = *v;
                 }
-                parser::Annotation::SkipSlots(_) => {
+                expr::Annotation::SkipSlots(_) => {
                     // Consumed by the position walk, not stored on Program.
                 }
             }
         }
-        if let parser::Binding::Definition(_, expr) = &sb.binding {
+        if let expr::Binding::Definition(_, expr) = &sb.binding {
             if let Some(s) = &expr.span
                 && s.end <= source.len()
             {
@@ -272,7 +273,7 @@ impl Program {
 
     /// Returns the cached keys-instrument function if the current text
     /// evaluated to one.
-    pub fn keys_instrument(&self) -> Option<&parser::SourceExpr<MarkId>> {
+    pub fn keys_instrument(&self) -> Option<&expr::SourceExpr<MarkId>> {
         self.cached_keys_instrument.as_ref()
     }
 
@@ -349,14 +350,14 @@ impl Program {
 }
 
 /// Returns the last `skip_slots=N` value on `sb`, or 0 if none is present.
-fn read_skip_slots(sb: &parser::SourceBinding<MarkId>) -> u32 {
+fn read_skip_slots(sb: &expr::SourceBinding<MarkId>) -> u32 {
     // The reverse walk mirrors the "last wins" semantics used elsewhere for
     // repeated annotations of the same kind.
     sb.annotations
         .iter()
         .rev()
         .find_map(|sa| match &sa.annotation {
-            parser::Annotation::SkipSlots(n) => Some(*n),
+            expr::Annotation::SkipSlots(n) => Some(*n),
             _ => None,
         })
         .unwrap_or(0)
@@ -369,7 +370,7 @@ fn read_skip_slots(sb: &parser::SourceBinding<MarkId>) -> u32 {
 /// valid. `position` starts at 0 and advances by `skip_slots + 1` for each such
 /// binding — the same walk `ProgramSet::from_source` uses to assign grid slots.
 fn walk_ui_positions(
-    bindings: &[parser::SourceBinding<MarkId>],
+    bindings: &[expr::SourceBinding<MarkId>],
     source_len: usize,
 ) -> Vec<(usize, usize, std::ops::Range<usize>)> {
     let mut out = Vec::new();
@@ -378,7 +379,7 @@ fn walk_ui_positions(
         if sb.annotations.is_empty() {
             continue;
         }
-        if let parser::Binding::Definition(_, expr) = &sb.binding
+        if let expr::Binding::Definition(_, expr) = &sb.binding
             && let Some(s) = &expr.span
             && s.end <= source_len
         {
@@ -399,7 +400,7 @@ fn walk_ui_positions(
 /// `bindings`/`source`.
 pub struct ProgramSet {
     programs: Vec<Program>,
-    bindings: Vec<parser::SourceBinding<MarkId>>,
+    bindings: Vec<expr::SourceBinding<MarkId>>,
     source: String,
     input_path: std::path::PathBuf,
 }
@@ -416,7 +417,7 @@ impl ProgramSet {
     pub fn from_source(
         source: String,
         input_path: std::path::PathBuf,
-    ) -> Result<(ProgramSet, String), Vec<parser::Error>> {
+    ) -> Result<(ProgramSet, String), Vec<expr::Error>> {
         let mut message = String::new();
         let (bindings, errors) = parser::parse_module::<MarkId>(&source)?;
         // TODO sort of a bummer that we don't know which binding this error was
@@ -490,8 +491,8 @@ impl ProgramSet {
             return String::new();
         };
         match &binding.binding {
-            parser::Binding::Definition(pattern, _) => match pattern {
-                parser::Pattern::Identifier(name) if name == "_" => String::new(),
+            expr::Binding::Definition(pattern, _) => match pattern {
+                expr::Pattern::Identifier(name) if name == "_" => String::new(),
                 _ => format!("{}", pattern),
             },
             _ => String::new(),
@@ -529,9 +530,9 @@ impl ProgramSet {
     /// file-level bindings preceding it (bindings after it are ignored),
     /// with anonymous `_` definitions filtered out, plus a binding for each
     /// of the program's sliders at its current value.
-    pub fn evaluation_bindings(&self, index: usize) -> Vec<parser::SourceBinding<MarkId>> {
+    pub fn evaluation_bindings(&self, index: usize) -> Vec<expr::SourceBinding<MarkId>> {
         let program = &self.programs[index];
-        let mut bindings: Vec<parser::SourceBinding<MarkId>> =
+        let mut bindings: Vec<expr::SourceBinding<MarkId>> =
             self.bindings[..program.binding_index].to_vec();
         // TODO this is a pretty big hack but there's an interesting question
         // about what sliders in *other* bindings mean. To avoid answering that
@@ -541,8 +542,8 @@ impl ProgramSet {
         // each binding... or at least those that have slots? (Otherwise, how
         // can you modify the slider value?)
         bindings.retain(|b| match &b.binding {
-            parser::Binding::Definition(p, _) => {
-                !matches!(p, parser::Pattern::Identifier(v) if v == "_")
+            expr::Binding::Definition(p, _) => {
+                !matches!(p, expr::Pattern::Identifier(v) if v == "_")
             }
             _ => true,
         });
@@ -563,7 +564,7 @@ impl ProgramSet {
         if offset > self.source.len() {
             return None;
         }
-        Some(parser::line_col(&self.source, offset))
+        Some(expr::line_col(&self.source, offset))
     }
 
     /// Evaluates the program at `index` and records the result in its
@@ -603,7 +604,7 @@ const ANNOTATION_EPSILON: f32 = 1e-4;
 /// value. Returns an empty list when nothing has changed.
 fn annotation_edits(
     program: &Program,
-    binding: &parser::SourceBinding<MarkId>,
+    binding: &expr::SourceBinding<MarkId>,
     source: &str,
 ) -> Vec<(std::ops::Range<usize>, String)> {
     let mut edits = Vec::new();
@@ -620,11 +621,11 @@ fn annotation_edits(
 /// the runtime level matches what the binding currently encodes.
 fn level_edit(
     program: &Program,
-    binding: &parser::SourceBinding<MarkId>,
+    binding: &expr::SourceBinding<MarkId>,
     source: &str,
 ) -> Option<(std::ops::Range<usize>, String)> {
     let (parsed_value, parsed_span) = match last_annotation_of(binding, |a| match a {
-        parser::Annotation::Level(v) => Some(*v),
+        expr::Annotation::Level(v) => Some(*v),
         _ => None,
     }) {
         Some((v, span)) => (v, span),
@@ -633,7 +634,7 @@ fn level_edit(
     if (program.level_db() - parsed_value).abs() < ANNOTATION_EPSILON {
         return None;
     }
-    let annotation = parser::Annotation::Level(program.level_db());
+    let annotation = expr::Annotation::Level(program.level_db());
     let body = format!("{}", annotation);
     match parsed_span {
         Some(span) => Some((span, body)),
@@ -680,7 +681,7 @@ fn insert_annotation_line(
 /// 0 — swapping in `level_db=…` instead when `skip_slots` is the binding's only
 /// annotation, so the binding stays a UI program.
 fn skip_slots_edit(
-    binding: &parser::SourceBinding<MarkId>,
+    binding: &expr::SourceBinding<MarkId>,
     new_skip: u32,
     level_db: f32,
     source: &str,
@@ -689,15 +690,15 @@ fn skip_slots_edit(
         return None;
     }
     let existing = last_annotation_of(binding, |a| match a {
-        parser::Annotation::SkipSlots(_) => Some(()),
+        expr::Annotation::SkipSlots(_) => Some(()),
         _ => None,
     })
     .and_then(|(_, span)| span);
-    let body = format!("{}", parser::Annotation::SkipSlots(new_skip));
+    let body = format!("{}", expr::Annotation::SkipSlots(new_skip));
     match existing {
         Some(span) if new_skip > 0 => Some((span, body)),
         Some(span) if binding.annotations.len() == 1 => {
-            Some((span, format!("{}", parser::Annotation::Level(level_db))))
+            Some((span, format!("{}", expr::Annotation::Level(level_db))))
         }
         Some(span) => Some(remove_annotation_edit(span, source)),
         None if new_skip > 0 => {
@@ -764,7 +765,7 @@ fn remove_annotation_edit(
 /// every slider's current normalized value matches its parsed initial.
 fn sliders_edit(
     program: &Program,
-    binding: &parser::SourceBinding<MarkId>,
+    binding: &expr::SourceBinding<MarkId>,
 ) -> Option<(std::ops::Range<usize>, String)> {
     if program.sliders().configs().is_empty() {
         return None;
@@ -781,36 +782,36 @@ fn sliders_edit(
         return None;
     }
     let (_, span) = last_annotation_of(binding, |a| match a {
-        parser::Annotation::Sliders(_) => Some(()),
+        expr::Annotation::Sliders(_) => Some(()),
         _ => None,
     })?;
     let span = span?;
-    let updated: Vec<parser::Slider> = program
+    let updated: Vec<expr::Slider> = program
         .sliders()
         .configs()
         .iter()
         .zip(program.sliders().normalized_values())
         .map(|(config, &normalized)| {
             let function = match &config.function {
-                parser::SliderFunction::Linear { min, max, .. } => parser::SliderFunction::Linear {
+                expr::SliderFunction::Linear { min, max, .. } => expr::SliderFunction::Linear {
                     initial_value: min + normalized * (max - min),
                     min: *min,
                     max: *max,
                 },
-                parser::SliderFunction::UserDefined {
+                expr::SliderFunction::UserDefined {
                     function_source, ..
-                } => parser::SliderFunction::UserDefined {
+                } => expr::SliderFunction::UserDefined {
                     normalized_initial_value: normalized,
                     function_source: function_source.clone(),
                 },
             };
-            parser::Slider {
+            expr::Slider {
                 label: config.label.clone(),
                 function,
             }
         })
         .collect();
-    Some((span, format!("{}", parser::Annotation::Sliders(updated))))
+    Some((span, format!("{}", expr::Annotation::Sliders(updated))))
 }
 
 /// Returns the (value, span) of the last annotation on `binding` that `pick`
@@ -820,11 +821,11 @@ fn sliders_edit(
 /// annotations of the same kind, so persisting onto the same span keeps the
 /// source authoritative.
 fn last_annotation_of<T, F>(
-    binding: &parser::SourceBinding<MarkId>,
+    binding: &expr::SourceBinding<MarkId>,
     mut pick: F,
 ) -> Option<(T, Option<std::ops::Range<usize>>)>
 where
-    F: FnMut(&parser::Annotation) -> Option<T>,
+    F: FnMut(&expr::Annotation) -> Option<T>,
 {
     binding
         .annotations
@@ -836,14 +837,14 @@ where
 /// Returns the normalized 0..1 position implied by a parsed slider's
 /// initial value, so it can be compared against the runtime's current
 /// `normalized_value` directly.
-fn parsed_normalized_value(function: &parser::SliderFunction) -> f32 {
+fn parsed_normalized_value(function: &expr::SliderFunction) -> f32 {
     match function {
-        parser::SliderFunction::Linear {
+        expr::SliderFunction::Linear {
             initial_value,
             min,
             max,
         } => (initial_value - min) / (max - min),
-        parser::SliderFunction::UserDefined {
+        expr::SliderFunction::UserDefined {
             normalized_initial_value,
             ..
         } => *normalized_initial_value,
@@ -917,11 +918,11 @@ impl ProgramSet {
                 Some(p) => program_index - p - 1,
                 None => program_index,
             };
-            let mut annos: Vec<parser::Annotation> = Vec::new();
+            let mut annos: Vec<expr::Annotation> = Vec::new();
             if new_skip > 0 {
-                annos.push(parser::Annotation::SkipSlots(new_skip as u32));
+                annos.push(expr::Annotation::SkipSlots(new_skip as u32));
             }
-            annos.push(parser::Annotation::Level(
+            annos.push(expr::Annotation::Level(
                 self.programs[program_index].level_db(),
             ));
             let anno_body = annos
@@ -1169,7 +1170,7 @@ mod tests {
 
         assert!(
             program
-                .record_evaluation(Evaluation::KeysInstrument(parser::SourceExpr::float(1.0)))
+                .record_evaluation(Evaluation::KeysInstrument(expr::SourceExpr::float(1.0)))
                 .is_ok()
         );
         assert!(program.waveform().is_none());
@@ -1199,9 +1200,7 @@ tone = saw(220);";
             .evaluation_bindings(1)
             .iter()
             .filter_map(|b| match &b.binding {
-                parser::Binding::Definition(parser::Pattern::Identifier(name), _) => {
-                    Some(name.clone())
-                }
+                expr::Binding::Definition(expr::Pattern::Identifier(name), _) => Some(name.clone()),
                 _ => None,
             })
             .collect();

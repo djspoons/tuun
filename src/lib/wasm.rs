@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use wasm_bindgen::prelude::*;
 
-use crate::{builtins, generator, modules, optimizer, parser, slider, waveform};
+use crate::{builtins, eval, expr, generator, modules, optimizer, parser, slider, waveform};
 
 #[derive(Clone, Debug, PartialEq)]
 enum MarkId {
@@ -34,23 +34,23 @@ pub struct Wasm {
     sample_rate: i32,
     /// Per-instance prelude (built-ins + `sample_rate` + `tempo`) prepended
     /// to every parse.
-    prelude: Vec<parser::SourceBinding<MarkId>>,
+    prelude: Vec<expr::SourceBinding<MarkId>>,
     /// Parsed embedded modules keyed by dotted path (e.g. `"std"`).
     /// Looked up by the `evaluate` resolve callback when an `Open`
     /// binding is processed.
-    modules: HashMap<String, Vec<parser::SourceBinding<MarkId>>>,
+    modules: HashMap<String, Vec<expr::SourceBinding<MarkId>>>,
     waveform: Option<generator::Waveform<MarkId>>,
     last_slider_values: HashMap<String, f32>,
     buffer_duration: Duration,
 }
 
 /// Builds a `Definition` binding for `id = expr`.
-fn def_binding(id: &str, expr: parser::SourceExpr<MarkId>) -> parser::SourceBinding<MarkId> {
-    parser::Binding::Definition(parser::Pattern::Identifier(id.to_string()), expr).into()
+fn def_binding(id: &str, expr: expr::SourceExpr<MarkId>) -> expr::SourceBinding<MarkId> {
+    expr::Binding::Definition(expr::Pattern::Identifier(id.to_string()), expr).into()
 }
 
 /// Joins parse errors into a single user-visible string.
-fn join_errors(errors: &[parser::Error]) -> String {
+fn join_errors(errors: &[expr::Error]) -> String {
     errors
         .iter()
         .map(|e| e.to_string())
@@ -67,14 +67,14 @@ impl Wasm {
     /// * `tempo` - The tempo in beats per minute (e.g., 120)
     #[wasm_bindgen(constructor)]
     pub fn new(sample_rate: i32, tempo: f32) -> Result<Wasm, String> {
-        use parser::SourceExpr;
+        use expr::SourceExpr;
         // Set up better panic messages in the browser console
         console_error_panic_hook::set_once();
 
         // TODO this has a lot of repetition with the native app
         // Prelude: sample_rate + tempo + built-ins. Cloned into the
         // bindings vec on every parse.
-        let mut prelude: Vec<parser::SourceBinding<MarkId>> = Vec::new();
+        let mut prelude: Vec<expr::SourceBinding<MarkId>> = Vec::new();
         prelude.push(def_binding(
             "sample_rate",
             SourceExpr::float(sample_rate as f32),
@@ -91,7 +91,7 @@ impl Wasm {
         // built-ins) without depending on the caller having opened the
         // prelude first. Mirrors `evaluator::Evaluator::resolve` in
         // the native runtime.
-        let mut modules: HashMap<String, Vec<parser::SourceBinding<MarkId>>> = HashMap::new();
+        let mut modules: HashMap<String, Vec<expr::SourceBinding<MarkId>>> = HashMap::new();
         for (name, content) in modules::EMBEDDED_MODULES {
             let (mut bindings, errors) =
                 parser::parse_module::<MarkId>(content).map_err(|errors| {
@@ -110,10 +110,7 @@ impl Wasm {
                     join_errors(&errors)
                 ));
             }
-            bindings.insert(
-                0,
-                parser::Binding::Open(vec!["__prelude".to_string()]).into(),
-            );
+            bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
             modules.insert((*name).to_string(), bindings);
         }
 
@@ -162,15 +159,15 @@ impl Wasm {
         // `open __prelude` first so the user expression can reference
         // prelude names directly (same prefix each embedded module
         // gets). Then user-requested opens, then slider bindings.
-        let mut bindings: Vec<parser::SourceBinding<MarkId>> = Vec::new();
-        bindings.push(parser::Binding::Open(vec!["__prelude".to_string()]).into());
+        let mut bindings: Vec<expr::SourceBinding<MarkId>> = Vec::new();
+        bindings.push(expr::Binding::Open(vec!["__prelude".to_string()]).into());
         for path in opens {
-            bindings.push(parser::Binding::Open(path).into());
+            bindings.push(expr::Binding::Open(path).into());
         }
         for (name, value) in &sliders {
             bindings.push(def_binding(
                 name,
-                parser::SourceExpr::from(parser::Expr::Waveform(waveform::Waveform::Marked {
+                expr::SourceExpr::from(expr::Expr::Waveform(waveform::Waveform::Marked {
                     id: MarkId::Slider(name.clone()),
                     waveform: Box::new(waveform::Waveform::Const(*value)),
                 })),
@@ -183,7 +180,7 @@ impl Wasm {
         // `evaluate`.
         let prelude = &self.prelude;
         let modules = &self.modules;
-        let resolve = |path: &[String]| -> Result<&[parser::SourceBinding<MarkId>], parser::Error> {
+        let resolve = |path: &[String]| -> Result<&[expr::SourceBinding<MarkId>], expr::Error> {
             if path.len() == 1 && path[0] == "__prelude" {
                 return Ok(prelude.as_slice());
             }
@@ -191,18 +188,18 @@ impl Wasm {
             modules
                 .get(&key)
                 .map(|v| v.as_slice())
-                .ok_or_else(|| parser::Error::new(format!("Module not found: {}", key)))
+                .ok_or_else(|| expr::Error::new(format!("Module not found: {}", key)))
         };
 
-        let expr = parser::evaluate(resolve, &bindings, parsed_expr)
+        let expr = eval::evaluate(resolve, &bindings, parsed_expr)
             .map_err(|e| format!("Evaluate error: {}", e))?;
 
         // TODO Do we want to precompute here?
 
         let waveform = match expr.expr {
-            parser::Expr::Waveform(w) => w,
-            parser::Expr::Seq { waveform, .. } => match waveform.expr {
-                parser::Expr::Waveform(w) => w,
+            expr::Expr::Waveform(w) => w,
+            expr::Expr::Seq { waveform, .. } => match waveform.expr {
+                expr::Expr::Waveform(w) => w,
                 _ => return Err("Got non-Waveform in seq after evaluate".to_string()),
             },
             other => {
@@ -336,7 +333,7 @@ pub fn parse_sliders(input: &str) -> Result<String, String> {
     let entries: Vec<String> = sliders
         .iter()
         .map(|s| match &s.function {
-            parser::SliderFunction::Linear {
+            expr::SliderFunction::Linear {
                 initial_value,
                 min,
                 max,
@@ -346,7 +343,7 @@ pub fn parse_sliders(input: &str) -> Result<String, String> {
                     s.label, initial_value, min, max
                 )
             }
-            parser::SliderFunction::UserDefined {
+            expr::SliderFunction::UserDefined {
                 normalized_initial_value,
                 function_source,
             } => {
@@ -374,7 +371,7 @@ pub fn parse_sliders(input: &str) -> Result<String, String> {
 /// For example, `evaluateSlider("fn(x) => 100 * pow(100, x)", 0.5)` returns ~1000.
 #[wasm_bindgen(js_name = "evaluateSlider")]
 pub fn evaluate_slider(function_source: &str, normalized_value: f32) -> Result<f32, String> {
-    let function = parser::SliderFunction::UserDefined {
+    let function = expr::SliderFunction::UserDefined {
         normalized_initial_value: 0.0, // unused for evaluation
         function_source: function_source.to_string(),
     };

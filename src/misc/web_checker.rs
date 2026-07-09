@@ -3,7 +3,7 @@ use std::fs;
 
 use clap::Parser as ClapParser;
 
-use tuun::{builtins, ids, modules, parser, slider};
+use tuun::{builtins, eval, expr, ids, modules, parser, slider};
 
 #[derive(ClapParser, Debug)]
 #[command(version, about = "Check tuun-synth expressions in .md and .html files")]
@@ -12,18 +12,18 @@ struct Args {
     input_files: Vec<String>,
 }
 
-type Bindings = Vec<parser::SourceBinding<ids::MarkId>>;
+type Bindings = Vec<expr::SourceBinding<ids::MarkId>>;
 
 /// Builds the always-in-scope prelude: `sample_rate`, `tempo`, plus the
 /// built-in definitions. Mirrors the wasm runtime's prelude so the
 /// checker evaluates expressions the same way the browser would.
 fn load_prelude() -> Bindings {
-    fn def(id: &str, expr: parser::SourceExpr<ids::MarkId>) -> parser::SourceBinding<ids::MarkId> {
-        parser::Binding::Definition(parser::Pattern::Identifier(id.to_string()), expr).into()
+    fn def(id: &str, expr: expr::SourceExpr<ids::MarkId>) -> expr::SourceBinding<ids::MarkId> {
+        expr::Binding::Definition(expr::Pattern::Identifier(id.to_string()), expr).into()
     }
     let mut bindings: Bindings = Vec::new();
-    bindings.push(def("sample_rate", parser::SourceExpr::float(44100.0)));
-    bindings.push(def("tempo", parser::SourceExpr::float(120.0)));
+    bindings.push(def("sample_rate", expr::SourceExpr::float(44100.0)));
+    bindings.push(def("tempo", expr::SourceExpr::float(120.0)));
     builtins::add_bindings(&mut bindings);
     bindings
 }
@@ -44,10 +44,7 @@ fn load_modules() -> HashMap<String, Bindings> {
                 if !errors.is_empty() {
                     eprintln!("Warning: failed to parse module '{}': {:?}", name, errors);
                 }
-                bindings.insert(
-                    0,
-                    parser::Binding::Open(vec!["__prelude".to_string()]).into(),
-                );
+                bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
                 out.insert((*name).to_string(), bindings);
             }
             Err(e) => eprintln!("Warning: failed to parse module '{}': {:?}", name, e),
@@ -228,9 +225,9 @@ fn check_block(
     // Build the bindings the same way the wasm runtime does:
     // implicit `open __prelude` → opens → sliders → expression.
     let mut bindings: Bindings = Vec::new();
-    bindings.push(parser::Binding::Open(vec!["__prelude".to_string()]).into());
+    bindings.push(expr::Binding::Open(vec!["__prelude".to_string()]).into());
     for path in opens {
-        bindings.push(parser::Binding::Open(path).into());
+        bindings.push(expr::Binding::Open(path).into());
     }
     slider::append_slider_bindings(
         &slider_configs,
@@ -239,19 +236,18 @@ fn check_block(
         &mut bindings,
     );
 
-    let resolve =
-        |path: &[String]| -> Result<&[parser::SourceBinding<ids::MarkId>], parser::Error> {
-            if path.len() == 1 && path[0] == "__prelude" {
-                return Ok(prelude.as_slice());
-            }
-            let key = path.join(".");
-            modules
-                .get(&key)
-                .map(|v| v.as_slice())
-                .ok_or_else(|| parser::Error::new(format!("Module not found: {}", key)))
-        };
+    let resolve = |path: &[String]| -> Result<&[expr::SourceBinding<ids::MarkId>], expr::Error> {
+        if path.len() == 1 && path[0] == "__prelude" {
+            return Ok(prelude.as_slice());
+        }
+        let key = path.join(".");
+        modules
+            .get(&key)
+            .map(|v| v.as_slice())
+            .ok_or_else(|| expr::Error::new(format!("Module not found: {}", key)))
+    };
 
-    match parser::evaluate(resolve, &bindings, expr) {
+    match eval::evaluate(resolve, &bindings, expr) {
         Ok(_) => CheckResult::Ok,
         Err(e) => CheckResult::Fail(format!("[FAIL] \"{}\" evaluate error: {:?}", label, e)),
     }
