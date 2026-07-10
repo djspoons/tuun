@@ -3,11 +3,11 @@
 
 ## Waveform Pipeline
 
-Though Tuun waveforms can be created in ways that don't leverage the Tuun expression language, no implementations currently do so. As such, we'll describe the pipeline starting with a Tuun expression and ending with playback on an audio device. There are four main stages, each described in more detail below:
+Though Tuun waveforms can be created without use of the Tuun expression language, no implementations currently do so. As such, we'll describe the pipeline starting with a Tuun expression and ending with playback on an audio device. There are four main stages:
 
 * Expression parsing and evaluation — converting strings into abstract syntax representing waveforms
 
-* Abstract waveform optimizations — transformations of the waveform independent of audio device or sample rate that enable more efficient generation
+* Abstract waveform optimizations — transformations of the waveforms independent of audio device or sample rate that enable more efficient generation
 
 * Sample generation — conversion of waveforms into audio samples
 
@@ -16,18 +16,18 @@ Though Tuun waveforms can be created in ways that don't leverage the Tuun expres
 Program text flows through four stages before reaching audio output:
 
 ```
-  "$(440)" │     Parser           │   Optimizer    │  Generator    │   Tracker
-      │    │ parse      evaluate  │    optimize    │    generate   │
-      └─String───► Expr ─────► Waveform ──────► Waveform ─────► Vec<f32> ─────►
-           |                      │                │               │   
+  "$440"  │ Parser      Eval     │   Optimizer    │   Generator   │   Tracker
+     │    │ parse      evaluate  │    optimize    │    generate   │
+     └─String───► Expr ─────► Waveform ──────► Waveform ─────► Vec<f32> ─────►
+          |                      │                │               │   
 ```
-As described below, generation can occur both on a UI thread or on an audio thread. In the first case, it's called "precomputing" some or all of a waveform. This means generating the samples and replacing the waveform, in whole or in part, with a `Fixed` waveform.
+As described below, generation can occur either when the audio system demands it or ahead of time. The second case is called "precomputing" some or all of a waveform: generating the samples and replacing the waveform (in whole or in part) with a `Fixed` waveform.
 
 ### Expression Parsing and Evaluation
 
 Tuun expressions are parsed using a [nom](https://docs.rs/nom/8.0.0/nom/)-based parser. Recall that Tuun expressions form a simple, call-by-value functional language. 
 
-Once parsing is complete, Tuun expressions are evaluated. This means functions and `let` bindings are resolved as well as any arithmetic expressions on floating point numbers. Importantly, `seq` and `\` are replaced with a combination of `Fin`, `Append`, and `Merge` as described in the [language overview](tuun-langs.md#sequencing). The result will be a value: either a floating point number, a string, a boolean, a function, waveform, or a seq waveform. In all but the last two cases, an error is presented to the user (since those values cannot be played). In the case of a seq waveform, an `unseq` is implicitly applied to extract the underlying waveform.
+Once parsing is complete, Tuun expressions are evaluated. This means functions and `let` bindings are resolved as well as any arithmetic expressions on floating point numbers. Importantly, `seq` and `\` are replaced with a combination of `Fin`, `Append`, and `Merge` as described in the [language overview](tuun-langs.md#sequencing). The result will be a value: either a floating point number, a string, a boolean, a function, waveform, or a seq waveform. In all but the last three cases, an error is presented to the user (since those values cannot be played). In the case of a seq waveform, an `unseq` is implicitly applied to extract the underlying waveform. If the resulting value is a function, it's considered as candidate for a "keys" instrument (and used when a MIDI device is connected or when the computer keyboard "keys" mode is enabled).
 
 ### Abstract Waveform Optimizations
 
@@ -51,9 +51,38 @@ Generation can occur in two places:
 
 The final component of Tuun, the `Tracker`, manages the sets of active and pending waveforms, handles callbacks from the audio device, and uses the `Generator` to create samples as necessary. It receives commands to `Play` or `Modify` waveforms and updates its internal state accordingly.
 
+## Module Structure
+
+Tuun compiles as a single crate but with a clear structure and dependencies within that crate.
+
+ * `waveform`: abstract syntax for Tuun waveforms and simple operations on that syntax; independent of other code
+ * `expr`, `parser`, `eval`, `builtins`: Tuun expression language definitions and transformations; depends on `waveform` to provide definitions
+ * audio `generator` and `optimizer`: transforms and converts waveforms; depends on `waveform` to provide definitions
+ * `tracker`: extends the `generator` component with SDL2 integration
+ * native app: SDL2 UI and MIDI integration; depends on all of the above
+ * wasm target: depends on `generate` and `optimizer` and expression language components
+
+Dependencies among these components are shown below.
+```
+                      waveform
+                      ▲      ▲
+                      │      │
+                   audio    expr
+             generator        parser
+             optimizer        eval
+              ▲     ▲         builtins
+              │     │          ▲   ▲
+          tracker   │          │   │
+              │     │          │   └───────────┐
+              │     └──────────│──────────┐    │
+      ┌───────┴────────────────┴──┐    ┌──┴────┴──────────────────┐
+      │ native app (SDL UI, MIDI) │    │ wasm target (web player) │
+      └───────────────────────────┘    └──────────────────────────┘
+```
+
 ## Native App Architecture
 
-The native Tuun app is a two-thread system: a **main thread** for UI and DSL evaluation, and an **audio callback thread** for real-time sample generation. They communicate via channels.
+The native Tuun app uses two primary threads: a **main thread** for UI and DSL evaluation, and an **audio callback thread** for real-time sample generation. In addition, several helper threads are used to move work out of the main UI thread for tasks like sample precomputation. Threads communicate via channels.
 
 ### System Overview
 
