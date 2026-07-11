@@ -9,7 +9,10 @@ use crate::expr::{Binding, Error, Expr, Pattern, SourceBinding, SourceExpr};
 
 /// Extends the context with a binding for each identifier in the pattern that is bound to
 /// itself.
-fn extend_with_trivial_context<M>(context: &mut Vec<(String, SourceExpr<M>)>, pattern: &Pattern) {
+fn extend_with_trivial_context<M, S>(
+    context: &mut Vec<(String, SourceExpr<M, S>)>,
+    pattern: &Pattern,
+) {
     match pattern {
         Pattern::Identifier(name) => {
             context.push((name.clone(), SourceExpr::variable(name.clone())));
@@ -25,9 +28,13 @@ fn extend_with_trivial_context<M>(context: &mut Vec<(String, SourceExpr<M>)>, pa
 /// Substitutes any occurrences of the variables in `context` that are found in
 /// `expr` with the corresponding expressions. All of the expressions in
 /// `context` should be closed values. The resulting expression will be closed.
-fn substitute<M>(context: &[(String, SourceExpr<M>)], expr: SourceExpr<M>) -> SourceExpr<M>
+fn substitute<M, S>(
+    context: &[(String, SourceExpr<M, S>)],
+    expr: SourceExpr<M, S>,
+) -> SourceExpr<M, S>
 where
     M: Clone,
+    S: Clone,
 {
     use Expr::{
         Application, Bool, BuiltIn, Error, Float, Function, IfThenElse, List, String, Tuple,
@@ -103,13 +110,14 @@ where
     }
 }
 
-fn extend_context<M>(
-    context: &mut Vec<(String, SourceExpr<M>)>,
+fn extend_context<M, S>(
+    context: &mut Vec<(String, SourceExpr<M, S>)>,
     pattern: &Pattern,
-    argument: &SourceExpr<M>,
-) -> Result<(), Error>
+    argument: &SourceExpr<M, S>,
+) -> Result<(), Error<S>>
 where
     M: Clone + Debug + Display,
+    S: Clone + Debug,
 {
     match (pattern, &argument.expr) {
         (Pattern::Identifier(name), _) => {
@@ -146,9 +154,10 @@ where
 ///
 /// The resulting expression will have a `span` only if the argument is a value
 /// already.
-fn evaluate_closed<M>(expr: SourceExpr<M>) -> Result<SourceExpr<M>, Error>
+fn evaluate_closed<M, S>(expr: SourceExpr<M, S>) -> Result<SourceExpr<M, S>, Error<S>>
 where
     M: Clone + fmt::Display + fmt::Debug,
+    S: Clone + fmt::Debug,
 {
     use Expr::{
         Application, Bool, BuiltIn, Float, Function, IfThenElse, List, Seq, String, Tuple,
@@ -211,7 +220,7 @@ where
                     // result. Use the outer Application's span (`span`) so
                     // errors point at the whole `f(x, y)` call site — builtins
                     // themselves don't see spans.
-                    let actuals: Vec<Expr<M>> = match argument.expr {
+                    let actuals: Vec<Expr<M, S>> = match argument.expr {
                         Tuple(actuals) => actuals.into_iter().map(|s| s.expr).collect(),
                         other => vec![other],
                     };
@@ -252,27 +261,29 @@ where
 ///
 /// After `bindings` is fully processed, `expr` is substituted against the
 /// final context and reduced to a value.
-pub fn evaluate<'a, M, F>(
+pub fn evaluate<'a, M, S, F>(
     resolve: F,
-    bindings: &'a [SourceBinding<M>],
-    expr: SourceExpr<M>,
-) -> Result<SourceExpr<M>, Error>
+    bindings: &'a [SourceBinding<M, S>],
+    expr: SourceExpr<M, S>,
+) -> Result<SourceExpr<M, S>, Error<S>>
 where
-    F: Fn(&[String]) -> Result<&'a [SourceBinding<M>], Error>,
+    F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
     M: Clone + Display + Debug,
+    S: Clone + Debug,
 {
-    let mut context: Vec<(String, SourceExpr<M>)> = Vec::new();
+    let mut context: Vec<(String, SourceExpr<M, S>)> = Vec::new();
     build_context(&resolve, bindings, &mut context)?;
     evaluate_with_context(&context, expr)
 }
 
 /// Substitutes `context` into `expr` and reduces the result to a value.
-fn evaluate_with_context<M>(
-    context: &[(String, SourceExpr<M>)],
-    expr: SourceExpr<M>,
-) -> Result<SourceExpr<M>, Error>
+fn evaluate_with_context<M, S>(
+    context: &[(String, SourceExpr<M, S>)],
+    expr: SourceExpr<M, S>,
+) -> Result<SourceExpr<M, S>, Error<S>>
 where
     M: Clone + Display + Debug,
+    S: Clone + Debug,
 {
     let expr = substitute(context, expr);
     evaluate_closed(expr)
@@ -282,14 +293,15 @@ where
 /// bindings recurse through `resolve` to pull in their referenced module's
 /// bindings.
 ///
-fn build_context<'a, M, F>(
+fn build_context<'a, M, S, F>(
     resolve: &F,
-    bindings: &'a [SourceBinding<M>],
-    context: &mut Vec<(String, SourceExpr<M>)>,
-) -> Result<(), Error>
+    bindings: &'a [SourceBinding<M, S>],
+    context: &mut Vec<(String, SourceExpr<M, S>)>,
+) -> Result<(), Error<S>>
 where
-    F: Fn(&[String]) -> Result<&'a [SourceBinding<M>], Error>,
+    F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
     M: Clone + Display + Debug,
+    S: Clone + Debug,
 {
     for source_binding in bindings {
         match &source_binding.binding {
@@ -320,18 +332,18 @@ mod tests {
         let resolve = |_: &[String]| Err(Error::new("no bindings".to_string()));
 
         let input = "(fn(x) => fn(x) => x)(7)(5)";
-        let expr = parse_program::<u32>(input).unwrap();
+        let expr = parse_program::<u32, _>(input, ()).unwrap();
         println!("Parsed expression: {}", expr);
         let evaluated = evaluate(resolve, &[], expr).unwrap();
         assert_eq!(format!("{}", evaluated), "5");
 
         let input = "(fn(x) => fn(y, z) => (x, y, z))(3)(4, 5)";
-        let expr = parse_program::<u32>(input).unwrap();
+        let expr = parse_program::<u32, _>(input, ()).unwrap();
         let evaluated = evaluate(resolve, &[], expr).unwrap();
         assert_eq!(format!("{}", evaluated), "(3, 4, 5)");
 
         let input = "(fn(x, (y, z)) => (x, y, z))(3, (4, 5))";
-        let expr = parse_program::<u32>(input).unwrap();
+        let expr = parse_program::<u32, _>(input, ()).unwrap();
         let evaluated = evaluate(resolve, &[], expr).unwrap();
         assert_eq!(format!("{}", evaluated), "(3, 4, 5)");
     }

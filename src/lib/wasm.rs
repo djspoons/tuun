@@ -26,6 +26,31 @@ impl fmt::Display for MarkId {
     }
 }
 
+/// Identifies which text a span's byte range indexes in the wasm runtime.
+#[derive(Copy, Clone, Debug, PartialEq)]
+enum Source {
+    /// The user expression passed to [`Wasm::parse`].
+    Expression,
+    /// The embedded module at this index of
+    /// [`modules::EMBEDDED_MODULES`].
+    Module(usize),
+}
+
+/// Renders `error` against the text its span indexes: `expression` for
+/// expression errors, or the embedded module the error came from,
+/// prefixed with that module's name. Falls back to the bare message for
+/// errors with no span.
+fn display_error(error: &expr::Error<Source>, expression: &str) -> String {
+    match error.source() {
+        Some(Source::Expression) => error.display_with_source(expression),
+        Some(Source::Module(index)) => match modules::EMBEDDED_MODULES.get(index) {
+            Some((name, content)) => format!("{}:{}", name, error.display_with_source(content)),
+            None => error.to_string(),
+        },
+        None => error.to_string(),
+    }
+}
+
 /// WebAssembly interface for the Tuun synthesizer.
 ///
 /// Owns the currently-playing waveform.
@@ -34,23 +59,27 @@ pub struct Wasm {
     sample_rate: i32,
     /// Per-instance prelude (built-ins + `sample_rate` + `tempo`) prepended
     /// to every parse.
-    prelude: Vec<expr::SourceBinding<MarkId>>,
+    prelude: Vec<expr::SourceBinding<MarkId, Source>>,
     /// Parsed embedded modules keyed by dotted path (e.g. `"std"`).
     /// Looked up by the `evaluate` resolve callback when an `Open`
     /// binding is processed.
-    modules: HashMap<String, Vec<expr::SourceBinding<MarkId>>>,
+    modules: HashMap<String, Vec<expr::SourceBinding<MarkId, Source>>>,
     waveform: Option<generator::Waveform<MarkId>>,
     last_slider_values: HashMap<String, f32>,
     buffer_duration: Duration,
 }
 
 /// Builds a `Definition` binding for `id = expr`.
-fn def_binding(id: &str, expr: expr::SourceExpr<MarkId>) -> expr::SourceBinding<MarkId> {
+fn def_binding(
+    id: &str,
+    expr: expr::SourceExpr<MarkId, Source>,
+) -> expr::SourceBinding<MarkId, Source> {
     expr::Binding::Definition(expr::Pattern::Identifier(id.to_string()), expr).into()
 }
 
-/// Joins parse errors into a single user-visible string.
-fn join_errors(errors: &[expr::Error]) -> String {
+/// Joins parse errors into a single user-visible string of messages,
+/// without positions.
+fn join_errors<S>(errors: &[expr::Error<S>]) -> String {
     errors
         .iter()
         .map(|e| e.to_string())
@@ -74,7 +103,7 @@ impl Wasm {
         // TODO this has a lot of repetition with the native app
         // Prelude: sample_rate + tempo + built-ins. Cloned into the
         // bindings vec on every parse.
-        let mut prelude: Vec<expr::SourceBinding<MarkId>> = Vec::new();
+        let mut prelude: Vec<expr::SourceBinding<MarkId, Source>> = Vec::new();
         prelude.push(def_binding(
             "sample_rate",
             SourceExpr::float(sample_rate as f32),
@@ -91,24 +120,26 @@ impl Wasm {
         // built-ins) without depending on the caller having opened the
         // prelude first. Mirrors `evaluator::Evaluator::resolve` in
         // the native runtime.
-        let mut modules: HashMap<String, Vec<expr::SourceBinding<MarkId>>> = HashMap::new();
-        for (name, content) in modules::EMBEDDED_MODULES {
+        let mut modules: HashMap<String, Vec<expr::SourceBinding<MarkId, Source>>> = HashMap::new();
+        for (index, (name, content)) in modules::EMBEDDED_MODULES.iter().enumerate() {
+            let render = |errors: Vec<expr::Error<Source>>| {
+                format!(
+                    "Failed to parse module '{}': {}",
+                    name,
+                    errors
+                        .iter()
+                        .map(|e| e.display_with_source(content))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
+            };
             let (mut bindings, errors) =
-                parser::parse_module::<MarkId>(content).map_err(|errors| {
-                    format!(
-                        "Failed to parse module '{}': {}",
-                        name,
-                        join_errors(&errors)
-                    )
-                })?;
+                parser::parse_module::<MarkId, _>(content, Source::Module(index))
+                    .map_err(&render)?;
             // Embedded modules are fixed at build time, so recoverable parse
             // errors mean the build itself is broken — fail loudly.
             if !errors.is_empty() {
-                return Err(format!(
-                    "Failed to parse module '{}': {}",
-                    name,
-                    join_errors(&errors)
-                ));
+                return Err(render(errors));
             }
             bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
             modules.insert((*name).to_string(), bindings);
@@ -145,13 +176,14 @@ impl Wasm {
         slider_json: &str,
         open_json: &str,
     ) -> Result<(), String> {
-        let parsed_expr = parser::parse_program::<MarkId>(expression).map_err(|errors| {
-            let rendered: Vec<String> = errors
-                .iter()
-                .map(|e| e.display_with_source(expression))
-                .collect();
-            format!("Parse errors: {}", rendered.join("; "))
-        })?;
+        let parsed_expr = parser::parse_program::<MarkId, _>(expression, Source::Expression)
+            .map_err(|errors| {
+                let rendered: Vec<String> = errors
+                    .iter()
+                    .map(|e| e.display_with_source(expression))
+                    .collect();
+                format!("Parse errors: {}", rendered.join("; "))
+            })?;
         let sliders = parse_json(slider_json)?;
         let opens = modules::parse_open_json(open_json)?;
 
@@ -159,7 +191,7 @@ impl Wasm {
         // `open __prelude` first so the user expression can reference
         // prelude names directly (same prefix each embedded module
         // gets). Then user-requested opens, then slider bindings.
-        let mut bindings: Vec<expr::SourceBinding<MarkId>> = Vec::new();
+        let mut bindings: Vec<expr::SourceBinding<MarkId, Source>> = Vec::new();
         bindings.push(expr::Binding::Open(vec!["__prelude".to_string()]).into());
         for path in opens {
             bindings.push(expr::Binding::Open(path).into());
@@ -180,7 +212,10 @@ impl Wasm {
         // `evaluate`.
         let prelude = &self.prelude;
         let modules = &self.modules;
-        let resolve = |path: &[String]| -> Result<&[expr::SourceBinding<MarkId>], expr::Error> {
+        let resolve = |path: &[String]| -> Result<
+            &[expr::SourceBinding<MarkId, Source>],
+            expr::Error<Source>,
+        > {
             if path.len() == 1 && path[0] == "__prelude" {
                 return Ok(prelude.as_slice());
             }
@@ -192,7 +227,7 @@ impl Wasm {
         };
 
         let expr = eval::evaluate(resolve, &bindings, parsed_expr)
-            .map_err(|e| format!("Evaluate error: {}", e))?;
+            .map_err(|e| format!("Evaluate error: {}", display_error(&e, expression)))?;
 
         // TODO Do we want to precompute here?
 

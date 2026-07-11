@@ -3,7 +3,8 @@
 use std::fmt;
 use std::ops::Range;
 
-use crate::diagnostics::Diagnostic;
+use crate::diagnostics::{Diagnostic, SourceId};
+use crate::evaluator::Evaluator;
 use crate::expr;
 use crate::ids::MarkId;
 use crate::parser;
@@ -133,7 +134,7 @@ pub enum Evaluation {
     /// The program evaluated to a playable waveform.
     Waveform(waveform::Waveform<MarkId>),
     /// The program evaluated to a function usable as a keys instrument.
-    KeysInstrument(expr::SourceExpr<MarkId>),
+    KeysInstrument(expr::SourceExpr<MarkId, SourceId>),
     /// The program failed to parse or evaluate; holds the user-visible
     /// diagnostics.
     Invalid(Vec<Diagnostic>),
@@ -157,7 +158,7 @@ pub struct Program {
     /// Set if the current text evaluates to a valid waveform.
     cached_waveform: Option<waveform::Waveform<MarkId>>,
     /// Set if the current text evaluates to a valid keys instrument.
-    cached_keys_instrument: Option<expr::SourceExpr<MarkId>>,
+    cached_keys_instrument: Option<expr::SourceExpr<MarkId, SourceId>>,
 }
 
 impl Program {
@@ -181,7 +182,7 @@ impl Program {
     /// Only `Definition`s with at least one annotation become programs.
     /// `Definition`s with no annotations are not returned.
     fn from_source_binding(
-        sb: &expr::SourceBinding<MarkId>,
+        sb: &expr::SourceBinding<MarkId, SourceId>,
         binding_index: usize,
         source: &str,
     ) -> Option<Program> {
@@ -268,7 +269,7 @@ impl Program {
 
     /// Returns the cached keys-instrument function if the current text
     /// evaluated to one.
-    pub fn keys_instrument(&self) -> Option<&expr::SourceExpr<MarkId>> {
+    pub fn keys_instrument(&self) -> Option<&expr::SourceExpr<MarkId, SourceId>> {
         self.cached_keys_instrument.as_ref()
     }
 
@@ -345,7 +346,7 @@ impl Program {
 }
 
 /// Returns the last `skip_slots=N` value on `sb`, or 0 if none is present.
-fn read_skip_slots(sb: &expr::SourceBinding<MarkId>) -> u32 {
+fn read_skip_slots(sb: &expr::SourceBinding<MarkId, SourceId>) -> u32 {
     // The reverse walk mirrors the "last wins" semantics used elsewhere for
     // repeated annotations of the same kind.
     sb.annotations
@@ -365,7 +366,7 @@ fn read_skip_slots(sb: &expr::SourceBinding<MarkId>) -> u32 {
 /// valid. `position` starts at 0 and advances by `skip_slots + 1` for each such
 /// binding — the same walk `ProgramSet::from_source` uses to assign grid slots.
 fn walk_ui_positions(
-    bindings: &[expr::SourceBinding<MarkId>],
+    bindings: &[expr::SourceBinding<MarkId, SourceId>],
     source_len: usize,
 ) -> Vec<(usize, usize, std::ops::Range<usize>)> {
     let mut out = Vec::new();
@@ -395,7 +396,7 @@ fn walk_ui_positions(
 /// `bindings`/`source`.
 pub struct ProgramSet {
     programs: Vec<Program>,
-    bindings: Vec<expr::SourceBinding<MarkId>>,
+    bindings: Vec<expr::SourceBinding<MarkId, SourceId>>,
     source: String,
     input_path: std::path::PathBuf,
 }
@@ -412,12 +413,9 @@ impl ProgramSet {
     pub fn from_source(
         source: String,
         input_path: std::path::PathBuf,
-    ) -> Result<(ProgramSet, String), Vec<expr::Error>> {
+    ) -> Result<(ProgramSet, String), Vec<expr::Error<SourceId>>> {
         let mut message = String::new();
-        let (mut bindings, errors) = parser::parse_module::<MarkId>(&source)?;
-        // These bindings' spans index the backing source file, not a program
-        // slot's text — stamp them so error positions resolve correctly.
-        expr::set_span_source(&mut bindings, expr::SourceId::File);
+        let (bindings, errors) = parser::parse_module::<MarkId, _>(&source, SourceId::File)?;
         // TODO sort of a bummer that we don't know which binding this error was
         // in... some opportunity here to improve the type of parse_module.
         if !errors.is_empty() {
@@ -528,9 +526,9 @@ impl ProgramSet {
     /// file-level bindings preceding it (bindings after it are ignored),
     /// with anonymous `_` definitions filtered out, plus a binding for each
     /// of the program's sliders at its current value.
-    pub fn evaluation_bindings(&self, index: usize) -> Vec<expr::SourceBinding<MarkId>> {
+    pub fn evaluation_bindings(&self, index: usize) -> Vec<expr::SourceBinding<MarkId, SourceId>> {
         let program = &self.programs[index];
-        let mut bindings: Vec<expr::SourceBinding<MarkId>> =
+        let mut bindings: Vec<expr::SourceBinding<MarkId, SourceId>> =
             self.bindings[..program.binding_index].to_vec();
         // TODO this is a pretty big hack but there's an interesting question
         // about what sliders in *other* bindings mean. To avoid answering that
@@ -571,7 +569,7 @@ impl ProgramSet {
     /// case).
     pub fn evaluate_and_record(
         &mut self,
-        evaluator: &crate::evaluator::Evaluator,
+        evaluator: &Evaluator,
         index: usize,
     ) -> Result<(), Vec<Diagnostic>> {
         // An empty program is a deletion, not a parse error: clear both caches
@@ -602,7 +600,7 @@ const ANNOTATION_EPSILON: f32 = 1e-4;
 /// value. Returns an empty list when nothing has changed.
 fn annotation_edits(
     program: &Program,
-    binding: &expr::SourceBinding<MarkId>,
+    binding: &expr::SourceBinding<MarkId, SourceId>,
     source: &str,
 ) -> Vec<(std::ops::Range<usize>, String)> {
     let mut edits = Vec::new();
@@ -619,7 +617,7 @@ fn annotation_edits(
 /// the runtime level matches what the binding currently encodes.
 fn level_edit(
     program: &Program,
-    binding: &expr::SourceBinding<MarkId>,
+    binding: &expr::SourceBinding<MarkId, SourceId>,
     source: &str,
 ) -> Option<(std::ops::Range<usize>, String)> {
     let (parsed_value, parsed_span) = match last_annotation_of(binding, |a| match a {
@@ -680,7 +678,7 @@ fn insert_annotation_line(
 /// 0 — swapping in `level_db=…` instead when `skip_slots` is the binding's only
 /// annotation, so the binding stays a UI program.
 fn skip_slots_edit(
-    binding: &expr::SourceBinding<MarkId>,
+    binding: &expr::SourceBinding<MarkId, SourceId>,
     new_skip: u32,
     level_db: f32,
     source: &str,
@@ -765,7 +763,7 @@ fn remove_annotation_edit(
 /// every slider's current normalized value matches its parsed initial.
 fn sliders_edit(
     program: &Program,
-    binding: &expr::SourceBinding<MarkId>,
+    binding: &expr::SourceBinding<MarkId, SourceId>,
 ) -> Option<(std::ops::Range<usize>, String)> {
     if program.sliders().configs().is_empty() {
         return None;
@@ -821,7 +819,7 @@ fn sliders_edit(
 /// annotations of the same kind, so persisting onto the same span keeps the
 /// source authoritative.
 fn last_annotation_of<T, F>(
-    binding: &expr::SourceBinding<MarkId>,
+    binding: &expr::SourceBinding<MarkId, SourceId>,
     mut pick: F,
 ) -> Option<(T, Option<std::ops::Range<usize>>)>
 where
@@ -1039,8 +1037,9 @@ impl ProgramSet {
         // It's ok to drop the errors here: if parse_module succeeded then we know
         // that the resulting bindings span the entire input (even if there are
         // errors).
-        let (new_bindings, _errors) = parser::parse_module::<MarkId>(&new_source)
-            .map_err(|errs| format!("Warning: source re-parse failed: {:?}", errs))?;
+        let (new_bindings, _errors) =
+            parser::parse_module::<MarkId, _>(&new_source, SourceId::File)
+                .map_err(|errs| format!("Warning: source re-parse failed: {:?}", errs))?;
 
         // Realign each program to its position in the re-parsed source by
         // running the same position walk used at load time.
@@ -1835,7 +1834,7 @@ kick = pulse(60);"
         // evaluator — an empty program is a deletion in progress.
         let mut state = state_from("#{level_db=0}\nkick = pulse(60);");
         state.program_mut(0).unwrap().set_text("  ".to_string());
-        let evaluator = crate::evaluator::Evaluator::new(44100, 90, std::path::PathBuf::new());
+        let evaluator = Evaluator::new(44100, 90, std::path::PathBuf::new());
         assert!(state.evaluate_and_record(&evaluator, 0).is_ok());
         assert!(state.programs()[0].waveform().is_none());
         assert!(state.programs()[0].keys_instrument().is_none());

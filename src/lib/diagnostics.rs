@@ -6,6 +6,21 @@ use std::path::PathBuf;
 
 use crate::expr;
 
+/// Identifies which of the app's texts a span's byte range indexes.
+///
+/// Passed to the parser when parsing each kind of text, and matched by
+/// `Evaluator::diagnose` to resolve an error's range against that same
+/// text.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum SourceId {
+    /// A program slot's own text, as shown in the editor.
+    Program,
+    /// The backing source file the program set was loaded from.
+    File,
+    /// The module at this index in the evaluator's module table.
+    Module(u32),
+}
+
 /// A user-visible error with its source position resolved, where known.
 ///
 /// Produced from an `expr::Error` at the evaluator boundary. Only errors

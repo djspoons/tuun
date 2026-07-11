@@ -10,16 +10,17 @@ use Expr::{Application, Bool, BuiltIn, Error, Float, List, Seq, Tuple};
 
 type WaveformBinOp<M> = fn(Box<Waveform<M>>, Box<Waveform<M>>) -> Waveform<M>;
 
-type BuiltinFn<M> = fn(Vec<Expr<M>>) -> Expr<M>;
+type BuiltinFn<M, S> = fn(Vec<Expr<M, S>>) -> Expr<M, S>;
 
-fn unary_op<M>(
-    mut arguments: Vec<Expr<M>>,
+fn unary_op<M, S>(
+    mut arguments: Vec<Expr<M, S>>,
     name: String,
     float_op: fn(f32) -> f32,
     waveform_op: fn(Box<Waveform<M>>) -> Waveform<M>,
-) -> Expr<M>
+) -> Expr<M, S>
 where
     M: Debug,
+    S: Debug,
 {
     if arguments.len() != 1 {
         return Error(format!("Expected one argument for {}", name));
@@ -31,21 +32,22 @@ where
     }
 }
 
-fn binary_op<M>(
-    mut arguments: Vec<Expr<M>>,
+fn binary_op<M, S>(
+    mut arguments: Vec<Expr<M, S>>,
     name: String,
     float_op: fn(f32, f32) -> f32,
     waveform_op: WaveformBinOp<M>,
-) -> Expr<M>
+) -> Expr<M, S>
 where
     M: Debug,
+    S: Debug,
 {
-    fn make_seq<M>(
-        offset: Box<SourceExpr<M>>,
+    fn make_seq<M, S>(
+        offset: Box<SourceExpr<M, S>>,
         waveform_op: WaveformBinOp<M>,
         a: Waveform<M>,
         b: Waveform<M>,
-    ) -> Expr<M>
+    ) -> Expr<M, S>
     where
         M: Debug,
     {
@@ -95,18 +97,20 @@ where
     }
 }
 
-pub fn plus<M>(arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn plus<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug,
+    S: Debug,
 {
     binary_op(arguments, "+".to_string(), std::ops::Add::add, |a, b| {
         Waveform::BinaryPointOp(Operator::Add, a, b)
     })
 }
 
-pub fn minus<M>(arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn minus<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug,
+    S: Debug,
 {
     if arguments.len() == 1 {
         return unary_op(
@@ -127,27 +131,30 @@ where
     })
 }
 
-pub fn times<M>(arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn times<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug,
+    S: Debug,
 {
     binary_op(arguments, "*".to_string(), std::ops::Mul::mul, |a, b| {
         Waveform::BinaryPointOp(Operator::Multiply, a, b)
     })
 }
 
-pub fn divide<M>(arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn divide<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug,
+    S: Debug,
 {
     binary_op(arguments, "/".to_string(), std::ops::Div::div, |a, b| {
         Waveform::BinaryPointOp(Operator::Divide, a, b)
     })
 }
 
-pub fn merge<M>(arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn merge<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug,
+    S: Debug,
 {
     // It seems strange to ever apply & to two floats, so just promote them
     // here.
@@ -169,9 +176,10 @@ where
 
 // Given waveforms that represent offsets (and assuming offset waveforms are of the form
 // `Time ~+ w` or `Const(x)`) return a new waveform which represents the sum of those offsets.
-fn add_offsets<M>(a: Waveform<M>, b: Waveform<M>) -> Expr<M>
+fn add_offsets<M, S>(a: Waveform<M>, b: Waveform<M>) -> Expr<M, S>
 where
     M: Clone + Debug + PartialEq,
+    S: Clone + Debug,
 {
     match (optimizer::first_root(&a), optimizer::first_root(&b)) {
         (Some(a_root), Some(b_root)) => {
@@ -197,9 +205,10 @@ where
     }
 }
 
-pub fn followed_by<M>(mut arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn followed_by<M, S>(mut arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug + Display + Clone + PartialEq,
+    S: Clone + Debug,
 {
     if arguments.len() != 2 {
         return Error("Expected two arguments to \\".to_string());
@@ -289,18 +298,20 @@ where
     }
 }
 
-pub fn power<M>(arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn power<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug,
+    S: Debug,
 {
     binary_op(arguments, "pow".to_string(), f32::powf, |a, b| {
         Waveform::BinaryPointOp(Operator::Power, a, b)
     })
 }
 
-pub fn log<M>(arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn log<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug,
+    S: Debug,
 {
     match arguments[..] {
         [Float(value), Float(base)] => Expr::Float(value.log(base)),
@@ -308,9 +319,10 @@ where
     }
 }
 
-pub fn sqrt<M>(arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn sqrt<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug,
+    S: Debug,
 {
     match arguments[..] {
         [Float(value)] if value >= 0.0 => Expr::Float(value.sqrt()),
@@ -318,9 +330,10 @@ where
     }
 }
 
-pub fn exp<M>(arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn exp<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug,
+    S: Debug,
 {
     match arguments[..] {
         [Float(value)] => Expr::Float(value.exp()),
@@ -328,9 +341,10 @@ where
     }
 }
 
-pub fn sine<M>(arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn sine<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug + Clone,
+    S: Clone + Debug,
 {
     // Like the waveform, Sine, the first argument is frequency in radians per
     // second, and the second is phase in radians.
@@ -362,9 +376,10 @@ where
 }
 
 // TODO: can this be moved to context?
-pub fn cos<M>(arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn cos<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug + Clone,
+    S: Clone + Debug,
 {
     match &arguments[..] {
         [Float(value)] => Expr::Float(value.cos()),
@@ -382,9 +397,10 @@ where
     }
 }
 
-pub fn equals<M>(arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn equals<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug,
+    S: Debug,
 {
     match &arguments[..] {
         [Bool(a), Bool(b)] => Expr::Bool(a == b),
@@ -394,9 +410,10 @@ where
     }
 }
 
-pub fn not_equals<M>(arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn not_equals<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug,
+    S: Debug,
 {
     match &arguments[..] {
         [Bool(a), Bool(b)] => Expr::Bool(a != b),
@@ -406,9 +423,10 @@ where
     }
 }
 
-pub fn less_than<M>(arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn less_than<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug,
+    S: Debug,
 {
     match arguments[..] {
         [Float(a), Float(b)] => Expr::Bool(a < b),
@@ -416,9 +434,10 @@ where
     }
 }
 
-pub fn less_than_equals<M>(arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn less_than_equals<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug,
+    S: Debug,
 {
     match arguments[..] {
         [Float(a), Float(b)] => Expr::Bool(a <= b),
@@ -426,9 +445,10 @@ where
     }
 }
 
-pub fn greater_than<M>(arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn greater_than<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug,
+    S: Debug,
 {
     match arguments[..] {
         [Float(a), Float(b)] => Expr::Bool(a > b),
@@ -436,9 +456,10 @@ where
     }
 }
 
-pub fn greater_than_equals<M>(arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn greater_than_equals<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug,
+    S: Debug,
 {
     match arguments[..] {
         [Float(a), Float(b)] => Expr::Bool(a >= b),
@@ -446,13 +467,14 @@ where
     }
 }
 
-pub fn map<M>(arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn map<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Clone + Debug + Display,
+    S: Clone + Debug,
 {
     match &arguments[..] {
         [function, List(exprs)] => {
-            let mut results: Vec<SourceExpr<M>> = Vec::new();
+            let mut results: Vec<SourceExpr<M, S>> = Vec::new();
             let resolve = |_: &[String]| {
                 Err(expr::Error::new(
                     "Didn't expect to resolve in map()".to_string(),
@@ -478,13 +500,14 @@ where
     }
 }
 
-pub fn reduce<M>(arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn reduce<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug + Clone + Display,
+    S: Clone + Debug,
 {
     match &arguments[..] {
         [function, acc, List(exprs)] => {
-            let mut acc: SourceExpr<M> = SourceExpr::from(acc.clone());
+            let mut acc: SourceExpr<M, S> = SourceExpr::from(acc.clone());
             let resolve = |_: &[String]| {
                 Err(expr::Error::new(
                     "Didn't expect to resolve in reduce()".to_string(),
@@ -510,14 +533,15 @@ where
     }
 }
 
-pub fn unfold<M>(arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn unfold<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug + Clone + Display,
+    S: Clone + Debug,
 {
     match &arguments[..] {
         [function, seed, Float(n)] if *n >= 0.0 && n.fract() == 0.0 => {
-            let mut results: Vec<SourceExpr<M>> = Vec::new();
-            let mut current: SourceExpr<M> = SourceExpr::from(seed.clone());
+            let mut results: Vec<SourceExpr<M, S>> = Vec::new();
+            let mut current: SourceExpr<M, S> = SourceExpr::from(seed.clone());
             let resolve = |_: &[String]| {
                 Err(expr::Error::new(
                     "Didn't expect to resolve in unfold()".to_string(),
@@ -546,9 +570,10 @@ where
 }
 
 // Appends two or more lists or waveforms together
-pub fn append<M>(arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn append<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug + Clone,
+    S: Clone + Debug,
 {
     match &arguments[..] {
         [List(a), rest @ ..] => {
@@ -577,9 +602,10 @@ where
     }
 }
 
-pub fn fixed<M>(arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn fixed<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug,
+    S: Debug,
 {
     match &arguments[..] {
         [List(samples)] => {
@@ -596,34 +622,36 @@ where
     }
 }
 
-pub fn curry<M>(f: impl Fn(Box<Waveform<M>>) -> Waveform<M> + 'static) -> BuiltInFn<M>
+pub fn curry<M, S>(f: impl Fn(Box<Waveform<M>>) -> Waveform<M> + 'static) -> BuiltInFn<M, S>
 where
     M: Display,
 {
-    BuiltInFn(Rc::new(move |mut arguments: Vec<Expr<M>>| -> Expr<M> {
-        if arguments.len() != 1 {
-            return Error("Expected waveform".to_string());
-        }
-        let waveform = arguments.remove(0);
-        match waveform {
-            Expr::Waveform(a) => Expr::Waveform(f(Box::new(a))),
-            Expr::Float(value) => Expr::Waveform(f(Box::new(Waveform::Const(value)))),
-            Seq { offset, waveform } => match waveform.expr {
-                Expr::Waveform(waveform) => Seq {
-                    offset,
-                    waveform: boxed(Expr::Waveform(f(Box::new(waveform)))),
+    BuiltInFn(Rc::new(
+        move |mut arguments: Vec<Expr<M, S>>| -> Expr<M, S> {
+            if arguments.len() != 1 {
+                return Error("Expected waveform".to_string());
+            }
+            let waveform = arguments.remove(0);
+            match waveform {
+                Expr::Waveform(a) => Expr::Waveform(f(Box::new(a))),
+                Expr::Float(value) => Expr::Waveform(f(Box::new(Waveform::Const(value)))),
+                Seq { offset, waveform } => match waveform.expr {
+                    Expr::Waveform(waveform) => Seq {
+                        offset,
+                        waveform: boxed(Expr::Waveform(f(Box::new(waveform)))),
+                    },
+                    expr => Error(format!(
+                        "Expected waveform as argument to seq, got {}",
+                        expr
+                    )),
                 },
-                expr => Error(format!(
-                    "Expected waveform as argument to seq, got {}",
-                    expr
-                )),
-            },
-            expr => Error(format!("Expected waveform, seq, or float, got {}", expr)),
-        }
-    }))
+                expr => Error(format!("Expected waveform, seq, or float, got {}", expr)),
+            }
+        },
+    ))
 }
 
-pub fn fin<M>(mut arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn fin<M, S>(mut arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug + Clone + Display + 'static,
 {
@@ -660,7 +688,7 @@ where
     }
 }
 
-pub fn seq<M>(mut arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn seq<M, S>(mut arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug + Clone + Display + 'static,
 {
@@ -680,34 +708,36 @@ where
     let name = format!("seq({})", offset);
     BuiltIn {
         name,
-        function: BuiltInFn(Rc::new(move |mut arguments: Vec<Expr<M>>| -> Expr<M> {
-            let offset = offset.clone();
-            if arguments.len() != 1 {
-                return Error(format!(
-                    "Expected one argument for seq({}), got {}",
-                    offset,
-                    arguments.len()
-                ));
-            }
-            match arguments.remove(0) {
-                Expr::Waveform(waveform) => Seq {
-                    offset: boxed(Expr::Waveform(offset)),
-                    waveform: boxed(Expr::Waveform(waveform)),
-                },
-                Expr::Float(f) => Seq {
-                    offset: boxed(Expr::Waveform(offset)),
-                    waveform: boxed(Expr::Waveform(Waveform::Const(f))),
-                },
-                expr => Error(format!(
-                    "Expected argument to seq({}) to be a waveform or float, got {}",
-                    offset, expr
-                )),
-            }
-        })),
+        function: BuiltInFn(Rc::new(
+            move |mut arguments: Vec<Expr<M, S>>| -> Expr<M, S> {
+                let offset = offset.clone();
+                if arguments.len() != 1 {
+                    return Error(format!(
+                        "Expected one argument for seq({}), got {}",
+                        offset,
+                        arguments.len()
+                    ));
+                }
+                match arguments.remove(0) {
+                    Expr::Waveform(waveform) => Seq {
+                        offset: boxed(Expr::Waveform(offset)),
+                        waveform: boxed(Expr::Waveform(waveform)),
+                    },
+                    Expr::Float(f) => Seq {
+                        offset: boxed(Expr::Waveform(offset)),
+                        waveform: boxed(Expr::Waveform(Waveform::Const(f))),
+                    },
+                    expr => Error(format!(
+                        "Expected argument to seq({}) to be a waveform or float, got {}",
+                        offset, expr
+                    )),
+                }
+            },
+        )),
     }
 }
 
-pub fn unseq<M>(arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn unseq<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug + 'static,
 {
@@ -719,7 +749,7 @@ where
     }
     Expr::BuiltIn {
         name: "unseq()".to_string(),
-        function: BuiltInFn(Rc::new(|mut arguments: Vec<Expr<M>>| -> Expr<M> {
+        function: BuiltInFn(Rc::new(|mut arguments: Vec<Expr<M, S>>| -> Expr<M, S> {
             if arguments.len() != 1 {
                 return Error(format!(
                     "Expected argument for unseq(), got {}",
@@ -737,7 +767,7 @@ where
 /*
 // TODO reconsider this: maybe this doesn't make sense any more... or the right argument
 // needs to be a list of waveforms
-pub fn waveform_convolution(mut arguments: Vec<Expr<M>>) -> Expr<M> where M: Debug {
+pub fn waveform_convolution(mut arguments: Vec<Expr<M, S>>) -> Expr<M, S> where M: Debug {
     if arguments.len() != 2 {
         return Error(format!("Expected two arguments for ~*"));
     }
@@ -758,7 +788,7 @@ pub fn waveform_convolution(mut arguments: Vec<Expr<M>>) -> Expr<M> where M: Deb
 }
 */
 
-pub fn waveform_filter<M>(mut arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn waveform_filter<M, S>(mut arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug + Clone + Display + 'static,
 {
@@ -822,9 +852,10 @@ where
     }
 }
 
-pub fn reset<M>(mut arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn reset<M, S>(mut arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug,
+    S: Debug,
 {
     // TODO make it work in curried form?
     if arguments.len() != 2 {
@@ -846,9 +877,10 @@ where
     })
 }
 
-pub fn alt<M>(mut arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn alt<M, S>(mut arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug,
+    S: Debug,
 {
     // TODO make it work in curried form?
     if arguments.len() != 3 {
@@ -877,7 +909,7 @@ where
 }
 
 // TODO move to main? (Because it only works in the native app anyway...?)
-fn capture<M>(mut arguments: Vec<Expr<M>>) -> Expr<M>
+fn capture<M, S>(mut arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug + Display + 'static,
 {
@@ -897,9 +929,10 @@ where
     }
 }
 
-pub fn chord<M>(arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn chord<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug + Clone + Display,
+    S: Clone + Debug,
 {
     match &arguments[..] {
         [List(exprs)] => {
@@ -921,9 +954,10 @@ where
     }
 }
 
-pub fn sequence<M>(mut arguments: Vec<Expr<M>>) -> Expr<M>
+pub fn sequence<M, S>(mut arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug + Clone + Display + PartialEq + 'static,
+    S: Clone + Debug + 'static,
 {
     if arguments.len() != 1 {
         return Error("Invalid argument for sequence".to_string());
@@ -950,10 +984,12 @@ where
 }
 
 /// Adds all of the built-ins to `bindings`.
-pub fn add_bindings<M: Debug + Clone + Display + PartialEq + 'static>(
-    bindings: &mut Vec<expr::SourceBinding<M>>,
-) {
-    fn def<M>(id: &str, expr: expr::SourceExpr<M>) -> expr::SourceBinding<M> {
+pub fn add_bindings<M, S>(bindings: &mut Vec<expr::SourceBinding<M, S>>)
+where
+    M: Debug + Clone + Display + PartialEq + 'static,
+    S: Clone + Debug + 'static,
+{
+    fn def<M, S>(id: &str, expr: expr::SourceExpr<M, S>) -> expr::SourceBinding<M, S> {
         use crate::expr::Binding;
         use crate::expr::Pattern;
         Binding::Definition(Pattern::Identifier(id.to_string()), expr).into()
@@ -969,7 +1005,7 @@ pub fn add_bindings<M: Debug + Clone + Display + PartialEq + 'static>(
         SourceExpr::from(Expr::Waveform(Waveform::Noise)),
     ));
 
-    let builtins: Vec<(&str, BuiltinFn<M>)> = vec![
+    let builtins: Vec<(&str, BuiltinFn<M, S>)> = vec![
         ("+", plus),
         ("-", minus),
         ("*", times),

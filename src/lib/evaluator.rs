@@ -12,7 +12,7 @@ use std::path;
 use std::time;
 
 use crate::builtins;
-use crate::diagnostics::Diagnostic;
+use crate::diagnostics::{Diagnostic, SourceId};
 use crate::eval;
 use crate::expr;
 use crate::ids::MarkId;
@@ -23,7 +23,7 @@ use crate::waveform;
 
 /// The `mark(N)` built-in: wraps a waveform in a `MarkId::UserDefined`
 /// mark.
-fn mark(arguments: Vec<expr::Expr<MarkId>>) -> expr::Expr<MarkId> {
+fn mark<S: 'static>(arguments: Vec<expr::Expr<MarkId, S>>) -> expr::Expr<MarkId, S> {
     match &arguments[..] {
         [expr::Expr::Float(id)] if *id >= 1.0 && id.fract() == 0.0 => {
             let id = id.round() as u32;
@@ -41,24 +41,13 @@ fn mark(arguments: Vec<expr::Expr<MarkId>>) -> expr::Expr<MarkId> {
     }
 }
 
-/// Returns a user-visible error for a failed module parse, rendering the
-/// first parse error as `file:line:col: message` when there is one.
-///
-/// `display_path` is the module's path as shown to the user (relative to
-/// the library root).
-fn module_parse_error(
-    display_path: &path::Path,
-    source: &str,
-    errors: Vec<expr::Error>,
-) -> expr::Error {
-    match errors.into_iter().next() {
-        Some(error) => expr::Error::new(format!(
-            "{}:{}",
-            display_path.display(),
-            error.display_with_source(source)
-        )),
-        None => expr::Error::new(format!("Parse failed for {}", display_path.display())),
-    }
+/// Returns the error to report for a module that failed to parse: the
+/// first of `errors`, whose span already locates it in the module.
+fn first_module_error(errors: Vec<expr::Error<SourceId>>) -> expr::Error<SourceId> {
+    errors
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| expr::Error::new("Parse failed".to_string()))
 }
 
 /// Returns the module's display path relative to the library root:
@@ -74,25 +63,29 @@ fn module_display_path(path: &[String]) -> path::PathBuf {
 }
 
 /// One slot in [`Evaluator`]'s module cache: the file's mtime at the time we
-/// parsed it, the source text (for resolving error offsets to line and column),
-/// the module's stable id (the payload of [`expr::SourceId::Module`] stamped
-/// on its spans), plus a leaked `&'static` slice of the parsed bindings.
+/// parsed it, plus a leaked `&'static` slice of the parsed bindings.
 // See the field doc on `Evaluator::modules` for the leak strategy.
 struct ModuleCacheEntry {
     mtime: time::SystemTime,
+    bindings: &'static [expr::SourceBinding<MarkId, SourceId>],
+}
+
+/// The identity behind a module id: the module's path and the most
+/// recently read source text (kept even when that text failed to parse,
+/// so parse errors can be located).
+struct ModuleInfo {
+    path: Vec<String>,
     source: String,
-    id: u32,
-    bindings: &'static [expr::SourceBinding<MarkId>],
 }
 
 pub struct Evaluator {
     /// Built-ins + environment-derived definitions; implicitly opened at
     /// the top of every other loaded module — see [`Evaluator::resolve`].
-    prelude: Vec<expr::SourceBinding<MarkId>>,
+    prelude: Vec<expr::SourceBinding<MarkId, SourceId>>,
     /// Filesystem root for module resolution. A module path
     /// `["foo", "bar"]` is looked up as `<library_root>/foo/bar.tuun`.
     library_root: path::PathBuf,
-    /// Cache of loaded modules, keyed by module path.
+    /// Cache of successfully parsed modules, keyed by module path.
     ///
     /// Each entry pairs the file's last-seen mtime with a leaked `&'static`
     /// slice of bindings. On `resolve`, we stat the file and re-read+re-parse
@@ -105,9 +98,9 @@ pub struct Evaluator {
     /// workflow.
     // TODO consider other ways of caching that don't depend on leak
     modules: RefCell<HashMap<Vec<String>, ModuleCacheEntry>>,
-    /// Module path for each assigned module id (index = id). Ids are stable
-    /// across mtime reloads of the same module.
-    module_paths: RefCell<Vec<Vec<String>>>,
+    /// Path and latest source for each assigned module id (index = id).
+    /// Ids are stable across mtime reloads of the same module.
+    module_info: RefCell<Vec<ModuleInfo>>,
 }
 
 impl Evaluator {
@@ -118,7 +111,7 @@ impl Evaluator {
         builtins::add_bindings(&mut prelude);
 
         use expr::SourceExpr;
-        fn def<M>(id: &str, expr: SourceExpr<M>) -> expr::SourceBinding<M> {
+        fn def<M, S>(id: &str, expr: SourceExpr<M, S>) -> expr::SourceBinding<M, S> {
             use expr::Binding;
             use expr::Pattern;
             Binding::Definition(Pattern::Identifier(id.to_string()), expr).into()
@@ -138,7 +131,7 @@ impl Evaluator {
             prelude,
             library_root,
             modules: RefCell::new(HashMap::new()),
-            module_paths: RefCell::new(Vec::new()),
+            module_info: RefCell::new(Vec::new()),
         }
     }
 
@@ -156,7 +149,10 @@ impl Evaluator {
     /// stays in memory — any borrows handed out before invalidation remain
     /// valid (essential for recursive resolve calls during one `evaluate`
     /// session).
-    fn resolve(&self, path: &[String]) -> Result<&[expr::SourceBinding<MarkId>], expr::Error> {
+    fn resolve(
+        &self,
+        path: &[String],
+    ) -> Result<&[expr::SourceBinding<MarkId, SourceId>], expr::Error<SourceId>> {
         if path.len() == 1 && path[0] == "__prelude" {
             return Ok(&self.prelude);
         }
@@ -182,7 +178,11 @@ impl Evaluator {
             return Ok(entry.bindings);
         }
 
-        // Cache miss or stale — reload.
+        // Cache miss or stale — reload. The module's id (stable across
+        // reloads of the same path) is assigned before parsing so both the
+        // bindings' spans and any parse error's span carry it; the source
+        // text is recorded even on a failed parse so those errors can be
+        // located.
         let contents = fs::read_to_string(&file_path).map_err(|e| {
             expr::Error::new(format!(
                 "Failed to read module {}: {}",
@@ -190,12 +190,17 @@ impl Evaluator {
                 e
             ))
         })?;
+        let id = self.record_module_info(path, contents);
+        let module_info = self.module_info.borrow();
+        let contents = &module_info[id as usize].source;
+
         // A module that parses with recoverable errors is still broken —
         // report it rather than evaluating with error placeholders.
-        let (mut bindings, errors) = parser::parse_module::<MarkId>(&contents)
-            .map_err(|errors| module_parse_error(&display_path, &contents, errors))?;
+        let (mut bindings, errors) =
+            parser::parse_module::<MarkId, _>(contents, SourceId::Module(id))
+                .map_err(first_module_error)?;
         if !errors.is_empty() {
-            return Err(module_parse_error(&display_path, &contents, errors));
+            return Err(first_module_error(errors));
         }
 
         // Every loaded module implicitly opens the prelude as its first binding
@@ -203,34 +208,39 @@ impl Evaluator {
         // line.
         bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
 
-        // Stamp every span with this module's id — stable across reloads of
-        // the same path — so errors escaping the module (including from its
-        // function bodies applied elsewhere) locate back to its file.
-        let id = match self.modules.borrow().get(path) {
-            Some(entry) => entry.id,
-            None => {
-                let mut module_paths = self.module_paths.borrow_mut();
-                module_paths.push(path.to_vec());
-                (module_paths.len() - 1) as u32
-            }
-        };
-        expr::set_span_source(&mut bindings, expr::SourceId::Module(id));
-
         // Leak the parsed bindings so we can hand out a stable
         // `&[SourceBinding]` reference. On a stale-cache reload, the previous
         // leak isn't freed — any borrows from before the reload (e.g. earlier
         // in the same evaluate session) remain valid.
-        let leaked: &'static [expr::SourceBinding<MarkId>] = Box::leak(bindings.into_boxed_slice());
+        let leaked: &'static [expr::SourceBinding<MarkId, SourceId>] =
+            Box::leak(bindings.into_boxed_slice());
         self.modules.borrow_mut().insert(
             path.to_vec(),
             ModuleCacheEntry {
                 mtime: current_mtime,
-                source: contents,
-                id,
                 bindings: leaked,
             },
         );
         Ok(leaked)
+    }
+
+    /// Records `source` as the latest text of the module at `path` and
+    /// returns the module's id, assigning the next free one on first sight.
+    fn record_module_info(&self, path: &[String], source: String) -> u32 {
+        let mut module_info = self.module_info.borrow_mut();
+        match module_info.iter().position(|info| info.path == path) {
+            Some(id) => {
+                module_info[id].source = source;
+                id as u32
+            }
+            None => {
+                module_info.push(ModuleInfo {
+                    path: path.to_vec(),
+                    source,
+                });
+                (module_info.len() - 1) as u32
+            }
+        }
     }
 
     /// Returns the file backing the module at `path`:
@@ -248,12 +258,10 @@ impl Evaluator {
     /// can drift from the leaked bindings an in-flight error came from — the
     /// same staleness the binding cache already accepts.
     pub fn module_location(&self, id: u32, offset: usize) -> Option<(path::PathBuf, usize, usize)> {
-        let module_paths = self.module_paths.borrow();
-        let path = module_paths.get(id as usize)?;
-        let modules = self.modules.borrow();
-        let entry = modules.get(path)?;
-        let (line, col) = expr::line_col(&entry.source, offset);
-        Some((module_display_path(path), line, col))
+        let module_info = self.module_info.borrow();
+        let info = module_info.get(id as usize)?;
+        let (line, col) = expr::line_col(&info.source, offset);
+        Some((module_display_path(&info.path), line, col))
     }
 
     /// Resolves `error` into a [`Diagnostic`] for program `index` of `set`,
@@ -261,19 +269,24 @@ impl Evaluator {
     /// display file and position; program-local errors carry a bare position
     /// relative to the program's own text (matching the editor's display);
     /// source-file errors (sibling bindings) a whole-file position.
-    fn diagnose(&self, error: &expr::Error, set: &ProgramSet, index: usize) -> Diagnostic {
+    fn diagnose(
+        &self,
+        error: &expr::Error<SourceId>,
+        set: &ProgramSet,
+        index: usize,
+    ) -> Diagnostic {
         let message = error.message().to_string();
         match (error.source(), error.range()) {
-            (Some(expr::SourceId::Local), Some(range)) => {
+            (Some(SourceId::Program), Some(range)) => {
                 Diagnostic::in_program(message, range, set.programs()[index].text())
             }
-            (Some(expr::SourceId::File), Some(range)) => Diagnostic {
+            (Some(SourceId::File), Some(range)) => Diagnostic {
                 file: None,
                 position: set.source_position(range.start),
                 program_range: None,
                 message,
             },
-            (Some(expr::SourceId::Module(id)), Some(range)) => {
+            (Some(SourceId::Module(id)), Some(range)) => {
                 match self.module_location(id, range.start) {
                     Some((file, line, col)) => Diagnostic {
                         file: Some(file),
@@ -294,9 +307,9 @@ impl Evaluator {
     pub fn evaluate_source(
         &self,
         text: &str,
-        bindings: &[expr::SourceBinding<MarkId>],
-    ) -> Result<expr::SourceExpr<MarkId>, String> {
-        let expr = match parser::parse_program(text) {
+        bindings: &[expr::SourceBinding<MarkId, SourceId>],
+    ) -> Result<expr::SourceExpr<MarkId, SourceId>, String> {
+        let expr = match parser::parse_program(text, SourceId::Program) {
             Err(errors) => return Err(format!("Error: {}", errors[0].display_with_source(text))),
             Ok(expr) => expr,
         };
@@ -316,7 +329,7 @@ impl Evaluator {
         let bindings = set.evaluation_bindings(index);
         let text = set.programs()[index].text();
 
-        let expr = match parser::parse_program(text) {
+        let expr = match parser::parse_program(text, SourceId::Program) {
             Err(errors) => {
                 return Evaluation::Invalid(
                     errors
@@ -365,8 +378,8 @@ impl Evaluator {
     /// references to `sliders`, which are bound at their current values.
     pub fn apply_note_function(
         &self,
-        expr: &expr::SourceExpr<MarkId>,
-        args: Vec<expr::SourceExpr<MarkId>>,
+        expr: &expr::SourceExpr<MarkId, SourceId>,
+        args: Vec<expr::SourceExpr<MarkId, SourceId>>,
         sliders: &ProgramSliders,
     ) -> Result<(waveform::Waveform<MarkId>, waveform::Waveform<MarkId>), String> {
         use expr::Expr::{Tuple, Waveform};
@@ -412,6 +425,7 @@ impl Evaluator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::optimizer;
     use crate::player::substitute_current_slider_values;
     use std::path::PathBuf;
 
@@ -464,7 +478,7 @@ mod tests {
             .expect("note function should apply");
         // Optimize first, exactly as Effect::PlayNoteOn does — the marks
         // must survive optimization for substitution and live updates.
-        let mut note_on = crate::optimizer::optimize(note_on);
+        let mut note_on = optimizer::optimize(note_on);
         let seeded = substitute_current_slider_values(&mut note_on, set.programs()[0].sliders());
         assert_eq!(seeded, vec![("vol".to_string(), 0.5)]);
         let mut marks = Vec::new();
@@ -479,7 +493,7 @@ mod tests {
         let (note_on, _note_off) = evaluator
             .apply_note_function(&function, args, set.programs()[0].sliders())
             .expect("note function should apply");
-        let mut note_on = crate::optimizer::optimize(note_on);
+        let mut note_on = optimizer::optimize(note_on);
         let seeded = substitute_current_slider_values(&mut note_on, set.programs()[0].sliders());
         assert_eq!(seeded, vec![("vol".to_string(), 1.0)]);
         let mut marks = Vec::new();
@@ -514,7 +528,7 @@ mod tests {
         let (note_on, _note_off) = evaluator
             .apply_note_function(&function, args, set.programs()[0].sliders())
             .expect("note function should apply");
-        let mut note_on = crate::optimizer::optimize(note_on);
+        let mut note_on = optimizer::optimize(note_on);
         let seeded = substitute_current_slider_values(&mut note_on, set.programs()[0].sliders());
         assert_eq!(seeded, vec![("vol".to_string(), 1.0)]);
         let mut marks = Vec::new();
@@ -538,7 +552,10 @@ mod tests {
 
         // A program-local error shows a bare position relative to the
         // program's own text (matching the editor's display), no file.
-        let error = expr::Error::with_span("boom".to_string(), Some(expr::Span::local(0..4)));
+        let error = expr::Error::with_span(
+            "boom".to_string(),
+            Some(expr::Span::new(SourceId::Program, 0..4)),
+        );
         let diagnostic = evaluator.diagnose(&error, &set, 0);
         assert_eq!(diagnostic.to_string(), "1:1: boom");
         assert_eq!(diagnostic.program_range, Some(0..4));
@@ -549,7 +566,7 @@ mod tests {
         let error = expr::Error::with_span(
             "boom".to_string(),
             Some(expr::Span {
-                source: expr::SourceId::File,
+                source: SourceId::File,
                 range: 24..27,
             }),
         );
@@ -566,7 +583,7 @@ mod tests {
         let error = expr::Error::with_span(
             "boom".to_string(),
             Some(expr::Span {
-                source: expr::SourceId::Module(0),
+                source: SourceId::Module(0),
                 range: 0..1,
             }),
         );
@@ -578,7 +595,7 @@ mod tests {
         let error = expr::Error::with_span(
             "boom".to_string(),
             Some(expr::Span {
-                source: expr::SourceId::Module(99),
+                source: SourceId::Module(99),
                 range: 0..1,
             }),
         );
@@ -586,6 +603,34 @@ mod tests {
         assert!(diagnostic.file.is_none());
         assert!(diagnostic.position.is_none());
         assert_eq!(diagnostic.message, "boom");
+    }
+
+    #[test]
+    fn module_parse_errors_are_located_in_the_module() {
+        // A module that fails to parse resolves to an error whose span
+        // carries the module's id, so its diagnostic names the module file
+        // and a position within it — same as module evaluation errors.
+        let dir = std::env::temp_dir().join("tuun_test_bad_module");
+        std::fs::create_dir_all(&dir).expect("temp module dir");
+        std::fs::write(dir.join("badmod.tuun"), "broken(;\n").expect("write bad module");
+        let (set, _) = ProgramSet::from_source(
+            "#{level_db=0}\nbad = 1;\n".to_string(),
+            PathBuf::from("song.tuun"),
+        )
+        .expect("test source should parse");
+        let evaluator = Evaluator::new(44100, 90, dir);
+
+        let error = evaluator
+            .resolve(&["badmod".to_string()])
+            .expect_err("bad module should not resolve");
+        let diagnostic = evaluator.diagnose(&error, &set, 0);
+        assert_eq!(diagnostic.file, Some(PathBuf::from("badmod.tuun")));
+        assert!(
+            diagnostic.position.is_some(),
+            "expected a position in the module, got {:?}",
+            diagnostic
+        );
+        assert!(diagnostic.program_range.is_none());
     }
 
     #[test]

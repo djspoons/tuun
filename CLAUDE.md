@@ -25,6 +25,13 @@
 - Main language: Rust (use idiomatic patterns, prefer `Result` over panics, run `cargo fmt` and `cargo clippy` after each change).
 - Secondary: Ruby/Jekyll for docs/site work.
 
+## Rust Style
+
+### Imports
+- Bring crate-internal dependencies into scope with `use crate::<module>` (or `use crate::<module>::{self, Item}`) at the top of the file, then write `module::item` or `Item` at use sites. Do *not* write inline `crate::...` paths in signatures or bodies — the `use` block should read as the file's complete dependency list.
+- The same applies inside `#[cfg(test)]` modules: add `use crate::...` lines to the test module rather than writing inline paths.
+- Rustdoc link targets (e.g. ``[`crate::parser::parse_module`]``) are exempt — they are documentation cross-references, not code dependencies.
+
 ## UI Conventions
 
 ### Program identifiers in user-visible text

@@ -9,6 +9,7 @@
 use std::sync::mpsc;
 use std::time;
 
+use crate::diagnostics::SourceId;
 use crate::evaluator::Evaluator;
 use crate::expr;
 use crate::ids::{MarkId, WaveformId};
@@ -240,7 +241,7 @@ impl Player {
             ));
         }
         let source = format!("<[{}]>", ws.join(", "));
-        let bindings: Vec<expr::SourceBinding<MarkId>> =
+        let bindings: Vec<expr::SourceBinding<MarkId, SourceId>> =
             vec![expr::Binding::Open(vec!["__prelude".to_string()]).into()];
         match evaluator
             .evaluate_source(&source, &bindings)

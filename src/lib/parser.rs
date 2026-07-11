@@ -15,7 +15,7 @@ use nom::{
 };
 
 use crate::expr::{
-    Annotation, Binding, Error, Expr, Pattern, Slider, SliderFunction, SourceAnnotation,
+    self, Annotation, Binding, Error, Expr, Pattern, Slider, SliderFunction, SourceAnnotation,
     SourceBinding, SourceExpr, Span, boxed,
 };
 
@@ -36,7 +36,7 @@ impl<'a> ToRange for Input<'a> {
 
 /// Builds an [`Error`] whose range covers `input`'s fragment.
 fn error_from_input(input: &Input, message: String) -> Error {
-    Error::with_span(message, Some(Span::local(input.to_range())))
+    Error::with_span(message, Some(Span::unstamped(input.to_range())))
 }
 
 impl<'a> nom::error::ParseError<Input<'a>> for Error {
@@ -85,6 +85,13 @@ where
         }
         Err(err) => Err(err),
     }
+}
+
+/// Builds the placeholder expression standing in where parsing failed but
+/// recovery continues. Always paired with a recoverable error describing
+/// the failure (reported by [`expect`] or directly at the recovery site).
+fn error_placeholder<M>() -> SourceExpr<M> {
+    SourceExpr::error("_".to_string())
 }
 
 /// Consumes a `//` line comment up to (but not including) the trailing newline.
@@ -273,11 +280,19 @@ fn parse_binding<M>(input: Input) -> IResult<SourceBinding<M>> {
                         ws(expect(char('='), "expected '=' in definition")),
                         alt((
                             parse_expr,
-                            // If that fails, consume everything up to a ';'
-                            take_till(|c| c == ';').map(|input: Input| SourceExpr::with_span(
-                                Expr::Error(input.fragment().to_string()),
-                                input.to_range(),
-                            )),
+                            // If that fails, consume everything up to a ';',
+                            // reporting the skipped text as a recoverable
+                            // error (mirroring what `expect` does).
+                            take_till(|c| c == ';').map(|input: Input| {
+                                input.extra.report_error(error_from_input(
+                                    &input,
+                                    "expected expression in definition".to_string(),
+                                ));
+                                SourceExpr::with_span(
+                                    Expr::Error(input.fragment().to_string()),
+                                    input.to_range(),
+                                )
+                            }),
                         )),
                     ).map(|(p, e)| Binding::Definition(p, e)),
                 ))
@@ -290,7 +305,7 @@ fn parse_binding<M>(input: Input) -> IResult<SourceBinding<M>> {
         SourceBinding {
             binding,
             annotations: annos.into_iter().flatten().collect(),
-            span: Some(Span::local(start..end)),
+            span: Some(Span::unstamped(start..end)),
         },
     ))
 }
@@ -313,7 +328,7 @@ fn parse_let<M>(input: Input) -> IResult<SourceExpr<M>> {
         ws(expect(parse_expr, "expected expression after 'in'"))
     ).parse(input)?;
     let end = rest.location_offset();
-    let body = body.unwrap_or_default();
+    let body = body.unwrap_or_else(error_placeholder);
     // Extract `Definition`s for `make_let` (the de-sugared lambda form doesn't
     // model spans). `Open` directives aren't valid inside `let` so report each
     // one as an error.
@@ -459,7 +474,7 @@ where
     let (mut rest, mut expr) = lhs(input)?;
     while let Ok((new_rest, (op, rhs))) = op_rhs(rest) {
         let end = new_rest.location_offset();
-        let rhs = rhs.unwrap_or_default();
+        let rhs = rhs.unwrap_or_else(error_placeholder);
         let op_var = SourceExpr::with_span(
             Expr::Variable(op.fragment().to_string()),
             op.location_offset()..op.location_offset() + op.fragment().len(),
@@ -595,7 +610,7 @@ fn parse_reverse_application<M>(input: Input) -> IResult<SourceExpr<M>> {
         match attempt {
             Ok((new_rest, function)) => {
                 let end = new_rest.location_offset();
-                let function = function.unwrap_or_default();
+                let function = function.unwrap_or_else(error_placeholder);
                 let app = Expr::Application {
                     function: Box::new(function),
                     argument: Box::new(argument),
@@ -624,7 +639,7 @@ fn parse_expr<M>(input: Input) -> IResult<SourceExpr<M>> {
         match attempt {
             Ok((new_rest, rhs)) => {
                 let end = new_rest.location_offset();
-                let rhs = rhs.unwrap_or_default();
+                let rhs = rhs.unwrap_or_else(error_placeholder);
                 let op_var = SourceExpr::from(Expr::Variable("\\".to_string()));
                 let args = SourceExpr::tuple(vec![expr, rhs]);
                 let app = Expr::Application {
@@ -654,7 +669,18 @@ fn translate_parse_result<T>(result: IResult<T>) -> Result<T, Vec<Error>> {
     }
 }
 
-pub fn parse_program<M>(input: &str) -> Result<SourceExpr<M>, Vec<Error>>
+/// Parses a program expression from `input`, stamping every span (and any
+/// error's span) with `source`, the identity of `input`'s text.
+pub fn parse_program<M, S: Copy>(input: &str, source: S) -> Result<SourceExpr<M, S>, Vec<Error<S>>>
+where
+    M: Display,
+{
+    parse_program_unstamped(input)
+        .map(|expr| expr::stamp_expr(expr, source))
+        .map_err(|errors| expr::stamp_errors(errors, source))
+}
+
+fn parse_program_unstamped<M>(input: &str) -> Result<SourceExpr<M>, Vec<Error>>
 where
     M: Display,
 {
@@ -671,11 +697,29 @@ where
 }
 
 /// Parses a module (often a file) whose contents are `input`, yielding the
-/// bindings defined by that module.
+/// bindings defined by that module. Every span (including any error's) is
+/// stamped with `source`, the identity of `input`'s text.
 ///
-/// On success, returns set of bindings that span the entire input but may
-/// contain errors.
-pub fn parse_module<M>(input: &str) -> Result<(Vec<SourceBinding<M>>, Vec<Error>), Vec<Error>> {
+/// On success, returns a set of bindings that span the entire input, plus
+/// any recoverable errors encountered while producing them.
+pub fn parse_module<M, S: Copy>(
+    input: &str,
+    source: S,
+) -> Result<ParsedModule<M, S>, Vec<Error<S>>> {
+    match parse_module_unstamped(input) {
+        Ok((bindings, errors)) => Ok((
+            expr::stamp_bindings(bindings, source),
+            expr::stamp_errors(errors, source),
+        )),
+        Err(errors) => Err(expr::stamp_errors(errors, source)),
+    }
+}
+
+/// A module's parsed bindings, plus any recoverable errors encountered
+/// while producing them.
+pub type ParsedModule<M, S = ()> = (Vec<SourceBinding<M, S>>, Vec<Error<S>>);
+
+fn parse_module_unstamped<M>(input: &str) -> Result<ParsedModule<M>, Vec<Error>> {
     let errors = RefCell::new(Vec::new());
     let input = Input::new_extra(input, ParseState(&errors));
     #[rustfmt::skip]
@@ -697,14 +741,14 @@ pub fn parse_module<M>(input: &str) -> Result<(Vec<SourceBinding<M>>, Vec<Error>
             for binding in bindings.iter_mut() {
                 if let Some(span) = &binding.span {
                     // The ";" is always the next character.
-                    binding.span = Some(Span::local(span.range.start..span.range.end + 1));
+                    binding.span = Some(Span::unstamped(span.range.start..span.range.end + 1));
                 }
             }
             if trivia.len() > 0 {
                 bindings.push(SourceBinding {
                     binding: Binding::Empty,
                     annotations: Vec::new(),
-                    span: Some(Span::local(
+                    span: Some(Span::unstamped(
                         trivia.location_offset()..trivia.location_offset() + trivia.len(),
                     )),
                 });
@@ -868,7 +912,7 @@ fn parse_annotation(input: Input) -> IResult<SourceAnnotation> {
         rest,
         SourceAnnotation {
             annotation,
-            span: Some(Span::local(start..end)),
+            span: Some(Span::unstamped(start..end)),
         },
     ))
 }
@@ -908,7 +952,7 @@ where
                 target_range,
                 source.len()
             ),
-            Some(Span::local(target_range)),
+            Some(Span::unstamped(target_range)),
         )]);
     }
     // Re-parses the whole expression rather than just the subtree —
@@ -920,7 +964,7 @@ where
     // nor `root` is touched.
     let mut new_source = source.clone();
     new_source.replace_range(target_range, new_text);
-    let new_root = parse_program::<M>(&new_source)?;
+    let new_root = parse_program_unstamped::<M>(&new_source)?;
 
     *source = new_source;
     *root = new_root;
@@ -936,7 +980,7 @@ mod tests {
     /// and confirm the formatted form re-parses to the same Display output
     /// (round-trip stability).
     fn assert_round_trip(input: &str, expected: &str) {
-        let parsed = parse_program::<u32>(input)
+        let parsed = parse_program_unstamped::<u32>(input)
             .unwrap_or_else(|errs| panic!("failed to parse {:?}: {:?}", input, errs));
         let displayed = format!("{}", parsed);
         assert_eq!(
@@ -944,7 +988,7 @@ mod tests {
             "Display output didn't match expected canonical form\n input: {:?}",
             input
         );
-        let parsed_again = parse_program::<u32>(&displayed).unwrap_or_else(|errs| {
+        let parsed_again = parse_program_unstamped::<u32>(&displayed).unwrap_or_else(|errs| {
             panic!("Display output {:?} didn't reparse: {:?}", displayed, errs)
         });
         let redisplayed = format!("{}", parsed_again);
@@ -957,9 +1001,9 @@ mod tests {
 
     #[test]
     fn test_parse_identifier_and_variable() {
-        let result = parse_program::<u32>("fn");
+        let result = parse_program_unstamped::<u32>("fn");
         assert!(result.is_err());
-        let result = parse_program::<u32>("_");
+        let result = parse_program_unstamped::<u32>("_");
         assert!(result.is_err());
 
         assert_round_trip("my_var", "my_var");
@@ -975,7 +1019,7 @@ mod tests {
     }
 
     fn parse_module_successfully(input: &str) -> Vec<SourceBinding<u32>> {
-        let result = parse_module::<u32>(input);
+        let result = parse_module_unstamped::<u32>(input);
         assert!(result.is_ok(), "got {:?}", result.err());
         let (bindings, errors) = result.unwrap();
         assert!(errors.is_empty(), "got {:?}", errors);
@@ -1002,7 +1046,7 @@ mod tests {
         assert_round_trip("fn(x) => x // identity\n", "fn(x) => x");
 
         // Comment between `let` keyword and bindings.
-        let result = parse_program::<u32>("let // bindings follow\n x = 1 in x");
+        let result = parse_program_unstamped::<u32>("let // bindings follow\n x = 1 in x");
         assert!(result.is_ok());
     }
 
@@ -1096,19 +1140,19 @@ mod tests {
         // parser saw — including any whitespace / comments between operands
         // that are *inside* the outer node's span.
         let input = "1 + 2";
-        let parsed = parse_program::<u32>(input).unwrap();
+        let parsed = parse_program_unstamped::<u32>(input).unwrap();
         assert_eq!(print_preserving(&parsed, input), "1 + 2");
 
         // A line comment between the two operands of `+` falls inside the
         // outer Application's span and round-trips verbatim. (Display alone
         // would normalize whitespace to `1 + 2`.)
         let input = "1 + // a comment\n  2";
-        let parsed = parse_program::<u32>(input).unwrap();
+        let parsed = parse_program_unstamped::<u32>(input).unwrap();
         assert_eq!(print_preserving(&parsed, input), "1 + // a comment\n  2");
 
         // Multiple operators — same deal, just splice the outer span.
         let input = "(10 - 8 - 1) * 6 // total\n";
-        let parsed = parse_program::<u32>(input).unwrap();
+        let parsed = parse_program_unstamped::<u32>(input).unwrap();
         // Outer span doesn't include the trailing `// total\n` (it's the
         // outer `ws()`'s trailing trivia), so the splice ends at `6`.
         assert_eq!(print_preserving(&parsed, input), "(10 - 8 - 1) * 6");
@@ -1139,7 +1183,7 @@ mod tests {
         // printer to structurally recurse — emitting the new LHS while
         // splicing the RHS verbatim from source.
         let input = "1 + // sibling comment\n 2";
-        let mut parsed = parse_program::<u32>(input).unwrap();
+        let mut parsed = parse_program_unstamped::<u32>(input).unwrap();
         if let Expr::Application { argument, .. } = &mut parsed.expr {
             if let Expr::Tuple(args) = &mut argument.expr {
                 args[0] = SourceExpr::float(99.0); // span: None — "edit"
@@ -1196,8 +1240,8 @@ mod tests {
     #[test]
     fn test_parse_module_accepts_trailing_comments() {
         // Trailing whitespace is fine (consumed silently by the terminator).
-        assert!(parse_module::<u32>("x = 1;\n").is_ok());
-        assert!(parse_module::<u32>("x = 1; y = 2; \n  ").is_ok());
+        assert!(parse_module_unstamped::<u32>("x = 1;\n").is_ok());
+        assert!(parse_module_unstamped::<u32>("x = 1; y = 2; \n  ").is_ok());
 
         // Trailing `//` comments at end of file become an extra `Empty`
         // binding so their span round-trips through
@@ -1216,13 +1260,40 @@ mod tests {
     }
 
     #[test]
+    fn test_unparseable_definition_body_reports_recoverable_error() {
+        // A definition whose body fails to parse recovers by consuming up
+        // to the `;`, but must still report a recoverable error — an
+        // `Expr::Error` node with an empty error list would let the broken
+        // source pass for a clean parse.
+        let (bindings, errors) = parse_module_unstamped::<u32>("x = ;\n").unwrap();
+        assert_eq!(errors.len(), 1, "expected one error, got {:?}", errors);
+        assert_eq!(errors[0].message(), "expected expression in definition");
+        assert_eq!(errors[0].range(), Some(4..4));
+        assert!(matches!(
+            &bindings[0].binding,
+            Binding::Definition(_, expr) if matches!(expr.expr, Expr::Error(_))
+        ));
+
+        // Same for a non-empty unparseable body; the error covers the
+        // skipped text.
+        let (_, errors) = parse_module_unstamped::<u32>("x = );\n").unwrap();
+        assert_eq!(errors.len(), 1, "expected one error, got {:?}", errors);
+        assert_eq!(errors[0].message(), "expected expression in definition");
+        assert_eq!(errors[0].range(), Some(4..5));
+    }
+
+    #[test]
     fn test_module_error_recovery() {
         let input = "\
 #{color=rgb(255,0,128)}
 // just a comment, not an annotation
 _x = )(obviously not parsable, but ends with ;
 y = 2;";
-        let bindings = parse_module_successfully(input);
+        // Recovery consumes the broken body up to the `;` and reports it
+        // as a recoverable error; the surrounding bindings still parse.
+        let (bindings, errors) = parse_module_unstamped::<u32>(input).unwrap();
+        assert_eq!(errors.len(), 1, "expected one error, got {:?}", errors);
+        assert_eq!(errors[0].message(), "expected expression in definition");
         assert_eq!(bindings.len(), 2);
         assert!(matches!(
             bindings[0].annotations[0].annotation,
@@ -1407,7 +1478,7 @@ synth = saw(220);";
     #[test]
     fn test_replace_at_list_literal() {
         let mut source = String::from("on_beats(b, [0, 1, 2, 3])");
-        let mut root = parse_program::<u32>(&source).unwrap();
+        let mut root = parse_program_unstamped::<u32>(&source).unwrap();
         let list_span = find_first_list_span(&root).expect("should find a list");
 
         replace_at(&mut root, list_span, "[0, 2]", &mut source).unwrap();
@@ -1425,7 +1496,7 @@ synth = saw(220);";
         // the edit (it's inside the outer Application's span, which is
         // re-parsed fresh against the spliced source).
         let mut source = String::from("f( // a list\n [0, 1, 2])");
-        let mut root = parse_program::<u32>(&source).unwrap();
+        let mut root = parse_program_unstamped::<u32>(&source).unwrap();
         let list_span = find_first_list_span(&root).expect("should find a list");
 
         replace_at(&mut root, list_span, "[7]", &mut source).unwrap();
@@ -1439,7 +1510,7 @@ synth = saw(220);";
         // returns Err and leaves both `source` and `root` untouched.
         let original = String::from("[1, 2, 3]");
         let mut source = original.clone();
-        let original_root = parse_program::<u32>(&source).unwrap();
+        let original_root = parse_program_unstamped::<u32>(&source).unwrap();
         let mut root = original_root.clone();
         let list_span = root.span.clone().unwrap().range;
 
@@ -1454,7 +1525,7 @@ synth = saw(220);";
     #[test]
     fn test_replace_at_out_of_bounds() {
         let mut source = String::from("[1, 2]");
-        let mut root = parse_program::<u32>(&source).unwrap();
+        let mut root = parse_program_unstamped::<u32>(&source).unwrap();
         let bad_span = 0..1000;
         let result = replace_at(&mut root, bad_span, "x", &mut source);
         assert!(result.is_err());

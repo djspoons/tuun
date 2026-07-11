@@ -13,7 +13,7 @@ use crate::actions::{AppState, Mode};
 use crate::ids::{MarkId, WaveformId};
 use crate::launchkey;
 use crate::metric::Metric;
-use crate::programs::PROGRAMS_PER_BANK;
+use crate::programs::{PROGRAMS_PER_BANK, SliderDisplay};
 use crate::tracker;
 
 fn make_texture<'a>(
@@ -404,7 +404,7 @@ impl Renderer {
         // gets the top/left edge bars; when the controller is connected
         // the encoder visualization below covers the same data more
         // completely.
-        let slider_display: Vec<crate::programs::SliderDisplay> =
+        let slider_display: Vec<SliderDisplay> =
             programs[active_program_index].sliders().slider_display();
         if encoder_mode.is_none() {
             let slider_color = if let Mode::MoveSliders = mode {

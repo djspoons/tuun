@@ -39,7 +39,7 @@ fn load_prelude() -> Bindings {
 fn load_modules() -> HashMap<String, Bindings> {
     let mut out = HashMap::new();
     for (name, content) in modules::EMBEDDED_MODULES {
-        match parser::parse_module::<ids::MarkId>(content) {
+        match parser::parse_module::<ids::MarkId, _>(content, ()) {
             Ok((mut bindings, errors)) => {
                 if !errors.is_empty() {
                     eprintln!("Warning: failed to parse module '{}': {:?}", name, errors);
@@ -190,7 +190,7 @@ fn check_block(
         }
     };
 
-    let expr = match parser::parse_program::<ids::MarkId>(&expression) {
+    let expr = match parser::parse_program::<ids::MarkId, _>(&expression, ()) {
         Ok(e) => e,
         Err(errors) => {
             return CheckResult::Fail(format!("[FAIL] \"{}\" parse errors: {:?}", label, errors));

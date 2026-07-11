@@ -119,7 +119,7 @@ fn bench_marks(c: &mut Criterion) {
 fn bench_large(c: &mut Criterion) {
     let mut bindings: Vec<expr::SourceBinding<u32>> = Vec::new();
     builtins::add_bindings(&mut bindings);
-    match parser::parse_module::<u32>(
+    match parser::parse_module::<u32, _>(
         r#"
     pi = 3.14159265;
     $ = fn(freq_hz) => sine(2*pi * freq_hz, 0);
@@ -127,6 +127,7 @@ fn bench_large(c: &mut Criterion) {
     linear = fn(initial, slope) => initial + (time * slope);
     Rw = fn(dur, level) => linear(level, -level / dur) | fin(time - dur);
     R = fn(dur, level) => fn(w) => w * Rw(dur, level);"#,
+        (),
     ) {
         Ok((parsed, _errors)) => bindings.extend(parsed),
         Err(e) => panic!("Failed to parse context: {:?}", e),
@@ -141,7 +142,7 @@ fn bench_large(c: &mut Criterion) {
     c.bench_function("large_440", |b| {
         b.iter(|| {
             let program = "triangle(55) + (noise * 0.2) | R(1.0, 1.0)";
-            match parser::parse_program(program) {
+            match parser::parse_program(program, ()) {
                 Ok(expr) => match eval::evaluate(resolve, &bindings, expr) {
                     Ok(expr) => {
                         if let expr::Expr::Waveform(waveform) = expr.expr {

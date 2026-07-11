@@ -61,7 +61,7 @@ impl InputHandler {
     pub fn classify(
         &self,
         event: &sdl2::event::Event,
-        state: &crate::actions::AppState,
+        state: &actions::AppState,
     ) -> Option<Vec<actions::Action>> {
         use actions::Action;
         use sdl2::event::Event;
@@ -102,7 +102,7 @@ impl InputHandler {
         scancode: Option<sdl2::keyboard::Scancode>,
         keymod: sdl2::keyboard::Mod,
         repeat: bool,
-        state: &crate::actions::AppState,
+        state: &actions::AppState,
     ) -> Option<Vec<actions::Action>> {
         let mode: &Mode = &state.mode;
         let active_program_index = state.active_program_index;
@@ -262,7 +262,7 @@ impl InputHandler {
     fn classify_text_input(
         &self,
         text: &str,
-        state: &crate::actions::AppState,
+        state: &actions::AppState,
     ) -> Option<Vec<actions::Action>> {
         use actions::Action;
         match state.mode {

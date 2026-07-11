@@ -30,7 +30,9 @@ pub fn denormalize(function: &expr::SliderFunction, normalized: f32) -> Result<f
             function_source, ..
         } => {
             let source = format!("({})({})", function_source, normalized);
-            let expr = parser::parse_program::<NoMark>(&source)
+            // The snippet is synthesized and errors are rendered without
+            // positions, so it needs no source identity.
+            let expr = parser::parse_program::<NoMark, _>(&source, ())
                 .map_err(|errors| format!("slider function parse error: {:?}", errors))?;
             let mut bindings = Vec::new();
             builtins::add_bindings(&mut bindings);
@@ -52,11 +54,11 @@ pub fn denormalize(function: &expr::SliderFunction, normalized: f32) -> Result<f
     }
 }
 
-pub fn append_slider_bindings<M, F>(
+pub fn append_slider_bindings<M, S, F>(
     configs: &[expr::Slider],
     normalized_values: &[f32],
     mark_id: F,
-    bindings: &mut Vec<expr::SourceBinding<M>>,
+    bindings: &mut Vec<expr::SourceBinding<M, S>>,
 ) where
     F: Fn(String) -> M,
 {

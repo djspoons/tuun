@@ -9,56 +9,48 @@ use std::rc::Rc;
 
 use crate::waveform;
 
-/// Identifies which text a span's byte range indexes.
-///
-/// Assigned by whoever parsed the text: the parser stamps everything
-/// `Local`, and callers that know a file identity restamp with
-/// [`set_span_source`] (the program set stamps its bindings `File`; the
-/// evaluator stamps each loaded module `Module(id)`).
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub enum SourceId {
-    /// The text handed to the parser, as-is.
-    Local,
-    /// The backing source file the program set was loaded from.
-    File,
-    /// The module at this index in the evaluator's module table.
-    Module(u32),
-}
-
 /// A byte range plus the identity of the text it indexes.
+///
+/// `S` is the embedder's source-identity type (which file, module, or
+/// editor buffer the range indexes); the parser produces spans at the
+/// placeholder `S = ()` and stamps the caller-supplied identity before
+/// returning (see [`crate::parser::parse_module`]).
 #[derive(Clone, Debug, PartialEq)]
-pub struct Span {
-    pub source: SourceId,
+pub struct Span<S = ()> {
+    pub source: S,
     pub range: Range<usize>,
 }
 
+impl<S> Span<S> {
+    /// Builds a span over `range` of the text identified by `source`.
+    pub fn new(source: S, range: Range<usize>) -> Span<S> {
+        Span { source, range }
+    }
+}
+
 impl Span {
-    /// Builds a span into the locally-parsed text.
-    pub fn local(range: Range<usize>) -> Span {
-        Span {
-            source: SourceId::Local,
-            range,
-        }
+    /// Builds a span into parsed text whose source identity has not been
+    /// stamped yet (see [`stamp_bindings`]).
+    pub fn unstamped(range: Range<usize>) -> Span {
+        Span { source: (), range }
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Error {
-    span: Option<Span>,
+pub struct Error<S = ()> {
+    span: Option<Span<S>>,
     message: String,
 }
 
-impl Error {
+impl<S> Error<S> {
     pub fn new(message: String) -> Self {
         Self {
             span: None,
             message,
         }
     }
-    /// Construct an `Error` located at the given span. Use when a non-parser
-    /// caller (e.g. the evaluator) wants to attach a source location to an
-    /// error it didn't itself produce.
-    pub fn with_span(message: String, span: Option<Span>) -> Self {
+    /// Constructs an `Error` located at the given span.
+    pub fn with_span(message: String, span: Option<Span<S>>) -> Self {
         Self { span, message }
     }
 
@@ -68,7 +60,10 @@ impl Error {
     }
 
     /// The identity of the text this error's range indexes.
-    pub fn source(&self) -> Option<SourceId> {
+    pub fn source(&self) -> Option<S>
+    where
+        S: Copy,
+    {
         self.span.as_ref().map(|span| span.source)
     }
 
@@ -124,16 +119,20 @@ pub fn line_col(source: &str, offset: usize) -> (usize, usize) {
 // Message-only: rendering a position requires the source text the span
 // indexes (see `display_with_source` and `Evaluator::diagnose`); raw byte
 // offsets would leak into user-visible messages.
-impl Display for Error {
+impl<S> Display for Error<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.message)
     }
 }
 
-#[derive(Clone)]
-pub struct BuiltInFn<M>(pub Rc<dyn Fn(Vec<Expr<M>>) -> Expr<M>>);
+/// The shared function backing a [`BuiltInFn`]: a pure function from a
+/// vector of values to a value.
+pub type BuiltInImpl<M, S> = Rc<dyn Fn(Vec<Expr<M, S>>) -> Expr<M, S>>;
 
-impl<M> Debug for BuiltInFn<M> {
+#[derive(Clone)]
+pub struct BuiltInFn<M, S = ()>(pub BuiltInImpl<M, S>);
+
+impl<M, S> Debug for BuiltInFn<M, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "BuiltInFn(...)")
     }
@@ -146,7 +145,7 @@ pub enum Pattern {
 }
 
 #[derive(Clone, Debug)]
-pub enum Expr<M> {
+pub enum Expr<M, S = ()> {
     // Values
     Bool(bool),
     Float(f32),
@@ -154,116 +153,106 @@ pub enum Expr<M> {
     Waveform(waveform::Waveform<M>),
     Function {
         pattern: Pattern,
-        body: Box<SourceExpr<M>>,
+        body: Box<SourceExpr<M, S>>,
     },
     BuiltIn {
         name: String,
         // Pure functions from a vector of values to a value
-        function: BuiltInFn<M>,
+        function: BuiltInFn<M, S>,
     },
     // A sequence-able waveform. In value form, both offset and waveform are Expr::Waveform.
     Seq {
-        offset: Box<SourceExpr<M>>,
-        waveform: Box<SourceExpr<M>>,
+        offset: Box<SourceExpr<M, S>>,
+        waveform: Box<SourceExpr<M, S>>,
     },
     // If-Then-Else expression
     IfThenElse {
-        condition: Box<SourceExpr<M>>,
-        then: Box<SourceExpr<M>>,
-        else_: Box<SourceExpr<M>>,
+        condition: Box<SourceExpr<M, S>>,
+        then: Box<SourceExpr<M, S>>,
+        else_: Box<SourceExpr<M, S>>,
     },
     // Function application
     Variable(String),
     Application {
-        function: Box<SourceExpr<M>>,
-        argument: Box<SourceExpr<M>>,
+        function: Box<SourceExpr<M, S>>,
+        argument: Box<SourceExpr<M, S>>,
     },
     // Compound expressions
-    Tuple(Vec<SourceExpr<M>>),
-    List(Vec<SourceExpr<M>>),
+    Tuple(Vec<SourceExpr<M, S>>),
+    List(Vec<SourceExpr<M, S>>),
     // Errors
     Error(String),
 }
 
-// TODO use this in 'expect'?
-impl<M> Default for Expr<M> {
-    fn default() -> Self {
-        Expr::Error("_".to_string())
-    }
-}
-
 #[derive(Clone, Debug)]
-pub struct SourceExpr<M> {
-    pub expr: Expr<M>,
-    pub span: Option<Span>, // Some(_) for parser output; None for synthesized
+pub struct SourceExpr<M, S = ()> {
+    pub expr: Expr<M, S>,
+    pub span: Option<Span<S>>, // Some(_) for parser output; None for synthesized
 }
 
-impl<M> From<Expr<M>> for SourceExpr<M> {
-    fn from(expr: Expr<M>) -> Self {
+impl<M, S> From<Expr<M, S>> for SourceExpr<M, S> {
+    fn from(expr: Expr<M, S>) -> Self {
         SourceExpr { expr, span: None }
     }
 }
 
-impl<M> Default for SourceExpr<M> {
-    fn default() -> Self {
-        SourceExpr::from(Expr::default())
-    }
-}
-
-/// Boxes a bare `Expr<M>` into a `Box<SourceExpr<M>>` with no span.
+/// Boxes a bare `Expr<M, S>` into a `Box<SourceExpr<M, S>>` with no span.
 ///
 /// Useful for synthesized compound expressions in builtins and the evaluator.
-pub fn boxed<M>(expr: Expr<M>) -> Box<SourceExpr<M>> {
+pub fn boxed<M, S>(expr: Expr<M, S>) -> Box<SourceExpr<M, S>> {
     Box::new(SourceExpr::from(expr))
 }
 
 impl<M> SourceExpr<M> {
-    /// Builds an expression spanning `range` of the locally-parsed text
-    /// (the parser's stamp; see [`SourceId::Local`]).
+    /// Builds an expression spanning `range` of parsed text, with an
+    /// unstamped source identity.
     pub fn with_span(expr: Expr<M>, range: Range<usize>) -> SourceExpr<M> {
         SourceExpr {
             expr,
-            span: Some(Span::local(range)),
+            span: Some(Span::unstamped(range)),
         }
     }
-    pub fn bool(v: bool) -> SourceExpr<M> {
+}
+
+impl<M, S> SourceExpr<M, S> {
+    pub fn bool(v: bool) -> SourceExpr<M, S> {
         SourceExpr::from(Expr::Bool(v))
     }
-    pub fn float(v: f32) -> SourceExpr<M> {
+    pub fn float(v: f32) -> SourceExpr<M, S> {
         SourceExpr::from(Expr::Float(v))
     }
-    pub fn string(v: String) -> SourceExpr<M> {
+    pub fn string(v: String) -> SourceExpr<M, S> {
         SourceExpr::from(Expr::String(v))
     }
-    pub fn variable(name: String) -> SourceExpr<M> {
+    pub fn variable(name: String) -> SourceExpr<M, S> {
         SourceExpr::from(Expr::Variable(name))
     }
-    pub fn error(msg: String) -> SourceExpr<M> {
+    pub fn error(msg: String) -> SourceExpr<M, S> {
         SourceExpr::from(Expr::Error(msg))
     }
-    pub fn function(pattern: Pattern, body: SourceExpr<M>) -> SourceExpr<M> {
+    pub fn function(pattern: Pattern, body: SourceExpr<M, S>) -> SourceExpr<M, S> {
         SourceExpr::from(Expr::Function {
             pattern,
             body: Box::new(body),
         })
     }
-    pub fn application(function: SourceExpr<M>, argument: SourceExpr<M>) -> SourceExpr<M> {
+    pub fn application(function: SourceExpr<M, S>, argument: SourceExpr<M, S>) -> SourceExpr<M, S> {
         SourceExpr::from(Expr::Application {
             function: Box::new(function),
             argument: Box::new(argument),
         })
     }
-    pub fn tuple(exprs: Vec<SourceExpr<M>>) -> SourceExpr<M> {
+    pub fn tuple(exprs: Vec<SourceExpr<M, S>>) -> SourceExpr<M, S> {
         SourceExpr::from(Expr::Tuple(exprs))
     }
-    pub fn list(exprs: Vec<SourceExpr<M>>) -> SourceExpr<M> {
+    pub fn list(exprs: Vec<SourceExpr<M, S>>) -> SourceExpr<M, S> {
         SourceExpr::from(Expr::List(exprs))
     }
     pub fn if_then_else(
-        condition: SourceExpr<M>,
-        then: SourceExpr<M>,
-        else_: SourceExpr<M>,
-    ) -> SourceExpr<M> {
+        condition: SourceExpr<M, S>,
+        then: SourceExpr<M, S>,
+        else_: SourceExpr<M, S>,
+    ) -> SourceExpr<M, S> {
         SourceExpr::from(Expr::IfThenElse {
             condition: Box::new(condition),
             then: Box::new(then),
@@ -275,13 +264,13 @@ impl<M> SourceExpr<M> {
 /// Bindings modify the current scope of evaluation. They appear in `let`
 /// expressions and in modules.
 #[derive(Debug, Clone)]
-pub enum Binding<M> {
+pub enum Binding<M, S = ()> {
     /// An import that binds all bindings from the module at `path` in the
     /// current scope. These bindings are not public in the current scope.
     // TODO make it just bind public ones
     Open(Vec<String>),
     /// Binds variables in `pattern` to the corresponding values in `expr`.
-    Definition(Pattern, SourceExpr<M>),
+    Definition(Pattern, SourceExpr<M, S>),
     /// A placeholder that carries only trivia (e.g., trailing comments at end
     /// of file).
     Empty,
@@ -295,18 +284,18 @@ pub enum Binding<M> {
 // terminating `;`.
 // TODO should bindings in `let` expressions include the source of their
 // separators?
-pub struct SourceBinding<M> {
-    pub binding: Binding<M>,
+pub struct SourceBinding<M, S = ()> {
+    pub binding: Binding<M, S>,
     /// Annotations attached to this binding.
-    pub annotations: Vec<SourceAnnotation>,
-    pub span: Option<Span>,
+    pub annotations: Vec<SourceAnnotation<S>>,
+    pub span: Option<Span<S>>,
 }
 
 // TODO need to define and handle the case where the same annotation type occurs
 // multiple times on a single definition
 
-impl<M> From<Binding<M>> for SourceBinding<M> {
-    fn from(binding: Binding<M>) -> Self {
+impl<M, S> From<Binding<M, S>> for SourceBinding<M, S> {
+    fn from(binding: Binding<M, S>) -> Self {
         SourceBinding {
             binding,
             annotations: Vec::new(),
@@ -315,29 +304,32 @@ impl<M> From<Binding<M>> for SourceBinding<M> {
     }
 }
 
-impl<M> SourceBinding<M> {
-    pub fn definition(pattern: Pattern, expr: SourceExpr<M>) -> SourceBinding<M> {
+impl<M, S> SourceBinding<M, S> {
+    pub fn definition(pattern: Pattern, expr: SourceExpr<M, S>) -> SourceBinding<M, S> {
         SourceBinding::from(Binding::Definition(pattern, expr))
     }
+}
 
-    /// Builds a binding spanning `range` of the locally-parsed text.
+impl<M> SourceBinding<M> {
+    /// Builds a binding spanning `range` of parsed text, with an
+    /// unstamped source identity.
     pub fn with_span(binding: Binding<M>, range: Range<usize>) -> SourceBinding<M> {
         SourceBinding {
             binding,
             annotations: Vec::new(),
-            span: Some(Span::local(range)),
+            span: Some(Span::unstamped(range)),
         }
     }
 }
 
 /// An `Annotation` together with the byte range in source it was parsed from.
 #[derive(Debug, Clone)]
-pub struct SourceAnnotation {
+pub struct SourceAnnotation<S = ()> {
     pub annotation: Annotation,
-    pub span: Option<Span>,
+    pub span: Option<Span<S>>,
 }
 
-impl From<Annotation> for SourceAnnotation {
+impl<S> From<Annotation> for SourceAnnotation<S> {
     fn from(annotation: Annotation) -> Self {
         SourceAnnotation {
             annotation,
@@ -346,64 +338,109 @@ impl From<Annotation> for SourceAnnotation {
     }
 }
 
-/// Rewrites the source identity of every span in `bindings` to `source`,
+/// Stamps `source` as the source identity of every span in `bindings`,
 /// including annotations and nested expressions.
 ///
-/// Freshly parsed bindings carry [`SourceId::Local`]; call this once the
-/// text's true identity (a backing file, a loaded module) is known.
-pub fn set_span_source<M>(bindings: &mut [SourceBinding<M>], source: SourceId) {
-    for binding in bindings.iter_mut() {
-        if let Some(span) = &mut binding.span {
-            span.source = source;
-        }
-        for annotation in &mut binding.annotations {
-            if let Some(span) = &mut annotation.span {
-                span.source = source;
+/// Consumes unstamped parser output; the tree's span type changes from
+/// `()` to `S`, so a stamped tree cannot be stamped again.
+pub(crate) fn stamp_bindings<M, S: Copy>(
+    bindings: Vec<SourceBinding<M>>,
+    source: S,
+) -> Vec<SourceBinding<M, S>> {
+    bindings
+        .into_iter()
+        .map(|binding| stamp_binding(binding, source))
+        .collect()
+}
+
+/// Stamps `source` as the source identity of every span in `binding`.
+fn stamp_binding<M, S: Copy>(binding: SourceBinding<M>, source: S) -> SourceBinding<M, S> {
+    let SourceBinding {
+        binding,
+        annotations,
+        span,
+    } = binding;
+    SourceBinding {
+        binding: match binding {
+            Binding::Open(path) => Binding::Open(path),
+            Binding::Definition(pattern, expr) => {
+                Binding::Definition(pattern, stamp_expr(expr, source))
             }
-        }
-        if let Binding::Definition(_, expr) = &mut binding.binding {
-            set_expr_span_source(expr, source);
-        }
+            Binding::Empty => Binding::Empty,
+        },
+        annotations: annotations
+            .into_iter()
+            .map(|a| SourceAnnotation {
+                annotation: a.annotation,
+                span: stamp_span(a.span, source),
+            })
+            .collect(),
+        span: stamp_span(span, source),
     }
 }
 
-/// Rewrites the source identity of every span in `expr`'s tree to `source`.
-fn set_expr_span_source<M>(expr: &mut SourceExpr<M>, source: SourceId) {
-    if let Some(span) = &mut expr.span {
-        span.source = source;
-    }
-    match &mut expr.expr {
-        Expr::Bool(_)
-        | Expr::Float(_)
-        | Expr::String(_)
-        | Expr::Variable(_)
-        | Expr::Waveform(_)
-        | Expr::BuiltIn { .. }
-        | Expr::Error(_) => {}
-        Expr::Function { body, .. } => set_expr_span_source(body, source),
-        Expr::Seq { offset, waveform } => {
-            set_expr_span_source(offset, source);
-            set_expr_span_source(waveform, source);
-        }
+/// Stamps `source` as the source identity of every span in `expr`'s tree.
+pub(crate) fn stamp_expr<M, S: Copy>(expr: SourceExpr<M>, source: S) -> SourceExpr<M, S> {
+    let SourceExpr { expr, span } = expr;
+    let expr = match expr {
+        Expr::Bool(v) => Expr::Bool(v),
+        Expr::Float(v) => Expr::Float(v),
+        Expr::String(v) => Expr::String(v),
+        Expr::Variable(name) => Expr::Variable(name),
+        Expr::Waveform(w) => Expr::Waveform(w),
+        Expr::Error(message) => Expr::Error(message),
+        // Built-ins exist only in synthesized trees (the prelude), never in
+        // parser output, and their closures cannot change span type.
+        Expr::BuiltIn { .. } => unreachable!("cannot stamp a built-in"),
+        Expr::Function { pattern, body } => Expr::Function {
+            pattern,
+            body: Box::new(stamp_expr(*body, source)),
+        },
+        Expr::Seq { offset, waveform } => Expr::Seq {
+            offset: Box::new(stamp_expr(*offset, source)),
+            waveform: Box::new(stamp_expr(*waveform, source)),
+        },
         Expr::IfThenElse {
             condition,
             then,
             else_,
-        } => {
-            set_expr_span_source(condition, source);
-            set_expr_span_source(then, source);
-            set_expr_span_source(else_, source);
+        } => Expr::IfThenElse {
+            condition: Box::new(stamp_expr(*condition, source)),
+            then: Box::new(stamp_expr(*then, source)),
+            else_: Box::new(stamp_expr(*else_, source)),
+        },
+        Expr::Application { function, argument } => Expr::Application {
+            function: Box::new(stamp_expr(*function, source)),
+            argument: Box::new(stamp_expr(*argument, source)),
+        },
+        Expr::Tuple(exprs) => {
+            Expr::Tuple(exprs.into_iter().map(|e| stamp_expr(e, source)).collect())
         }
-        Expr::Application { function, argument } => {
-            set_expr_span_source(function, source);
-            set_expr_span_source(argument, source);
-        }
-        Expr::Tuple(exprs) | Expr::List(exprs) => {
-            for expr in exprs {
-                set_expr_span_source(expr, source);
-            }
-        }
+        Expr::List(exprs) => Expr::List(exprs.into_iter().map(|e| stamp_expr(e, source)).collect()),
+    };
+    SourceExpr {
+        expr,
+        span: stamp_span(span, source),
     }
+}
+
+/// Stamps `source` as the source identity of `span`, if there is one.
+fn stamp_span<S>(span: Option<Span>, source: S) -> Option<Span<S>> {
+    span.map(|span| Span {
+        source,
+        range: span.range,
+    })
+}
+
+/// Stamps `source` as the source identity of each error's span.
+pub(crate) fn stamp_errors<S: Copy>(errors: Vec<Error>, source: S) -> Vec<Error<S>> {
+    errors
+        .into_iter()
+        .map(|error| Error {
+            span: stamp_span(error.span, source),
+            message: error.message,
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -524,7 +561,7 @@ fn is_unary_op(op: &str) -> bool {
 
 /// Precedence of an expression's outermost form, used to decide whether a
 /// child needs parens when nested inside an operator context.
-fn expr_precedence<M>(expr: &Expr<M>) -> Precedence {
+fn expr_precedence<M, S>(expr: &Expr<M, S>) -> Precedence {
     match expr {
         Expr::Bool(_)
         | Expr::Float(_)
@@ -565,9 +602,9 @@ fn expr_precedence<M>(expr: &Expr<M>) -> Precedence {
 /// Emits `let p1 = e1, p2 = e2, … in body` for an
 /// `Application { function: Function { pattern, body }, argument }` chain,
 /// merging nested `let`s into a single comma-separated form.
-fn fmt_as_let<M>(
-    function: &SourceExpr<M>,
-    argument: &SourceExpr<M>,
+fn fmt_as_let<M, S>(
+    function: &SourceExpr<M, S>,
+    argument: &SourceExpr<M, S>,
     f: &mut fmt::Formatter,
 ) -> fmt::Result
 where
@@ -602,7 +639,7 @@ where
 
 /// Format `expr` in an operator context with minimum precedence `min_precedence`,
 /// adding parens iff the child's outermost form binds looser than required.
-fn fmt_at<M>(expr: &SourceExpr<M>, min_precedence: u8, f: &mut fmt::Formatter) -> fmt::Result
+fn fmt_at<M, S>(expr: &SourceExpr<M, S>, min_precedence: u8, f: &mut fmt::Formatter) -> fmt::Result
 where
     M: Display,
 {
@@ -631,7 +668,7 @@ impl Display for Pattern {
     }
 }
 
-impl<M> Display for SourceExpr<M>
+impl<M, S> Display for SourceExpr<M, S>
 where
     M: Display,
 {
@@ -640,7 +677,7 @@ where
     }
 }
 
-impl<M> Display for Expr<M>
+impl<M, S> Display for Expr<M, S>
 where
     M: Display,
 {
@@ -754,7 +791,7 @@ where
 
 /// Returns true iff `node` and every descendant either has Some span or is one
 /// of the parser's "transparent packaging" forms (binary-op-argument Tuples).
-fn is_clean<M>(node: &SourceExpr<M>) -> bool {
+fn is_clean<M, S>(node: &SourceExpr<M, S>) -> bool {
     match &node.expr {
         // Leaves: must have been stamped by the parser.
         Expr::Bool(_)
@@ -792,7 +829,7 @@ fn is_clean<M>(node: &SourceExpr<M>) -> bool {
 /// has a span, splices `source[span]`. For dirty regions, falls back to
 /// structural pretty-print, recursing into children so that clean sub-sub-trees
 /// still splice their original source.
-pub fn print_preserving<M>(node: &SourceExpr<M>, source: &str) -> String
+pub fn print_preserving<M, S>(node: &SourceExpr<M, S>, source: &str) -> String
 where
     M: Display,
 {
@@ -805,7 +842,7 @@ where
 ///
 /// Bindings that have been mutated in memory (cleared spans on the binding, its
 /// expression, or an annotation) fall back to structural pretty-print.
-pub fn print_preserving_module<M>(bindings: &[SourceBinding<M>], source: &str) -> String
+pub fn print_preserving_module<M, S>(bindings: &[SourceBinding<M, S>], source: &str) -> String
 where
     M: Display,
 {
@@ -840,7 +877,7 @@ where
     out
 }
 
-impl<M> SourceBinding<M> {
+impl<M, S> SourceBinding<M, S> {
     /// Returns the source span to splice verbatim for `binding`, or `None` when
     /// something inside has been mutated since parsing and the binding needs
     /// structural re-emit.
@@ -856,7 +893,7 @@ impl<M> SourceBinding<M> {
     }
 }
 
-fn write_preserving<M, W>(node: &SourceExpr<M>, source: &str, out: &mut W) -> fmt::Result
+fn write_preserving<M, S, W>(node: &SourceExpr<M, S>, source: &str, out: &mut W) -> fmt::Result
 where
     M: Display,
     W: fmt::Write,
@@ -869,7 +906,7 @@ where
     write_preserving_structural(&node.expr, source, out)
 }
 
-fn write_preserving_structural<M, W>(expr: &Expr<M>, source: &str, out: &mut W) -> fmt::Result
+fn write_preserving_structural<M, S, W>(expr: &Expr<M, S>, source: &str, out: &mut W) -> fmt::Result
 where
     M: Display,
     W: fmt::Write,
@@ -929,8 +966,8 @@ where
 /// Emit a comma-separated element sequence. If both adjacent elements have
 /// spans, splice `source[prev.end..curr.start]` to preserve any comments or
 /// whitespace the user had between them; otherwise emit a plain `, `.
-fn write_preserving_elements<M, W>(
-    items: &[SourceExpr<M>],
+fn write_preserving_elements<M, S, W>(
+    items: &[SourceExpr<M, S>],
     source: &str,
     out: &mut W,
 ) -> fmt::Result
@@ -956,9 +993,9 @@ where
     Ok(())
 }
 
-fn write_preserving_application<M, W>(
-    function: &SourceExpr<M>,
-    argument: &SourceExpr<M>,
+fn write_preserving_application<M, S, W>(
+    function: &SourceExpr<M, S>,
+    argument: &SourceExpr<M, S>,
     source: &str,
     out: &mut W,
 ) -> fmt::Result
@@ -1012,8 +1049,8 @@ where
     }
 }
 
-fn write_preserving_at<M, W>(
-    expr: &SourceExpr<M>,
+fn write_preserving_at<M, S, W>(
+    expr: &SourceExpr<M, S>,
     min_precedence: u8,
     source: &str,
     out: &mut W,
@@ -1031,8 +1068,8 @@ where
     }
 }
 
-fn write_preserving_with_parens<M, W>(
-    expr: &SourceExpr<M>,
+fn write_preserving_with_parens<M, S, W>(
+    expr: &SourceExpr<M, S>,
     source: &str,
     out: &mut W,
 ) -> fmt::Result
@@ -1055,9 +1092,9 @@ where
     }
 }
 
-fn write_preserving_as_let<M, W>(
-    function: &SourceExpr<M>,
-    argument: &SourceExpr<M>,
+fn write_preserving_as_let<M, S, W>(
+    function: &SourceExpr<M, S>,
+    argument: &SourceExpr<M, S>,
     source: &str,
     out: &mut W,
 ) -> fmt::Result
@@ -1118,7 +1155,7 @@ mod tests {
     }
 
     #[test]
-    fn test_set_span_source() {
+    fn test_stamp_bindings() {
         let expr = SourceExpr::with_span(
             Expr::Application {
                 function: Box::new(SourceExpr::<u32>::with_span(
@@ -1129,31 +1166,31 @@ mod tests {
             },
             0..3,
         );
-        let mut bindings = vec![SourceBinding::with_span(
+        let bindings = vec![SourceBinding::with_span(
             Binding::Definition(Pattern::Identifier("x".to_string()), expr),
             0..3,
         )];
-        set_span_source(&mut bindings, SourceId::Module(7));
+        let bindings = stamp_bindings(bindings, 7u32);
 
-        let source_of = |span: &Option<Span>| span.as_ref().unwrap().source;
-        assert_eq!(source_of(&bindings[0].span), SourceId::Module(7));
+        let source_of = |span: &Option<Span<u32>>| span.as_ref().unwrap().source;
+        assert_eq!(source_of(&bindings[0].span), 7);
         let Binding::Definition(_, expr) = &bindings[0].binding else {
             panic!("expected a definition");
         };
-        assert_eq!(source_of(&expr.span), SourceId::Module(7));
+        assert_eq!(source_of(&expr.span), 7);
         let Expr::Application { function, argument } = &expr.expr else {
             panic!("expected an application");
         };
-        assert_eq!(source_of(&function.span), SourceId::Module(7));
-        assert_eq!(source_of(&argument.span), SourceId::Module(7));
+        assert_eq!(source_of(&function.span), 7);
+        assert_eq!(source_of(&argument.span), 7);
     }
 
     #[test]
     fn test_display_with_source() {
         let source = "a = 1;\nb = nope;\n";
-        let error = Error::with_span("bad".to_string(), Some(Span::local(11..15)));
+        let error = Error::with_span("bad".to_string(), Some(Span::unstamped(11..15)));
         assert_eq!(error.display_with_source(source), "2:5: bad");
-        let error = Error::new("bad".to_string());
+        let error = Error::<()>::new("bad".to_string());
         assert_eq!(error.display_with_source(source), "bad");
     }
 }
