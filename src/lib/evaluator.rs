@@ -73,21 +73,15 @@ fn module_display_path(path: &[String]) -> path::PathBuf {
     display_path
 }
 
-/// Which text a local (module-origin-less) error's byte range indexes: a
-/// program slot's text, or the whole backing source file.
-#[derive(Clone, Copy)]
-enum LocalCoords {
-    Program { index: usize },
-    SourceFile,
-}
-
 /// One slot in [`Evaluator`]'s module cache: the file's mtime at the time we
 /// parsed it, the source text (for resolving error offsets to line and column),
-/// plus a leaked `&'static` slice of the parsed bindings.
+/// the module's stable id (the payload of [`expr::SourceId::Module`] stamped
+/// on its spans), plus a leaked `&'static` slice of the parsed bindings.
 // See the field doc on `Evaluator::modules` for the leak strategy.
 struct ModuleCacheEntry {
     mtime: time::SystemTime,
     source: String,
+    id: u32,
     bindings: &'static [expr::SourceBinding<MarkId>],
 }
 
@@ -111,6 +105,9 @@ pub struct Evaluator {
     /// workflow.
     // TODO consider other ways of caching that don't depend on leak
     modules: RefCell<HashMap<Vec<String>, ModuleCacheEntry>>,
+    /// Module path for each assigned module id (index = id). Ids are stable
+    /// across mtime reloads of the same module.
+    module_paths: RefCell<Vec<Vec<String>>>,
 }
 
 impl Evaluator {
@@ -141,6 +138,7 @@ impl Evaluator {
             prelude,
             library_root,
             modules: RefCell::new(HashMap::new()),
+            module_paths: RefCell::new(Vec::new()),
         }
     }
 
@@ -205,6 +203,19 @@ impl Evaluator {
         // line.
         bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
 
+        // Stamp every span with this module's id — stable across reloads of
+        // the same path — so errors escaping the module (including from its
+        // function bodies applied elsewhere) locate back to its file.
+        let id = match self.modules.borrow().get(path) {
+            Some(entry) => entry.id,
+            None => {
+                let mut module_paths = self.module_paths.borrow_mut();
+                module_paths.push(path.to_vec());
+                (module_paths.len() - 1) as u32
+            }
+        };
+        expr::set_span_source(&mut bindings, expr::SourceId::Module(id));
+
         // Leak the parsed bindings so we can hand out a stable
         // `&[SourceBinding]` reference. On a stale-cache reload, the previous
         // leak isn't freed — any borrows from before the reload (e.g. earlier
@@ -215,6 +226,7 @@ impl Evaluator {
             ModuleCacheEntry {
                 mtime: current_mtime,
                 source: contents,
+                id,
                 bindings: leaked,
             },
         );
@@ -227,80 +239,55 @@ impl Evaluator {
         self.library_root.join(module_display_path(path))
     }
 
-    /// Returns the module's display path (relative to the library root) and
-    /// the 1-based (line, column) of byte `offset` in its cached source.
+    /// Returns the display path (relative to the library root) of the module
+    /// with the given id, and the 1-based (line, column) of byte `offset` in
+    /// its cached source.
     ///
-    /// Returns `None` for the in-memory `__prelude` and for modules that
-    /// haven't been loaded. After an mtime reload, the position is computed
-    /// against the newest source text, which can drift from the leaked bindings
-    /// an in-flight error came from — the same staleness the binding cache
-    /// already accepts.
-    pub fn module_location(
-        &self,
-        path: &[String],
-        offset: usize,
-    ) -> Option<(path::PathBuf, usize, usize)> {
+    /// Returns `None` for ids that were never assigned. After an mtime
+    /// reload, the position is computed against the newest source text, which
+    /// can drift from the leaked bindings an in-flight error came from — the
+    /// same staleness the binding cache already accepts.
+    pub fn module_location(&self, id: u32, offset: usize) -> Option<(path::PathBuf, usize, usize)> {
+        let module_paths = self.module_paths.borrow();
+        let path = module_paths.get(id as usize)?;
         let modules = self.modules.borrow();
         let entry = modules.get(path)?;
         let (line, col) = expr::line_col(&entry.source, offset);
         Some((module_display_path(path), line, col))
     }
 
-    /// Resolves `error` into a [`Diagnostic`] for a program of `set`.
-    ///
-    /// Module-origin errors carry their module's display file and position;
-    /// local errors carry a bare position — relative to the program's own
-    /// text for `Program` coordinates (matching the editor's display), or to
-    /// the whole source file for `SourceFile` coordinates.
-    fn diagnose(&self, error: &expr::Error, set: &ProgramSet, coords: LocalCoords) -> Diagnostic {
-        if let Some(origin) = error.origin() {
-            let location = error
-                .range()
-                .and_then(|range| self.module_location(origin, range.start));
-            let (file, position, message) = match location {
-                Some((file, line, col)) => {
-                    (Some(file), Some((line, col)), error.message().to_string())
-                }
-                // Without a resolvable position, at least name the module.
-                None => (
-                    None,
-                    None,
-                    format!("in {}: {}", origin.join("."), error.message()),
-                ),
-            };
-            return Diagnostic {
-                file,
-                position,
-                program_range: None,
-                message,
-            };
-        }
-        // TODO spans don't record which text they index; an error raised from a
-        // module-defined function body applied here carries module-file
-        // offsets, and when those happen to fit inside the program text it
-        // locates incorrectly. Fixing this needs source provenance on spans.
-        // The bounds checks below at least drop clearly-foreign offsets.
-        let (position, program_range) = match coords {
-            LocalCoords::Program { index } => {
+    /// Resolves `error` into a [`Diagnostic`] for program `index` of `set`,
+    /// according to the error's span source: module errors carry their module's
+    /// display file and position; program-local errors carry a bare position
+    /// relative to the program's own text (matching the editor's display);
+    /// source-file errors (sibling bindings) a whole-file position.
+    fn diagnose(&self, error: &expr::Error, set: &ProgramSet, index: usize) -> Diagnostic {
+        let message = error.message().to_string();
+        let (file, position, program_range) = match (error.source(), error.range()) {
+            (Some(expr::SourceId::Local), Some(range)) => {
                 let text = set.programs()[index].text();
-                let in_bounds = error.range().filter(|range| range.end <= text.len());
-                let position = in_bounds
-                    .as_ref()
-                    .map(|range| expr::line_col(text, range.start));
-                (position, in_bounds)
+                (
+                    None,
+                    Some(expr::line_col(text, range.start)),
+                    Some(range.clone()),
+                )
             }
-            LocalCoords::SourceFile => (
-                error
-                    .range()
-                    .and_then(|range| set.source_position(range.start)),
-                None,
-            ),
+            (Some(expr::SourceId::File), Some(range)) => {
+                (None, set.source_position(range.start), None)
+            }
+            (Some(expr::SourceId::Module(id)), Some(range)) => {
+                match self.module_location(id, range.start) {
+                    Some((file, line, col)) => (Some(file), Some((line, col)), None),
+                    None => (None, None, None),
+                }
+            }
+            _ => (None, None, None),
         };
         Diagnostic {
-            file: None,
+            file,
             position,
             program_range,
-            message: error.message().to_string(),
+            message,
         }
     }
 
@@ -332,37 +319,20 @@ impl Evaluator {
         let bindings = set.evaluation_bindings(index);
         let text = set.programs()[index].text();
 
-        // The three phases are run separately (rather than through
-        // `evaluate_source`) because their errors index different texts: parse
-        // and reduction errors index the program's own text, while context
-        // errors index the backing source file (sibling bindings) or an opened
-        // module's file.
         let expr = match parser::parse_program(text) {
             Err(errors) => {
                 return Evaluation::Invalid(
                     errors
                         .iter()
-                        .map(|error| self.diagnose(error, set, LocalCoords::Program { index }))
+                        .map(|error| self.diagnose(error, set, index))
                         .collect(),
                 );
             }
             Ok(expr) => expr,
         };
-        let mut context = Vec::new();
-        if let Err(error) = eval::build_context(
-            &|path: &[String]| self.resolve(path),
-            &bindings,
-            &mut context,
-        ) {
-            return Evaluation::Invalid(vec![self.diagnose(&error, set, LocalCoords::SourceFile)]);
-        }
-        let expr = match eval::evaluate_with_context(&context, expr) {
+        let expr = match eval::evaluate(|path| self.resolve(path), &bindings, expr) {
             Err(error) => {
-                return Evaluation::Invalid(vec![self.diagnose(
-                    &error,
-                    set,
-                    LocalCoords::Program { index },
-                )]);
+                return Evaluation::Invalid(vec![self.diagnose(&error, set, index)]);
             }
             Ok(expr) => expr,
         };
@@ -571,29 +541,54 @@ mod tests {
 
         // A program-local error shows a bare position relative to the
         // program's own text (matching the editor's display), no file.
-        let error = expr::Error::with_range("boom".to_string(), Some(0..4));
-        let diagnostic = evaluator.diagnose(&error, &set, LocalCoords::Program { index: 0 });
+        let error = expr::Error::with_span("boom".to_string(), Some(expr::Span::local(0..4)));
+        let diagnostic = evaluator.diagnose(&error, &set, 0);
         assert_eq!(diagnostic.to_string(), "1:1: boom");
         assert_eq!(diagnostic.program_range, Some(0..4));
         assert!(diagnostic.file.is_none());
 
-        // A module-origin error names the module file relative to the
-        // library root and locates into its cached source.
+        // A source-file error (e.g. from a sibling binding) locates into the
+        // whole file: offset 24 is `bad` on line 3.
+        let error = expr::Error::with_span(
+            "boom".to_string(),
+            Some(expr::Span {
+                source: expr::SourceId::File,
+                range: 24..27,
+            }),
+        );
+        let diagnostic = evaluator.diagnose(&error, &set, 0);
+        assert_eq!(diagnostic.to_string(), "3:1: boom");
+        assert!(diagnostic.program_range.is_none());
+
+        // A module error names the module file relative to the library root
+        // and locates into its cached source. `std` is the first module
+        // resolved, so it holds id 0.
         evaluator
             .resolve(&["std".to_string()])
             .expect("std resolves");
-        let error =
-            expr::Error::with_range("boom".to_string(), Some(0..1)).in_module(&["std".to_string()]);
-        let diagnostic = evaluator.diagnose(&error, &set, LocalCoords::Program { index: 0 });
+        let error = expr::Error::with_span(
+            "boom".to_string(),
+            Some(expr::Span {
+                source: expr::SourceId::Module(0),
+                range: 0..1,
+            }),
+        );
+        let diagnostic = evaluator.diagnose(&error, &set, 0);
         assert_eq!(diagnostic.to_string(), "std.tuun:1:1: boom");
         assert!(diagnostic.program_range.is_none());
 
-        // An origin whose module isn't cached still names the module.
-        let error = expr::Error::new("boom".to_string()).in_module(&["ghost".to_string()]);
-        let diagnostic = evaluator.diagnose(&error, &set, LocalCoords::Program { index: 0 });
+        // A module id that was never assigned degrades to the bare message.
+        let error = expr::Error::with_span(
+            "boom".to_string(),
+            Some(expr::Span {
+                source: expr::SourceId::Module(99),
+                range: 0..1,
+            }),
+        );
+        let diagnostic = evaluator.diagnose(&error, &set, 0);
         assert!(diagnostic.file.is_none());
         assert!(diagnostic.position.is_none());
-        assert_eq!(diagnostic.message, "in ghost: boom");
+        assert_eq!(diagnostic.message, "boom");
     }
 
     #[test]

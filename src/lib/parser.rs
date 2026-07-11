@@ -16,17 +16,17 @@ use nom::{
 
 use crate::expr::{
     Annotation, Binding, Error, Expr, Pattern, Slider, SliderFunction, SourceAnnotation,
-    SourceBinding, SourceExpr, boxed,
+    SourceBinding, SourceExpr, Span, boxed,
 };
 
-type LocatedSpan<'a> = nom_locate::LocatedSpan<&'a str, ParseState<'a>>;
-type IResult<'a, T> = nom::IResult<LocatedSpan<'a>, T>;
+type Input<'a> = nom_locate::LocatedSpan<&'a str, ParseState<'a>>;
+type IResult<'a, T> = nom::IResult<Input<'a>, T>;
 
 trait ToRange {
     fn to_range(&self) -> Range<usize>;
 }
 
-impl<'a> ToRange for LocatedSpan<'a> {
+impl<'a> ToRange for Input<'a> {
     fn to_range(&self) -> Range<usize> {
         let start = self.location_offset();
         let end = start + self.fragment().len();
@@ -34,17 +34,17 @@ impl<'a> ToRange for LocatedSpan<'a> {
     }
 }
 
-/// Builds an [`Error`] whose range covers `span`'s fragment.
-fn error_from_span(span: &LocatedSpan, message: String) -> Error {
-    Error::with_range(message, Some(span.to_range()))
+/// Builds an [`Error`] whose range covers `input`'s fragment.
+fn error_from_input(input: &Input, message: String) -> Error {
+    Error::with_span(message, Some(Span::local(input.to_range())))
 }
 
-impl<'a> nom::error::ParseError<LocatedSpan<'a>> for Error {
-    fn from_error_kind(input: LocatedSpan<'a>, kind: nom::error::ErrorKind) -> Self {
-        error_from_span(&input, format!("parse error {:?}", kind))
+impl<'a> nom::error::ParseError<Input<'a>> for Error {
+    fn from_error_kind(input: Input<'a>, kind: nom::error::ErrorKind) -> Self {
+        error_from_input(&input, format!("parse error {:?}", kind))
     }
 
-    fn append(_input: LocatedSpan<'a>, _kind: nom::error::ErrorKind, other: Self) -> Self {
+    fn append(_input: Input<'a>, _kind: nom::error::ErrorKind, other: Self) -> Self {
         other
     }
 
@@ -53,7 +53,7 @@ impl<'a> nom::error::ParseError<LocatedSpan<'a>> for Error {
     // }
 }
 
-/// Carried around in the `LocatedSpan::extra` field in
+/// Carried around in the `Input::extra` field in
 /// between `nom` parsers.
 #[derive(Clone, Copy, Debug)]
 struct ParseState<'a>(&'a RefCell<Vec<Error>>);
@@ -70,19 +70,16 @@ impl<'a> ParseState<'a> {
 /// Evaluate `parser` and wrap the result in a `Some(_)`. Otherwise,
 /// emit the  provided `error_msg` and return a `None` while allowing
 /// parsing to continue.
-fn expect<'a, F, E, T>(
-    mut parser: F,
-    error_msg: E,
-) -> impl FnMut(LocatedSpan<'a>) -> IResult<Option<T>>
+fn expect<'a, F, E, T>(mut parser: F, error_msg: E) -> impl FnMut(Input<'a>) -> IResult<Option<T>>
 where
-    F: FnMut(LocatedSpan<'a>) -> IResult<T>,
+    F: FnMut(Input<'a>) -> IResult<T>,
     E: ToString,
 {
-    move |input: LocatedSpan| match parser(input) {
+    move |input: Input| match parser(input) {
         Ok((remaining, out)) => Ok((remaining, Some(out))),
         Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => {
             let input = e.input;
-            let err = error_from_span(&input, error_msg.to_string());
+            let err = error_from_input(&input, error_msg.to_string());
             input.extra.report_error(err); // Push error onto stack.
             Ok((input, None)) // Parsing failed, but keep going.
         }
@@ -91,7 +88,7 @@ where
 }
 
 /// Consumes a `//` line comment up to (but not including) the trailing newline.
-fn parse_line_comment(input: LocatedSpan) -> IResult<()> {
+fn parse_line_comment(input: Input) -> IResult<()> {
     #[rustfmt::skip]
     let (rest, _) = (
         tag("//"),
@@ -104,7 +101,7 @@ fn parse_line_comment(input: LocatedSpan) -> IResult<()> {
 ///
 /// Use instead of `multispace0` at parser call sites so comments
 /// survive in the surrounding expression's span.
-fn trivia0(input: LocatedSpan) -> IResult<()> {
+fn trivia0(input: Input) -> IResult<()> {
     #[rustfmt::skip]
     let (rest, _) =
         many0(
@@ -117,7 +114,7 @@ fn trivia0(input: LocatedSpan) -> IResult<()> {
 }
 
 /// Like [`trivia0`] but requires at least one whitespace run or comment.
-fn trivia1(input: LocatedSpan) -> IResult<()> {
+fn trivia1(input: Input) -> IResult<()> {
     #[rustfmt::skip]
     let (rest, _) =
         many1(
@@ -133,14 +130,14 @@ fn trivia1(input: LocatedSpan) -> IResult<()> {
 // TODO rename with_trivia
 fn ws<'a, F, T>(
     inner: F,
-) -> impl Parser<LocatedSpan<'a>, Output = T, Error = nom::error::Error<LocatedSpan<'a>>>
+) -> impl Parser<Input<'a>, Output = T, Error = nom::error::Error<Input<'a>>>
 where
-    F: Parser<LocatedSpan<'a>, Output = T, Error = nom::error::Error<LocatedSpan<'a>>>,
+    F: Parser<Input<'a>, Output = T, Error = nom::error::Error<Input<'a>>>,
 {
     delimited(trivia0, inner, trivia0)
 }
 
-fn parse_string<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
+fn parse_string<M>(input: Input) -> IResult<SourceExpr<M>> {
     let start = input.location_offset();
     #[rustfmt::skip]
     let (rest, value) = delimited(
@@ -156,7 +153,7 @@ fn parse_string<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
     ))
 }
 
-fn parse_float<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
+fn parse_float<M>(input: Input) -> IResult<SourceExpr<M>> {
     let start = input.location_offset();
     #[rustfmt::skip]
     let (rest, value) = preceded(
@@ -168,11 +165,11 @@ fn parse_float<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
     Ok((rest, SourceExpr::with_span(Expr::Float(value), start..end)))
 }
 
-fn parse_literal<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
+fn parse_literal<M>(input: Input) -> IResult<SourceExpr<M>> {
     alt((parse_float, parse_string)).parse(input)
 }
 
-fn parse_identifier(input: LocatedSpan) -> IResult<String> {
+fn parse_identifier(input: Input) -> IResult<String> {
     #[rustfmt::skip]
     let (rest, value) =
         alt((
@@ -184,7 +181,7 @@ fn parse_identifier(input: LocatedSpan) -> IResult<String> {
                     )),
                     many0(alt((alphanumeric1, tag("_"), tag("#")))),
                 )),
-                |s: &LocatedSpan| *s.fragment() != "fn" &&
+                |s: &Input| *s.fragment() != "fn" &&
                     *s.fragment() != "let" && *s.fragment() != "in" &&
                     *s.fragment() != "if" && *s.fragment() != "then" &&
                     *s.fragment() != "else" && *s.fragment() != "open",
@@ -196,7 +193,7 @@ fn parse_identifier(input: LocatedSpan) -> IResult<String> {
     Ok((rest, value.to_string()))
 }
 
-fn parse_unary_operator(input: LocatedSpan) -> IResult<LocatedSpan> {
+fn parse_unary_operator(input: Input) -> IResult<Input> {
     #[rustfmt::skip]
     let (rest, value) =
         alt((
@@ -210,7 +207,7 @@ fn parse_unary_operator(input: LocatedSpan) -> IResult<LocatedSpan> {
     Ok((rest, value))
 }
 
-fn parse_pattern(input: LocatedSpan) -> IResult<Pattern> {
+fn parse_pattern(input: Input) -> IResult<Pattern> {
     #[rustfmt::skip]
     let (rest, pattern) =
         alt((
@@ -226,7 +223,7 @@ fn parse_pattern(input: LocatedSpan) -> IResult<Pattern> {
     Ok((rest, pattern))
 }
 
-fn parse_function<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
+fn parse_function<M>(input: Input) -> IResult<SourceExpr<M>> {
     let start = input.location_offset();
     #[rustfmt::skip]
     let (rest, (pattern, body)) =
@@ -251,7 +248,7 @@ fn parse_function<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
 
 /// Parses `foo.bar.baz` and returns the module path as a list of
 /// components.
-fn parse_import_path(input: LocatedSpan) -> IResult<Vec<String>> {
+fn parse_import_path(input: Input) -> IResult<Vec<String>> {
     separated_list1(char('.'), parse_identifier).parse(input)
 }
 
@@ -261,10 +258,10 @@ fn parse_import_path(input: LocatedSpan) -> IResult<Vec<String>> {
 /// and whitespace). It does not consume any separator or terminator. Returns
 /// success if the resulting bindings span the entire input, even those bindings
 /// may contain errors.
-fn parse_binding<M>(input: LocatedSpan) -> IResult<SourceBinding<M>> {
+fn parse_binding<M>(input: Input) -> IResult<SourceBinding<M>> {
     let start = input.location_offset();
     #[rustfmt::skip]
-    let (rest, (annos, binding)) = 
+    let (rest, (annos, binding)) =
         delimited(
             trivia0,
             (
@@ -277,10 +274,10 @@ fn parse_binding<M>(input: LocatedSpan) -> IResult<SourceBinding<M>> {
                         alt((
                             parse_expr,
                             // If that fails, consume everything up to a ';'
-                            take_till(|c| c == ';').map(|span: LocatedSpan| SourceExpr {
-                                expr: Expr::Error(span.fragment().to_string()),
-                                span: Some(span.location_offset()..span.location_offset()+span.len()),
-                            }),
+                            take_till(|c| c == ';').map(|input: Input| SourceExpr::with_span(
+                                Expr::Error(input.fragment().to_string()),
+                                input.to_range(),
+                            )),
                         )),
                     ).map(|(p, e)| Binding::Definition(p, e)),
                 ))
@@ -293,12 +290,12 @@ fn parse_binding<M>(input: LocatedSpan) -> IResult<SourceBinding<M>> {
         SourceBinding {
             binding,
             annotations: annos.into_iter().flatten().collect(),
-            span: Some(start..end),
+            span: Some(Span::local(start..end)),
         },
     ))
 }
 
-fn parse_let<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
+fn parse_let<M>(input: Input) -> IResult<SourceExpr<M>> {
     let start = input.location_offset();
     #[rustfmt::skip]
     let (rest, (bindings, body)) = (
@@ -309,7 +306,7 @@ fn parse_let<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
             (
                 // Optional trailing comma
                 opt((char(','), trivia0)),
-                expect(tag("in"), "expected 'in'"), 
+                expect(tag("in"), "expected 'in'"),
                 trivia1,
             ),
         ),
@@ -325,7 +322,7 @@ fn parse_let<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
         match source_binding.binding {
             Binding::Definition(pattern, expr) => definitions.push((pattern, expr)),
             Binding::Open(_) => {
-                rest.extra.report_error(Error::with_range(
+                rest.extra.report_error(Error::with_span(
                     "`open` is not allowed inside `let`; use it at the top level".to_string(),
                     source_binding.span,
                 ));
@@ -342,7 +339,7 @@ fn parse_let<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
     Ok((rest, SourceExpr::with_span(expr.expr, start..end)))
 }
 
-fn parse_if_then_else<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
+fn parse_if_then_else<M>(input: Input) -> IResult<SourceExpr<M>> {
     let start = input.location_offset();
     #[rustfmt::skip]
     let (rest, (condition, then, _, else_)) =
@@ -364,7 +361,7 @@ fn parse_if_then_else<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
     Ok((rest, SourceExpr::with_span(expr, start..end)))
 }
 
-fn parse_unary_application<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
+fn parse_unary_application<M>(input: Input) -> IResult<SourceExpr<M>> {
     let start = input.location_offset();
     let (rest, (op, expr)) = (parse_unary_operator, parse_primitive).parse(input)?;
     let end = rest.location_offset();
@@ -379,7 +376,7 @@ fn parse_unary_application<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
     Ok((rest, SourceExpr::with_span(app, start..end)))
 }
 
-fn parse_variable<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
+fn parse_variable<M>(input: Input) -> IResult<SourceExpr<M>> {
     let start = input.location_offset();
     // Variables are the same as identifiers (i.e., trivial patterns) except:
     //   "_" is only a identifier: it may be bound but *not* referenced
@@ -392,7 +389,7 @@ fn parse_variable<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
             recognize((
                 tag("__"),
                 many0(alt((alphanumeric1, tag("_"), tag("#")))),
-            )).map(|v: LocatedSpan| v.fragment().to_string()),
+            )).map(|v: Input| v.fragment().to_string()),
         )),
         |name: &String| name != "_",
     ).parse(input)?;
@@ -403,7 +400,7 @@ fn parse_variable<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
     ))
 }
 
-fn parse_primitive<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
+fn parse_primitive<M>(input: Input) -> IResult<SourceExpr<M>> {
     #[rustfmt::skip]
     let (rest, value) = alt((
         parse_literal,
@@ -421,7 +418,7 @@ fn parse_primitive<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
     Ok((rest, value))
 }
 
-fn parse_application<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
+fn parse_application<M>(input: Input) -> IResult<SourceExpr<M>> {
     let start = input.location_offset();
     let (mut rest, mut result) = parse_primitive(input)?;
     loop {
@@ -450,13 +447,13 @@ fn parse_application<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
 /// the end of the current step, so intermediate folds carry accurate source
 /// ranges.
 fn fold_binary_op<'a, M, P, Q>(
-    input: LocatedSpan<'a>,
+    input: Input<'a>,
     mut lhs: P,
     mut op_rhs: Q,
 ) -> IResult<'a, SourceExpr<M>>
 where
-    P: FnMut(LocatedSpan<'a>) -> IResult<'a, SourceExpr<M>>,
-    Q: FnMut(LocatedSpan<'a>) -> IResult<'a, (LocatedSpan<'a>, Option<SourceExpr<M>>)>,
+    P: FnMut(Input<'a>) -> IResult<'a, SourceExpr<M>>,
+    Q: FnMut(Input<'a>) -> IResult<'a, (Input<'a>, Option<SourceExpr<M>>)>,
 {
     let start = input.location_offset();
     let (mut rest, mut expr) = lhs(input)?;
@@ -482,7 +479,7 @@ where
 // The operator tags and nesting of the `parse_*` precedence-level parsers
 // below must match `expr::Precedence` and `expr::binary_op_precedence`, so
 // that `format!("{}", parse(s))` round-trips back to the same AST.
-fn parse_multiplicative<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
+fn parse_multiplicative<M>(input: Input) -> IResult<SourceExpr<M>> {
     fold_binary_op(input, parse_application, |rest| {
         (
             ws(alt((tag("*"), tag("/"), tag("~*")))),
@@ -492,7 +489,7 @@ fn parse_multiplicative<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
     })
 }
 
-fn parse_additive<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
+fn parse_additive<M>(input: Input) -> IResult<SourceExpr<M>> {
     fold_binary_op(input, parse_multiplicative, |rest| {
         (
             ws(alt((tag("+"), tag("-"), tag("&")))),
@@ -502,7 +499,7 @@ fn parse_additive<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
     })
 }
 
-fn parse_relational<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
+fn parse_relational<M>(input: Input) -> IResult<SourceExpr<M>> {
     fold_binary_op(input, parse_additive, |rest| {
         let (rest, op) = ws(alt((
             tag("=="),
@@ -518,7 +515,7 @@ fn parse_relational<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
     })
 }
 
-fn parse_chord<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
+fn parse_chord<M>(input: Input) -> IResult<SourceExpr<M>> {
     let start = input.location_offset();
     #[rustfmt::skip]
     let (rest, inner) = delimited(
@@ -534,7 +531,7 @@ fn parse_chord<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
     Ok((rest, SourceExpr::with_span(app, start..end)))
 }
 
-fn parse_sequence<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
+fn parse_sequence<M>(input: Input) -> IResult<SourceExpr<M>> {
     let start = input.location_offset();
     #[rustfmt::skip]
     let (rest, inner) = delimited(
@@ -552,7 +549,7 @@ fn parse_sequence<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
 
 /// Parses a parenthesized expression or expressions. If there is only one element, returns just that element;
 /// otherwise returns a Tuple of elements.
-fn parse_tuple<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
+fn parse_tuple<M>(input: Input) -> IResult<SourceExpr<M>> {
     let start = input.location_offset();
     #[rustfmt::skip]
     let (rest, mut exprs) = delimited(
@@ -571,7 +568,7 @@ fn parse_tuple<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
     Ok((rest, SourceExpr::with_span(Expr::Tuple(exprs), start..end)))
 }
 
-fn parse_list<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
+fn parse_list<M>(input: Input) -> IResult<SourceExpr<M>> {
     let start = input.location_offset();
     #[rustfmt::skip]
     let (rest, exprs) = delimited(
@@ -586,7 +583,7 @@ fn parse_list<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
     Ok((rest, SourceExpr::with_span(Expr::List(exprs), start..end)))
 }
 
-fn parse_reverse_application<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
+fn parse_reverse_application<M>(input: Input) -> IResult<SourceExpr<M>> {
     let start = input.location_offset();
     let (mut rest, mut argument) = parse_relational(input)?;
     loop {
@@ -612,7 +609,7 @@ fn parse_reverse_application<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
     Ok((rest, argument))
 }
 
-fn parse_expr<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
+fn parse_expr<M>(input: Input) -> IResult<SourceExpr<M>> {
     let start = input.location_offset();
     let (mut rest, mut expr) = parse_reverse_application(input)?;
     loop {
@@ -644,9 +641,10 @@ fn parse_expr<M>(input: LocatedSpan) -> IResult<SourceExpr<M>> {
 }
 
 fn translate_parse_result<T>(result: IResult<T>) -> Result<T, Vec<Error>> {
+    // TODO consider finish()
     match result {
         Ok((_, a)) => Ok(a),
-        Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => Err(vec![error_from_span(
+        Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => Err(vec![error_from_input(
             &e.input,
             "unable to parse input".to_string(),
         )]),
@@ -661,11 +659,11 @@ where
     M: Display,
 {
     let errors = RefCell::new(Vec::new());
-    let span = LocatedSpan::new_extra(input, ParseState(&errors));
+    let input = Input::new_extra(input, ParseState(&errors));
     #[rustfmt::skip]
     let result = all_consuming(
         ws(parse_expr),
-    ).parse(span);
+    ).parse(input);
     if !errors.borrow().is_empty() {
         println!(
             "Got result {:} and errors {:?}",
@@ -687,7 +685,7 @@ where
 /// contain errors.
 pub fn parse_module<M>(input: &str) -> Result<(Vec<SourceBinding<M>>, Vec<Error>), Vec<Error>> {
     let errors = RefCell::new(Vec::new());
-    let span = LocatedSpan::new_extra(input, ParseState(&errors));
+    let input = Input::new_extra(input, ParseState(&errors));
     #[rustfmt::skip]
     let result = all_consuming((
         many0(
@@ -698,26 +696,28 @@ pub fn parse_module<M>(input: &str) -> Result<(Vec<SourceBinding<M>>, Vec<Error>
             )
         ),
         recognize(trivia0),
-    )).parse(span);
+    )).parse(input);
     // Two things: 1) we need to extend each binding to include the ";" and 2)
     // we need to add an `Empty` binding at the end if there is any trailing
     // trivia.
     let result = match result {
-        Ok((span, (mut bindings, trivia))) => {
+        Ok((rest, (mut bindings, trivia))) => {
             for binding in bindings.iter_mut() {
                 if let Some(span) = &binding.span {
                     // The ";" is always the next character.
-                    binding.span = Some(span.start..span.end + 1);
+                    binding.span = Some(Span::local(span.range.start..span.range.end + 1));
                 }
             }
             if trivia.len() > 0 {
                 bindings.push(SourceBinding {
                     binding: Binding::Empty,
                     annotations: Vec::new(),
-                    span: Some(trivia.location_offset()..trivia.location_offset() + trivia.len()),
+                    span: Some(Span::local(
+                        trivia.location_offset()..trivia.location_offset() + trivia.len(),
+                    )),
                 });
             }
-            Ok((span, (bindings, errors.take())))
+            Ok((rest, (bindings, errors.take())))
         }
         Err(e) => Err(e),
     };
@@ -725,12 +725,12 @@ pub fn parse_module<M>(input: &str) -> Result<(Vec<SourceBinding<M>>, Vec<Error>
 }
 
 /// Parses a slider config entry.
-fn parse_slider(input: LocatedSpan) -> IResult<Slider> {
+fn parse_slider(input: Input) -> IResult<Slider> {
     // TODO this is a bit of a mess... and also could first parse the whole thing as a string literal.
     let label_char = |c: char| c != ':' && c != '"' && c != ',' && c != ']' && !c.is_whitespace();
     // Parse the quoted opening, label, and first float (shared prefix)
     #[rustfmt::skip]
-    let (rest, (_, label, (initial_span, initial_value), _)) = (
+    let (rest, (_, label, (initial_input, initial_value), _)) = (
         char('"'),
         expect(take_while1(label_char), "expected slider label"),
         preceded(
@@ -759,15 +759,15 @@ fn parse_slider(input: LocatedSpan) -> IResult<Slider> {
         let min = min.unwrap_or_default();
         let max = max.unwrap_or_default();
         if min > initial_value || max < initial_value {
-            initial_span.extra.report_error(error_from_span(
-                &initial_span,
+            initial_input.extra.report_error(error_from_input(
+                &initial_input,
                 format!(
                     "initial value {} is not between min {} and max {}",
                     initial_value, min, max
                 ),
             ));
             return Err(nom::Err::Failure(nom::error::Error::new(
-                initial_span,
+                initial_input,
                 nom::error::ErrorKind::Verify,
             )));
         }
@@ -801,7 +801,7 @@ fn parse_slider(input: LocatedSpan) -> IResult<Slider> {
     }
 }
 
-fn parse_sliders_internal(input: LocatedSpan) -> IResult<Vec<Slider>> {
+fn parse_sliders_internal(input: Input) -> IResult<Vec<Slider>> {
     let (rest, sliders) = preceded(
         tag("sliders="),
         delimited(
@@ -818,8 +818,8 @@ fn parse_sliders_internal(input: LocatedSpan) -> IResult<Vec<Slider>> {
 /// Example: `["volume:0.5:0:1", "cutoff:2000:200:8000"]`
 pub fn parse_sliders(input: &str) -> Result<Vec<Slider>, Vec<Error>> {
     let errors = RefCell::new(Vec::new());
-    let span = LocatedSpan::new_extra(input, ParseState(&errors));
-    let result = all_consuming(parse_sliders_internal).parse(span);
+    let input = Input::new_extra(input, ParseState(&errors));
+    let result = all_consuming(parse_sliders_internal).parse(input);
     if !errors.borrow().is_empty() {
         return Err(errors.into_inner());
     }
@@ -827,7 +827,7 @@ pub fn parse_sliders(input: &str) -> Result<Vec<Slider>, Vec<Error>> {
 }
 
 /// Parses `color=rgb(R,G,B)` where R, G, B are integers in [0, 255].
-fn parse_color(input: LocatedSpan) -> IResult<(u8, u8, u8)> {
+fn parse_color(input: Input) -> IResult<(u8, u8, u8)> {
     #[rustfmt::skip]
     let (rest, (_, r, _, g, _, b, _)) = (
         tag("color=rgb("),
@@ -842,13 +842,13 @@ fn parse_color(input: LocatedSpan) -> IResult<(u8, u8, u8)> {
 }
 
 /// Parses `level_db=<float>` (e.g. `level_db=-6.0`).
-fn parse_level(input: LocatedSpan) -> IResult<f32> {
+fn parse_level(input: Input) -> IResult<f32> {
     let (rest, (_, value)) = (tag("level_db="), number::float).parse(input)?;
     Ok((rest, value))
 }
 
 /// Parses `skip_slots=<non-negative integer>` (e.g., `skip_slots=3`).
-fn parse_skip_slots(input: LocatedSpan) -> IResult<u32> {
+fn parse_skip_slots(input: Input) -> IResult<u32> {
     // TODO combinators
     let (rest, _) = tag("skip_slots=").parse(input)?;
     let (rest, digits) = character::digit1(rest)?;
@@ -860,7 +860,7 @@ fn parse_skip_slots(input: LocatedSpan) -> IResult<u32> {
 }
 
 /// Parses a single annotation variant (one element from inside `#{ ... }`).
-fn parse_annotation(input: LocatedSpan) -> IResult<SourceAnnotation> {
+fn parse_annotation(input: Input) -> IResult<SourceAnnotation> {
     // TODO can we capture this start/end+wrap pattern as a combinator here and
     // elsewhere?
     let start = input.location_offset();
@@ -876,14 +876,14 @@ fn parse_annotation(input: LocatedSpan) -> IResult<SourceAnnotation> {
         rest,
         SourceAnnotation {
             annotation,
-            span: Some(start..end),
+            span: Some(Span::local(start..end)),
         },
     ))
 }
 
 /// Parses a set of annotations `#{anno, anno, ...}` and returns the inner
 /// annotations (each with its own span).
-fn parse_annotation_set(input: LocatedSpan) -> IResult<Vec<SourceAnnotation>> {
+fn parse_annotation_set(input: Input) -> IResult<Vec<SourceAnnotation>> {
     // TODO combinators
     let (rest, _) = tag("#").parse(input)?;
     let (rest, _) = ws(char('{')).parse(rest)?;
@@ -892,31 +892,31 @@ fn parse_annotation_set(input: LocatedSpan) -> IResult<Vec<SourceAnnotation>> {
     let (rest, _) = char('}').parse(rest)?;
     Ok((rest, annos))
 }
-/// Replaces `source[target_span]` with `new_text`, re-parse the resulting
+/// Replaces `source[target_range]` with `new_text`, re-parse the resulting
 /// source, and atomically update both `source` and `root` on success. On parse
 /// failure neither is modified and the parse errors are returned.
 ///
-/// The intended use is to find a node by walking `root`, grab its `span`, and
-/// pass it as `target_span` here. After the call returns Ok, every node in the
-/// new `root` has fresh spans into the new `source`, so `print_preserving`
-/// round-trips the edited file.
+/// The intended use is to find a node by walking `root`, grab the range its
+/// `span`, and pass it as `target_range` here. After the call returns Ok, every
+/// node in the new `root` has fresh spans into the new `source`, so
+/// `print_preserving` round-trips the edited file.
 pub fn replace_at<M>(
     root: &mut SourceExpr<M>,
-    target_span: Range<usize>,
+    target_range: Range<usize>,
     new_text: &str,
     source: &mut String,
 ) -> Result<(), Vec<Error>>
 where
     M: Display,
 {
-    if target_span.end > source.len() || target_span.start > target_span.end {
-        return Err(vec![Error::with_range(
+    if target_range.end > source.len() || target_range.start > target_range.end {
+        return Err(vec![Error::with_span(
             format!(
                 "target span {:?} is out of bounds for source of length {}",
-                target_span,
+                target_range,
                 source.len()
             ),
-            Some(target_span),
+            Some(Span::local(target_range)),
         )]);
     }
     // Re-parses the whole expression rather than just the subtree —
@@ -927,7 +927,7 @@ where
     // Speculatively splice and re-parse. If parsing fails, neither `source`
     // nor `root` is touched.
     let mut new_source = source.clone();
-    new_source.replace_range(target_span, new_text);
+    new_source.replace_range(target_range, new_text);
     let new_root = parse_program::<M>(&new_source)?;
 
     *source = new_source;
@@ -977,8 +977,8 @@ mod tests {
 
         // Double underscore identifiers are internal-only
         let errors = RefCell::new(Vec::new());
-        let span = LocatedSpan::new_extra("__chord", ParseState(&errors));
-        let result = parse_identifier(span);
+        let input = Input::new_extra("__chord", ParseState(&errors));
+        let result = parse_identifier(input);
         assert!(result.is_err());
     }
 
@@ -1194,7 +1194,7 @@ mod tests {
         let bindings = parse_module_successfully(input);
         assert_eq!(bindings.len(), 2);
         assert_eq!(
-            bindings[0].span.as_ref().map(|s| s.start),
+            bindings[0].span.as_ref().map(|s| s.range.start),
             Some(0),
             "first binding should absorb file-leading"
         );
@@ -1272,7 +1272,7 @@ y = 2;";
         for binding in &bindings {
             for sa in &binding.annotations {
                 let span = sa.span.as_ref().expect("annotation should have a span");
-                assert!(span.end <= input.len());
+                assert!(span.range.end <= input.len());
             }
         }
 
@@ -1390,7 +1390,7 @@ synth = saw(220);";
     /// None. Used by replace_at tests as a stand-in for editor navigation.
     fn find_first_list_span<M>(node: &SourceExpr<M>) -> Option<Range<usize>> {
         if let Expr::List(_) = &node.expr {
-            return node.span.clone();
+            return node.span.as_ref().map(|s| s.range.clone());
         }
         match &node.expr {
             Expr::Function { body, .. } => find_first_list_span(body),
@@ -1449,7 +1449,7 @@ synth = saw(220);";
         let mut source = original.clone();
         let original_root = parse_program::<u32>(&source).unwrap();
         let mut root = original_root.clone();
-        let list_span = root.span.clone().unwrap();
+        let list_span = root.span.clone().unwrap().range;
 
         // Replacing the list with malformed text fails atomically.
         let result = replace_at(&mut root, list_span, "[1,", &mut source);
@@ -1566,8 +1566,8 @@ synth = saw(220);";
     /// return the flat list of `Annotation`s or surface the parse error.
     fn parse_one_annotation_set(input: &str) -> Result<Vec<Annotation>, Vec<Error>> {
         let errors = RefCell::new(Vec::new());
-        let span = LocatedSpan::new_extra(input, ParseState(&errors));
-        let result = all_consuming(parse_annotation_set).parse(span);
+        let input = Input::new_extra(input, ParseState(&errors));
+        let result = all_consuming(parse_annotation_set).parse(input);
         if !errors.borrow().is_empty() {
             return Err(errors.into_inner());
         }

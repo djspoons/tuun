@@ -147,7 +147,10 @@ impl EffectRunner {
                                 .iter()
                                 .filter_map(|d| {
                                     d.program_range.clone().map(|range| {
-                                        expr::Error::with_range(d.message.clone(), Some(range))
+                                        expr::Error::with_span(
+                                            d.message.clone(),
+                                            Some(expr::Span::local(range)),
+                                        )
                                     })
                                 })
                                 .collect();

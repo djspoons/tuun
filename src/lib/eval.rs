@@ -118,7 +118,7 @@ where
         }
         (Pattern::Tuple(patterns), Expr::Tuple(arguments)) => {
             if patterns.len() != arguments.len() {
-                return Err(Error::with_range(
+                return Err(Error::with_span(
                     format!(
                         "Mismatched number of elements in pattern {:?} and arguments {:?}",
                         patterns, arguments
@@ -131,7 +131,7 @@ where
             }
             Ok(())
         }
-        _ => Err(Error::with_range(
+        _ => Err(Error::with_span(
             format!(
                 "Pattern {:?} does not match actual expression {:?}",
                 pattern, argument.expr
@@ -162,7 +162,7 @@ where
             // TODO is that true for functions?
             Ok(SourceExpr { expr, span })
         }
-        Variable(name) => Err(Error::with_range(
+        Variable(name) => Err(Error::with_span(
             format!("Variable '{}' not found in context", name),
             span,
         )),
@@ -189,7 +189,7 @@ where
             match evaluate_closed(*condition)?.expr {
                 Bool(true) => evaluate_closed(*then),
                 Bool(false) => evaluate_closed(*else_),
-                _ => Err(Error::with_range(
+                _ => Err(Error::with_span(
                     "Expected boolean condition".to_string(),
                     condition_span,
                 )),
@@ -217,11 +217,11 @@ where
                     };
                     let result = function.0(actuals);
                     match result {
-                        Expr::Error(s) => Err(Error::with_range(s, span.clone())),
+                        Expr::Error(s) => Err(Error::with_span(s, span.clone())),
                         _ => Ok(SourceExpr::from(result)),
                     }
                 }
-                (function, actuals) => Err(Error::with_range(
+                (function, actuals) => Err(Error::with_span(
                     format!("Invalid application: {} {}", function, actuals),
                     span.clone(),
                 )),
@@ -239,7 +239,7 @@ where
                 .map(|e| evaluate_closed(e))
                 .collect::<Result<Vec<_>, _>>()?,
         ))),
-        Expr::Error(s) => Err(Error::with_range(s, span)),
+        Expr::Error(s) => Err(Error::with_span(s, span)),
     }
 }
 
@@ -267,10 +267,7 @@ where
 }
 
 /// Substitutes `context` into `expr` and reduces the result to a value.
-///
-/// Use with [`build_context`] when the two phases' errors need different
-/// handling; [`evaluate`] combines them.
-pub fn evaluate_with_context<M>(
+fn evaluate_with_context<M>(
     context: &[(String, SourceExpr<M>)],
     expr: SourceExpr<M>,
 ) -> Result<SourceExpr<M>, Error>
@@ -285,9 +282,7 @@ where
 /// bindings recurse through `resolve` to pull in their referenced module's
 /// bindings.
 ///
-/// Errors raised while processing an `open`ed module's bindings are tagged with
-/// that module's path (see [`Error::origin`]).
-pub fn build_context<'a, M, F>(
+fn build_context<'a, M, F>(
     resolve: &F,
     bindings: &'a [SourceBinding<M>],
     context: &mut Vec<(String, SourceExpr<M>)>,
@@ -300,7 +295,7 @@ where
         match &source_binding.binding {
             Binding::Open(path) => {
                 let module = resolve(path)?;
-                build_context(resolve, module, context).map_err(|e| e.in_module(path))?;
+                build_context(resolve, module, context)?;
             }
             Binding::Definition(pattern, def_expr) => {
                 let substituted = substitute(context, def_expr.clone());

@@ -141,11 +141,6 @@ pub enum Evaluation {
 
 /// One program slot: its source text, sliders, level, color, and the
 /// cached results of its last evaluation.
-//
-// `Program` exposes a narrow API — fields are private so the rest of the
-// UI (renderer, input handlers, reducer, effect runner) can only observe
-// programs through getters and mutate them through methods that preserve
-// the internal invariants.
 #[derive(Debug, Clone)]
 pub struct Program {
     /// The program's source expression text. Kept in sync with the caches
@@ -167,7 +162,7 @@ pub struct Program {
 
 impl Program {
     /// Builds a program from a string without attempting to parse it.
-    pub(crate) fn from_string(text: &str, binding_index: usize) -> Program {
+    fn from_string(text: &str, binding_index: usize) -> Program {
         Program {
             text: text.to_string(),
             span: 0..0,
@@ -185,7 +180,7 @@ impl Program {
     ///
     /// Only `Definition`s with at least one annotation become programs.
     /// `Definition`s with no annotations are not returned.
-    pub(crate) fn from_source_binding(
+    fn from_source_binding(
         sb: &expr::SourceBinding<MarkId>,
         binding_index: usize,
         source: &str,
@@ -214,10 +209,10 @@ impl Program {
         }
         if let expr::Binding::Definition(_, expr) = &sb.binding {
             if let Some(s) = &expr.span
-                && s.end <= source.len()
+                && s.range.end <= source.len()
             {
-                let span = s.clone();
-                let text = source[s.clone()].to_string();
+                let span = s.range.clone();
+                let text = source[s.range.clone()].to_string();
                 Some(Program {
                     text,
                     span,
@@ -381,10 +376,10 @@ fn walk_ui_positions(
         }
         if let expr::Binding::Definition(_, expr) = &sb.binding
             && let Some(s) = &expr.span
-            && s.end <= source_len
+            && s.range.end <= source_len
         {
             position += read_skip_slots(sb) as usize;
-            out.push((position, i, s.clone()));
+            out.push((position, i, s.range.clone()));
             position += 1;
         }
     }
@@ -419,7 +414,10 @@ impl ProgramSet {
         input_path: std::path::PathBuf,
     ) -> Result<(ProgramSet, String), Vec<expr::Error>> {
         let mut message = String::new();
-        let (bindings, errors) = parser::parse_module::<MarkId>(&source)?;
+        let (mut bindings, errors) = parser::parse_module::<MarkId>(&source)?;
+        // These bindings' spans index the backing source file, not a program
+        // slot's text — stamp them so error positions resolve correctly.
+        expr::set_span_source(&mut bindings, expr::SourceId::File);
         // TODO sort of a bummer that we don't know which binding this error was
         // in... some opportunity here to improve the type of parse_module.
         if !errors.is_empty() {
@@ -645,6 +643,7 @@ fn level_edit(
                 .span
                 .as_ref()
                 .expect("parsed binding has span")
+                .range
                 .start;
             Some(insert_annotation_line(pos, &body, source))
         }
@@ -706,6 +705,7 @@ fn skip_slots_edit(
                 .span
                 .as_ref()
                 .expect("parsed binding has span")
+                .range
                 .start;
             Some(insert_annotation_line(pos, &body, source))
         }
@@ -831,7 +831,7 @@ where
         .annotations
         .iter()
         .rev()
-        .find_map(|a| pick(&a.annotation).map(|v| (v, a.span.clone())))
+        .find_map(|a| pick(&a.annotation).map(|v| (v, a.span.as_ref().map(|s| s.range.clone()))))
 }
 
 /// Returns the normalized 0..1 position implied by a parsed slider's
@@ -936,6 +936,7 @@ impl ProgramSet {
                         .span
                         .as_ref()
                         .expect("parsed binding has span")
+                        .range
                         .start
                 }
                 None => self.source.len(),
@@ -981,7 +982,8 @@ impl ProgramSet {
             let binding_span = self.bindings[binding_index]
                 .span
                 .clone()
-                .expect("parsed binding has span");
+                .expect("parsed binding has span")
+                .range;
             edits.push((binding_span, String::new()));
 
             let positions = walk_ui_positions(&self.bindings, self.source.len());

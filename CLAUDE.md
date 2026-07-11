@@ -9,6 +9,9 @@
 - When a short example is possible, an Example section should include that example.
 - Doc comments should *not* describe previous versions of the code or changes that have occurred since previous versions of the code.
 - Doc comments should *not* describe implementation details of the function; these comments should go inside the function.
+- Doc comments should describe only the item being documented — its behavior, inputs, outputs, and preconditions — *not* the behavior of its callers or of other parts of the codebase. Describing callers inverts the dependency: a later change to the caller would require an edit to this comment, and that edit will be missed.
+  - If the reader needs to know *when* to call a function, state it as a precondition or condition the function itself can express ("Call once the text's source identity is known"), not as a survey of current call sites ("the parser does X, and then module loading calls this").
+  - Facts about how another component behaves belong in that component's own docs; use a cross-reference link if needed rather than restating them.
 
 ### TODO Comments
 - Comments that begin with TODO describe cases which are not handled or optimizations that should be considered at a later time.

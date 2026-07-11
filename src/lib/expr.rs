@@ -9,37 +9,67 @@ use std::rc::Rc;
 
 use crate::waveform;
 
+/// Identifies which text a span's byte range indexes.
+///
+/// Assigned by whoever parsed the text: the parser stamps everything
+/// `Local`, and callers that know a file identity restamp with
+/// [`set_span_source`] (the program set stamps its bindings `File`; the
+/// evaluator stamps each loaded module `Module(id)`).
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum SourceId {
+    /// The text handed to the parser, as-is.
+    Local,
+    /// The backing source file the program set was loaded from.
+    File,
+    /// The module at this index in the evaluator's module table.
+    Module(u32),
+}
+
+/// A byte range plus the identity of the text it indexes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Span {
+    pub source: SourceId,
+    pub range: Range<usize>,
+}
+
+impl Span {
+    /// Builds a span into the locally-parsed text.
+    pub fn local(range: Range<usize>) -> Span {
+        Span {
+            source: SourceId::Local,
+            range,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Error {
-    range: Option<Range<usize>>,
+    span: Option<Span>,
     message: String,
-    /// Path of the `open`ed module this error originated in, when known;
-    /// `None` for errors local to the text being parsed or evaluated.
-    origin: Option<Vec<String>>,
 }
 
 impl Error {
     pub fn new(message: String) -> Self {
         Self {
-            range: None,
+            span: None,
             message,
-            origin: None,
         }
     }
-    /// Construct an `Error` with the given byte range. Use when a non-parser
+    /// Construct an `Error` located at the given span. Use when a non-parser
     /// caller (e.g. the evaluator) wants to attach a source location to an
     /// error it didn't itself produce.
-    pub fn with_range(message: String, range: Option<Range<usize>>) -> Self {
-        Self {
-            range,
-            message,
-            origin: None,
-        }
+    pub fn with_span(message: String, span: Option<Span>) -> Self {
+        Self { span, message }
     }
 
-    //pub fn span(&self) -> &Span { &self.span }
+    /// The error's byte range, without its source identity.
     pub fn range(&self) -> Option<Range<usize>> {
-        self.range.clone()
+        self.span.as_ref().map(|span| span.range.clone())
+    }
+
+    /// The identity of the text this error's range indexes.
+    pub fn source(&self) -> Option<SourceId> {
+        self.span.as_ref().map(|span| span.source)
     }
 
     /// The error message, without any location rendering.
@@ -47,29 +77,13 @@ impl Error {
         &self.message
     }
 
-    /// Returns this error tagged as originating in the module at `path`, unless
-    /// an origin is already set: the innermost module wins, so nested `open`s
-    /// attribute errors to the module that actually contains them.
-    pub fn in_module(mut self, path: &[String]) -> Self {
-        if self.origin.is_none() {
-            self.origin = Some(path.to_vec());
-        }
-        self
-    }
-
-    /// The path of the `open`ed module this error originated in, or `None` for
-    /// errors local to the text being parsed or evaluated.
-    pub fn origin(&self) -> Option<&[String]> {
-        self.origin.as_deref()
-    }
-
     /// Renders the error as `line:col: message` against `source`, the text
     /// this error's range indexes; falls back to the bare message when the
     /// error has no range.
     pub fn display_with_source(&self, source: &str) -> String {
-        match &self.range {
-            Some(range) => {
-                let (line, col) = line_col(source, range.start);
+        match &self.span {
+            Some(span) => {
+                let (line, col) = line_col(source, span.range.start);
                 format!("{}:{}: {}", line, col, self.message)
             }
             None => self.message.clone(),
@@ -83,7 +97,11 @@ impl Error {
 /// are clamped to the end.
 ///
 /// # Example
-/// `line_col("ab\ncd", 4)` is `(2, 2)` — the `d` on the second line.
+/// ```
+/// // Offset points to the `d` on the second line.
+/// let result = tuun::expr::line_col("ab\ncd", 4);
+/// assert_eq!(result, (2, 2));
+/// ```
 pub fn line_col(source: &str, offset: usize) -> (usize, usize) {
     let offset = offset.min(source.len());
     let prefix = &source.as_bytes()[..offset];
@@ -105,8 +123,12 @@ pub fn line_col(source: &str, offset: usize) -> (usize, usize) {
 
 impl Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.range {
-            Some(range) => write!(f, "{} at {}..{}", self.message, range.start, range.end),
+        match &self.span {
+            Some(span) => write!(
+                f,
+                "{} at {}..{}",
+                self.message, span.range.start, span.range.end
+            ),
             None => f.write_str(&self.message),
         }
     }
@@ -177,7 +199,7 @@ impl<M> Default for Expr<M> {
 #[derive(Clone, Debug)]
 pub struct SourceExpr<M> {
     pub expr: Expr<M>,
-    pub span: Option<Range<usize>>, // Some(_) for parser output; None for synthesized
+    pub span: Option<Span>, // Some(_) for parser output; None for synthesized
 }
 
 impl<M> From<Expr<M>> for SourceExpr<M> {
@@ -200,10 +222,12 @@ pub fn boxed<M>(expr: Expr<M>) -> Box<SourceExpr<M>> {
 }
 
 impl<M> SourceExpr<M> {
-    pub fn with_span(expr: Expr<M>, span: Range<usize>) -> SourceExpr<M> {
+    /// Builds an expression spanning `range` of the locally-parsed text
+    /// (the parser's stamp; see [`SourceId::Local`]).
+    pub fn with_span(expr: Expr<M>, range: Range<usize>) -> SourceExpr<M> {
         SourceExpr {
             expr,
-            span: Some(span),
+            span: Some(Span::local(range)),
         }
     }
     pub fn bool(v: bool) -> SourceExpr<M> {
@@ -279,7 +303,7 @@ pub struct SourceBinding<M> {
     pub binding: Binding<M>,
     /// Annotations attached to this binding.
     pub annotations: Vec<SourceAnnotation>,
-    pub span: Option<Range<usize>>,
+    pub span: Option<Span>,
 }
 
 // TODO need to define and handle the case where the same annotation type occurs
@@ -300,11 +324,12 @@ impl<M> SourceBinding<M> {
         SourceBinding::from(Binding::Definition(pattern, expr))
     }
 
-    pub fn with_span(binding: Binding<M>, span: Range<usize>) -> SourceBinding<M> {
+    /// Builds a binding spanning `range` of the locally-parsed text.
+    pub fn with_span(binding: Binding<M>, range: Range<usize>) -> SourceBinding<M> {
         SourceBinding {
             binding,
             annotations: Vec::new(),
-            span: Some(span),
+            span: Some(Span::local(range)),
         }
     }
 }
@@ -313,7 +338,7 @@ impl<M> SourceBinding<M> {
 #[derive(Debug, Clone)]
 pub struct SourceAnnotation {
     pub annotation: Annotation,
-    pub span: Option<Range<usize>>,
+    pub span: Option<Span>,
 }
 
 impl From<Annotation> for SourceAnnotation {
@@ -321,6 +346,66 @@ impl From<Annotation> for SourceAnnotation {
         SourceAnnotation {
             annotation,
             span: None,
+        }
+    }
+}
+
+/// Rewrites the source identity of every span in `bindings` to `source`,
+/// including annotations and nested expressions.
+///
+/// Freshly parsed bindings carry [`SourceId::Local`]; call this once the
+/// text's true identity (a backing file, a loaded module) is known.
+pub fn set_span_source<M>(bindings: &mut [SourceBinding<M>], source: SourceId) {
+    for binding in bindings.iter_mut() {
+        if let Some(span) = &mut binding.span {
+            span.source = source;
+        }
+        for annotation in &mut binding.annotations {
+            if let Some(span) = &mut annotation.span {
+                span.source = source;
+            }
+        }
+        if let Binding::Definition(_, expr) = &mut binding.binding {
+            set_expr_span_source(expr, source);
+        }
+    }
+}
+
+/// Rewrites the source identity of every span in `expr`'s tree to `source`.
+fn set_expr_span_source<M>(expr: &mut SourceExpr<M>, source: SourceId) {
+    if let Some(span) = &mut expr.span {
+        span.source = source;
+    }
+    match &mut expr.expr {
+        Expr::Bool(_)
+        | Expr::Float(_)
+        | Expr::String(_)
+        | Expr::Variable(_)
+        | Expr::Waveform(_)
+        | Expr::BuiltIn { .. }
+        | Expr::Error(_) => {}
+        Expr::Function { body, .. } => set_expr_span_source(body, source),
+        Expr::Seq { offset, waveform } => {
+            set_expr_span_source(offset, source);
+            set_expr_span_source(waveform, source);
+        }
+        Expr::IfThenElse {
+            condition,
+            then,
+            else_,
+        } => {
+            set_expr_span_source(condition, source);
+            set_expr_span_source(then, source);
+            set_expr_span_source(else_, source);
+        }
+        Expr::Application { function, argument } => {
+            set_expr_span_source(function, source);
+            set_expr_span_source(argument, source);
+        }
+        Expr::Tuple(exprs) | Expr::List(exprs) => {
+            for expr in exprs {
+                set_expr_span_source(expr, source);
+            }
         }
     }
 }
@@ -770,7 +855,7 @@ impl<M> SourceBinding<M> {
         let span = self.span.as_ref()?;
         match &self.binding {
             Binding::Definition(_, expr) if !is_clean(expr) => None,
-            _ => Some(span.clone()),
+            _ => Some(span.range.clone()),
         }
     }
 }
@@ -783,7 +868,7 @@ where
     if let Some(span) = &node.span
         && is_clean(node)
     {
-        return out.write_str(&source[span.clone()]);
+        return out.write_str(&source[span.range.clone()]);
     }
     write_preserving_structural(&node.expr, source, out)
 }
@@ -862,8 +947,10 @@ where
             let prev = items[i - 1].span.as_ref();
             let curr = item.span.as_ref();
             match (prev, curr) {
-                (Some(p), Some(c)) if p.end <= c.start && c.start <= source.len() => {
-                    out.write_str(&source[p.end..c.start])?;
+                (Some(p), Some(c))
+                    if p.range.end <= c.range.start && c.range.start <= source.len() =>
+                {
+                    out.write_str(&source[p.range.end..c.range.start])?;
                 }
                 _ => out.write_str(", ")?,
             }
@@ -1035,9 +1122,40 @@ mod tests {
     }
 
     #[test]
+    fn test_set_span_source() {
+        let expr = SourceExpr::with_span(
+            Expr::Application {
+                function: Box::new(SourceExpr::<u32>::with_span(
+                    Expr::Variable("f".to_string()),
+                    0..1,
+                )),
+                argument: Box::new(SourceExpr::with_span(Expr::Float(1.0), 2..3)),
+            },
+            0..3,
+        );
+        let mut bindings = vec![SourceBinding::with_span(
+            Binding::Definition(Pattern::Identifier("x".to_string()), expr),
+            0..3,
+        )];
+        set_span_source(&mut bindings, SourceId::Module(7));
+
+        let source_of = |span: &Option<Span>| span.as_ref().unwrap().source;
+        assert_eq!(source_of(&bindings[0].span), SourceId::Module(7));
+        let Binding::Definition(_, expr) = &bindings[0].binding else {
+            panic!("expected a definition");
+        };
+        assert_eq!(source_of(&expr.span), SourceId::Module(7));
+        let Expr::Application { function, argument } = &expr.expr else {
+            panic!("expected an application");
+        };
+        assert_eq!(source_of(&function.span), SourceId::Module(7));
+        assert_eq!(source_of(&argument.span), SourceId::Module(7));
+    }
+
+    #[test]
     fn test_display_with_source() {
         let source = "a = 1;\nb = nope;\n";
-        let error = Error::with_range("bad".to_string(), Some(11..15));
+        let error = Error::with_span("bad".to_string(), Some(Span::local(11..15)));
         assert_eq!(error.display_with_source(source), "2:5: bad");
         let error = Error::new("bad".to_string());
         assert_eq!(error.display_with_source(source), "bad");
