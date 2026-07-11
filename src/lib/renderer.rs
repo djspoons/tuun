@@ -316,10 +316,9 @@ impl Renderer {
                         // both `cursor_position` and the errors' byte ranges.
                         let mut x = self.nav_width as i32;
                         for (j, c) in program.text().char_indices() {
-                            let color = if errors
-                                .iter()
-                                .any(|e| matches!(e.range(), Some(range) if range.contains(&j)))
-                            {
+                            let color = if errors.iter().any(
+                                |e| matches!(&e.program_range, Some(range) if range.contains(&j)),
+                            ) {
                                 ERROR_COLOR
                             } else {
                                 EDIT_COLOR

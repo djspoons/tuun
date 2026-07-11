@@ -665,14 +665,6 @@ where
         ws(parse_expr),
     ).parse(input);
     if !errors.borrow().is_empty() {
-        println!(
-            "Got result {:} and errors {:?}",
-            match result {
-                Ok((_, node)) => node,
-                _ => SourceExpr::default(),
-            },
-            errors.borrow()
-        );
         return Err(errors.into_inner());
     }
     translate_parse_result(result)

@@ -4,6 +4,8 @@ use std::fmt;
 use std::ops::Range;
 use std::path::PathBuf;
 
+use crate::expr;
+
 /// A user-visible error with its source position resolved, where known.
 ///
 /// Produced from an `expr::Error` at the evaluator boundary. Only errors
@@ -32,6 +34,18 @@ impl Diagnostic {
             file: None,
             position: None,
             program_range: None,
+            message,
+        }
+    }
+
+    /// Builds a diagnostic for an error at `range` of a program's own
+    /// `text`: a bare `line:col` position matching the editor's display,
+    /// with the range kept for editor highlighting.
+    pub fn in_program(message: String, range: Range<usize>, text: &str) -> Diagnostic {
+        Diagnostic {
+            file: None,
+            position: Some(expr::line_col(text, range.start)),
+            program_range: Some(range),
             message,
         }
     }

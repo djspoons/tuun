@@ -263,31 +263,28 @@ impl Evaluator {
     /// source-file errors (sibling bindings) a whole-file position.
     fn diagnose(&self, error: &expr::Error, set: &ProgramSet, index: usize) -> Diagnostic {
         let message = error.message().to_string();
-        let (file, position, program_range) = match (error.source(), error.range()) {
+        match (error.source(), error.range()) {
             (Some(expr::SourceId::Local), Some(range)) => {
-                let text = set.programs()[index].text();
-                (
-                    None,
-                    Some(expr::line_col(text, range.start)),
-                    Some(range.clone()),
-                )
+                Diagnostic::in_program(message, range, set.programs()[index].text())
             }
-            (Some(expr::SourceId::File), Some(range)) => {
-                (None, set.source_position(range.start), None)
-            }
+            (Some(expr::SourceId::File), Some(range)) => Diagnostic {
+                file: None,
+                position: set.source_position(range.start),
+                program_range: None,
+                message,
+            },
             (Some(expr::SourceId::Module(id)), Some(range)) => {
                 match self.module_location(id, range.start) {
-                    Some((file, line, col)) => (Some(file), Some((line, col)), None),
-                    None => (None, None, None),
+                    Some((file, line, col)) => Diagnostic {
+                        file: Some(file),
+                        position: Some((line, col)),
+                        program_range: None,
+                        message,
+                    },
+                    None => Diagnostic::message_only(message),
                 }
             }
-            _ => (None, None, None),
-        };
-        Diagnostic {
-            file,
-            position,
-            program_range,
-            message,
+            _ => Diagnostic::message_only(message),
         }
     }
 

@@ -121,16 +121,12 @@ pub fn line_col(source: &str, offset: usize) -> (usize, usize) {
     (line, col)
 }
 
+// Message-only: rendering a position requires the source text the span
+// indexes (see `display_with_source` and `Evaluator::diagnose`); raw byte
+// offsets would leak into user-visible messages.
 impl Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.span {
-            Some(span) => write!(
-                f,
-                "{} at {}..{}",
-                self.message, span.range.start, span.range.end
-            ),
-            None => f.write_str(&self.message),
-        }
+        f.write_str(&self.message)
     }
 }
 

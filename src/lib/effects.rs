@@ -140,20 +140,10 @@ impl EffectRunner {
                             1 => format!("Error: {}", diagnostics[0]),
                             n => format!("Error: {} (+{} more)", diagnostics[0], n - 1),
                         };
-                        // Hand the diagnostics' program ranges to the editor
-                        // so evaluation errors highlight like parse errors do.
+                        // Hand the diagnostics to the editor so evaluation
+                        // errors highlight like parse errors do.
                         if let actions::Mode::Edit { errors, .. } = &mut mode_on_failure {
-                            *errors = diagnostics
-                                .iter()
-                                .filter_map(|d| {
-                                    d.program_range.clone().map(|range| {
-                                        expr::Error::with_span(
-                                            d.message.clone(),
-                                            Some(expr::Span::local(range)),
-                                        )
-                                    })
-                                })
-                                .collect();
+                            *errors = diagnostics;
                         }
                         state.mode = mode_on_failure;
                     }

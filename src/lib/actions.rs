@@ -6,6 +6,7 @@
 
 use std::time::Instant;
 
+use crate::diagnostics::Diagnostic;
 use crate::expr;
 use crate::ids::{MarkId, WaveformId};
 use crate::keys;
@@ -26,7 +27,10 @@ pub enum Mode {
         /// cursor op moves over whole characters (see `prev_char_boundary` /
         /// `next_char_boundary`).
         cursor_position: usize,
-        errors: Vec<expr::Error>,
+        /// Diagnostics for the current text — parse errors while typing,
+        /// or evaluation errors after a failed evaluate. The renderer
+        /// highlights their `program_range`s.
+        errors: Vec<Diagnostic>,
     },
     MoveSliders,
     /// Computer-keyboard piano: lower QWERTY row plays white keys, row above
@@ -379,7 +383,7 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             let cursor = program.text().len();
             let errors = parse_program_errors(program.text());
             state.message = if !errors.is_empty() {
-                format!("Error: {}", errors[0].display_with_source(program.text()))
+                format!("Error: {}", errors[0])
             } else if !program.sliders().configs().is_empty() {
                 program
                     .sliders()
@@ -617,9 +621,10 @@ fn apply_install_keys(state: &mut AppState, program_index: usize) -> Vec<Effect>
     vec![Effect::InstallKeys(program_index)]
 }
 
-/// Re-parses `text` and returns the syntax errors. Empty `text` is treated
-/// as a clean parse (renderer would have nothing to highlight anyway).
-fn parse_program_errors(text: &str) -> Vec<crate::expr::Error> {
+/// Re-parses `text` and returns its syntax errors as diagnostics. Empty
+/// `text` is treated as a clean parse (renderer would have nothing to
+/// highlight anyway).
+fn parse_program_errors(text: &str) -> Vec<Diagnostic> {
     use crate::parser;
     // Empty (or whitespace-only) text is a pending deletion, not a parse error.
     if text.trim().is_empty() {
@@ -627,7 +632,13 @@ fn parse_program_errors(text: &str) -> Vec<crate::expr::Error> {
     } else {
         match parser::parse_program::<MarkId>(text) {
             Ok(_) => Vec::new(),
-            Err(es) => es,
+            Err(es) => es
+                .into_iter()
+                .map(|e| match e.range() {
+                    Some(range) => Diagnostic::in_program(e.message().to_string(), range, text),
+                    None => Diagnostic::message_only(e.message().to_string()),
+                })
+                .collect(),
         }
     }
 }
