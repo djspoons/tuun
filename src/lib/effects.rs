@@ -218,8 +218,8 @@ impl EffectRunner {
                             .send(SliderEvent::UpdateInitialValues(last_slider_values));
                         self.player.play_note(key, note_on, program.level_db());
                     }
-                    Err(message) => {
-                        state.message = message;
+                    Err(error) => {
+                        state.message = format!("Error: {}", error);
                     }
                 }
             }

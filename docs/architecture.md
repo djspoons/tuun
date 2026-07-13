@@ -82,7 +82,7 @@ Dependencies among these components are shown below.
 
 ## Native App Architecture
 
-The native Tuun app uses two primary threads: a **main thread** for UI and DSL evaluation, and an **audio callback thread** for real-time sample generation. In addition, several helper threads are used to move work out of the main UI thread for tasks like sample precomputation. Threads communicate via channels.
+The native Tuun app uses two primary threads: a **main thread** for UI and DSL evaluation, and an **audio callback thread** for real-time sample generation. In addition, several helper threads are used to move work out of the main UI thread for tasks like sample pre-computation. Threads communicate via channels.
 
 ### System Overview
 

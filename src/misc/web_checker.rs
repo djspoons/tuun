@@ -3,7 +3,7 @@ use std::fs;
 
 use clap::Parser as ClapParser;
 
-use tuun::{builtins, eval, expr, ids, modules, parser, slider};
+use tuun::{builtins, diagnostics, eval, expr, ids, modules, parser, slider};
 
 #[derive(ClapParser, Debug)]
 #[command(version, about = "Check tuun-synth expressions in .md and .html files")]
@@ -12,13 +12,54 @@ struct Args {
     input_files: Vec<String>,
 }
 
-type Bindings = Vec<expr::SourceBinding<ids::MarkId>>;
+/// Identifies which text a span's byte range indexes in the checker.
+#[derive(Copy, Clone, Debug, PartialEq)]
+enum Source {
+    /// The `<tuun-synth>` block's expression (after comment stripping).
+    Expression,
+    /// The embedded module at this index of
+    /// [`modules::EMBEDDED_MODULES`].
+    Module(usize),
+}
+
+type Bindings = Vec<expr::SourceBinding<ids::MarkId, Source>>;
+
+/// Renders `error` with its `line:col` position and a caret snippet
+/// against `text`, the text its span indexes. Falls back to the bare
+/// message when the error has no span.
+fn display_error_in<S: Copy>(error: &expr::Error<S>, text: &str) -> String {
+    match error.range() {
+        Some(range) => format!(
+            "{}\n{}",
+            error.display_with_source(text),
+            diagnostics::render_snippet(text, &range)
+        ),
+        None => error.to_string(),
+    }
+}
+
+/// Renders `error` against the text its span indexes: the block's
+/// `expression`, or the embedded module the error came from (prefixed
+/// with that module's name).
+fn display_error(error: &expr::Error<Source>, expression: &str) -> String {
+    match error.source() {
+        Some(Source::Expression) => display_error_in(error, expression),
+        Some(Source::Module(index)) => match modules::EMBEDDED_MODULES.get(index) {
+            Some((name, content)) => format!("{}:{}", name, display_error_in(error, content)),
+            None => error.to_string(),
+        },
+        None => error.to_string(),
+    }
+}
 
 /// Builds the always-in-scope prelude: `sample_rate`, `tempo`, plus the
 /// built-in definitions. Mirrors the wasm runtime's prelude so the
 /// checker evaluates expressions the same way the browser would.
 fn load_prelude() -> Bindings {
-    fn def(id: &str, expr: expr::SourceExpr<ids::MarkId>) -> expr::SourceBinding<ids::MarkId> {
+    fn def(
+        id: &str,
+        expr: expr::SourceExpr<ids::MarkId, Source>,
+    ) -> expr::SourceBinding<ids::MarkId, Source> {
         expr::Binding::Definition(expr::Pattern::Identifier(id.to_string()), expr).into()
     }
     let mut bindings: Bindings = Vec::new();
@@ -29,7 +70,7 @@ fn load_prelude() -> Bindings {
 }
 
 /// Parses every embedded module ahead of time and indexes them by dotted path.
-/// The result feeds the `resolve` callback used by [`parser::evaluate`] when a
+/// The result feeds the `resolve` callback used by [`eval::evaluate`] when a
 /// `Binding::Open` is encountered.
 ///
 /// Each module gets an implicit `open __prelude` prepended so its bindings can
@@ -38,16 +79,26 @@ fn load_prelude() -> Bindings {
 /// runtime and `Wasm::new` in the wasm bindings.
 fn load_modules() -> HashMap<String, Bindings> {
     let mut out = HashMap::new();
-    for (name, content) in modules::EMBEDDED_MODULES {
-        match parser::parse_module::<ids::MarkId, _>(content, ()) {
+    for (index, (name, content)) in modules::EMBEDDED_MODULES.iter().enumerate() {
+        match parser::parse_module::<ids::MarkId, _>(content, Source::Module(index)) {
             Ok((mut bindings, errors)) => {
-                if !errors.is_empty() {
-                    eprintln!("Warning: failed to parse module '{}': {:?}", name, errors);
+                for error in &errors {
+                    eprintln!(
+                        "Warning: error in embedded module: {}",
+                        display_error(error, "")
+                    );
                 }
                 bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
                 out.insert((*name).to_string(), bindings);
             }
-            Err(e) => eprintln!("Warning: failed to parse module '{}': {:?}", name, e),
+            Err(errors) => {
+                for error in &errors {
+                    eprintln!(
+                        "Warning: failed to parse embedded module: {}",
+                        display_error(error, "")
+                    );
+                }
+            }
         }
     }
     out
@@ -190,24 +241,40 @@ fn check_block(
         }
     };
 
-    let expr = match parser::parse_program::<ids::MarkId, _>(&expression, ()) {
+    let expr = match parser::parse_program::<ids::MarkId, _>(&expression, Source::Expression) {
         Ok(e) => e,
         Err(errors) => {
-            return CheckResult::Fail(format!("[FAIL] \"{}\" parse errors: {:?}", label, errors));
+            let rendered: Vec<String> = errors
+                .iter()
+                .map(|e| display_error(e, &expression))
+                .collect();
+            return CheckResult::Fail(format!(
+                "[FAIL] \"{}\" parse error: {}",
+                label,
+                rendered.join("\n")
+            ));
         }
     };
 
     // Sliders: `sliders='["volume:0.5:0:1", ...]'`.
     let slider_configs = match extract_attr(block, "sliders") {
-        Some(s) => match parser::parse_sliders(&format!("sliders={}", s)) {
-            Ok(cs) => cs,
-            Err(e) => {
-                return CheckResult::Fail(format!(
-                    "[FAIL] \"{}\" slider parsing error: {:?}",
-                    label, e
-                ));
+        Some(s) => {
+            let slider_source = format!("sliders={}", s);
+            match parser::parse_sliders(&slider_source) {
+                Ok(cs) => cs,
+                Err(errors) => {
+                    let rendered: Vec<String> = errors
+                        .iter()
+                        .map(|e| display_error_in(e, &slider_source))
+                        .collect();
+                    return CheckResult::Fail(format!(
+                        "[FAIL] \"{}\" slider parse error: {}",
+                        label,
+                        rendered.join("\n")
+                    ));
+                }
             }
-        },
+        }
         None => vec![],
     };
 
@@ -236,7 +303,10 @@ fn check_block(
         &mut bindings,
     );
 
-    let resolve = |path: &[String]| -> Result<&[expr::SourceBinding<ids::MarkId>], expr::Error> {
+    let resolve = |path: &[String]| -> Result<
+        &[expr::SourceBinding<ids::MarkId, Source>],
+        expr::Error<Source>,
+    > {
         if path.len() == 1 && path[0] == "__prelude" {
             return Ok(prelude.as_slice());
         }
@@ -249,7 +319,11 @@ fn check_block(
 
     match eval::evaluate(resolve, &bindings, expr) {
         Ok(_) => CheckResult::Ok,
-        Err(e) => CheckResult::Fail(format!("[FAIL] \"{}\" evaluate error: {:?}", label, e)),
+        Err(e) => CheckResult::Fail(format!(
+            "[FAIL] \"{}\" evaluate error: {}",
+            label,
+            display_error(&e, &expression)
+        )),
     }
 }
 

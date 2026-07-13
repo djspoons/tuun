@@ -282,16 +282,15 @@ fn parse_binding<M>(input: Input) -> IResult<SourceBinding<M>> {
                             parse_expr,
                             // If that fails, consume everything up to a ';',
                             // reporting the skipped text as a recoverable
-                            // error (mirroring what `expect` does).
+                            // error (mirroring what `expect` does). The
+                            // placeholder node carries the same message, so
+                            // if it survives to evaluation (the source-file
+                            // path tolerates recoverable errors) the eval
+                            // error reads the same way.
                             take_till(|c| c == ';').map(|input: Input| {
-                                input.extra.report_error(error_from_input(
-                                    &input,
-                                    "expected expression in definition".to_string(),
-                                ));
-                                SourceExpr::with_span(
-                                    Expr::Error(input.fragment().to_string()),
-                                    input.to_range(),
-                                )
+                                let message = "expected expression in definition".to_string();
+                                input.extra.report_error(error_from_input(&input, message.clone()));
+                                SourceExpr::with_span(Expr::Error(message), input.to_range())
                             }),
                         )),
                     ).map(|(p, e)| Binding::Definition(p, e)),
@@ -655,13 +654,27 @@ fn parse_expr<M>(input: Input) -> IResult<SourceExpr<M>> {
     Ok((rest, expr))
 }
 
+/// Builds the message for a hard parse failure at `input`: names the
+/// offending text, truncated to its first line and a readable length.
+fn unexpected_input_message(input: &Input) -> String {
+    let first_line = input.fragment().lines().next().unwrap_or("");
+    let mut text: String = first_line.chars().take(30).collect();
+    if text.is_empty() {
+        return "unexpected end of input".to_string();
+    }
+    if text.len() < first_line.len() {
+        text.push('…');
+    }
+    format!("unexpected input '{}'", text)
+}
+
 fn translate_parse_result<T>(result: IResult<T>) -> Result<T, Vec<Error>> {
     // TODO consider finish()
     match result {
         Ok((_, a)) => Ok(a),
         Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => Err(vec![error_from_input(
             &e.input,
-            "unable to parse input".to_string(),
+            unexpected_input_message(&e.input),
         )]),
         Err(nom::Err::Incomplete(_)) => {
             panic!("Incomplete error on input");

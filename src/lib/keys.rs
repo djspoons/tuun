@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use crate::diagnostics::SourceId;
+use crate::diagnostics::Source;
 use crate::expr;
 use crate::ids::MarkId;
 use crate::waveform;
@@ -20,7 +20,7 @@ pub struct Keys {
     /// A snapshot from install time — editing the program's text afterwards
     /// does not change the installed instrument. Should be a closed value
     /// except for references to sliders.
-    pub function: expr::SourceExpr<MarkId, SourceId>,
+    pub function: expr::SourceExpr<MarkId, Source>,
     /// The note-off waveform captured at note-on time for each held key
     /// (keys are MIDI note numbers).
     pub note_off_waveforms: HashMap<u8, waveform::Waveform<MarkId>>,

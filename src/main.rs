@@ -11,6 +11,7 @@ use sdl2::audio::AudioSpecDesired;
 use sdl2::ttf::Sdl2TtfContext;
 
 use tuun::actions;
+use tuun::diagnostics;
 use tuun::effects;
 use tuun::evaluator;
 use tuun::generator;
@@ -79,6 +80,9 @@ pub fn main() {
         Err(errors) => {
             for error in &errors {
                 eprintln!("{}:{}", args.input_file, error.display_with_source(&input));
+                if let Some(range) = error.range() {
+                    eprintln!("{}", diagnostics::render_snippet(&input, &range));
+                }
             }
             process::exit(1);
         }
@@ -86,6 +90,11 @@ pub fn main() {
 
     if !args.ui {
         println!("Starting in non-UI mode");
+        // Recoverable parse problems don't stop startup, but in batch mode
+        // there is no status line to show the warning on — print it.
+        if !state.message.is_empty() {
+            println!("{}", state.message);
+        }
 
         let mut tracker = tracker::Tracker::<WaveformId, MarkId>::new(
             args.sample_rate,
@@ -138,6 +147,9 @@ pub fn main() {
                 Err(diagnostics) => {
                     for diagnostic in &diagnostics {
                         println!("Error: {}", diagnostic);
+                        if let Some(snippet) = &diagnostic.snippet {
+                            println!("{}", snippet);
+                        }
                     }
                     process::exit(1);
                 }

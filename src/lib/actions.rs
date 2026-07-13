@@ -6,7 +6,7 @@
 
 use std::time::Instant;
 
-use crate::diagnostics::{Diagnostic, SourceId};
+use crate::diagnostics::{Diagnostic, Source};
 use crate::expr;
 use crate::ids::{MarkId, WaveformId};
 use crate::keys;
@@ -86,7 +86,7 @@ impl AppState {
     pub fn from_source(
         source: String,
         input_path: std::path::PathBuf,
-    ) -> Result<AppState, Vec<expr::Error<SourceId>>> {
+    ) -> Result<AppState, Vec<expr::Error<Source>>> {
         let (programs, message) = programs::ProgramSet::from_source(source, input_path)?;
         Ok(AppState {
             programs,
@@ -630,7 +630,7 @@ fn parse_program_errors(text: &str) -> Vec<Diagnostic> {
     if text.trim().is_empty() {
         Vec::new()
     } else {
-        match parser::parse_program::<MarkId, _>(text, SourceId::Program) {
+        match parser::parse_program::<MarkId, _>(text, Source::Program) {
             Ok(_) => Vec::new(),
             Err(es) => es
                 .into_iter()
