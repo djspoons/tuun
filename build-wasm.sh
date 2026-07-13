@@ -13,7 +13,7 @@ echo "🔧 Building Tuun for WebAssembly..."
 # the committed copy.
 git update-index -q --refresh
 BUILD_ID=$(git rev-parse --short HEAD)
-if ! git diff-index --quiet HEAD -- . ':(exclude)web/pkg'; then
+if ! git diff-index --quiet HEAD -- . ':(exclude)web/pkg' ':(exclude)docs'; then
     BUILD_ID="${BUILD_ID}-dirty"
 fi
 
