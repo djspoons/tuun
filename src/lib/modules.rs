@@ -7,8 +7,11 @@
 
 /// `(dotted_module_path, source_contents)` pairs. The dotted path is
 /// the same shape that `Binding::Open(path)` carries; running
-/// `parser::parse_file` on the contents yields the module's bindings.
-pub const EMBEDDED_MODULES: &[(&str, &str)] = &[("std", include_str!("../../lib/v0/std.tuun"))];
+/// `parser::parse_module` on the contents yields the module's bindings.
+pub const EMBEDDED_MODULES: &[(&str, &str)] = &[
+    ("std", include_str!("../../lib/v0/std.tuun")),
+    ("pm_synth", include_str!("../../lib/v0/pm_synth.tuun")),
+];
 
 /// Parses a JSON array of dotted module paths like `["std", "foo.bar"]`
 /// into the path-component vectors that `Binding::Open` expects. `"[]"`

@@ -75,3 +75,45 @@ pm_piano_keys = fn(k, v) =>
   in
     (note_on, note_off);
 
+pm_ukulele = fn(I_max, decay_dur, mod_decay_dur) => fn(dur, freq_hz) =>
+  let
+    //I_max = 10,
+    attack_dur = 0.01,
+    //decay_dur = 0.41,
+    sustain_level = 0.17,
+    sustain_dur = 0,
+    release_dur = 2.0,
+    mute_dur = 0.2,
+
+    mod_envelope = ADSR(attack_dur, mod_decay_dur, sustain_level, sustain_dur, release_dur),
+
+    I = I_max | mod_envelope,
+    fc = freq_hz,
+    osc = sine(2*pi * fc, I * sine(2*pi * fc, 0)),
+    //pluck = noise * <[Rw(0.03, 1.0)]> | seq(time - 0.03),
+    //mix = osc + (0.2 * pluck \ 0)
+
+    envelope = ADSR(attack_dur, decay_dur, sustain_level, sustain_dur, release_dur),
+
+  in
+    osc | envelope | seq(time - dur) | fin(time - dur);
+
+
+pm_ukulele_keys = fn(I_max) => fn(k, v) =>
+  let
+    //I_max = 10,
+    amp_attack = 0.01,
+    amp_decay = 0.41,
+    amp_sustain_level = 0.17,
+    amp_release = 2.0,
+    mute_dur = 0.2,
+
+    fc = @k,
+    envelope = ADS(amp_attack, amp_decay, amp_sustain_level),
+    I = I_max | envelope,
+    osc = v * sine(2*pi * fc, I * sine(2*pi * fc, 0)) | envelope,
+    note_on = osc,
+
+    note_off = Rw(mute_dur, 1.0)
+  in
+    (note_on, note_off);

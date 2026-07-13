@@ -42,8 +42,8 @@ pulse = fn(width, freq_hz) =>
 // Filter which multiplies by the given amplitude
 amp = fn(a) => fn(w) => a * w;
 
-// Convert level to amplitude
-level2amp = fn(db) => pow(10.0, db / 20.0);
+// Convert db level to amplitude
+db2amp = fn(db) => pow(10.0, db / 20.0);
 
 // Returns a linear waveform
 // slope is in terms of amplitude-change per second

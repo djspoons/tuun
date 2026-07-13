@@ -4,9 +4,21 @@ open std;
 
 ADS = fn(attack_dur, decay_dur, sustain_level) =>
   let
-    attack_level = linear(0.0, 1/attack_dur),
+    attack = linear(0.0, 1/attack_dur),
     decay_slope = (sustain_level-1)/decay_dur,
-    decay_level = linear(1-attack_dur*decay_slope, decay_slope),
-    env = min(attack_level, max(decay_level, sustain_level))
+    decay = linear(1-attack_dur*decay_slope, decay_slope),
+    env = min(attack, max(decay, sustain_level))
   in
     fn(w) => w * env;
+
+ADSR = fn(attack_dur, decay_dur, sustain_level, sustain_dur, release_dur) =>
+  let
+    attack = linear(0.0, 1/attack_dur),
+    decay_slope = (sustain_level-1)/decay_dur,
+    decay = linear(1-attack_dur*decay_slope, decay_slope),
+    release_slope = -sustain_level/release_dur,
+    release = linear(sustain_level-(attack_dur+decay_dur+sustain_dur)*release_slope, release_slope),
+    env = min(attack, max(decay, min(sustain_level, release))),
+    dur = attack_dur + decay_dur + sustain_dur + release_dur
+  in
+    fn(w) => w * env | fin(time - dur);
