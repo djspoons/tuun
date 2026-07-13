@@ -255,7 +255,12 @@ impl Evaluator {
     /// relative to the program's own text (matching the editor's display);
     /// source-file errors (sibling bindings) a whole-file position. Each
     /// carries a snippet of the text its position resolves against.
-    fn diagnose(&self, error: &expr::Error<Source>, set: &ProgramSet, index: usize) -> Diagnostic {
+    pub(crate) fn diagnose(
+        &self,
+        error: &expr::Error<Source>,
+        set: &ProgramSet,
+        index: usize,
+    ) -> Diagnostic {
         let message = error.message().to_string();
         match (error.source(), error.range()) {
             (Some(Source::Program), Some(range)) => {

@@ -594,7 +594,7 @@ impl Renderer {
         // instead of `state.message` — slider feedback is the whole point
         // of that mode, and replaces any status text while active.
         let dynamic_slider_message: String;
-        let mut message: &str = match mode {
+        let message: &str = match mode {
             Mode::MoveSliders => {
                 dynamic_slider_message = if slider_display.is_empty() {
                     "No sliders configured".to_string()
@@ -614,6 +614,10 @@ impl Renderer {
             println!("{}", message);
         }
         self.last_message = message.to_string();
+        // The status line shows only the message's first line; any further
+        // lines (e.g. error snippets) are context for the terminal echo
+        // above.
+        let mut message = message.lines().next().unwrap_or("");
         if !message.is_empty() {
             // Truncate to 45 chars, not bytes — a byte slice can panic
             // mid-character on multi-byte input.

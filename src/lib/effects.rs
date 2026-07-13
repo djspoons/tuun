@@ -10,6 +10,7 @@ use std::time::Instant;
 use std::collections::HashMap;
 
 use crate::actions::{self, AppState, Effect};
+use crate::diagnostics;
 use crate::evaluator;
 use crate::expr;
 use crate::ids::{MarkId, WaveformId};
@@ -136,10 +137,7 @@ impl EffectRunner {
                 {
                     Ok(()) => state.mode = actions::Mode::Select,
                     Err(diagnostics) => {
-                        state.message = match diagnostics.len() {
-                            1 => format!("Error: {}", diagnostics[0]),
-                            n => format!("Error: {} (+{} more)", diagnostics[0], n - 1),
-                        };
+                        state.message = diagnostics::error_message(&diagnostics);
                         // Hand the diagnostics to the editor so evaluation
                         // errors highlight like parse errors do.
                         if let actions::Mode::Edit { errors, .. } = &mut mode_on_failure {
@@ -219,7 +217,8 @@ impl EffectRunner {
                         self.player.play_note(key, note_on, program.level_db());
                     }
                     Err(error) => {
-                        state.message = format!("Error: {}", error);
+                        let diagnostic = self.evaluator.diagnose(&error, &state.programs, keys.id);
+                        state.message = diagnostics::error_message(&[diagnostic]);
                     }
                 }
             }

@@ -11,10 +11,10 @@ use crate::waveform;
 
 /// A byte range plus the identity of the text it indexes.
 ///
-/// `S` is the embedder's source-identity type (which file, module, or
-/// editor buffer the range indexes); the parser produces spans at the
-/// placeholder `S = ()` and stamps the caller-supplied identity before
-/// returning (see [`crate::parser::parse_module`]).
+/// `S` is the source-identity type (which file, module, or editor buffer the
+/// range indexes); the parser produces spans at the placeholder `S = ()` and
+/// stamps the caller-supplied identity before returning (see
+/// [`crate::parser::parse_module`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Span<S = ()> {
     pub source: S,

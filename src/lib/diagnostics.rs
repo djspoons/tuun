@@ -1,4 +1,11 @@
 //! User-facing diagnostics: errors resolved to source positions.
+//!
+//! Resolution happens once, at the boundary where an error's byte range and
+//! the text it indexes are both in hand: [`render_snippet`] is called there
+//! (usually via a [`Diagnostic`] constructor) and its output stored in the
+//! diagnostic, since the source text may not be reachable later. Display
+//! sites work from resolved `Diagnostic`s — e.g. via [`error_message`] —
+//! and never consult source text again.
 
 use std::fmt;
 use std::ops::Range;
@@ -59,9 +66,9 @@ impl Diagnostic {
         }
     }
 
-    /// Builds a diagnostic for an error at `range` of a program's own
-    /// `text`: a bare `line:col` position matching the editor's display,
-    /// with the range kept for editor highlighting.
+    /// Builds a diagnostic for an error at `range` of a program's own `text`: a
+    /// bare `line:col` position matching the editor's display, with the range
+    /// kept for editor highlighting.
     pub fn in_program(message: String, range: Range<usize>, text: &str) -> Diagnostic {
         Diagnostic {
             file: None,
@@ -84,6 +91,35 @@ impl fmt::Display for Diagnostic {
             (None, None) => f.write_str(&self.message),
         }
     }
+}
+
+/// Formats `diagnostics` as a user-facing error message.
+///
+/// The first line summarizes: the first diagnostic's position and message,
+/// with a count of any further diagnostics. Each diagnostic's snippet
+/// follows on subsequent lines, preceded by its own message line for
+/// diagnostics after the first. Single-line display sites should show only
+/// the first line.
+pub fn error_message(diagnostics: &[Diagnostic]) -> String {
+    let Some((first, rest)) = diagnostics.split_first() else {
+        return String::new();
+    };
+    let mut message = match rest.len() {
+        0 => format!("Error: {}", first),
+        n => format!("Error: {} (+{} more)", first, n),
+    };
+    if let Some(snippet) = &first.snippet {
+        message.push('\n');
+        message.push_str(snippet);
+    }
+    for diagnostic in rest {
+        message.push_str(&format!("\nError: {}", diagnostic));
+        if let Some(snippet) = &diagnostic.snippet {
+            message.push('\n');
+            message.push_str(snippet);
+        }
+    }
+    message
 }
 
 /// Renders a rustc-style snippet locating `range` in `source`: the line
@@ -135,6 +171,26 @@ pub fn render_snippet(source: &str, range: &Range<usize>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_error_message() {
+        assert_eq!(error_message(&[]), "");
+
+        // A single positioned diagnostic: message line plus its snippet.
+        let first = Diagnostic::in_program("unknown".to_string(), 4..8, "x = nope;");
+        assert_eq!(
+            error_message(std::slice::from_ref(&first)),
+            "Error: 1:5: unknown\n  |\n1 | x = nope;\n  |     ^^^^"
+        );
+
+        // Further diagnostics are counted on the first line and then listed
+        // in full; ones without a snippet contribute only their message line.
+        let second = Diagnostic::message_only("boom".to_string());
+        assert_eq!(
+            error_message(&[first, second]),
+            "Error: 1:5: unknown (+1 more)\n  |\n1 | x = nope;\n  |     ^^^^\nError: boom"
+        );
+    }
 
     #[test]
     fn test_render_snippet() {

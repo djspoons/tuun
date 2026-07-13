@@ -6,7 +6,7 @@
 
 use std::time::Instant;
 
-use crate::diagnostics::{Diagnostic, Source};
+use crate::diagnostics::{self, Diagnostic, Source};
 use crate::expr;
 use crate::ids::{MarkId, WaveformId};
 use crate::keys;
@@ -76,6 +76,10 @@ pub struct AppState {
     /// Last user-visible status message. Set by `Effect::ShowMessage` (and
     /// a few direct writes from the reducer / runner). Persists across
     /// mode transitions; cleared explicitly by navigation actions.
+    ///
+    /// May be multi-line (e.g. an error followed by its source snippet):
+    /// the first line is the status-line summary, and single-line display
+    /// sites should show only that line.
     pub message: String,
 }
 
@@ -383,7 +387,7 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             let cursor = program.text().len();
             let errors = parse_program_errors(program.text());
             state.message = if !errors.is_empty() {
-                format!("Error: {}", errors[0])
+                diagnostics::error_message(&errors)
             } else if !program.sliders().configs().is_empty() {
                 program
                     .sliders()
