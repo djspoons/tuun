@@ -10,6 +10,7 @@
 /// `parser::parse_module` on the contents yields the module's bindings.
 pub const EMBEDDED_MODULES: &[(&str, &str)] = &[
     ("std", include_str!("../../lib/v0/std.tuun")),
+    ("env_minmax", include_str!("../../lib/v0/env_minmax.tuun")),
     ("pm_synth", include_str!("../../lib/v0/pm_synth.tuun")),
 ];
 
