@@ -446,7 +446,7 @@ impl<'a> Generator<'a> {
         let mut fb_outs = vec![];
 
         if all_const_coeffs {
-            // If they are all constants, then fil in the coefficients once and for all.
+            // If they are all constants, then fill in the coefficients once and for all.
             for (j, ff) in feed_forward.iter().enumerate() {
                 ff_coeffs[j] = if let Const(x) = &ff {
                     *x
@@ -535,14 +535,14 @@ impl<'a> Generator<'a> {
         }
         // Get an upper bound on how long the result might be.
         let len = if extend_to_longer { out.len() } else { a_len };
-        match b {
+        match self.is_const(b) {
             // Check to see if we can avoid generating the right-hand side and instead just apply the
             // op directly.
-            waveform::Waveform::Const(f) => {
+            Some(f) => {
                 // Make sure that any element where we apply `op` is initialized.
                 out[a_len..len].fill(0.0);
                 for x in out[..len].iter_mut() {
-                    *x = op_fn(*x, *f);
+                    *x = op_fn(*x, f);
                 }
                 // In theory, we need to advance `b`, but that's a no-op given that it's a Const
                 len
@@ -566,6 +566,48 @@ impl<'a> Generator<'a> {
                 }
                 len
             }
+        }
+    }
+
+    /// Returns the constant value of a waveform if it is constant for the
+    /// remainder of this generation quantum.
+    fn is_const<M>(&self, waveform: &Waveform<M>) -> Option<f32> {
+        use waveform::Operator;
+        use waveform::Waveform::*;
+        match waveform {
+            Time(_)
+            | Noise
+            | Fixed(_, _)
+            | Sine { .. }
+            | Filter { .. }
+            | Reset { .. }
+            | Fin { .. }
+            | Alt { .. }
+            // Captured needs the side effect that occurs during generate.
+            | Captured { .. } => None,
+
+            Const(f) => Some(*f),
+            BinaryPointOp(op, a, b) => match (self.is_const(a), self.is_const(b)) {
+                (Some(f), Some(g)) => match op {
+                    Operator::Add | Operator::Merge => Some(f + g),
+                    Operator::Subtract => Some(f - g),
+                    Operator::Multiply => Some(f * g),
+                    Operator::Divide => {
+                        Some(if g == 0.0 {
+                            0.0
+                        } else {
+                            f / g
+                        })
+                    }
+                    Operator::Power => Some(f32::powf(f, g)),
+                },
+                _ => None,
+            },
+            Append(a, b, _) => match (self.is_const(a), self.is_const(b)) {
+                (Some(f), Some(g)) if f == g => Some(f),
+                _ => None,
+            },
+            Marked { waveform, .. } => self.is_const(waveform),
         }
     }
 
@@ -751,6 +793,13 @@ impl<'a> Generator<'a> {
         use State::{Initial, Position};
         use waveform::Operator;
         use waveform::Waveform::{Append, BinaryPointOp, Const, Time};
+        if let Some(f) = self.is_const(waveform) {
+            return if f >= value {
+                MaybeOption::Some(0)
+            } else {
+                MaybeOption::None
+            };
+        }
         match waveform {
             Const(v) if *v >= value => MaybeOption::Some(0),
             Const(_) => MaybeOption::None,
