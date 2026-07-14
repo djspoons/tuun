@@ -40,6 +40,10 @@ enum Source {
 /// expression errors, or the embedded module the error came from,
 /// prefixed with that module's name. Falls back to the bare message for
 /// errors with no span.
+///
+/// TODO include a source snippet (like `diagnostics::render_snippet`,
+/// which is native-only); the widget's status area would need
+/// preformatted rendering to keep the caret line aligned.
 fn display_error(error: &expr::Error<Source>, expression: &str) -> String {
     match error.source() {
         Some(Source::Expression) => error.display_with_source(expression),

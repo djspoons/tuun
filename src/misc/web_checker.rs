@@ -226,6 +226,9 @@ fn check_block(
         Ok(s) => s,
         Err(message) => return CheckResult::Skip(message),
     };
+    // TODO error snippets downstream render against this stripped text, so
+    // the lines they show are missing their comments. Keep the original
+    // expression around for display.
     let expression = strip_comments(&expression);
 
     // Label that goes into log output. Prefer the description, otherwise
