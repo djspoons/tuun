@@ -325,7 +325,11 @@ impl Evaluator {
     pub fn evaluate_program(&self, set: &ProgramSet, index: usize) -> Evaluation {
         // TODO could improve error messages here
         const NOT_A_PROGRAM: &str = "Program is not a waveform or keys instrument";
-        let bindings = set.evaluation_bindings(index);
+        // Programs and their file's sibling bindings see the prelude through an
+        // implicit leading `open __prelude`, the same way modules do (see
+        // `resolve`).
+        let mut bindings = set.evaluation_bindings(index);
+        bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
         let text = set.programs()[index].text();
 
         let expr = match parser::parse_program(text, Source::Program) {
@@ -640,6 +644,23 @@ mod tests {
             diagnostic
         );
         assert!(diagnostic.program_range.is_none());
+    }
+
+    #[test]
+    fn programs_see_the_prelude_without_any_open() {
+        let (set, _) = ProgramSet::from_source(
+            "#{level_db=0}\n_ = debug(\"level\", 0.7) * sine(440, 0) | fin(0.1);\n".to_string(),
+            PathBuf::new(),
+        )
+        .expect("test source should parse");
+        let evaluator = Evaluator::new(44100, 90, PathBuf::new());
+        match evaluator.evaluate_program(&set, 0) {
+            Evaluation::Waveform(_) => {}
+            Evaluation::Invalid(diagnostics) => {
+                panic!("prelude names should resolve, got: {}", diagnostics[0])
+            }
+            _ => panic!("expected a waveform evaluation"),
+        }
     }
 
     #[test]

@@ -7,6 +7,9 @@ use std::fmt::{Debug, Display};
 
 use crate::expr::{Binding, Error, Expr, Pattern, SourceBinding, SourceExpr};
 
+/// A context entry: a bound name and the closed value it evaluates to.
+type ContextEntry<M, S> = (String, SourceExpr<M, S>);
+
 /// Extends the context with a binding for each identifier in the pattern that is bound to
 /// itself.
 fn extend_with_trivial_context<M, S>(
@@ -289,43 +292,74 @@ where
     evaluate_closed(expr)
 }
 
-/// Walks `bindings`, accumulating evaluated entries into `context`. `Open`
-/// bindings recurse through `resolve` to pull in their referenced module's
-/// bindings.
-///
+/// Walks `bindings`, accumulating evaluated entries into `context`.
 fn build_context<'a, M, S, F>(
     resolve: &F,
     bindings: &'a [SourceBinding<M, S>],
-    context: &mut Vec<(String, SourceExpr<M, S>)>,
-) -> Result<(), Error<S>>
+    context: &mut Vec<ContextEntry<M, S>>,
+) -> Result<Vec<ContextEntry<M, S>>, Error<S>>
 where
     F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
     M: Clone + Display + Debug,
     S: Clone + Debug,
 {
+    let mut own = Vec::new();
     for source_binding in bindings {
         match &source_binding.binding {
             Binding::Open(path) => {
                 let module = resolve(path)?;
-                build_context(resolve, module, context)?;
+                let mut module_context = Vec::new();
+                let exports = build_context(resolve, module, &mut module_context)?;
+                context.extend(exports);
             }
             Binding::Definition(pattern, def_expr) => {
                 let substituted = substitute(context, def_expr.clone());
                 let value = evaluate_closed(substituted)?;
+                let before = context.len();
                 extend_context(context, pattern, &value)?;
+                own.extend_from_slice(&context[before..]);
             }
             // Empty bindings have no semantic content — they exist only to
             // anchor annotation/comment spans for source preservation.
             Binding::Empty => {}
         }
     }
-    Ok(())
+    Ok(own)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::parse_program;
+    use crate::parser::{parse_module, parse_program};
+
+    #[test]
+    fn test_opens_are_scoped() {
+        let (b, errors) = parse_module::<u32, _>("two = 2;", ()).unwrap();
+        assert!(errors.is_empty());
+        let (a, errors) = parse_module::<u32, _>("open b; alias = two;", ()).unwrap();
+        assert!(errors.is_empty());
+        let resolve = |path: &[String]| {
+            if path == ["a"] {
+                Ok(&a[..])
+            } else if path == ["b"] {
+                Ok(&b[..])
+            } else {
+                Err(Error::new(format!("no module {:?}", path)))
+            }
+        };
+        let (bindings, errors) = parse_module::<u32, _>("open a;", ()).unwrap();
+        assert!(errors.is_empty());
+
+        // `a`'s own definitions can use the names `a` opened...
+        let expr = parse_program::<u32, _>("alias", ()).unwrap();
+        let evaluated = evaluate(resolve, &bindings, expr).unwrap();
+        assert_eq!(format!("{}", evaluated), "2");
+
+        // ...but opening `a` does not re-export what `a` merely opened.
+        let expr = parse_program::<u32, _>("two", ()).unwrap();
+        let error = evaluate(resolve, &bindings, expr).unwrap_err();
+        assert_eq!(error.message(), "Variable 'two' not found in context");
+    }
 
     #[test]
     fn test_function_eval() {
