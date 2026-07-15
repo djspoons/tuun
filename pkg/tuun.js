@@ -207,7 +207,9 @@ export class Tuun {
         return this;
     }
     /**
-     * Parses an expression with slider bindings and prepares for playback.
+     * Installs an expression as the current waveform: parses it, evaluates
+     * it under the slider bindings and opened modules, and stores the
+     * resulting waveform for [`Wasm::process`] to render.
      *
      * `slider_json` is a JSON object mapping slider names to initial values,
      * for example, `{"volume": 0.5, "cutoff": 2000}`. Pass `"{}"` for no
@@ -219,21 +221,21 @@ export class Tuun {
      *
      * # Examples
      * ```javascript
-     * const waveform = tuun.parse("sine(2764, 0)", "{}", "[]");
-     * const filtered = tuun.parse("$440 | lpf(0.5, 1900)", "{}", '["std"]');
+     * tuun.install("sine(2764, 0)", "{}", "[]");
+     * tuun.install("$440 | lpf(0.5, 1900)", "{}", '["std"]');
      * ```
      * @param {string} expression
      * @param {string} slider_json
      * @param {string} open_json
      */
-    parse(expression, slider_json, open_json) {
+    install(expression, slider_json, open_json) {
         const ptr0 = passStringToWasm0(expression, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passStringToWasm0(slider_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
         const ptr2 = passStringToWasm0(open_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len2 = WASM_VECTOR_LEN;
-        const ret = wasm.tuun_parse(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        const ret = wasm.tuun_install(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
         if (ret[1]) {
             throw takeFromExternrefTable0(ret[0]);
         }
@@ -271,7 +273,7 @@ export class Tuun {
      *
      * # Examples
      * ```javascript
-     * tuun.parse("$440", "{}", "[]");
+     * tuun.install("$440", "{}", "[]");
      * const done = tuun.process(output);
      * ```
      * @param {Float32Array} out
@@ -345,6 +347,9 @@ function __wbg_get_imports() {
         } finally {
             wasm.__wbindgen_free(deferred0_0, deferred0_1, 1);
         }
+    };
+    imports.wbg.__wbg_log_c222819a41e063d3 = function(arg0) {
+        console.log(arg0);
     };
     imports.wbg.__wbg_new_8a6f238a6ece86ea = function() {
         const ret = new Error();
@@ -452,3 +457,6 @@ async function __wbg_init(module_or_path) {
 
 export { initSync };
 export default __wbg_init;
+
+// The git revision this build was made from (stamped by build-wasm.sh).
+export const tuunBuild = '0f0ded6';
