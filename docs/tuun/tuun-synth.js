@@ -58,8 +58,8 @@ class TuunRuntime {
         await this.audioContext.audioWorklet.addModule(processorUrl);
     }
 
-    parse(expression, sliders, opens) {
-        const result = this.tuun.parse(expression, sliders, opens);
+    install(expression, sliders, opens) {
+        const result = this.tuun.install(expression, sliders, opens);
         // If successful, tell the module to discard any state.
         this.tuun.stop();
     }
@@ -338,6 +338,11 @@ class TuunSynthElement extends HTMLElement {
         this._workletNode = null;
         this._sliders = [];
         this._sliderValues = new Map();
+        // Snapshot of each slider's original raw range value, used by the
+        // reset button to detect "any slider has moved" and to restore the
+        // input position on click. Re-snapshotted whenever `_sliders` is
+        // rebuilt.
+        this._originalSliderRawValues = new Map();
     }
 
     async connectedCallback() {
@@ -348,6 +353,7 @@ class TuunSynthElement extends HTMLElement {
         await runtime._wasmReady;
         this._sliders = this._parseSliders();
         this._sliderValues = new Map(this._sliders.map(s => [s.label, s.displayValue ?? s.value]));
+        this._originalSliderRawValues = new Map(this._sliders.map(s => [s.label, s.value]));
         this._render();
         this._bindEvents();
     }
@@ -379,6 +385,7 @@ class TuunSynthElement extends HTMLElement {
         } else if (name === 'sliders') {
             this._sliders = this._parseSliders();
             this._sliderValues = new Map(this._sliders.map(s => [s.label, s.displayValue ?? s.value]));
+            this._originalSliderRawValues = new Map(this._sliders.map(s => [s.label, s.value]));
             this._render();
             this._bindEvents();
         }
@@ -401,7 +408,7 @@ class TuunSynthElement extends HTMLElement {
                     </div>
                     <div class="editor-row ${this._expanded ? '' : 'hidden'}">
                         <textarea rows="1">${expression}</textarea>
-                        <button class="reset-button" title="Reset expression" disabled>&#x21BA;</button>
+                        <button class="reset-button" title="Reset expression and sliders" disabled>&#x21BA;</button>
                     </div>
                     ${this._renderSliders()}
                     <div class="controls ${hasControls ? '' : 'hidden'}">
@@ -425,7 +432,7 @@ class TuunSynthElement extends HTMLElement {
                     <div class="main-row">
                         <button class="play-button" title="Play/Stop">&#x25B6;</button>
                         <textarea rows="1">${expression}</textarea>
-                        <button class="reset-button" title="Reset expression" disabled>&#x21BA;</button>
+                        <button class="reset-button" title="Reset expression and sliders" disabled>&#x21BA;</button>
                     </div>
                     ${this._renderSliders()}
                     <div class="controls ${hasControls ? '' : 'hidden'}">
@@ -473,9 +480,10 @@ class TuunSynthElement extends HTMLElement {
             resetBtn.addEventListener('click', () => {
                 if (textarea) {
                     textarea.value = this._originalExpression;
-                    this._hideError();
-                    this._updateResetButton();
                 }
+                this._resetSliders();
+                this._hideError();
+                this._updateResetButton();
             });
         }
 
@@ -508,6 +516,7 @@ class TuunSynthElement extends HTMLElement {
                 }
                 const span = input.nextElementSibling;
                 if (span) span.textContent = actualVal.toFixed(decimals);
+                this._updateResetButton();
             });
         });
 
@@ -552,8 +561,9 @@ class TuunSynthElement extends HTMLElement {
         await runtime.ensureInitialized(this._getSampleRate(), this._getTempo());
         const sliders = JSON.stringify(Object.fromEntries(this._sliderValues) || {});
         const opens = this._getOpens();
-        // First, check to see if the expression parses.
-        runtime.parse(expression, sliders, opens);
+        // First, check that the expression installs (parses and
+        // evaluates) before involving the worklet.
+        runtime.install(expression, sliders, opens);
         // Claim our status as the active instance.
         runtime.setPlaying(this);
 
@@ -687,9 +697,45 @@ class TuunSynthElement extends HTMLElement {
 
     _updateResetButton() {
         const btn = this.shadowRoot.querySelector('.reset-button');
+        if (!btn) return;
         const textarea = this.shadowRoot.querySelector('textarea');
-        if (btn && textarea) {
-            btn.disabled = textarea.value === this._originalExpression;
+        const textChanged = !!textarea && textarea.value !== this._originalExpression;
+        const slidersChanged = Array.from(
+            this.shadowRoot.querySelectorAll('input[type="range"]')
+        ).some(input => {
+            const original = this._originalSliderRawValues.get(input.dataset.label);
+            // Missing originals (unknown labels) shouldn't enable the
+            // reset button — only real divergence from a known starting
+            // value counts as "changed".
+            return original !== undefined && parseFloat(input.value) !== original;
+        });
+        btn.disabled = !textChanged && !slidersChanged;
+    }
+
+    // Restore every slider to the raw value it had at parse time: input
+    // position, displayed value, internal `_sliderValues` Map, and (if
+    // playing) a pending update routed through the same batched pipeline
+    // as a live drag.
+    _resetSliders() {
+        let queued = false;
+        this.shadowRoot.querySelectorAll('input[type="range"]').forEach(input => {
+            const label = input.dataset.label;
+            const slider = this._sliders.find(s => s.label === label);
+            if (!slider) return;
+            const rawVal = slider.value;
+            const actualVal = slider.displayValue ?? slider.value;
+            input.value = rawVal;
+            this._sliderValues.set(label, actualVal);
+            const span = input.nextElementSibling;
+            if (span) span.textContent = actualVal.toFixed(slider.decimals);
+            if (this._isPlaying && this._workletNode) {
+                if (!this._pendingSliderUpdates) this._pendingSliderUpdates = new Map();
+                this._pendingSliderUpdates.set(label, actualVal);
+                queued = true;
+            }
+        });
+        if (queued && !this._batchTimerId) {
+            this._batchTimerId = setTimeout(() => this._flushSliderUpdates(), 46);
         }
     }
 
@@ -749,7 +795,7 @@ class TuunSynthElement extends HTMLElement {
                     const decimals = Math.max(0, 3 - intDigits);
                     return {
                         type: 'user-defined', label: s.label,
-                        min: 0, max: 1, value: s.normalized_initial_value_value,
+                        min: 0, max: 1, value: s.normalized_initial_value,
                         displayValue: s.initial_value, decimals,
                         functionSource: s.function_source,
                     };

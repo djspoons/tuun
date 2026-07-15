@@ -37,7 +37,9 @@ export class Tuun {
    */
   constructor(sample_rate: number, tempo: number);
   /**
-   * Parses an expression with slider bindings and prepares for playback.
+   * Installs an expression as the current waveform: parses it, evaluates
+   * it under the slider bindings and opened modules, and stores the
+   * resulting waveform for [`Wasm::process`] to render.
    *
    * `slider_json` is a JSON object mapping slider names to initial values,
    * for example, `{"volume": 0.5, "cutoff": 2000}`. Pass `"{}"` for no
@@ -49,11 +51,11 @@ export class Tuun {
    *
    * # Examples
    * ```javascript
-   * const waveform = tuun.parse("sine(2764, 0)", "{}", "[]");
-   * const filtered = tuun.parse("$440 | lpf(0.5, 1900)", "{}", '["std"]');
+   * tuun.install("sine(2764, 0)", "{}", "[]");
+   * tuun.install("$440 | lpf(0.5, 1900)", "{}", '["std"]');
    * ```
    */
-  parse(expression: string, slider_json: string, open_json: string): void;
+  install(expression: string, slider_json: string, open_json: string): void;
   /**
    * Drops the current waveform.
    */
@@ -79,7 +81,7 @@ export class Tuun {
    *
    * # Examples
    * ```javascript
-   * tuun.parse("$440", "{}", "[]");
+   * tuun.install("$440", "{}", "[]");
    * const done = tuun.process(output);
    * ```
    */
@@ -100,7 +102,7 @@ export interface InitOutput {
   readonly memory: WebAssembly.Memory;
   readonly __wbg_tuun_free: (a: number, b: number) => void;
   readonly tuun_new: (a: number, b: number) => [number, number, number];
-  readonly tuun_parse: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
+  readonly tuun_install: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
   readonly tuun_stop: (a: number) => void;
   readonly tuun_update_slider: (a: number, b: number, c: number, d: number) => void;
   readonly tuun_process: (a: number, b: number, c: number, d: any) => number;
