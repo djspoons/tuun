@@ -602,6 +602,23 @@ where
     }
 }
 
+pub fn nth<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
+where
+    M: Clone,
+    S: Clone,
+{
+    match &arguments[..] {
+        [Float(a), List(b)] => {
+            if let Some(element) = b.get(*a as usize) {
+                element.expr.clone()
+            } else {
+                Error(format!("No element with index {}", a))
+            }
+        }
+        _ => Error("Invalid arguments for nth".to_string()),
+    }
+}
+
 pub fn fixed<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug,
@@ -1060,6 +1077,7 @@ where
         ("reduce", reduce),
         ("unfold", unfold),
         ("append", append),
+        ("nth", nth),
         ("fixed", fixed),
         ("fin", fin),
         ("seq", seq),

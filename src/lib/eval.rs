@@ -128,8 +128,8 @@ where
             if patterns.len() != arguments.len() {
                 return Err(Error::with_span(
                     format!(
-                        "Mismatched number of elements in pattern {:?} and arguments {:?}",
-                        patterns, arguments
+                        "Mismatched number of elements in pattern {} and arguments {}",
+                        pattern, argument
                     ),
                     argument.span.clone(),
                 ));
@@ -141,7 +141,7 @@ where
         }
         _ => Err(Error::with_span(
             format!(
-                "Pattern {:?} does not match actual expression {:?}",
+                "Pattern {} does not match actual expression {}",
                 pattern, argument.expr
             ),
             argument.span.clone(),
