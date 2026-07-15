@@ -1,3 +1,7 @@
+// The polyfill import must come first: imports execute in declaration
+// order, and the pkg glue needs TextDecoder/TextEncoder at module-eval
+// time (AudioWorkletGlobalScope doesn't provide them).
+import './tuun-text-codec.js';
 import { initSync, Tuun } from './pkg/tuun.js';
 
 class TuunProcessor extends AudioWorkletProcessor {
