@@ -984,6 +984,38 @@ where
 }
 
 /// Adds all of the built-ins to `bindings`.
+/// Builds the `debug` built-in: applied, it renders its arguments as a
+/// line `debug: [a, b, ...]`, hands the line to `print`, and evaluates to
+/// its last argument (or an empty list when given none).
+///
+/// Passing the last value through lets a call wrap any sub-expression
+/// without changing what it evaluates to; earlier arguments can serve as
+/// labels. `print` supplies the embedder's logging sink (terminal,
+/// browser console, ...).
+///
+/// # Example
+/// ```tuun
+/// sine(debug("freq", freq), 0)   // logs `debug: [freq, 440]`, plays sine(freq, 0)
+/// ```
+pub fn debug<M, S>(print: impl Fn(&str) + 'static) -> SourceExpr<M, S>
+where
+    M: Display + 'static,
+    S: 'static,
+{
+    SourceExpr::from(Expr::BuiltIn {
+        name: "debug".to_string(),
+        function: BuiltInFn(Rc::new(move |mut arguments: Vec<Expr<M, S>>| {
+            let rendered = arguments
+                .iter()
+                .map(|argument| argument.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            print(&format!("debug: [{}]", rendered));
+            arguments.pop().unwrap_or(Expr::List(Vec::new()))
+        })),
+    })
+}
+
 pub fn add_bindings<M, S>(bindings: &mut Vec<expr::SourceBinding<M, S>>)
 where
     M: Debug + Clone + Display + PartialEq + 'static,
@@ -1055,6 +1087,27 @@ where
 mod tests {
     use super::*;
     use Expr::BuiltIn;
+
+    #[test]
+    fn test_debug() {
+        use std::cell::RefCell;
+        let printed: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = Rc::clone(&printed);
+        let debug = debug::<u32, ()>(move |line| sink.borrow_mut().push(line.to_string()));
+        let Expr::BuiltIn { function, .. } = debug.expr else {
+            panic!("debug should build a BuiltIn");
+        };
+
+        // Logs all arguments, evaluates to the last.
+        let result = function.0(vec![Expr::String("freq".to_string()), Float(440.0)]);
+        assert_eq!(format!("{}", result), "440");
+        assert_eq!(printed.borrow().as_slice(), ["debug: [freq, 440]"]);
+
+        // No arguments: logs an empty list and evaluates to one.
+        let result = function.0(vec![]);
+        assert_eq!(format!("{}", result), "[]");
+        assert_eq!(printed.borrow().last().unwrap(), "debug: []");
+    }
 
     #[test]
     fn test_map() {

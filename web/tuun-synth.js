@@ -58,8 +58,8 @@ class TuunRuntime {
         await this.audioContext.audioWorklet.addModule(processorUrl);
     }
 
-    parse(expression, sliders, opens) {
-        const result = this.tuun.parse(expression, sliders, opens);
+    install(expression, sliders, opens) {
+        const result = this.tuun.install(expression, sliders, opens);
         // If successful, tell the module to discard any state.
         this.tuun.stop();
     }
@@ -561,8 +561,9 @@ class TuunSynthElement extends HTMLElement {
         await runtime.ensureInitialized(this._getSampleRate(), this._getTempo());
         const sliders = JSON.stringify(Object.fromEntries(this._sliderValues) || {});
         const opens = this._getOpens();
-        // First, check to see if the expression parses.
-        runtime.parse(expression, sliders, opens);
+        // First, check that the expression installs (parses and
+        // evaluates) before involving the worklet.
+        runtime.install(expression, sliders, opens);
         // Claim our status as the active instance.
         runtime.setPlaying(this);
 

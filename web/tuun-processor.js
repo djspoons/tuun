@@ -16,7 +16,7 @@ class TuunProcessor extends AudioWorkletProcessor {
             switch (event.data.type) {
                 case 'play':
                     try {
-                        this.tuun.parse(
+                        this.tuun.install(
                             event.data.expression,
                             event.data.sliders,
                             event.data.opens,

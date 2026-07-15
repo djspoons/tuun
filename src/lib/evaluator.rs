@@ -105,7 +105,7 @@ pub struct Evaluator {
 
 impl Evaluator {
     /// Builds an evaluator whose prelude defines `tempo`, `sample_rate`,
-    /// and `mark` alongside the built-ins.
+    /// `mark`, and `debug` alongside the built-ins.
     pub fn new(sample_rate: u32, tempo: u32, library_root: path::PathBuf) -> Evaluator {
         let mut prelude = Vec::new();
         builtins::add_bindings(&mut prelude);
@@ -125,6 +125,10 @@ impl Evaluator {
                 name: "mark".to_string(),
                 function: expr::BuiltInFn(std::rc::Rc::new(mark)),
             }),
+        ));
+        prelude.push(def(
+            "debug",
+            builtins::debug(|message| println!("{}", message)),
         ));
 
         Evaluator {

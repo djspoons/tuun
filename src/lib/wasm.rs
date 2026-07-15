@@ -9,6 +9,7 @@ use std::fmt;
 use std::time::Duration;
 
 use wasm_bindgen::prelude::*;
+use web_sys::console;
 
 use crate::{builtins, eval, expr, generator, modules, optimizer, parser, slider, waveform};
 
@@ -29,7 +30,7 @@ impl fmt::Display for MarkId {
 /// Identifies which text a span's byte range indexes in the wasm runtime.
 #[derive(Copy, Clone, Debug, PartialEq)]
 enum Source {
-    /// The user expression passed to [`Wasm::parse`].
+    /// The user expression passed to [`Wasm::install`].
     Expression,
     /// The embedded module at this index of
     /// [`modules::EMBEDDED_MODULES`].
@@ -62,7 +63,7 @@ fn display_error(error: &expr::Error<Source>, expression: &str) -> String {
 pub struct Wasm {
     sample_rate: i32,
     /// Per-instance prelude (built-ins + `sample_rate` + `tempo`) prepended
-    /// to every parse.
+    /// to every install.
     prelude: Vec<expr::SourceBinding<MarkId, Source>>,
     /// Parsed embedded modules keyed by dotted path (e.g. `"std"`).
     /// Looked up by the `evaluate` resolve callback when an `Open`
@@ -106,7 +107,7 @@ impl Wasm {
 
         // TODO this has a lot of repetition with the native app
         // Prelude: sample_rate + tempo + built-ins. Cloned into the
-        // bindings vec on every parse.
+        // bindings vec on every install.
         let mut prelude: Vec<expr::SourceBinding<MarkId, Source>> = Vec::new();
         prelude.push(def_binding(
             "sample_rate",
@@ -114,6 +115,10 @@ impl Wasm {
         ));
         prelude.push(def_binding("tempo", SourceExpr::float(tempo)));
         builtins::add_bindings(&mut prelude);
+        prelude.push(def_binding(
+            "debug",
+            builtins::debug(|message| console::log_1(&message.into())),
+        ));
 
         // Parse every embedded module once. Anything that fails to parse
         // surfaces as a constructor error rather than a later evaluate
@@ -159,7 +164,9 @@ impl Wasm {
         })
     }
 
-    /// Parses an expression with slider bindings and prepares for playback.
+    /// Installs an expression as the current waveform: parses it, evaluates
+    /// it under the slider bindings and opened modules, and stores the
+    /// resulting waveform for [`Wasm::process`] to render.
     ///
     /// `slider_json` is a JSON object mapping slider names to initial values,
     /// for example, `{"volume": 0.5, "cutoff": 2000}`. Pass `"{}"` for no
@@ -171,10 +178,10 @@ impl Wasm {
     ///
     /// # Examples
     /// ```javascript
-    /// const waveform = tuun.parse("sine(2764, 0)", "{}", "[]");
-    /// const filtered = tuun.parse("$440 | lpf(0.5, 1900)", "{}", '["std"]');
+    /// tuun.install("sine(2764, 0)", "{}", "[]");
+    /// tuun.install("$440 | lpf(0.5, 1900)", "{}", '["std"]');
     /// ```
-    pub fn parse(
+    pub fn install(
         &mut self,
         expression: &str,
         slider_json: &str,
@@ -296,7 +303,7 @@ impl Wasm {
     ///
     /// # Examples
     /// ```javascript
-    /// tuun.parse("$440", "{}", "[]");
+    /// tuun.install("$440", "{}", "[]");
     /// const done = tuun.process(output);
     /// ```
     pub fn process(&mut self, out: &mut [f32]) -> bool {
@@ -441,8 +448,8 @@ mod tests {
         for (expr, description) in examples {
             println!("Testing: {} - {}", description, expr);
 
-            tuun.parse(expr, "{}", "[]")
-                .unwrap_or_else(|e| panic!("Failed to parse '{}': {}", expr, e));
+            tuun.install(expr, "{}", "[]")
+                .unwrap_or_else(|e| panic!("Failed to install '{}': {}", expr, e));
 
             let mut out = vec![0.0; 100];
             let more = tuun.process(&mut out);
@@ -472,7 +479,7 @@ mod tests {
 
         for expr in invalid_examples {
             println!("Testing invalid expression: {}", expr);
-            let result = tuun.parse(expr, "{}", "[]");
+            let result = tuun.install(expr, "{}", "[]");
             assert!(
                 result.is_err(),
                 "Expected error for invalid expression '{}', but got success",
@@ -485,7 +492,7 @@ mod tests {
     #[test]
     fn test_context_functions() {
         // These all rely on names from the embedded `std` module (`Qw`,
-        // `lpf`, `sawtooth`), so each parse opens it explicitly.
+        // `lpf`, `sawtooth`), so each install opens it explicitly.
         let mut tuun = Wasm::new(44100, 120.0).expect("Failed to create Tuun instance");
 
         let lpf_examples = vec![
@@ -500,8 +507,8 @@ mod tests {
         for (expr, description) in lpf_examples {
             println!("Testing lpf: {} - {}", description, expr);
 
-            tuun.parse(expr, "{}", r#"["std"]"#)
-                .unwrap_or_else(|e| panic!("Failed to parse '{}': {}", expr, e));
+            tuun.install(expr, "{}", r#"["std"]"#)
+                .unwrap_or_else(|e| panic!("Failed to install '{}': {}", expr, e));
 
             let mut out = vec![0.0; 100];
             let more = tuun.process(&mut out);
@@ -525,7 +532,7 @@ mod tests {
     #[test]
     fn test_open_unknown_module_errors() {
         let mut tuun = Wasm::new(44100, 120.0).expect("Failed to create Tuun instance");
-        let result = tuun.parse("sine(2764, 0)", "{}", r#"["does_not_exist"]"#);
+        let result = tuun.install("sine(2764, 0)", "{}", r#"["does_not_exist"]"#);
         let message = result.expect_err("opening an unknown module should fail");
         assert!(
             message.contains("does_not_exist"),

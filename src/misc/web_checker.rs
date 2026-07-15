@@ -66,6 +66,10 @@ fn load_prelude() -> Bindings {
     bindings.push(def("sample_rate", expr::SourceExpr::float(44100.0)));
     bindings.push(def("tempo", expr::SourceExpr::float(120.0)));
     builtins::add_bindings(&mut bindings);
+    bindings.push(def(
+        "debug",
+        builtins::debug(|message| println!("{}", message)),
+    ));
     bindings
 }
 

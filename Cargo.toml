@@ -61,6 +61,7 @@ features = [
     "AudioDestinationNode",
     "AudioBuffer",
     "AudioBufferSourceNode",
+    "console",
 ]
 
 [dev-dependencies]
