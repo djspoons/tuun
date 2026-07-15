@@ -386,13 +386,13 @@ impl Evaluator {
     pub fn apply_note_function(
         &self,
         expr: &expr::SourceExpr<MarkId, Source>,
-        args: Vec<expr::SourceExpr<MarkId, Source>>,
+        arguments: Vec<expr::SourceExpr<MarkId, Source>>,
         sliders: &ProgramSliders,
     ) -> Result<(waveform::Waveform<MarkId>, waveform::Waveform<MarkId>), expr::Error<Source>> {
         use expr::Expr::{Tuple, Waveform};
         let expr = expr::SourceExpr::from(expr::Expr::Application {
             function: Box::new(expr.clone()),
-            argument: Box::new(expr::SourceExpr::from(Tuple(args))),
+            arguments,
         });
         let mut bindings = vec![];
         slider::append_slider_bindings(

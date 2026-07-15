@@ -152,7 +152,7 @@ pub enum Expr<M, S = ()> {
     String(String),
     Waveform(waveform::Waveform<M>),
     Function {
-        pattern: Pattern,
+        params: Vec<Pattern>,
         body: Box<SourceExpr<M, S>>,
     },
     BuiltIn {
@@ -175,7 +175,7 @@ pub enum Expr<M, S = ()> {
     Variable(String),
     Application {
         function: Box<SourceExpr<M, S>>,
-        argument: Box<SourceExpr<M, S>>,
+        arguments: Vec<SourceExpr<M, S>>,
     },
     // Compound expressions
     Tuple(Vec<SourceExpr<M, S>>),
@@ -230,16 +230,19 @@ impl<M, S> SourceExpr<M, S> {
     pub fn error(msg: String) -> SourceExpr<M, S> {
         SourceExpr::from(Expr::Error(msg))
     }
-    pub fn function(pattern: Pattern, body: SourceExpr<M, S>) -> SourceExpr<M, S> {
+    pub fn function(params: Vec<Pattern>, body: SourceExpr<M, S>) -> SourceExpr<M, S> {
         SourceExpr::from(Expr::Function {
-            pattern,
+            params,
             body: Box::new(body),
         })
     }
-    pub fn application(function: SourceExpr<M, S>, argument: SourceExpr<M, S>) -> SourceExpr<M, S> {
+    pub fn application(
+        function: SourceExpr<M, S>,
+        arguments: Vec<SourceExpr<M, S>>,
+    ) -> SourceExpr<M, S> {
         SourceExpr::from(Expr::Application {
             function: Box::new(function),
-            argument: Box::new(argument),
+            arguments,
         })
     }
     pub fn tuple(exprs: Vec<SourceExpr<M, S>>) -> SourceExpr<M, S> {
@@ -392,8 +395,8 @@ pub(crate) fn stamp_expr<M, S: Copy>(expr: SourceExpr<M>, source: S) -> SourceEx
         // Built-ins exist only in synthesized trees (the prelude), never in
         // parser output, and their closures cannot change span type.
         Expr::BuiltIn { .. } => unreachable!("cannot stamp a built-in"),
-        Expr::Function { pattern, body } => Expr::Function {
-            pattern,
+        Expr::Function { params, body } => Expr::Function {
+            params,
             body: Box::new(stamp_expr(*body, source)),
         },
         Expr::Seq { offset, waveform } => Expr::Seq {
@@ -409,9 +412,15 @@ pub(crate) fn stamp_expr<M, S: Copy>(expr: SourceExpr<M>, source: S) -> SourceEx
             then: Box::new(stamp_expr(*then, source)),
             else_: Box::new(stamp_expr(*else_, source)),
         },
-        Expr::Application { function, argument } => Expr::Application {
+        Expr::Application {
+            function,
+            arguments,
+        } => Expr::Application {
             function: Box::new(stamp_expr(*function, source)),
-            argument: Box::new(stamp_expr(*argument, source)),
+            arguments: arguments
+                .into_iter()
+                .map(|a| stamp_expr(a, source))
+                .collect(),
         },
         Expr::Tuple(exprs) => {
             Expr::Tuple(exprs.into_iter().map(|e| stamp_expr(e, source)).collect())
@@ -573,24 +582,28 @@ fn expr_precedence<M, S>(expr: &Expr<M, S>) -> Precedence {
         | Expr::List(_)
         | Expr::Error(_) => Precedence::Atom,
         Expr::Seq { .. } => Precedence::Application,
-        Expr::Application { function, argument } => {
+        Expr::Application {
+            function,
+            arguments,
+        } => {
             if let Expr::Variable(op) = &function.expr {
-                if let Expr::Tuple(args) = &argument.expr
-                    && args.len() == 2
+                if arguments.len() == 2
                     && let Some(p) = binary_op_precedence(op)
                 {
                     return p;
                 }
-                if is_unary_op(op) && !matches!(argument.expr, Expr::Tuple(_)) {
+                if arguments.len() == 1 && is_unary_op(op) {
                     return Precedence::Unary;
                 }
             }
-            // Function literal LHS → displayed as `let` (same precedence as Function).
-            if matches!(function.expr, Expr::Function { .. }) {
+            // Single-binding function-literal application → displayed as
+            // `let` (same precedence as Function).
+            if as_let_binding(function, arguments).is_some() {
                 return Precedence::Followed;
             }
-            // Application LHS → displayed as `|` pipe.
-            if matches!(function.expr, Expr::Application { .. }) {
+            // Single-argument application of an application → displayed as
+            // `|` pipe.
+            if matches!(function.expr, Expr::Application { .. }) && arguments.len() == 1 {
                 return Precedence::ReverseApp;
             }
             Precedence::Application
@@ -599,12 +612,35 @@ fn expr_precedence<M, S>(expr: &Expr<M, S>) -> Precedence {
     }
 }
 
-/// Emits `let p1 = e1, p2 = e2, … in body` for an
-/// `Application { function: Function { pattern, body }, argument }` chain,
-/// merging nested `let`s into a single comma-separated form.
+/// A `let`-shaped application decomposed into (pattern, argument, body).
+type LetBinding<'a, M, S> = (&'a Pattern, &'a SourceExpr<M, S>, &'a SourceExpr<M, S>);
+
+/// The single binding of an application that `let` syntax can represent, if
+/// any: a function literal with exactly one parameter applied to exactly one
+/// argument.
+///
+/// Both printers and `expr_precedence` must share this predicate so that
+/// parenthesization matches what actually gets emitted.
+fn as_let_binding<'a, M, S>(
+    function: &'a SourceExpr<M, S>,
+    arguments: &'a [SourceExpr<M, S>],
+) -> Option<LetBinding<'a, M, S>> {
+    if let Expr::Function { params, body } = &function.expr
+        && params.len() == 1
+        && arguments.len() == 1
+    {
+        Some((&params[0], &arguments[0], body))
+    } else {
+        None
+    }
+}
+
+/// Emits `let p1 = e1, p2 = e2, … in body` for a chain of single-binding
+/// function-literal applications (see [`as_let_binding`]), merging nested
+/// `let`s into a single comma-separated form.
 fn fmt_as_let<M, S>(
     function: &SourceExpr<M, S>,
-    argument: &SourceExpr<M, S>,
+    arguments: &[SourceExpr<M, S>],
     f: &mut fmt::Formatter,
 ) -> fmt::Result
 where
@@ -612,28 +648,27 @@ where
 {
     write!(f, "let ")?;
     let mut current_fn = function;
-    let mut current_arg = argument;
+    let mut current_args = arguments;
     let mut first = true;
     loop {
-        if let Expr::Function { pattern, body } = &current_fn.expr {
-            if !first {
-                write!(f, ", ")?;
-            }
-            first = false;
-            write!(f, "{} = {}", pattern, current_arg)?;
-            if let Expr::Application {
-                function: next_fn,
-                argument: next_arg,
-            } = &body.expr
-                && matches!(next_fn.expr, Expr::Function { .. })
-            {
-                current_fn = next_fn;
-                current_arg = next_arg;
-                continue;
-            }
-            return write!(f, " in {}", body);
+        let (pattern, argument, body) = as_let_binding(current_fn, current_args)
+            .expect("fmt_as_let entered with a non-let-shaped application");
+        if !first {
+            write!(f, ", ")?;
         }
-        unreachable!("fmt_as_let entered with non-Function function");
+        first = false;
+        write!(f, "{} = {}", pattern, argument)?;
+        if let Expr::Application {
+            function: next_fn,
+            arguments: next_args,
+        } = &body.expr
+            && as_let_binding(next_fn, next_args).is_some()
+        {
+            current_fn = next_fn;
+            current_args = next_args;
+            continue;
+        }
+        return write!(f, " in {}", body);
     }
 }
 
@@ -689,13 +724,15 @@ where
             Expr::Waveform(waveform) => {
                 write!(f, "{}", waveform)
             }
-            Expr::Function { pattern, body } => {
-                write!(f, "fn")?;
-                match pattern {
-                    Pattern::Identifier(name) => write!(f, "({})", name)?,
-                    Pattern::Tuple(_) => write!(f, "{}", pattern)?,
+            Expr::Function { params, body } => {
+                write!(f, "fn(")?;
+                for (i, param) in params.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", param)?;
                 }
-                write!(f, " => {}", body)
+                write!(f, ") => {}", body)
             }
             Expr::BuiltIn { name, .. } => write!(f, "{}", name),
             Expr::Variable(name) => write!(f, "{}", name),
@@ -706,7 +743,10 @@ where
             } => {
                 write!(f, "if {} then {} else {}", condition, then, else_)
             }
-            Expr::Application { function, argument } => {
+            Expr::Application {
+                function,
+                arguments,
+            } => {
                 // Render operator applications and `{...}` / `<...>` sugar
                 // using surface syntax matching the parser, so the Display
                 // output round-trips.
@@ -715,33 +755,36 @@ where
                     // they can only be entered via the `{x}` / `<x>` sugar.
                     // Emit the sugar so the output re-parses.
                     match name.as_str() {
-                        "__chord" => return write!(f, "{{{}}}", argument),
-                        "__sequence" => return write!(f, "<{}>", argument),
+                        "__chord" if arguments.len() == 1 => {
+                            return write!(f, "{{{}}}", arguments[0]);
+                        }
+                        "__sequence" if arguments.len() == 1 => {
+                            return write!(f, "<{}>", arguments[0]);
+                        }
                         _ => {}
                     }
-                    if let Expr::Tuple(args) = &argument.expr
-                        && args.len() == 2
+                    if arguments.len() == 2
                         && let Some(p) = binary_op_precedence(name)
                     {
                         // Left-associative: lhs allows equal-precedence,
                         // rhs requires strictly tighter precedence.
-                        fmt_at(&args[0], p as u8, f)?;
+                        fmt_at(&arguments[0], p as u8, f)?;
                         write!(f, " {} ", name)?;
-                        fmt_at(&args[1], (p as u8) + 1, f)?;
+                        fmt_at(&arguments[1], (p as u8) + 1, f)?;
                         return Ok(());
                     }
-                    if is_unary_op(name) && !matches!(&argument.expr, Expr::Tuple(_)) {
+                    if is_unary_op(name) && arguments.len() == 1 {
                         write!(f, "{}", name)?;
-                        return fmt_at(argument, Precedence::Unary as u8, f);
+                        return fmt_at(&arguments[0], Precedence::Unary as u8, f);
                     }
                 }
-                // Function literal LHS → `let p = arg in body` sugar.
-                if matches!(function.expr, Expr::Function { .. }) {
-                    return fmt_as_let(function, argument, f);
+                // Single-binding function literal LHS → `let p = arg in body`.
+                if as_let_binding(function, arguments).is_some() {
+                    return fmt_as_let(function, arguments, f);
                 }
-                // Application LHS → `arg | function` pipe sugar.
-                if matches!(function.expr, Expr::Application { .. }) {
-                    fmt_at(argument, Precedence::ReverseApp as u8, f)?;
+                // Application LHS with one argument → `arg | function` pipe.
+                if matches!(function.expr, Expr::Application { .. }) && arguments.len() == 1 {
+                    fmt_at(&arguments[0], Precedence::ReverseApp as u8, f)?;
                     write!(f, " | ")?;
                     return fmt_at(function, (Precedence::ReverseApp as u8) + 1, f);
                 }
@@ -749,11 +792,14 @@ where
                 // `Application` precedence — anything looser (Function,
                 // IfThenElse, an operator app) gets wrapped.
                 fmt_at(function, Precedence::Application as u8, f)?;
-                if let Expr::Tuple(_) = &argument.expr {
-                    write!(f, "{}", argument)
-                } else {
-                    write!(f, "({})", argument)
+                write!(f, "(")?;
+                for (i, argument) in arguments.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", argument)?;
                 }
+                write!(f, ")")
             }
             Expr::Tuple(exprs) => {
                 write!(f, "(")?;
@@ -810,15 +856,12 @@ fn is_clean<M, S>(node: &SourceExpr<M, S>) -> bool {
             then,
             else_,
         } => node.span.is_some() && is_clean(condition) && is_clean(then) && is_clean(else_),
-        Expr::Application { function, argument } => {
-            node.span.is_some() && is_clean(function) && is_clean(argument)
-        }
-        // Tuples are sometimes synthesized by `fold_binary_op` as transparent
-        // packaging around the two operands of a binary operator — those Tuples
-        // have no span of their own but the surrounding Application does, and
-        // splicing the Application's span gives the right text. So a Tuple's
-        // own span isn't required; what matters is its children.
-        Expr::Tuple(items) => items.iter().all(is_clean),
+        Expr::Application {
+            function,
+            arguments,
+        } => node.span.is_some() && is_clean(function) && arguments.iter().all(is_clean),
+        // Tuples in source always have parens; we require a span.
+        Expr::Tuple(items) => node.span.is_some() && items.iter().all(is_clean),
         // Lists in source always have brackets; we require a span.
         Expr::List(items) => node.span.is_some() && items.iter().all(is_clean),
     }
@@ -918,13 +961,15 @@ where
         Expr::Waveform(w) => write!(out, "{}", w),
         Expr::BuiltIn { name, .. } => write!(out, "{}", name),
         Expr::Variable(name) => write!(out, "{}", name),
-        Expr::Function { pattern, body } => {
-            write!(out, "fn ")?;
-            match pattern {
-                Pattern::Identifier(name) => write!(out, "({})", name)?,
-                Pattern::Tuple(_) => write!(out, "{}", pattern)?,
+        Expr::Function { params, body } => {
+            write!(out, "fn(")?;
+            for (i, param) in params.iter().enumerate() {
+                if i > 0 {
+                    write!(out, ", ")?;
+                }
+                write!(out, "{}", param)?;
             }
-            write!(out, " => ")?;
+            write!(out, ") => ")?;
             write_preserving(body, source, out)
         }
         Expr::IfThenElse {
@@ -939,9 +984,10 @@ where
             write!(out, " else ")?;
             write_preserving(else_, source, out)
         }
-        Expr::Application { function, argument } => {
-            write_preserving_application(function, argument, source, out)
-        }
+        Expr::Application {
+            function,
+            arguments,
+        } => write_preserving_application(function, arguments, source, out),
         Expr::Tuple(exprs) => {
             write!(out, "(")?;
             write_preserving_elements(exprs, source, out)?;
@@ -995,7 +1041,7 @@ where
 
 fn write_preserving_application<M, S, W>(
     function: &SourceExpr<M, S>,
-    argument: &SourceExpr<M, S>,
+    arguments: &[SourceExpr<M, S>],
     source: &str,
     out: &mut W,
 ) -> fmt::Result
@@ -1005,48 +1051,43 @@ where
 {
     if let Expr::Variable(name) = &function.expr {
         match name.as_str() {
-            "_chord" => {
+            "__chord" if arguments.len() == 1 => {
                 out.write_str("{")?;
-                write_preserving(argument, source, out)?;
+                write_preserving(&arguments[0], source, out)?;
                 return out.write_str("}");
             }
-            "_sequence" => {
+            "__sequence" if arguments.len() == 1 => {
                 out.write_str("<")?;
-                write_preserving(argument, source, out)?;
+                write_preserving(&arguments[0], source, out)?;
                 return out.write_str(">");
             }
             _ => {}
         }
-        if let Expr::Tuple(args) = &argument.expr
-            && args.len() == 2
+        if arguments.len() == 2
             && let Some(p) = binary_op_precedence(name)
         {
-            write_preserving_at(&args[0], p as u8, source, out)?;
+            write_preserving_at(&arguments[0], p as u8, source, out)?;
             write!(out, " {} ", name)?;
-            return write_preserving_at(&args[1], (p as u8) + 1, source, out);
+            return write_preserving_at(&arguments[1], (p as u8) + 1, source, out);
         }
-        if is_unary_op(name) && !matches!(&argument.expr, Expr::Tuple(_)) {
+        if arguments.len() == 1 && is_unary_op(name) {
             write!(out, "{}", name)?;
-            return write_preserving_at(argument, Precedence::Unary as u8, source, out);
+            return write_preserving_at(&arguments[0], Precedence::Unary as u8, source, out);
         }
     }
-    if matches!(function.expr, Expr::Function { .. }) {
-        return write_preserving_as_let(function, argument, source, out);
+    if as_let_binding(function, arguments).is_some() {
+        return write_preserving_as_let(function, arguments, source, out);
     }
-    if matches!(function.expr, Expr::Application { .. }) {
-        write_preserving_at(argument, Precedence::ReverseApp as u8, source, out)?;
+    if matches!(function.expr, Expr::Application { .. }) && arguments.len() == 1 {
+        write_preserving_at(&arguments[0], Precedence::ReverseApp as u8, source, out)?;
         out.write_str(" | ")?;
         return write_preserving_at(function, (Precedence::ReverseApp as u8) + 1, source, out);
     }
     // Default function-call form.
     write_preserving_with_parens(function, source, out)?;
-    if let Expr::Tuple(_) = &argument.expr {
-        write_preserving(argument, source, out)
-    } else {
-        out.write_str("(")?;
-        write_preserving(argument, source, out)?;
-        out.write_str(")")
-    }
+    out.write_str("(")?;
+    write_preserving_elements(arguments, source, out)?;
+    out.write_str(")")
 }
 
 fn write_preserving_at<M, S, W>(
@@ -1094,7 +1135,7 @@ where
 
 fn write_preserving_as_let<M, S, W>(
     function: &SourceExpr<M, S>,
-    argument: &SourceExpr<M, S>,
+    arguments: &[SourceExpr<M, S>],
     source: &str,
     out: &mut W,
 ) -> fmt::Result
@@ -1104,30 +1145,29 @@ where
 {
     out.write_str("let ")?;
     let mut current_fn = function;
-    let mut current_arg = argument;
+    let mut current_args = arguments;
     let mut first = true;
     loop {
-        if let Expr::Function { pattern, body } = &current_fn.expr {
-            if !first {
-                out.write_str(", ")?;
-            }
-            first = false;
-            write!(out, "{} = ", pattern)?;
-            write_preserving(current_arg, source, out)?;
-            if let Expr::Application {
-                function: next_fn,
-                argument: next_arg,
-            } = &body.expr
-                && matches!(next_fn.expr, Expr::Function { .. })
-            {
-                current_fn = next_fn;
-                current_arg = next_arg;
-                continue;
-            }
-            out.write_str(" in ")?;
-            return write_preserving(body, source, out);
+        let (pattern, argument, body) = as_let_binding(current_fn, current_args)
+            .expect("write_preserving_as_let entered with a non-let-shaped application");
+        if !first {
+            out.write_str(", ")?;
         }
-        unreachable!("write_preserving_as_let entered with non-Function function");
+        first = false;
+        write!(out, "{} = ", pattern)?;
+        write_preserving(argument, source, out)?;
+        if let Expr::Application {
+            function: next_fn,
+            arguments: next_args,
+        } = &body.expr
+            && as_let_binding(next_fn, next_args).is_some()
+        {
+            current_fn = next_fn;
+            current_args = next_args;
+            continue;
+        }
+        out.write_str(" in ")?;
+        return write_preserving(body, source, out);
     }
 }
 
@@ -1162,7 +1202,7 @@ mod tests {
                     Expr::Variable("f".to_string()),
                     0..1,
                 )),
-                argument: Box::new(SourceExpr::with_span(Expr::Float(1.0), 2..3)),
+                arguments: vec![SourceExpr::with_span(Expr::Float(1.0), 2..3)],
             },
             0..3,
         );
@@ -1178,11 +1218,15 @@ mod tests {
             panic!("expected a definition");
         };
         assert_eq!(source_of(&expr.span), 7);
-        let Expr::Application { function, argument } = &expr.expr else {
+        let Expr::Application {
+            function,
+            arguments,
+        } = &expr.expr
+        else {
             panic!("expected an application");
         };
         assert_eq!(source_of(&function.span), 7);
-        assert_eq!(source_of(&argument.span), 7);
+        assert_eq!(source_of(&arguments[0].span), 7);
     }
 
     #[test]

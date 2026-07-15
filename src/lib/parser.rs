@@ -233,21 +233,18 @@ fn parse_pattern(input: Input) -> IResult<Pattern> {
 fn parse_function<M>(input: Input) -> IResult<SourceExpr<M>> {
     let start = input.location_offset();
     #[rustfmt::skip]
-    let (rest, (pattern, body)) =
+    let (rest, (params, body)) =
         (delimited(
             (tag("fn"), trivia0),
-            alt((
-                delimited((char('('), trivia0),
-                        parse_identifier.map(Pattern::Identifier),
-                        (trivia0, char(')'))),
-                parse_pattern,
-            )),
+            delimited((char('('), trivia0),
+                    separated_list0(ws(char(',')), parse_pattern),
+                    (trivia0, expect(char(')'), "expected ')' at end of parameter list"))),
             ws(expect(tag("=>"), "expected '=>'"))),
             parse_expr,
         ).parse(input)?;
     let end = rest.location_offset();
     let expr = Expr::Function {
-        pattern,
+        params,
         body: Box::new(body),
     };
     Ok((rest, SourceExpr::with_span(expr, start..end)))
@@ -348,7 +345,7 @@ fn parse_let<M>(input: Input) -> IResult<SourceExpr<M>> {
     // `let … in …` source range.
     let mut expr = body;
     for (pattern, binding) in definitions.into_iter().rev() {
-        expr = SourceExpr::application(SourceExpr::function(pattern, expr), binding)
+        expr = SourceExpr::application(SourceExpr::function(vec![pattern], expr), vec![binding])
     }
     Ok((rest, SourceExpr::with_span(expr.expr, start..end)))
 }
@@ -385,7 +382,7 @@ fn parse_unary_application<M>(input: Input) -> IResult<SourceExpr<M>> {
     );
     let app = Expr::Application {
         function: Box::new(var),
-        argument: Box::new(expr),
+        arguments: vec![expr],
     };
     Ok((rest, SourceExpr::with_span(app, start..end)))
 }
@@ -432,18 +429,36 @@ fn parse_primitive<M>(input: Input) -> IResult<SourceExpr<M>> {
     Ok((rest, value))
 }
 
+/// Parses a call's argument list: `'(' expr ',' ... ')'`, returning one
+/// element per argument. Unlike [`parse_tuple`], a single element is NOT
+/// collapsed — `f(x)` has one argument, and `f((1, 2))` has one argument
+/// that is a pair, distinct from `f(1, 2)`.
+fn parse_call_arguments<M>(input: Input) -> IResult<Vec<SourceExpr<M>>> {
+    #[rustfmt::skip]
+    let (rest, arguments) = delimited(
+        (char('('), trivia0),
+        separated_list0(
+            (trivia0, char(','), trivia0),
+            parse_expr,
+        ),
+        (trivia0, expect(char(')'), "expected ')' at end of arguments")),
+    ).parse(input)?;
+    Ok((rest, arguments))
+}
+
 fn parse_application<M>(input: Input) -> IResult<SourceExpr<M>> {
     let start = input.location_offset();
     let (mut rest, mut result) = parse_primitive(input)?;
     loop {
-        // Peek-and-consume one (whitespace + tuple) iteration to track positions.
-        let attempt = preceded(trivia0, parse_tuple).parse(rest);
+        // Peek-and-consume one (whitespace + argument-list) iteration to
+        // track positions.
+        let attempt = preceded(trivia0, parse_call_arguments).parse(rest);
         match attempt {
-            Ok((new_rest, arg)) => {
+            Ok((new_rest, arguments)) => {
                 let end = new_rest.location_offset();
                 let app = Expr::Application {
                     function: Box::new(result),
-                    argument: Box::new(arg),
+                    arguments,
                 };
                 result = SourceExpr::with_span(app, start..end);
                 rest = new_rest;
@@ -478,10 +493,9 @@ where
             Expr::Variable(op.fragment().to_string()),
             op.location_offset()..op.location_offset() + op.fragment().len(),
         );
-        let args = SourceExpr::tuple(vec![expr, rhs]);
         let app = Expr::Application {
             function: Box::new(op_var),
-            argument: Box::new(args),
+            arguments: vec![expr, rhs],
         };
         expr = SourceExpr::with_span(app, start..end);
         rest = new_rest;
@@ -540,7 +554,7 @@ fn parse_chord<M>(input: Input) -> IResult<SourceExpr<M>> {
     let end = rest.location_offset();
     let app = Expr::Application {
         function: boxed(Expr::Variable("__chord".to_string())),
-        argument: Box::new(inner),
+        arguments: vec![inner],
     };
     Ok((rest, SourceExpr::with_span(app, start..end)))
 }
@@ -556,7 +570,7 @@ fn parse_sequence<M>(input: Input) -> IResult<SourceExpr<M>> {
     let end = rest.location_offset();
     let app = Expr::Application {
         function: boxed(Expr::Variable("__sequence".to_string())),
-        argument: Box::new(inner),
+        arguments: vec![inner],
     };
     Ok((rest, SourceExpr::with_span(app, start..end)))
 }
@@ -612,7 +626,7 @@ fn parse_reverse_application<M>(input: Input) -> IResult<SourceExpr<M>> {
                 let function = function.unwrap_or_else(error_placeholder);
                 let app = Expr::Application {
                     function: Box::new(function),
-                    argument: Box::new(argument),
+                    arguments: vec![argument],
                 };
                 argument = SourceExpr::with_span(app, start..end);
                 rest = new_rest;
@@ -640,10 +654,9 @@ fn parse_expr<M>(input: Input) -> IResult<SourceExpr<M>> {
                 let end = new_rest.location_offset();
                 let rhs = rhs.unwrap_or_else(error_placeholder);
                 let op_var = SourceExpr::from(Expr::Variable("\\".to_string()));
-                let args = SourceExpr::tuple(vec![expr, rhs]);
                 let app = Expr::Application {
                     function: Box::new(op_var),
-                    argument: Box::new(args),
+                    arguments: vec![expr, rhs],
                 };
                 expr = SourceExpr::with_span(app, start..end);
                 rest = new_rest;
@@ -1091,6 +1104,23 @@ mod tests {
     fn test_parse_function() {
         assert_round_trip("fn(x) => x", "fn(x) => x");
         assert_round_trip("fn(x, (y, z)) => x", "fn(x, (y, z)) => x");
+        assert_round_trip("fn() => 1", "fn() => 1");
+        // The parameter list requires parens.
+        assert!(parse_program_unstamped::<u32>("fn x => x").is_err());
+    }
+
+    #[test]
+    fn test_parse_call_arguments() {
+        // A tuple literal is ONE argument, distinct from two arguments.
+        assert_round_trip("f((1, 2))", "f((1, 2))");
+        assert_round_trip("f(1, 2)", "f(1, 2)");
+        assert_round_trip("f()", "f()");
+        // A multi-parameter function literal applied to multiple arguments
+        // is not expressible as `let` — it stays in call form.
+        assert_round_trip("(fn(x, y) => x)(1, 2)", "(fn(x, y) => x)(1, 2)");
+        // A multi-argument call of an application can't re-sugar to a pipe
+        // (a pipe delivers exactly one argument).
+        assert_round_trip("f(1)(2, 3)", "f(1)(2, 3)");
     }
 
     #[test]
@@ -1183,8 +1213,7 @@ mod tests {
         let lhs = SourceExpr::float(1.0);
         let rhs = SourceExpr::float(2.0);
         let plus = SourceExpr::variable("+".to_string());
-        let synth: SourceExpr<u32> =
-            SourceExpr::application(plus, SourceExpr::tuple(vec![lhs, rhs]));
+        let synth: SourceExpr<u32> = SourceExpr::application(plus, vec![lhs, rhs]);
         assert_eq!(print_preserving(&synth, ""), "1 + 2");
     }
 
@@ -1197,12 +1226,8 @@ mod tests {
         // splicing the RHS verbatim from source.
         let input = "1 + // sibling comment\n 2";
         let mut parsed = parse_program_unstamped::<u32>(input).unwrap();
-        if let Expr::Application { argument, .. } = &mut parsed.expr {
-            if let Expr::Tuple(args) = &mut argument.expr {
-                args[0] = SourceExpr::float(99.0); // span: None — "edit"
-            } else {
-                panic!("expected Tuple argument");
-            }
+        if let Expr::Application { arguments, .. } = &mut parsed.expr {
+            arguments[0] = SourceExpr::float(99.0); // span: None — "edit"
         } else {
             panic!("expected Application root");
         }
@@ -1480,9 +1505,11 @@ synth = saw(220);";
             } => find_first_list_span(condition)
                 .or_else(|| find_first_list_span(then))
                 .or_else(|| find_first_list_span(else_)),
-            Expr::Application { function, argument } => {
-                find_first_list_span(function).or_else(|| find_first_list_span(argument))
-            }
+            Expr::Application {
+                function,
+                arguments,
+            } => find_first_list_span(function)
+                .or_else(|| arguments.iter().find_map(find_first_list_span)),
             Expr::Tuple(items) | Expr::List(items) => items.iter().find_map(find_first_list_span),
             _ => None,
         }

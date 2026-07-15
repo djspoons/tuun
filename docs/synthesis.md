@@ -33,7 +33,7 @@ Additive synthesis often requires many primitive waveforms to be combined; this 
         | ADSR(a, d, s_level, max(dur - (a + d + r), 0), r)
         | seq(time - dur),
     in
-      <map(organ, [(Q, @48), (Q, @52), (W, @55)])>
+      <map2(organ, [(Q, @48), (Q, @52), (W, @55)])>
   </tuun-synth>
 </div>
 
@@ -47,7 +47,7 @@ Additive synthesis can also be used to create inharmonic sounds, including tuned
       bars = fn(dur, freq) => {map(over(freq), [1.0, 3.92, 9.24, 16.27, 24.22, 33.54, 42.97])}
         | ADSR(0, 0.1, 0.3, 0, 0.2) | seq(time - dur)
     in
-      <map(bars, [(Q, @60), (Q, @64), (W, @67)])>
+      <map2(bars, [(Q, @60), (Q, @64), (W, @67)])>
   </tuun-synth>
 </div>
 
@@ -60,7 +60,7 @@ Subtractive synthesis starts with a waveform with many component frequencies and
   let pulse_inst = fn(dur, freq) =>
     pulse(0.93, freq) | amp(0.2) | ADSR(0.01, 0, 1, dur, 0.01) | seq(time - dur)
   in
-    <map(pulse_inst, [(Q, @60), (Q, @64), (W, @67)])>
+    <map2(pulse_inst, [(Q, @60), (Q, @64), (W, @67)])>
   </tuun-synth>
 </div>
 
@@ -82,7 +82,7 @@ In this example, the two pulse waves are combined and then passed through a low-
           | ADSR(a, d, 0.5, s, r)
           | seq(time - dur),
       in
-        <map(harmonica, [(Q, @60), (Q, @64), (W, @67)])>
+        <map2(harmonica, [(Q, @60), (Q, @64), (W, @67)])>
       </script>
   </tuun-synth>
 </div>

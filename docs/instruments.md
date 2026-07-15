@@ -155,7 +155,7 @@ Since [flutes are open at both ends](https://newt.phys.unsw.edu.au/jw/fluteacous
           freq_hzs = map(fn(order) => freq_hz * order, orders),
           make_component = fn(freq_hz, level_amp) => $freq_hz * level_amp,
         in
-          {map(make_component, zip(freq_hzs, level_amps))}
+          {map2(make_component, zip(freq_hzs, level_amps))}
           | ADSR(attack_dur, 0.0, 1.0, sustain_dur, release_dur)
       in
         reset($(1/3), flute(1.75, 546))

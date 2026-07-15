@@ -6,7 +6,7 @@ use crate::expr;
 use crate::expr::{BuiltInFn, Expr, SourceExpr, boxed};
 use crate::optimizer;
 use crate::waveform::{Operator, Waveform};
-use Expr::{Application, Bool, BuiltIn, Error, Float, List, Seq, Tuple};
+use Expr::{Application, Bool, BuiltIn, Error, Float, List, Seq};
 
 type WaveformBinOp<M> = fn(Box<Waveform<M>>, Box<Waveform<M>>) -> Waveform<M>;
 
@@ -475,20 +475,11 @@ where
     match &arguments[..] {
         [function, List(exprs)] => {
             let mut results: Vec<SourceExpr<M, S>> = Vec::new();
-            let resolve = |_: &[String]| {
-                Err(expr::Error::new(
-                    "Didn't expect to resolve in map()".to_string(),
-                ))
-            };
             for expr in exprs {
-                let result = eval::evaluate(
-                    resolve,
-                    &[],
-                    SourceExpr::from(Application {
-                        function: boxed(function.clone()),
-                        argument: Box::new(expr.clone()), // can we avoid this clone?
-                    }),
-                );
+                let result = eval::evaluate_closed(SourceExpr::from(Application {
+                    function: boxed(function.clone()),
+                    arguments: vec![expr.clone()], // can we avoid this clone?
+                }));
                 match result {
                     Ok(expr) => results.push(expr),
                     Err(err) => results.push(SourceExpr::error(err.to_string())),
@@ -508,20 +499,11 @@ where
     match &arguments[..] {
         [function, acc, List(exprs)] => {
             let mut acc: SourceExpr<M, S> = SourceExpr::from(acc.clone());
-            let resolve = |_: &[String]| {
-                Err(expr::Error::new(
-                    "Didn't expect to resolve in reduce()".to_string(),
-                ))
-            };
             for expr in exprs {
-                let result = eval::evaluate(
-                    resolve,
-                    &[],
-                    SourceExpr::from(Application {
-                        function: boxed(function.clone()),
-                        argument: Box::new(SourceExpr::from(Tuple(vec![acc, expr.clone()]))),
-                    }),
-                );
+                let result = eval::evaluate_closed(SourceExpr::from(Application {
+                    function: boxed(function.clone()),
+                    arguments: vec![acc, expr.clone()],
+                }));
                 acc = match result {
                     Ok(expr) => expr,
                     Err(err) => return Error(err.to_string()),
@@ -542,22 +524,12 @@ where
         [function, seed, Float(n)] if *n >= 0.0 && n.fract() == 0.0 => {
             let mut results: Vec<SourceExpr<M, S>> = Vec::new();
             let mut current: SourceExpr<M, S> = SourceExpr::from(seed.clone());
-            let resolve = |_: &[String]| {
-                Err(expr::Error::new(
-                    "Didn't expect to resolve in unfold()".to_string(),
-                ))
-            };
-
             for _ in 0..(*n as u32) {
                 results.push(current.clone());
-                let result = eval::evaluate(
-                    resolve,
-                    &[],
-                    SourceExpr::from(Application {
-                        function: boxed(function.clone()),
-                        argument: Box::new(current.clone()),
-                    }),
-                );
+                let result = eval::evaluate_closed(SourceExpr::from(Application {
+                    function: boxed(function.clone()),
+                    arguments: vec![current.clone()],
+                }));
                 current = match result {
                     Ok(expr) => expr,
                     Err(err) => return Error(err.to_string()),

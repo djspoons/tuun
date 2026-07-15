@@ -54,12 +54,14 @@ where
             offset: Box::new(substitute(context, *offset)),
             waveform: Box::new(substitute(context, *waveform)),
         }),
-        Function { pattern, body } => {
+        Function { params, body } => {
             let mut context = Vec::from(context);
-            extend_with_trivial_context(&mut context, &pattern);
+            for param in &params {
+                extend_with_trivial_context(&mut context, param);
+            }
             let body = substitute(&context, *body);
             SourceExpr::from(Expr::Function {
-                pattern,
+                params,
                 body: Box::new(body),
             })
         }
@@ -92,12 +94,18 @@ where
                 else_,
             })
         }
-        Application { function, argument } => {
+        Application {
+            function,
+            arguments,
+        } => {
             let function = substitute(context, *function);
-            let argument = substitute(context, *argument);
+            let arguments = arguments
+                .into_iter()
+                .map(|a| substitute(context, a))
+                .collect();
             SourceExpr::from(Expr::Application {
                 function: Box::new(function),
-                argument: Box::new(argument),
+                arguments,
             })
         }
         Tuple(exprs) => SourceExpr::from(Expr::Tuple(
@@ -155,9 +163,13 @@ where
 /// Evaluates a closed expression to a value. Closed expressions do not contain
 /// variables.
 ///
+/// Equivalent to [`evaluate`] with no bindings and a resolver that always
+/// fails, but skips the substitution pass (which rebuilds nodes and drops
+/// their spans).
+///
 /// The resulting expression will have a `span` only if the argument is a value
 /// already.
-fn evaluate_closed<M, S>(expr: SourceExpr<M, S>) -> Result<SourceExpr<M, S>, Error<S>>
+pub fn evaluate_closed<M, S>(expr: SourceExpr<M, S>) -> Result<SourceExpr<M, S>, Error<S>>
 where
     M: Clone + fmt::Display + fmt::Debug,
     S: Clone + fmt::Debug,
@@ -207,34 +219,51 @@ where
                 )),
             }
         }
-        Application { function, argument } => {
+        Application {
+            function,
+            arguments,
+        } => {
             let function = evaluate_closed(*function)?;
-            let argument = evaluate_closed(*argument)?;
-            match (function.expr, argument) {
-                (Function { pattern, body }, argument) => {
+            let arguments = arguments
+                .into_iter()
+                .map(evaluate_closed)
+                .collect::<Result<Vec<_>, _>>()?;
+            match (function.expr, arguments) {
+                (Function { params, body }, arguments) => {
+                    if arguments.len() > params.len() {
+                        return Err(Error::with_span(
+                            "extra positional parameter".to_string(),
+                            span.clone(),
+                        ));
+                    }
+                    if arguments.len() < params.len() {
+                        return Err(Error::with_span(
+                            format!("missing parameter \"{}\"", params[arguments.len()]),
+                            span.clone(),
+                        ));
+                    }
                     let mut context = Vec::new();
-                    extend_context(&mut context, &pattern, &argument)?;
+                    for (param, argument) in params.iter().zip(&arguments) {
+                        extend_context(&mut context, param, argument)?;
+                    }
                     let body = substitute(&context, *body);
                     evaluate_closed(body)
                 }
-                (BuiltIn { function, .. }, argument) => {
+                (BuiltIn { function, .. }, arguments) => {
                     // Builtins operate on bare `Expr<M>` values, so unwrap
                     // the SourceExpr children before calling and wrap the
                     // result. Use the outer Application's span (`span`) so
                     // errors point at the whole `f(x, y)` call site — builtins
                     // themselves don't see spans.
-                    let actuals: Vec<Expr<M, S>> = match argument.expr {
-                        Tuple(actuals) => actuals.into_iter().map(|s| s.expr).collect(),
-                        other => vec![other],
-                    };
+                    let actuals: Vec<Expr<M, S>> = arguments.into_iter().map(|s| s.expr).collect();
                     let result = function.0(actuals);
                     match result {
                         Expr::Error(s) => Err(Error::with_span(s, span.clone())),
                         _ => Ok(SourceExpr::from(result)),
                     }
                 }
-                (function, actuals) => Err(Error::with_span(
-                    format!("Invalid application: {} {}", function, actuals),
+                (function, _) => Err(Error::with_span(
+                    format!("Invalid application: {}", function),
                     span.clone(),
                 )),
             }
@@ -362,23 +391,42 @@ mod tests {
     }
 
     #[test]
-    fn test_function_eval() {
-        let resolve = |_: &[String]| Err(Error::new("no bindings".to_string()));
+    fn test_application_arity_is_exact() {
+        let expr = parse_program::<u32, _>("(fn(x) => x)(2, 3)", ()).unwrap();
+        let error = evaluate_closed(expr).unwrap_err();
+        assert_eq!(error.message(), "extra positional parameter");
 
+        let expr = parse_program::<u32, _>("(fn(x, y) => x)(2)", ()).unwrap();
+        let error = evaluate_closed(expr).unwrap_err();
+        assert_eq!(error.message(), "missing parameter \"y\"");
+
+        // A tuple literal is one argument; destructuring params accept it...
+        let expr = parse_program::<u32, _>("(fn((y, z)) => (z, y))((4, 5))", ()).unwrap();
+        let evaluated = evaluate_closed(expr).unwrap();
+        assert_eq!(format!("{}", evaluated), "(5, 4)");
+
+        // ...and passing two arguments instead is an arity error, not a splat.
+        let expr = parse_program::<u32, _>("(fn((y, z)) => y)(4, 5)", ()).unwrap();
+        let error = evaluate_closed(expr).unwrap_err();
+        assert_eq!(error.message(), "extra positional parameter");
+    }
+
+    #[test]
+    fn test_function_eval() {
         let input = "(fn(x) => fn(x) => x)(7)(5)";
         let expr = parse_program::<u32, _>(input, ()).unwrap();
         println!("Parsed expression: {}", expr);
-        let evaluated = evaluate(resolve, &[], expr).unwrap();
+        let evaluated = evaluate_closed(expr).unwrap();
         assert_eq!(format!("{}", evaluated), "5");
 
         let input = "(fn(x) => fn(y, z) => (x, y, z))(3)(4, 5)";
         let expr = parse_program::<u32, _>(input, ()).unwrap();
-        let evaluated = evaluate(resolve, &[], expr).unwrap();
+        let evaluated = evaluate_closed(expr).unwrap();
         assert_eq!(format!("{}", evaluated), "(3, 4, 5)");
 
         let input = "(fn(x, (y, z)) => (x, y, z))(3, (4, 5))";
         let expr = parse_program::<u32, _>(input, ()).unwrap();
-        let evaluated = evaluate(resolve, &[], expr).unwrap();
+        let evaluated = evaluate_closed(expr).unwrap();
         assert_eq!(format!("{}", evaluated), "(3, 4, 5)");
     }
 }

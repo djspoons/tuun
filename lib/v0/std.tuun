@@ -39,6 +39,10 @@ pulse = fn(width, freq_hz) =>
 // LISTS
 
 len = fn(xs) => reduce(fn(acc, _) => acc + 1, 0, xs);
+
+// Maps a two-argument function over a list of pairs.
+map2 = fn(f, xs) => map(fn((a, b)) => f(a, b), xs);
+
 zip = fn(xs, ys) => let
     indexes = unfold(fn(i) => i + 1, 0, len(xs)),
     f = fn(acc, i) => append(acc, [(nth(i, xs), nth(i, ys))]),
