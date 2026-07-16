@@ -183,11 +183,17 @@ pub enum Action {
     // --- text editing (Edit mode) ---
     InsertText(String),
     DeleteCharBeforeCursor,
+    DeleteCharAfterCursor,
     DeleteWordBeforeCursor,
+    DeleteWordAfterCursor,
+    /// Delete from the cursor to the end of the line, or the newline itself
+    /// when the cursor is already at the end of a line (emacs `kill-line`).
+    DeleteToEndOfLine,
     MoveCursorBy(i32),
     MoveCursorToStart,
     MoveCursorToEnd,
     MoveCursorToPreviousWord,
+    MoveCursorToNextWord,
 
     // --- sliders / level ---
     /// Set a slider on a program by normalized value [0.0, 1.0].
@@ -459,6 +465,15 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             new_text.replace_range(start..cursor, "");
             Some((new_text, start))
         }),
+        Action::DeleteCharAfterCursor => edit_text_op(state, |current, cursor| {
+            if cursor == current.len() {
+                return None;
+            }
+            let end = next_char_boundary(current, cursor);
+            let mut new_text = current.to_string();
+            new_text.replace_range(cursor..end, "");
+            Some((new_text, cursor))
+        }),
         Action::DeleteWordBeforeCursor => edit_text_op(state, |current, cursor| {
             if cursor == 0 {
                 return None;
@@ -467,6 +482,30 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             let mut new_text = current.to_string();
             new_text.replace_range(new_cursor..cursor, "");
             Some((new_text, new_cursor))
+        }),
+        Action::DeleteWordAfterCursor => edit_text_op(state, |current, cursor| {
+            if cursor == current.len() {
+                return None;
+            }
+            let end = cursor + next_word_end(&current[cursor..]);
+            let mut new_text = current.to_string();
+            new_text.replace_range(cursor..end, "");
+            Some((new_text, cursor))
+        }),
+        Action::DeleteToEndOfLine => edit_text_op(state, |current, cursor| {
+            if cursor == current.len() {
+                return None;
+            }
+            let end = match current[cursor..].find('\n') {
+                // At the end of a line: delete the newline itself, joining
+                // the next line onto this one.
+                Some(0) => cursor + 1,
+                Some(i) => cursor + i,
+                None => current.len(),
+            };
+            let mut new_text = current.to_string();
+            new_text.replace_range(cursor..end, "");
+            Some((new_text, cursor))
         }),
         Action::MoveCursorBy(delta) => edit_cursor_op(state, |current, cursor| {
             let mut cursor = cursor;
@@ -487,6 +526,9 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             } else {
                 prev_word_start(&current[..cursor])
             }
+        }),
+        Action::MoveCursorToNextWord => edit_cursor_op(state, |current, cursor| {
+            cursor + next_word_end(&current[cursor..])
         }),
 
         Action::SetSliderNormalized {
@@ -734,16 +776,35 @@ fn next_char_boundary(text: &str, cursor: usize) -> usize {
         .map_or(text.len(), |c| cursor + c.len_utf8())
 }
 
-/// Returns the byte offset where the word preceding the end of `prefix` starts:
-/// skips any trailing whitespace, then scans back to the previous whitespace
-/// boundary (or the start of the string).
+/// Returns true if `c` can appear in a word for cursor word operations.
+///
+/// Word characters are the characters that can appear in identifiers
+/// (alphanumerics, `_`, and `#` — as in the note name `c#4`); everything
+/// else (whitespace, operators, punctuation) separates words.
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '#'
+}
+
+/// Returns the byte offset where the word preceding the end of `prefix`
+/// starts: skips any trailing non-word characters, then scans back over one
+/// run of word characters (emacs `backward-word`). Returns 0 when `prefix`
+/// contains no word characters.
 fn prev_word_start(prefix: &str) -> usize {
-    match prefix.trim_end().rfind(char::is_whitespace) {
-        // `rfind` returns the byte offset of the whitespace char's start;
-        // skip past the full char (it may be multi-byte, e.g. U+00A0).
-        Some(idx) => next_char_boundary(prefix, idx),
-        None => 0,
-    }
+    prefix
+        .trim_end_matches(|c: char| !is_word_char(c))
+        .trim_end_matches(is_word_char)
+        .len()
+}
+
+/// Returns the byte offset just past the word at the start of `suffix`:
+/// skips any leading non-word characters, then scans over one run of word
+/// characters (emacs `forward-word`). Returns `suffix.len()` when `suffix`
+/// contains no word characters.
+fn next_word_end(suffix: &str) -> usize {
+    let rest = suffix
+        .trim_start_matches(|c: char| !is_word_char(c))
+        .trim_start_matches(is_word_char);
+    suffix.len() - rest.len()
 }
 
 fn apply_mouse_slider(state: &mut AppState, axis: usize, delta: f32) -> Vec<Effect> {
@@ -1013,6 +1074,123 @@ mod tests {
         apply_with_empty_status(&mut state, Action::InsertText("a\u{a0}bc".to_string()));
         apply_with_empty_status(&mut state, Action::DeleteWordBeforeCursor);
         assert_eq!(state.active_program().text(), "a\u{a0}");
+    }
+
+    #[test]
+    fn word_boundaries_follow_identifier_chars() {
+        // Backward: skip non-word chars (operators, whitespace), then one
+        // run of word chars.
+        assert_eq!(prev_word_start("sine(440)"), 5); // before "440"
+        assert_eq!(prev_word_start("sine("), 0);
+        assert_eq!(prev_word_start("a + b"), 4);
+        assert_eq!(prev_word_start("a + "), 0);
+        assert_eq!(prev_word_start("c#4"), 0); // '#' is a word char
+        assert_eq!(prev_word_start("x_1"), 0); // '_' is a word char
+        assert_eq!(prev_word_start("+-*/"), 0); // no word: to the start
+        assert_eq!(prev_word_start(""), 0);
+        // Forward mirror.
+        assert_eq!(next_word_end("sine(440)"), 4); // after "sine"
+        assert_eq!(next_word_end("(440)"), 4); // after "440"
+        assert_eq!(next_word_end(" + b"), 4);
+        assert_eq!(next_word_end("+-*/"), 4); // no word: to the end
+        assert_eq!(next_word_end(""), 0);
+    }
+
+    #[test]
+    fn move_cursor_by_word_stops_at_identifier_boundaries() {
+        let mut state =
+            AppState::from_source(String::new(), std::path::PathBuf::new()).expect("empty source");
+        state.mode = Mode::Edit {
+            cursor_position: 0,
+            errors: vec![],
+        };
+        apply_with_empty_status(
+            &mut state,
+            Action::InsertText("sine(440) | env".to_string()),
+        );
+        let cursor = |state: &AppState| match state.mode {
+            Mode::Edit {
+                cursor_position, ..
+            } => cursor_position,
+            _ => panic!("expected Edit mode"),
+        };
+        apply_with_empty_status(&mut state, Action::MoveCursorToPreviousWord);
+        assert_eq!(cursor(&state), 12); // before "env"
+        apply_with_empty_status(&mut state, Action::MoveCursorToPreviousWord);
+        assert_eq!(cursor(&state), 5); // before "440"
+        apply_with_empty_status(&mut state, Action::MoveCursorToPreviousWord);
+        assert_eq!(cursor(&state), 0); // before "sine"
+        apply_with_empty_status(&mut state, Action::MoveCursorToNextWord);
+        assert_eq!(cursor(&state), 4); // after "sine"
+        apply_with_empty_status(&mut state, Action::MoveCursorToNextWord);
+        assert_eq!(cursor(&state), 8); // after "440"
+        apply_with_empty_status(&mut state, Action::MoveCursorToNextWord);
+        assert_eq!(cursor(&state), 15); // after "env" (end of text)
+        apply_with_empty_status(&mut state, Action::MoveCursorToNextWord);
+        assert_eq!(cursor(&state), 15); // no-op at the end
+    }
+
+    #[test]
+    fn delete_word_after_cursor_deletes_through_next_word() {
+        let mut state =
+            AppState::from_source(String::new(), std::path::PathBuf::new()).expect("empty source");
+        state.mode = Mode::Edit {
+            cursor_position: 0,
+            errors: vec![],
+        };
+        apply_with_empty_status(&mut state, Action::InsertText("sine(440)".to_string()));
+        apply_with_empty_status(&mut state, Action::MoveCursorToStart);
+        apply_with_empty_status(&mut state, Action::DeleteWordAfterCursor);
+        assert_eq!(state.active_program().text(), "(440)");
+        apply_with_empty_status(&mut state, Action::DeleteWordAfterCursor);
+        assert_eq!(state.active_program().text(), ")");
+        // No word after the cursor: delete to the end of the text.
+        apply_with_empty_status(&mut state, Action::DeleteWordAfterCursor);
+        assert_eq!(state.active_program().text(), "");
+        // No-op on empty text.
+        apply_with_empty_status(&mut state, Action::DeleteWordAfterCursor);
+        assert_eq!(state.active_program().text(), "");
+    }
+
+    #[test]
+    fn delete_char_after_cursor_removes_whole_multibyte_char() {
+        let mut state =
+            AppState::from_source(String::new(), std::path::PathBuf::new()).expect("empty source");
+        state.mode = Mode::Edit {
+            cursor_position: 0,
+            errors: vec![],
+        };
+        apply_with_empty_status(&mut state, Action::InsertText("πa".to_string()));
+        apply_with_empty_status(&mut state, Action::MoveCursorToStart);
+        apply_with_empty_status(&mut state, Action::DeleteCharAfterCursor);
+        assert_eq!(state.active_program().text(), "a");
+        // No-op at the end of the text.
+        apply_with_empty_status(&mut state, Action::MoveCursorToEnd);
+        apply_with_empty_status(&mut state, Action::DeleteCharAfterCursor);
+        assert_eq!(state.active_program().text(), "a");
+    }
+
+    #[test]
+    fn delete_to_end_of_line_deletes_rest_then_newline() {
+        let mut state =
+            AppState::from_source(String::new(), std::path::PathBuf::new()).expect("empty source");
+        state.mode = Mode::Edit {
+            cursor_position: 0,
+            errors: vec![],
+        };
+        apply_with_empty_status(&mut state, Action::InsertText("ab\ncd".to_string()));
+        apply_with_empty_status(&mut state, Action::MoveCursorToStart);
+        apply_with_empty_status(&mut state, Action::MoveCursorBy(1));
+        apply_with_empty_status(&mut state, Action::DeleteToEndOfLine);
+        assert_eq!(state.active_program().text(), "a\ncd");
+        // At the end of a line: the newline itself is deleted.
+        apply_with_empty_status(&mut state, Action::DeleteToEndOfLine);
+        assert_eq!(state.active_program().text(), "acd");
+        apply_with_empty_status(&mut state, Action::DeleteToEndOfLine);
+        assert_eq!(state.active_program().text(), "a");
+        // No-op at the end of the text.
+        apply_with_empty_status(&mut state, Action::DeleteToEndOfLine);
+        assert_eq!(state.active_program().text(), "a");
     }
 
     #[test]

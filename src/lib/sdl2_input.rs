@@ -112,8 +112,6 @@ impl InputHandler {
         let ctrl = keymod.contains(Mod::LCTRLMOD) || keymod.contains(Mod::RCTRLMOD);
         // gui_mod is "command" on a Mac
         let gui_mod = keymod.contains(Mod::LGUIMOD) || keymod.contains(Mod::RGUIMOD);
-        // alt_mod is "option" on a Mac
-        let alt_mod = keymod.contains(Mod::LALTMOD) || keymod.contains(Mod::RALTMOD);
         let shift = keymod.contains(Mod::LSHIFTMOD) || keymod.contains(Mod::RSHIFTMOD);
         // Keys mode: piano keystrokes → NoteOn (suppress on auto-repeat so a
         // held key doesn't retrigger), Escape leaves keys mode, Ctrl+C still
@@ -219,18 +217,35 @@ impl InputHandler {
                     },
                 ])
             }
+            // Char- and line-level ops on Ctrl, word-level ops on Cmd
+            // (mirroring emacs's Ctrl/Meta split).
             (Mode::Edit { .. }, Some(Scancode::A)) if ctrl => Some(vec![Action::MoveCursorToStart]),
             (Mode::Edit { .. }, Some(Scancode::E)) if ctrl => Some(vec![Action::MoveCursorToEnd]),
-            (Mode::Edit { .. }, Some(Scancode::Left)) if alt_mod => {
+            (Mode::Edit { .. }, Some(Scancode::F)) if ctrl => Some(vec![Action::MoveCursorBy(1)]),
+            (Mode::Edit { .. }, Some(Scancode::B)) if ctrl => Some(vec![Action::MoveCursorBy(-1)]),
+            (Mode::Edit { .. }, Some(Scancode::D)) if ctrl => {
+                Some(vec![Action::DeleteCharAfterCursor])
+            }
+            (Mode::Edit { .. }, Some(Scancode::K)) if ctrl => Some(vec![Action::DeleteToEndOfLine]),
+            (Mode::Edit { .. }, Some(Scancode::F)) if gui_mod => {
+                Some(vec![Action::MoveCursorToNextWord])
+            }
+            (Mode::Edit { .. }, Some(Scancode::B)) if gui_mod => {
                 Some(vec![Action::MoveCursorToPreviousWord])
+            }
+            (Mode::Edit { .. }, Some(Scancode::D)) if gui_mod => {
+                Some(vec![Action::DeleteWordAfterCursor])
+            }
+            (Mode::Edit { .. }, Some(Scancode::Backspace)) if gui_mod => {
+                Some(vec![Action::DeleteWordBeforeCursor])
             }
             (Mode::Edit { .. }, Some(Scancode::Left)) => Some(vec![Action::MoveCursorBy(-1)]),
             (Mode::Edit { .. }, Some(Scancode::Right)) => Some(vec![Action::MoveCursorBy(1)]),
-            (Mode::Edit { .. }, Some(Scancode::Backspace)) if alt_mod => {
-                Some(vec![Action::DeleteWordBeforeCursor])
-            }
             (Mode::Edit { .. }, Some(Scancode::Backspace)) => {
                 Some(vec![Action::DeleteCharBeforeCursor])
+            }
+            (Mode::Edit { .. }, Some(Scancode::Delete)) => {
+                Some(vec![Action::DeleteCharAfterCursor])
             }
             // Recognized keyboard event with no binding in the current mode.
             _ => Some(vec![]),
@@ -399,6 +414,61 @@ mod tests {
             "expected NoteOff(60), got {:?}",
             actions[0]
         );
+    }
+
+    #[test]
+    fn edit_mode_binds_char_ops_to_ctrl_and_word_ops_to_cmd() {
+        let handler = InputHandler::new(false, 800, 600);
+        let state = test_state(Mode::Edit {
+            cursor_position: 4,
+            errors: vec![],
+        });
+        let classify = |scancode, keymod| {
+            let actions = handler
+                .classify_keydown(Some(scancode), keymod, false, &state)
+                .expect("Edit-mode key should be classified");
+            assert_eq!(actions.len(), 1, "expected one action, got {:?}", actions);
+            actions.into_iter().next().unwrap()
+        };
+        // Char- and line-level ops on Ctrl.
+        assert!(matches!(
+            classify(Scancode::F, Mod::LCTRLMOD),
+            Action::MoveCursorBy(1)
+        ));
+        assert!(matches!(
+            classify(Scancode::B, Mod::LCTRLMOD),
+            Action::MoveCursorBy(-1)
+        ));
+        assert!(matches!(
+            classify(Scancode::D, Mod::LCTRLMOD),
+            Action::DeleteCharAfterCursor
+        ));
+        assert!(matches!(
+            classify(Scancode::K, Mod::LCTRLMOD),
+            Action::DeleteToEndOfLine
+        ));
+        // Word-level ops on Cmd (gui mod).
+        assert!(matches!(
+            classify(Scancode::F, Mod::LGUIMOD),
+            Action::MoveCursorToNextWord
+        ));
+        assert!(matches!(
+            classify(Scancode::B, Mod::LGUIMOD),
+            Action::MoveCursorToPreviousWord
+        ));
+        assert!(matches!(
+            classify(Scancode::D, Mod::LGUIMOD),
+            Action::DeleteWordAfterCursor
+        ));
+        assert!(matches!(
+            classify(Scancode::Backspace, Mod::LGUIMOD),
+            Action::DeleteWordBeforeCursor
+        ));
+        // Forward delete works unmodified.
+        assert!(matches!(
+            classify(Scancode::Delete, Mod::NOMOD),
+            Action::DeleteCharAfterCursor
+        ));
     }
 
     #[test]
