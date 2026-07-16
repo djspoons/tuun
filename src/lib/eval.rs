@@ -31,6 +31,11 @@ fn extend_with_trivial_context<M, S>(
 /// Substitutes any occurrences of the variables in `context` that are found in
 /// `expr` with the corresponding expressions. All of the expressions in
 /// `context` should be closed values. The resulting expression will be closed.
+///
+/// Rebuilt nodes keep their spans as provenance (a substituted variable keeps
+/// the span of the value's defining expression), so the result's spans locate
+/// where each part originated but no longer promise verbatim source text —
+/// see the span contract on [`SourceExpr`].
 fn substitute<M, S>(
     context: &[(String, SourceExpr<M, S>)],
     expr: SourceExpr<M, S>,
@@ -50,10 +55,13 @@ where
             expr: Expr::Waveform(w),
             span,
         },
-        Expr::Seq { offset, waveform } => SourceExpr::from(Expr::Seq {
-            offset: Box::new(substitute(context, *offset)),
-            waveform: Box::new(substitute(context, *waveform)),
-        }),
+        Expr::Seq { offset, waveform } => SourceExpr {
+            expr: Expr::Seq {
+                offset: Box::new(substitute(context, *offset)),
+                waveform: Box::new(substitute(context, *waveform)),
+            },
+            span,
+        },
         Function {
             positional,
             named,
@@ -73,11 +81,14 @@ where
                 context.push((name.clone(), SourceExpr::variable(name.clone())));
             }
             let body = substitute(&context, *body);
-            SourceExpr::from(Expr::Function {
-                positional,
-                named,
-                body: Box::new(body),
-            })
+            SourceExpr {
+                expr: Expr::Function {
+                    positional,
+                    named,
+                    body: Box::new(body),
+                },
+                span,
+            }
         }
         BuiltIn { name, function } => SourceExpr {
             expr: Expr::BuiltIn { name, function },
@@ -102,11 +113,14 @@ where
             let condition = Box::new(substitute(context, *condition));
             let then = Box::new(substitute(context, *then));
             let else_ = Box::new(substitute(context, *else_));
-            SourceExpr::from(Expr::IfThenElse {
-                condition,
-                then,
-                else_,
-            })
+            SourceExpr {
+                expr: Expr::IfThenElse {
+                    condition,
+                    then,
+                    else_,
+                },
+                span,
+            }
         }
         Application {
             function,
@@ -122,18 +136,23 @@ where
                 .into_iter()
                 .map(|(name, value)| (name, substitute(context, value)))
                 .collect();
-            SourceExpr::from(Expr::Application {
-                function: Box::new(function),
-                positional,
-                named,
-            })
+            SourceExpr {
+                expr: Expr::Application {
+                    function: Box::new(function),
+                    positional,
+                    named,
+                },
+                span,
+            }
         }
-        Tuple(exprs) => SourceExpr::from(Expr::Tuple(
-            exprs.into_iter().map(|e| substitute(context, e)).collect(),
-        )),
-        List(exprs) => SourceExpr::from(Expr::List(
-            exprs.into_iter().map(|e| substitute(context, e)).collect(),
-        )),
+        Tuple(exprs) => SourceExpr {
+            expr: Expr::Tuple(exprs.into_iter().map(|e| substitute(context, e)).collect()),
+            span,
+        },
+        List(exprs) => SourceExpr {
+            expr: Expr::List(exprs.into_iter().map(|e| substitute(context, e)).collect()),
+            span,
+        },
         Error(s) => SourceExpr {
             expr: Error(s),
             span,
@@ -184,11 +203,12 @@ where
 /// variables.
 ///
 /// Equivalent to [`evaluate`] with no bindings and a resolver that always
-/// fails, but skips the substitution pass (which rebuilds nodes and drops
-/// their spans).
+/// fails, but skips the needless substitution pass.
 ///
-/// The resulting expression will have a `span` only if the argument is a value
-/// already.
+/// The result's spans are provenance (see [`SourceExpr`]): an expression that
+/// is already a value keeps its span, an extracted sub-value (a chosen
+/// branch, an applied function's body) keeps its own, and a built-in
+/// application's result carries the span of the call site.
 pub fn evaluate_closed<M, S>(expr: SourceExpr<M, S>) -> Result<SourceExpr<M, S>, Error<S>>
 where
     M: Clone + fmt::Display + fmt::Debug,
@@ -218,8 +238,6 @@ where
                 .into_iter()
                 .map(|(name, value)| Ok((name, evaluate_closed(value)?)))
                 .collect::<Result<NamedExprs<M, S>, Error<S>>>()?;
-            // Preserve the span, as for the other values.
-            // TODO is that faithful for functions?
             Ok(SourceExpr {
                 expr: Function {
                     positional,
@@ -236,10 +254,13 @@ where
         Seq { offset, waveform } => {
             let offset = evaluate_closed(*offset)?;
             let waveform = evaluate_closed(*waveform)?;
-            Ok(SourceExpr::from(Seq {
-                offset: Box::new(offset),
-                waveform: Box::new(waveform),
-            }))
+            Ok(SourceExpr {
+                expr: Seq {
+                    offset: Box::new(offset),
+                    waveform: Box::new(waveform),
+                },
+                span,
+            })
         }
         BuiltIn { name, function } => Ok(SourceExpr {
             expr: BuiltIn { name, function },
@@ -345,13 +366,14 @@ where
                     // Builtins operate on bare `Expr<M>` values, so unwrap
                     // the SourceExpr children before calling and wrap the
                     // result. Use the outer Application's span (`span`) so
-                    // errors point at the whole `f(x, y)` call site — builtins
-                    // themselves don't see spans.
+                    // errors — and the result's provenance — point at the
+                    // whole `f(x, y)` call site; builtins themselves don't
+                    // see spans.
                     let actuals: Vec<Expr<M, S>> = arguments.into_iter().map(|s| s.expr).collect();
                     let result = function.0(actuals);
                     match result {
                         Expr::Error(s) => Err(Error::with_span(s, span.clone())),
-                        _ => Ok(SourceExpr::from(result)),
+                        _ => Ok(SourceExpr { expr: result, span }),
                     }
                 }
                 (function, _) => Err(Error::with_span(
@@ -360,18 +382,24 @@ where
                 )),
             }
         }
-        Tuple(exprs) => Ok(SourceExpr::from(Tuple(
-            exprs
-                .into_iter()
-                .map(|e| evaluate_closed(e))
-                .collect::<Result<Vec<_>, _>>()?,
-        ))),
-        List(exprs) => Ok(SourceExpr::from(List(
-            exprs
-                .into_iter()
-                .map(|e| evaluate_closed(e))
-                .collect::<Result<Vec<_>, _>>()?,
-        ))),
+        Tuple(exprs) => Ok(SourceExpr {
+            expr: Tuple(
+                exprs
+                    .into_iter()
+                    .map(|e| evaluate_closed(e))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            span,
+        }),
+        List(exprs) => Ok(SourceExpr {
+            expr: List(
+                exprs
+                    .into_iter()
+                    .map(|e| evaluate_closed(e))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            span,
+        }),
         Expr::Error(s) => Err(Error::with_span(s, span)),
     }
 }

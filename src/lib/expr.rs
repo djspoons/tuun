@@ -203,12 +203,16 @@ pub enum Expr<M, S = ()> {
 ///   semantics-preserving rewrites (substitution, evaluation), so diagnostics
 ///   can always use a span to point at an expression's origin.
 /// - **Verbatim**: the source text at the range still reads back as exactly
-///   this expression. Only the source-preserving printer needs this promise,
-///   and it checks it with `is_clean` (see the printer section below): a
-///   expression is only spliced verbatim from `span` if every sub-expression
-///   inside it also has a span. Rewrites support this by rebuilding the nodes
-///   they change *without* spans (via [`SourceExpr::from`]), so a subtree that
-///   no longer matches its source text is not judged clean.
+///   this expression. This promise is made only by trees as produced by the
+///   parser, including those that contain synthesized, spanless replacements.
+///   It does *not* apply to trees that have been through substitution or
+///   evaluation (which keep spans only as provenance).
+///
+/// Only the source-preserving printer requires the second "verbatim" promise,
+/// so it must be given only parser-derived trees; within them it checks
+/// `is_clean` (see the printer section below): an expression is only spliced
+/// verbatim from `span` if every sub-expression inside it also has a span, so
+/// synthesized replacements fall back to pretty-printing.
 #[derive(Clone, Debug)]
 pub struct SourceExpr<M, S = ()> {
     pub expr: Expr<M, S>,
@@ -930,9 +934,15 @@ where
 //
 // `print_preserving(node, source)` reproduces the original source for any
 // sub-tree whose every leaf still has a span (i.e. nothing inside has been
-// edited since parsing), and falls back to a structural pretty-print for
-// dirty regions — recursing into each child so that clean sub-sub-trees
-// inside a dirty parent still come back verbatim from `source`.
+// edited since parsing), and falls back to a structural pretty-print for dirty
+// regions — recursing into each child so that clean sub-sub-trees inside a
+// dirty parent still come back verbatim from `source`.
+//
+// These functions must only be given trees derived from parsing `source`
+// (including those with synthesized spanless nodes). Trees that have been
+// through substitution or evaluation keep spans as provenance only (see the
+// span contract on `SourceExpr`), so their spans no longer guarantee verbatim
+// source text.
 
 /// Returns true iff `node` and every descendant either has Some span or is one
 /// of the parser's "transparent packaging" forms (binary-op-argument Tuples).
