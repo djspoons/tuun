@@ -6,7 +6,7 @@ use crate::expr;
 use crate::expr::{BuiltInFn, Expr, SourceExpr, boxed};
 use crate::optimizer;
 use crate::waveform::{Operator, Waveform};
-use Expr::{Application, Bool, BuiltIn, Error, Float, List, Seq};
+use Expr::{Bool, BuiltIn, Error, Float, List, Seq};
 
 type WaveformBinOp<M> = fn(Box<Waveform<M>>, Box<Waveform<M>>) -> Waveform<M>;
 
@@ -476,10 +476,10 @@ where
         [function, List(exprs)] => {
             let mut results: Vec<SourceExpr<M, S>> = Vec::new();
             for expr in exprs {
-                let result = eval::evaluate_closed(SourceExpr::from(Application {
-                    function: boxed(function.clone()),
-                    arguments: vec![expr.clone()], // can we avoid this clone?
-                }));
+                let result = eval::evaluate_closed(SourceExpr::application(
+                    function.clone().into(),
+                    vec![expr.clone()], // can we avoid this clone?
+                ));
                 match result {
                     Ok(expr) => results.push(expr),
                     Err(err) => results.push(SourceExpr::error(err.to_string())),
@@ -500,10 +500,10 @@ where
         [function, acc, List(exprs)] => {
             let mut acc: SourceExpr<M, S> = SourceExpr::from(acc.clone());
             for expr in exprs {
-                let result = eval::evaluate_closed(SourceExpr::from(Application {
-                    function: boxed(function.clone()),
-                    arguments: vec![acc, expr.clone()],
-                }));
+                let result = eval::evaluate_closed(SourceExpr::application(
+                    function.clone().into(),
+                    vec![acc, expr.clone()],
+                ));
                 acc = match result {
                     Ok(expr) => expr,
                     Err(err) => return Error(err.to_string()),
@@ -526,10 +526,10 @@ where
             let mut current: SourceExpr<M, S> = SourceExpr::from(seed.clone());
             for _ in 0..(*n as u32) {
                 results.push(current.clone());
-                let result = eval::evaluate_closed(SourceExpr::from(Application {
-                    function: boxed(function.clone()),
-                    arguments: vec![current.clone()],
-                }));
+                let result = eval::evaluate_closed(SourceExpr::application(
+                    function.clone().into(),
+                    vec![current.clone()],
+                ));
                 current = match result {
                     Ok(expr) => expr,
                     Err(err) => return Error(err.to_string()),

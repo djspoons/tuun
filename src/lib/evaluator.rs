@@ -374,15 +374,15 @@ impl Evaluator {
         }
     }
 
-    /// Applies a note function `expr` to the given `args`, expecting a pair
-    /// of (note-on, note-off) waveforms as a result.
+    /// Applies a note function `expr` to the given `arguments`, expecting a
+    /// pair of (note-on, note-off) waveforms as a result.
     ///
-    /// The expressions `expr` and `args` should be closed except for
-    /// references to `sliders`, which are bound at their current values.
+    /// The expressions `expr` and `arguments` should be closed except for references
+    /// to `sliders`, which are bound at their current values.
     ///
-    /// Errors keep any span the evaluation produced (e.g. an unbound
-    /// variable in the function's body), so they can be diagnosed against
-    /// the program the function came from.
+    /// Errors keep any span the evaluation produced (e.g. an unbound variable
+    /// in the function's body), so they can be diagnosed against the program
+    /// the function came from.
     pub fn apply_note_function(
         &self,
         expr: &expr::SourceExpr<MarkId, Source>,
@@ -390,10 +390,7 @@ impl Evaluator {
         sliders: &ProgramSliders,
     ) -> Result<(waveform::Waveform<MarkId>, waveform::Waveform<MarkId>), expr::Error<Source>> {
         use expr::Expr::{Tuple, Waveform};
-        let expr = expr::SourceExpr::from(expr::Expr::Application {
-            function: Box::new(expr.clone()),
-            arguments,
-        });
+        let expr = expr::SourceExpr::application(expr.clone(), arguments);
         let mut bindings = vec![];
         slider::append_slider_bindings(
             sliders.configs(),

@@ -15,8 +15,8 @@ use nom::{
 };
 
 use crate::expr::{
-    self, Annotation, Binding, Error, Expr, Pattern, Slider, SliderFunction, SourceAnnotation,
-    SourceBinding, SourceExpr, Span, boxed,
+    self, Annotation, Binding, Error, Expr, NamedExprs, Pattern, Slider, SliderFunction,
+    SourceAnnotation, SourceBinding, SourceExpr, Span,
 };
 
 type Input<'a> = nom_locate::LocatedSpan<&'a str, ParseState<'a>>;
@@ -230,6 +230,62 @@ fn parse_pattern(input: Input) -> IResult<Pattern> {
     Ok((rest, pattern))
 }
 
+/// Parses `name = value`, the shared shape of a named parameter and a named
+/// argument.
+fn parse_named_item<'a, M>(
+    input: Input<'a>,
+    missing_value: &'static str,
+) -> IResult<'a, (String, SourceExpr<M>)> {
+    // The lookahead after `=` rejects `==`, so a comparison like `y == 5`
+    // backtracks to be parsed as a positional expression
+    let (rest, (name, _, _, value)) = (
+        parse_identifier,
+        ws(char('=')),
+        not(char('=')),
+        expect(parse_expr, missing_value),
+    )
+        .parse(input)?;
+    Ok((rest, (name, value.unwrap_or_else(error_placeholder))))
+}
+
+fn parse_named_parameter<M>(input: Input) -> IResult<(String, SourceExpr<M>)> {
+    parse_named_item(input, "expected default expression after '=' in parameter")
+}
+
+fn parse_named_argument<M>(input: Input) -> IResult<(String, SourceExpr<M>)> {
+    parse_named_item(input, "expected expression after '=' in named argument")
+}
+
+/// One entry of a function's parameter list.
+enum Parameter<M> {
+    Positional(Pattern),
+    Named(String, SourceExpr<M>),
+}
+
+/// Collects every identifier bound by `pattern` into `names`.
+fn pattern_names(pattern: &Pattern, names: &mut Vec<String>) {
+    match pattern {
+        Pattern::Identifier(name) => names.push(name.clone()),
+        Pattern::Tuple(patterns) => {
+            for pattern in patterns {
+                pattern_names(pattern, names);
+            }
+        }
+    }
+}
+
+/// Parses one entry of a function's parameter list, along with its source range
+/// (used to locate validation errors).
+fn parse_parameter<M>(input: Input) -> IResult<(Range<usize>, Parameter<M>)> {
+    let start = input.location_offset();
+    let (rest, item) = alt((
+        parse_named_parameter.map(|(name, value)| Parameter::Named(name, value)),
+        parse_pattern.map(Parameter::Positional),
+    ))
+    .parse(input)?;
+    Ok((rest, (start..rest.location_offset(), item)))
+}
+
 fn parse_function<M>(input: Input) -> IResult<SourceExpr<M>> {
     let start = input.location_offset();
     #[rustfmt::skip]
@@ -237,14 +293,61 @@ fn parse_function<M>(input: Input) -> IResult<SourceExpr<M>> {
         (delimited(
             (tag("fn"), trivia0),
             delimited((char('('), trivia0),
-                    separated_list0(ws(char(',')), parse_pattern),
+                    separated_list0(ws(char(',')), parse_parameter),
                     (trivia0, expect(char(')'), "expected ')' at end of parameter list"))),
             ws(expect(tag("=>"), "expected '=>'"))),
             parse_expr,
         ).parse(input)?;
     let end = rest.location_offset();
+
+    // Validate the parameter list: positional parameters before named ones,
+    // and no name bound twice (including a named parameter colliding with a
+    // positional identifier). The first violation is reported as a
+    // recoverable error and the whole function becomes an Error node
+    // carrying the same message.
+    let mut positional = Vec::new();
+    let mut named: NamedExprs<M> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    let mut violation: Option<(Range<usize>, String)> = None;
+    for (range, param) in params {
+        match param {
+            Parameter::Positional(pattern) => {
+                if !named.is_empty() {
+                    violation = Some((
+                        range,
+                        "positional arguments should appear before named ones".to_string(),
+                    ));
+                    break;
+                }
+                pattern_names(&pattern, &mut names);
+                positional.push(pattern);
+            }
+            Parameter::Named(name, value) => {
+                if names.iter().any(|n| n == &name) {
+                    violation = Some((
+                        range,
+                        format!("named parameter \"{}\" appears more than once", name),
+                    ));
+                    break;
+                }
+                names.push(name.clone());
+                named.push((name, value));
+            }
+        }
+    }
+    if let Some((range, message)) = violation {
+        rest.extra.report_error(Error::with_span(
+            message.clone(),
+            Some(Span::unstamped(range)),
+        ));
+        return Ok((
+            rest,
+            SourceExpr::with_span(Expr::Error(message), start..end),
+        ));
+    }
     let expr = Expr::Function {
-        params,
+        positional,
+        named,
         body: Box::new(body),
     };
     Ok((rest, SourceExpr::with_span(expr, start..end)))
@@ -380,10 +483,7 @@ fn parse_unary_application<M>(input: Input) -> IResult<SourceExpr<M>> {
         Expr::Variable(op.fragment().to_string()),
         start..op.location_offset() + op.fragment().len(),
     );
-    let app = Expr::Application {
-        function: Box::new(var),
-        arguments: vec![expr],
-    };
+    let app = Expr::application(var, vec![expr]);
     Ok((rest, SourceExpr::with_span(app, start..end)))
 }
 
@@ -429,21 +529,83 @@ fn parse_primitive<M>(input: Input) -> IResult<SourceExpr<M>> {
     Ok((rest, value))
 }
 
-/// Parses a call's argument list: `'(' expr ',' ... ')'`, returning one
-/// element per argument. Unlike [`parse_tuple`], a single element is NOT
-/// collapsed — `f(x)` has one argument, and `f((1, 2))` has one argument
-/// that is a pair, distinct from `f(1, 2)`.
-fn parse_call_arguments<M>(input: Input) -> IResult<Vec<SourceExpr<M>>> {
+/// One element of a call's argument list.
+enum Argument<M> {
+    Positional(SourceExpr<M>),
+    Named(String, SourceExpr<M>),
+}
+
+/// Parses one entry of a call's argument list, along with its source range.
+fn parse_argument<M>(input: Input) -> IResult<(Range<usize>, Argument<M>)> {
+    let start = input.location_offset();
+    let (rest, argument) = alt((
+        parse_named_argument.map(|(name, value)| Argument::Named(name, value)),
+        parse_expr.map(Argument::Positional),
+    ))
+    .parse(input)?;
+    Ok((rest, (start..rest.location_offset(), argument)))
+}
+
+/// Parses a call's argument list: `'(' expr ',' ... ',' name '=' expr ',' ... ')'`,
+/// returning the positional arguments and the named arguments.
+///
+/// Unlike [`parse_tuple`], a single element is NOT collapsed — `f(x)` has
+/// one argument, and `f((1, 2))` has one argument that is a pair, distinct
+/// from `f(1, 2)`.
+fn parse_arguments<M>(input: Input) -> IResult<(Vec<SourceExpr<M>>, NamedExprs<M>)> {
+    let args_start = input.location_offset();
     #[rustfmt::skip]
     let (rest, arguments) = delimited(
         (char('('), trivia0),
         separated_list0(
             (trivia0, char(','), trivia0),
-            parse_expr,
+            parse_argument,
         ),
         (trivia0, expect(char(')'), "expected ')' at end of arguments")),
     ).parse(input)?;
-    Ok((rest, arguments))
+    let args_end = rest.location_offset();
+
+    // Validate the list: positional arguments before named ones, and no
+    // name given twice. The first violation is reported as a recoverable
+    // error and the whole argument list collapses to a single Error node
+    // carrying the same message, so the module path (which evaluates
+    // despite recoverable errors) fails the same way.
+    let mut positional = Vec::new();
+    let mut named: NamedExprs<M> = Vec::new();
+    let mut violation: Option<(Range<usize>, String)> = None;
+    for (range, argument) in arguments {
+        match argument {
+            Argument::Positional(expr) => {
+                if !named.is_empty() {
+                    violation = Some((
+                        range,
+                        "positional arguments should appear before named ones".to_string(),
+                    ));
+                    break;
+                }
+                positional.push(expr);
+            }
+            Argument::Named(name, value) => {
+                if named.iter().any(|(n, _)| n == &name) {
+                    violation = Some((
+                        range,
+                        format!("named parameter \"{}\" appears more than once", name),
+                    ));
+                    break;
+                }
+                named.push((name, value));
+            }
+        }
+    }
+    if let Some((range, message)) = violation {
+        rest.extra.report_error(Error::with_span(
+            message.clone(),
+            Some(Span::unstamped(range)),
+        ));
+        let error = SourceExpr::with_span(Expr::Error(message), args_start..args_end);
+        return Ok((rest, (vec![error], Vec::new())));
+    }
+    Ok((rest, (positional, named)))
 }
 
 fn parse_application<M>(input: Input) -> IResult<SourceExpr<M>> {
@@ -452,13 +614,14 @@ fn parse_application<M>(input: Input) -> IResult<SourceExpr<M>> {
     loop {
         // Peek-and-consume one (whitespace + argument-list) iteration to
         // track positions.
-        let attempt = preceded(trivia0, parse_call_arguments).parse(rest);
+        let attempt = preceded(trivia0, parse_arguments).parse(rest);
         match attempt {
-            Ok((new_rest, arguments)) => {
+            Ok((new_rest, (positional, named))) => {
                 let end = new_rest.location_offset();
                 let app = Expr::Application {
                     function: Box::new(result),
-                    arguments,
+                    positional,
+                    named,
                 };
                 result = SourceExpr::with_span(app, start..end);
                 rest = new_rest;
@@ -493,10 +656,7 @@ where
             Expr::Variable(op.fragment().to_string()),
             op.location_offset()..op.location_offset() + op.fragment().len(),
         );
-        let app = Expr::Application {
-            function: Box::new(op_var),
-            arguments: vec![expr, rhs],
-        };
+        let app = Expr::application(op_var, vec![expr, rhs]);
         expr = SourceExpr::with_span(app, start..end);
         rest = new_rest;
     }
@@ -552,10 +712,7 @@ fn parse_chord<M>(input: Input) -> IResult<SourceExpr<M>> {
         (trivia0, expect(char('}'), "expected '}' at end of chord")),
     ).parse(input)?;
     let end = rest.location_offset();
-    let app = Expr::Application {
-        function: boxed(Expr::Variable("__chord".to_string())),
-        arguments: vec![inner],
-    };
+    let app = Expr::application(SourceExpr::variable("__chord".to_string()), vec![inner]);
     Ok((rest, SourceExpr::with_span(app, start..end)))
 }
 
@@ -568,10 +725,7 @@ fn parse_sequence<M>(input: Input) -> IResult<SourceExpr<M>> {
         (trivia0, expect(char('>'), "expected '>' at end of sequence")),
     ).parse(input)?;
     let end = rest.location_offset();
-    let app = Expr::Application {
-        function: boxed(Expr::Variable("__sequence".to_string())),
-        arguments: vec![inner],
-    };
+    let app = Expr::application(SourceExpr::variable("__sequence".to_string()), vec![inner]);
     Ok((rest, SourceExpr::with_span(app, start..end)))
 }
 
@@ -624,10 +778,7 @@ fn parse_reverse_application<M>(input: Input) -> IResult<SourceExpr<M>> {
             Ok((new_rest, function)) => {
                 let end = new_rest.location_offset();
                 let function = function.unwrap_or_else(error_placeholder);
-                let app = Expr::Application {
-                    function: Box::new(function),
-                    arguments: vec![argument],
-                };
+                let app = Expr::application(function, vec![argument]);
                 argument = SourceExpr::with_span(app, start..end);
                 rest = new_rest;
             }
@@ -653,11 +804,8 @@ fn parse_expr<M>(input: Input) -> IResult<SourceExpr<M>> {
             Ok((new_rest, rhs)) => {
                 let end = new_rest.location_offset();
                 let rhs = rhs.unwrap_or_else(error_placeholder);
-                let op_var = SourceExpr::from(Expr::Variable("\\".to_string()));
-                let app = Expr::Application {
-                    function: Box::new(op_var),
-                    arguments: vec![expr, rhs],
-                };
+                let op_var = SourceExpr::variable("\\".to_string());
+                let app = Expr::application(op_var, vec![expr, rhs]);
                 expr = SourceExpr::with_span(app, start..end);
                 rest = new_rest;
             }
@@ -1110,6 +1258,79 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_named_arguments() {
+        // Definitions with defaults.
+        assert_round_trip("fn(x, y = 10) => x * y + 1", "fn(x, y = 10) => x * y + 1");
+        assert_round_trip("fn(y = 1) => y", "fn(y = 1) => y");
+        assert_round_trip(
+            "fn(x, (y, z), a = 1, b = 2) => x",
+            "fn(x, (y, z), a = 1, b = 2) => x",
+        );
+        // Calls with named arguments.
+        assert_round_trip("f(2, y = 5)", "f(2, y = 5)");
+        assert_round_trip("f(y = 2)", "f(y = 2)");
+        assert_round_trip("f((1, 2), y = 5)", "f((1, 2), y = 5)");
+        // `==` stays a positional comparison, not a named argument.
+        assert_round_trip("f(2, y == 5)", "f(2, y == 5)");
+        // A named inner call still re-sugars the outer pipe.
+        assert_round_trip("2 * 3 | f(1, y = 3)", "2 * 3 | f(1, y = 3)");
+        // A named-default fn as a binding value keeps the `let` sugar...
+        assert_round_trip(
+            "let f = fn(x, y = 10) => x * y in f(2, y = 5)",
+            "let f = fn(x, y = 10) => x * y in f(2, y = 5)",
+        );
+        // ...but applying a named-params literal cannot be a `let`.
+        assert_round_trip("(fn(x, y = 10) => x)(2)", "(fn(x, y = 10) => x)(2)");
+    }
+
+    #[test]
+    fn test_named_argument_error_recovery() {
+        // Each violation reports exactly one recoverable error carrying the
+        // offending message; the module still parses, and printing it back
+        // reproduces the input verbatim (the recovery Error node keeps the
+        // original span).
+        let cases = [
+            (
+                "x = f(y = 3, 2);",
+                "positional arguments should appear before named ones",
+            ),
+            (
+                "x = f(2, y = 2, y = 1);",
+                "named parameter \"y\" appears more than once",
+            ),
+            (
+                "g = fn(b = 2, a) => a;",
+                "positional arguments should appear before named ones",
+            ),
+            (
+                "g = fn(a, b = 2, b = 3) => a;",
+                "named parameter \"b\" appears more than once",
+            ),
+            // A named parameter colliding with a positional identifier.
+            (
+                "g = fn(a, a = 2) => a;",
+                "named parameter \"a\" appears more than once",
+            ),
+        ];
+        for (source, message) in cases {
+            let (bindings, errors) = parse_module_unstamped::<u32>(source).unwrap();
+            assert_eq!(errors.len(), 1, "for {:?}: {:?}", source, errors);
+            assert_eq!(errors[0].message(), message, "for {:?}", source);
+            assert!(errors[0].range().is_some(), "for {:?}", source);
+            assert_eq!(print_preserving_module(&bindings, source), source);
+        }
+
+        // The expression path fails outright on the same violations.
+        let result = parse_program_unstamped::<u32>("f(y = 3, 2)");
+        assert!(result.is_err());
+
+        // Valid named syntax splices verbatim, comments included.
+        let source = "x = f(2, // pick y\n y = 5);\ng = fn(a, b = 1 + 2) => a * b;";
+        let bindings = parse_module_successfully(source);
+        assert_eq!(print_preserving_module(&bindings, source), source);
+    }
+
+    #[test]
     fn test_parse_call_arguments() {
         // A tuple literal is ONE argument, distinct from two arguments.
         assert_round_trip("f((1, 2))", "f((1, 2))");
@@ -1226,8 +1447,8 @@ mod tests {
         // splicing the RHS verbatim from source.
         let input = "1 + // sibling comment\n 2";
         let mut parsed = parse_program_unstamped::<u32>(input).unwrap();
-        if let Expr::Application { arguments, .. } = &mut parsed.expr {
-            arguments[0] = SourceExpr::float(99.0); // span: None — "edit"
+        if let Expr::Application { positional, .. } = &mut parsed.expr {
+            positional[0] = SourceExpr::float(99.0); // span: None — "edit"
         } else {
             panic!("expected Application root");
         }
@@ -1507,9 +1728,10 @@ synth = saw(220);";
                 .or_else(|| find_first_list_span(else_)),
             Expr::Application {
                 function,
-                arguments,
+                positional,
+                ..
             } => find_first_list_span(function)
-                .or_else(|| arguments.iter().find_map(find_first_list_span)),
+                .or_else(|| positional.iter().find_map(find_first_list_span)),
             Expr::Tuple(items) | Expr::List(items) => items.iter().find_map(find_first_list_span),
             _ => None,
         }

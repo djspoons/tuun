@@ -5,7 +5,7 @@
 use std::fmt;
 use std::fmt::{Debug, Display};
 
-use crate::expr::{Binding, Error, Expr, Pattern, SourceBinding, SourceExpr};
+use crate::expr::{Binding, Error, Expr, NamedExprs, Pattern, SourceBinding, SourceExpr};
 
 /// A context entry: a bound name and the closed value it evaluates to.
 type ContextEntry<M, S> = (String, SourceExpr<M, S>);
@@ -54,14 +54,28 @@ where
             offset: Box::new(substitute(context, *offset)),
             waveform: Box::new(substitute(context, *waveform)),
         }),
-        Function { params, body } => {
+        Function {
+            positional,
+            named,
+            body,
+        } => {
+            // Named defaults are evaluated in the enclosing scope: they see
+            // the incoming context, not the parameters.
+            let named: NamedExprs<M, S> = named
+                .into_iter()
+                .map(|(name, value)| (name, substitute(context, value)))
+                .collect();
             let mut context = Vec::from(context);
-            for param in &params {
+            for param in &positional {
                 extend_with_trivial_context(&mut context, param);
+            }
+            for (name, _) in &named {
+                context.push((name.clone(), SourceExpr::variable(name.clone())));
             }
             let body = substitute(&context, *body);
             SourceExpr::from(Expr::Function {
-                params,
+                positional,
+                named,
                 body: Box::new(body),
             })
         }
@@ -96,16 +110,22 @@ where
         }
         Application {
             function,
-            arguments,
+            positional,
+            named,
         } => {
             let function = substitute(context, *function);
-            let arguments = arguments
+            let positional = positional
                 .into_iter()
                 .map(|a| substitute(context, a))
                 .collect();
+            let named = named
+                .into_iter()
+                .map(|(name, value)| (name, substitute(context, value)))
+                .collect();
             SourceExpr::from(Expr::Application {
                 function: Box::new(function),
-                arguments,
+                positional,
+                named,
             })
         }
         Tuple(exprs) => SourceExpr::from(Expr::Tuple(
@@ -180,11 +200,34 @@ where
     };
     let SourceExpr { expr, span } = expr;
     match expr {
-        Bool(_) | Float(_) | String(_) | Waveform(_) | Function { .. } => {
+        Bool(_) | Float(_) | String(_) | Waveform(_) => {
             // For values, we can preserve the input span, since it still faithfully
             // represents the value.
-            // TODO is that true for functions?
             Ok(SourceExpr { expr, span })
+        }
+        Function {
+            positional,
+            named,
+            body,
+        } => {
+            // Named defaults are evaluated once, here — when the function
+            // expression itself is reduced to a value (for a binding, at
+            // definition time) — not at each application. Idempotent:
+            // defaults that are already values evaluate to themselves.
+            let named = named
+                .into_iter()
+                .map(|(name, value)| Ok((name, evaluate_closed(value)?)))
+                .collect::<Result<NamedExprs<M, S>, Error<S>>>()?;
+            // Preserve the span, as for the other values.
+            // TODO is that faithful for functions?
+            Ok(SourceExpr {
+                expr: Function {
+                    positional,
+                    named,
+                    body,
+                },
+                span,
+            })
         }
         Variable(name) => Err(Error::with_span(
             format!("Variable '{}' not found in context", name),
@@ -221,35 +264,84 @@ where
         }
         Application {
             function,
-            arguments,
+            positional,
+            named,
         } => {
             let function = evaluate_closed(*function)?;
-            let arguments = arguments
+            let pos_args = positional
                 .into_iter()
                 .map(evaluate_closed)
                 .collect::<Result<Vec<_>, _>>()?;
-            match (function.expr, arguments) {
-                (Function { params, body }, arguments) => {
-                    if arguments.len() > params.len() {
+            let named = named
+                .into_iter()
+                .map(|(name, value)| Ok((name, evaluate_closed(value)?)))
+                .collect::<Result<NamedExprs<M, S>, Error<S>>>()?;
+            match (function.expr, pos_args) {
+                (
+                    Function {
+                        positional: pos_params,
+                        named: defaults,
+                        body,
+                    },
+                    pos_args,
+                ) => {
+                    // Every call-site name must be a declared named
+                    // parameter and may appear at most once. (The parser
+                    // reports both violations too; these checks defend
+                    // synthesized trees.)
+                    for (i, (name, _)) in named.iter().enumerate() {
+                        if named[..i].iter().any(|(n, _)| n == name) {
+                            return Err(Error::with_span(
+                                format!("named parameter \"{}\" appears more than once", name),
+                                span.clone(),
+                            ));
+                        }
+                        if !defaults.iter().any(|(n, _)| n == name) {
+                            return Err(Error::with_span(
+                                format!("no named parameter \"{}\"", name),
+                                span.clone(),
+                            ));
+                        }
+                    }
+                    if pos_args.len() > pos_params.len() {
                         return Err(Error::with_span(
                             "extra positional parameter".to_string(),
                             span.clone(),
                         ));
                     }
-                    if arguments.len() < params.len() {
+                    if pos_args.len() < pos_params.len() {
                         return Err(Error::with_span(
-                            format!("missing parameter \"{}\"", params[arguments.len()]),
+                            format!("missing parameter \"{}\"", pos_params[pos_args.len()]),
                             span.clone(),
                         ));
                     }
                     let mut context = Vec::new();
-                    for (param, argument) in params.iter().zip(&arguments) {
+                    for (param, argument) in pos_params.iter().zip(&pos_args) {
                         extend_context(&mut context, param, argument)?;
+                    }
+                    // Each named parameter binds the call-site override if
+                    // present, else its (already evaluated) default.
+                    for (name, default) in &defaults {
+                        let value = named
+                            .iter()
+                            .find(|(n, _)| n == name)
+                            .map(|(_, v)| v.clone())
+                            .unwrap_or_else(|| default.clone());
+                        context.push((name.clone(), value));
                     }
                     let body = substitute(&context, *body);
                     evaluate_closed(body)
                 }
-                (BuiltIn { function, .. }, arguments) => {
+                (BuiltIn { name, function }, arguments) => {
+                    if let Some((named_name, _)) = named.first() {
+                        return Err(Error::with_span(
+                            format!(
+                                "named argument \"{}\" is not supported by built-in \"{}\"",
+                                named_name, name
+                            ),
+                            span.clone(),
+                        ));
+                    }
                     // Builtins operate on bare `Expr<M>` values, so unwrap
                     // the SourceExpr children before calling and wrap the
                     // result. Use the outer Application's span (`span`) so
@@ -359,7 +451,125 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::builtins;
     use crate::parser::{parse_module, parse_program};
+
+    /// Parses and evaluates `input` with the built-ins in scope.
+    fn eval_with_builtins(input: &str) -> Result<SourceExpr<u32, ()>, Error<()>> {
+        let mut bindings: Vec<SourceBinding<u32, ()>> = Vec::new();
+        builtins::add_bindings(&mut bindings);
+        let expr = parse_program::<u32, _>(input, ()).unwrap();
+        evaluate(
+            |_: &[String]| Err(Error::new("no modules".to_string())),
+            &bindings,
+            expr,
+        )
+    }
+
+    #[test]
+    fn test_named_arguments() {
+        let f = "let f = fn(x, y = 10) => x * y + 1 in ";
+        let run = |call: &str| eval_with_builtins(&format!("{}{}", f, call));
+        assert_eq!(format!("{}", run("f(2)").unwrap()), "21");
+        assert_eq!(format!("{}", run("f(2, y = 5)").unwrap()), "11");
+        assert_eq!(
+            run("f(2, 3)").unwrap_err().message(),
+            "extra positional parameter"
+        );
+        assert_eq!(
+            run("f(2, z = 3)").unwrap_err().message(),
+            "no named parameter \"z\""
+        );
+        assert_eq!(
+            run("f(y = 2)").unwrap_err().message(),
+            "missing parameter \"x\""
+        );
+
+        // All-named functions can be called with no arguments at all.
+        let g = "let g = fn(y = 1) => y in ";
+        assert_eq!(
+            format!("{}", eval_with_builtins(&format!("{}g()", g)).unwrap()),
+            "1"
+        );
+        assert_eq!(
+            format!("{}", eval_with_builtins(&format!("{}g(y = 3)", g)).unwrap()),
+            "3"
+        );
+
+        // Defaults close over the enclosing scope...
+        assert_eq!(
+            format!(
+                "{}",
+                eval_with_builtins("let a = 5, f = fn(x, y = a * 2) => x + y in f(1)").unwrap()
+            ),
+            "11"
+        );
+        // ...while the parameter name shadows outer bindings in the body.
+        assert_eq!(
+            format!(
+                "{}",
+                eval_with_builtins("let y = 100, f = fn(x, y = 10) => x * y in f(2)").unwrap()
+            ),
+            "20"
+        );
+
+        // Destructuring positional params combine with named ones.
+        let h = "let f = fn((a, b), y = 1) => a + b + y in ";
+        assert_eq!(
+            format!(
+                "{}",
+                eval_with_builtins(&format!("{}f((1, 2))", h)).unwrap()
+            ),
+            "4"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                eval_with_builtins(&format!("{}f((1, 2), y = 10)", h)).unwrap()
+            ),
+            "13"
+        );
+
+        // Builtins do not take named arguments.
+        let error = eval_with_builtins("sine(440, y = 1)").unwrap_err();
+        assert!(error.message().contains("built-in \"sine\""), "{}", error);
+    }
+
+    #[test]
+    fn test_named_defaults_evaluate_once() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let printed: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = Rc::clone(&printed);
+        let mut bindings: Vec<SourceBinding<u32, ()>> = Vec::new();
+        builtins::add_bindings(&mut bindings);
+        bindings.push(
+            Binding::Definition(
+                Pattern::Identifier("debug".to_string()),
+                builtins::debug(move |line| sink.borrow_mut().push(line.to_string())),
+            )
+            .into(),
+        );
+        let resolve = |_: &[String]| Err(Error::new("no modules".to_string()));
+
+        // The default is evaluated once, when the function value is
+        // created — not at each of the three calls.
+        let expr = parse_program::<u32, _>(
+            "let f = fn(x, y = debug(1)) => x, _ = f(1), _ = f(2) in f(3)",
+            (),
+        )
+        .unwrap();
+        let evaluated = evaluate(resolve, &bindings, expr).unwrap();
+        assert_eq!(format!("{}", evaluated), "3");
+        assert_eq!(printed.borrow().as_slice(), ["debug: [1]"]);
+
+        // Even a function that is never applied evaluates its defaults.
+        printed.borrow_mut().clear();
+        let expr = parse_program::<u32, _>("let f = fn(x, y = debug(1)) => x in 0", ()).unwrap();
+        evaluate(resolve, &bindings, expr).unwrap();
+        assert_eq!(printed.borrow().as_slice(), ["debug: [1]"]);
+    }
 
     #[test]
     fn test_opens_are_scoped() {

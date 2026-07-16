@@ -144,6 +144,10 @@ pub enum Pattern {
     Tuple(Vec<Pattern>),
 }
 
+/// Named parameters (on a function) or named arguments (at a call site):
+/// each pairs a name with its default value or supplied value.
+pub type NamedExprs<M, S = ()> = Vec<(String, SourceExpr<M, S>)>;
+
 #[derive(Clone, Debug)]
 pub enum Expr<M, S = ()> {
     // Values
@@ -152,7 +156,11 @@ pub enum Expr<M, S = ()> {
     String(String),
     Waveform(waveform::Waveform<M>),
     Function {
-        params: Vec<Pattern>,
+        positional: Vec<Pattern>,
+        /// Named parameters with their default values; call sites may
+        /// override them by name. Defaults are evaluated once, when the
+        /// function expression itself is evaluated.
+        named: NamedExprs<M, S>,
         body: Box<SourceExpr<M, S>>,
     },
     BuiltIn {
@@ -175,7 +183,10 @@ pub enum Expr<M, S = ()> {
     Variable(String),
     Application {
         function: Box<SourceExpr<M, S>>,
-        arguments: Vec<SourceExpr<M, S>>,
+        positional: Vec<SourceExpr<M, S>>,
+        /// Named arguments, which follow the positional arguments in source and
+        /// may only name the function's named parameters.
+        named: NamedExprs<M, S>,
     },
     // Compound expressions
     Tuple(Vec<SourceExpr<M, S>>),
@@ -184,6 +195,20 @@ pub enum Expr<M, S = ()> {
     Error(String),
 }
 
+/// An expression, optionally paired with the source span it was parsed from.
+///
+/// A span makes two promises, one stronger than the other:
+///
+/// - **Provenance**: the expression originated at that range. This survives
+///   semantics-preserving rewrites (substitution, evaluation), so diagnostics
+///   can always use a span to point at an expression's origin.
+/// - **Verbatim**: the source text at the range still reads back as exactly
+///   this expression. Only the source-preserving printer needs this promise,
+///   and it checks it with `is_clean` (see the printer section below): a
+///   expression is only spliced verbatim from `span` if every sub-expression
+///   inside it also has a span. Rewrites support this by rebuilding the nodes
+///   they change *without* spans (via [`SourceExpr::from`]), so a subtree that
+///   no longer matches its source text is not judged clean.
 #[derive(Clone, Debug)]
 pub struct SourceExpr<M, S = ()> {
     pub expr: Expr<M, S>,
@@ -201,6 +226,20 @@ impl<M, S> From<Expr<M, S>> for SourceExpr<M, S> {
 /// Useful for synthesized compound expressions in builtins and the evaluator.
 pub fn boxed<M, S>(expr: Expr<M, S>) -> Box<SourceExpr<M, S>> {
     Box::new(SourceExpr::from(expr))
+}
+
+impl<M, S> Expr<M, S> {
+    /// Builds an application of `function` to `positional` arguments.
+    pub fn application(
+        function: SourceExpr<M, S>,
+        positional: Vec<SourceExpr<M, S>>,
+    ) -> Expr<M, S> {
+        Expr::Application {
+            function: Box::new(function),
+            positional,
+            named: Vec::new(),
+        }
+    }
 }
 
 impl<M> SourceExpr<M> {
@@ -230,20 +269,18 @@ impl<M, S> SourceExpr<M, S> {
     pub fn error(msg: String) -> SourceExpr<M, S> {
         SourceExpr::from(Expr::Error(msg))
     }
-    pub fn function(params: Vec<Pattern>, body: SourceExpr<M, S>) -> SourceExpr<M, S> {
+    pub fn function(positional: Vec<Pattern>, body: SourceExpr<M, S>) -> SourceExpr<M, S> {
         SourceExpr::from(Expr::Function {
-            params,
+            positional,
+            named: Vec::new(),
             body: Box::new(body),
         })
     }
     pub fn application(
         function: SourceExpr<M, S>,
-        arguments: Vec<SourceExpr<M, S>>,
+        positional: Vec<SourceExpr<M, S>>,
     ) -> SourceExpr<M, S> {
-        SourceExpr::from(Expr::Application {
-            function: Box::new(function),
-            arguments,
-        })
+        SourceExpr::from(Expr::application(function, positional))
     }
     pub fn tuple(exprs: Vec<SourceExpr<M, S>>) -> SourceExpr<M, S> {
         SourceExpr::from(Expr::Tuple(exprs))
@@ -395,8 +432,13 @@ pub(crate) fn stamp_expr<M, S: Copy>(expr: SourceExpr<M>, source: S) -> SourceEx
         // Built-ins exist only in synthesized trees (the prelude), never in
         // parser output, and their closures cannot change span type.
         Expr::BuiltIn { .. } => unreachable!("cannot stamp a built-in"),
-        Expr::Function { params, body } => Expr::Function {
-            params,
+        Expr::Function {
+            positional,
+            named,
+            body,
+        } => Expr::Function {
+            positional,
+            named: stamp_named(named, source),
             body: Box::new(stamp_expr(*body, source)),
         },
         Expr::Seq { offset, waveform } => Expr::Seq {
@@ -414,13 +456,15 @@ pub(crate) fn stamp_expr<M, S: Copy>(expr: SourceExpr<M>, source: S) -> SourceEx
         },
         Expr::Application {
             function,
-            arguments,
+            positional,
+            named,
         } => Expr::Application {
             function: Box::new(stamp_expr(*function, source)),
-            arguments: arguments
+            positional: positional
                 .into_iter()
                 .map(|a| stamp_expr(a, source))
                 .collect(),
+            named: stamp_named(named, source),
         },
         Expr::Tuple(exprs) => {
             Expr::Tuple(exprs.into_iter().map(|e| stamp_expr(e, source)).collect())
@@ -431,6 +475,15 @@ pub(crate) fn stamp_expr<M, S: Copy>(expr: SourceExpr<M>, source: S) -> SourceEx
         expr,
         span: stamp_span(span, source),
     }
+}
+
+/// Stamps `source` as the source identity of every span in `named`'s value
+/// expressions.
+fn stamp_named<M, S: Copy>(named: NamedExprs<M>, source: S) -> NamedExprs<M, S> {
+    named
+        .into_iter()
+        .map(|(name, value)| (name, stamp_expr(value, source)))
+        .collect()
 }
 
 /// Stamps `source` as the source identity of `span`, if there is one.
@@ -584,26 +637,31 @@ fn expr_precedence<M, S>(expr: &Expr<M, S>) -> Precedence {
         Expr::Seq { .. } => Precedence::Application,
         Expr::Application {
             function,
-            arguments,
+            positional,
+            named,
         } => {
+            // Named arguments only ever print in function-call form.
+            if !named.is_empty() {
+                return Precedence::Application;
+            }
             if let Expr::Variable(op) = &function.expr {
-                if arguments.len() == 2
+                if positional.len() == 2
                     && let Some(p) = binary_op_precedence(op)
                 {
                     return p;
                 }
-                if arguments.len() == 1 && is_unary_op(op) {
+                if positional.len() == 1 && is_unary_op(op) {
                     return Precedence::Unary;
                 }
             }
             // Single-binding function-literal application → displayed as
             // `let` (same precedence as Function).
-            if as_let_binding(function, arguments).is_some() {
+            if as_let_binding(function, positional, named).is_some() {
                 return Precedence::Followed;
             }
             // Single-argument application of an application → displayed as
             // `|` pipe.
-            if matches!(function.expr, Expr::Application { .. }) && arguments.len() == 1 {
+            if positional.len() == 1 && matches!(function.expr, Expr::Application { .. }) {
                 return Precedence::ReverseApp;
             }
             Precedence::Application
@@ -616,20 +674,28 @@ fn expr_precedence<M, S>(expr: &Expr<M, S>) -> Precedence {
 type LetBinding<'a, M, S> = (&'a Pattern, &'a SourceExpr<M, S>, &'a SourceExpr<M, S>);
 
 /// The single binding of an application that `let` syntax can represent, if
-/// any: a function literal with exactly one parameter applied to exactly one
-/// argument.
+/// any: a function literal with exactly one parameter and no named parameters,
+/// applied to exactly one argument with no named arguments (`let` syntax cannot
+/// express either kind of named entry).
 ///
 /// Both printers and `expr_precedence` must share this predicate so that
 /// parenthesization matches what actually gets emitted.
 fn as_let_binding<'a, M, S>(
     function: &'a SourceExpr<M, S>,
-    arguments: &'a [SourceExpr<M, S>],
+    pos_args: &'a [SourceExpr<M, S>],
+    named_args: &[(String, SourceExpr<M, S>)],
 ) -> Option<LetBinding<'a, M, S>> {
-    if let Expr::Function { params, body } = &function.expr
-        && params.len() == 1
-        && arguments.len() == 1
+    if let Expr::Function {
+        positional,
+        named: defaults,
+        body,
+    } = &function.expr
+        && named_args.is_empty()
+        && defaults.is_empty()
+        && positional.len() == 1
+        && pos_args.len() == 1
     {
-        Some((&params[0], &arguments[0], body))
+        Some((&positional[0], &pos_args[0], body))
     } else {
         None
     }
@@ -651,7 +717,7 @@ where
     let mut current_args = arguments;
     let mut first = true;
     loop {
-        let (pattern, argument, body) = as_let_binding(current_fn, current_args)
+        let (pattern, argument, body) = as_let_binding(current_fn, current_args, &[])
             .expect("fmt_as_let entered with a non-let-shaped application");
         if !first {
             write!(f, ", ")?;
@@ -660,9 +726,10 @@ where
         write!(f, "{} = {}", pattern, argument)?;
         if let Expr::Application {
             function: next_fn,
-            arguments: next_args,
+            positional: next_args,
+            named: next_named,
         } = &body.expr
-            && as_let_binding(next_fn, next_args).is_some()
+            && as_let_binding(next_fn, next_args, next_named).is_some()
         {
             current_fn = next_fn;
             current_args = next_args;
@@ -670,6 +737,28 @@ where
         }
         return write!(f, " in {}", body);
     }
+}
+
+/// Writes `name = value` pairs, continuing a comma-separated sequence:
+/// emits a separating `", "` before each pair unless `first` is still
+/// true.
+fn fmt_named<M, S, W>(
+    named: &[(String, SourceExpr<M, S>)],
+    mut first: bool,
+    f: &mut W,
+) -> fmt::Result
+where
+    M: Display,
+    W: fmt::Write,
+{
+    for (name, value) in named {
+        if !first {
+            write!(f, ", ")?;
+        }
+        first = false;
+        write!(f, "{} = {}", name, value)?;
+    }
+    Ok(())
 }
 
 /// Format `expr` in an operator context with minimum precedence `min_precedence`,
@@ -724,14 +813,19 @@ where
             Expr::Waveform(waveform) => {
                 write!(f, "{}", waveform)
             }
-            Expr::Function { params, body } => {
+            Expr::Function {
+                positional,
+                named,
+                body,
+            } => {
                 write!(f, "fn(")?;
-                for (i, param) in params.iter().enumerate() {
+                for (i, param) in positional.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
                     write!(f, "{}", param)?;
                 }
+                fmt_named(named, positional.is_empty(), f)?;
                 write!(f, ") => {}", body)
             }
             Expr::BuiltIn { name, .. } => write!(f, "{}", name),
@@ -745,60 +839,65 @@ where
             }
             Expr::Application {
                 function,
-                arguments,
+                positional,
+                named,
             } => {
                 // Render operator applications and `{...}` / `<...>` sugar
                 // using surface syntax matching the parser, so the Display
-                // output round-trips.
-                if let Expr::Variable(name) = &function.expr {
-                    // `__chord` and `__sequence` aren't legal identifiers —
-                    // they can only be entered via the `{x}` / `<x>` sugar.
-                    // Emit the sugar so the output re-parses.
-                    match name.as_str() {
-                        "__chord" if arguments.len() == 1 => {
-                            return write!(f, "{{{}}}", arguments[0]);
+                // output round-trips. None of the sugar forms can carry
+                // named arguments, so any named argument forces call form.
+                if named.is_empty() {
+                    if let Expr::Variable(name) = &function.expr {
+                        // `__chord` and `__sequence` aren't legal identifiers —
+                        // they can only be entered via the `{x}` / `<x>` sugar.
+                        // Emit the sugar so the output re-parses.
+                        match name.as_str() {
+                            "__chord" if positional.len() == 1 => {
+                                return write!(f, "{{{}}}", positional[0]);
+                            }
+                            "__sequence" if positional.len() == 1 => {
+                                return write!(f, "<{}>", positional[0]);
+                            }
+                            _ => {}
                         }
-                        "__sequence" if arguments.len() == 1 => {
-                            return write!(f, "<{}>", arguments[0]);
+                        if positional.len() == 2
+                            && let Some(p) = binary_op_precedence(name)
+                        {
+                            // Left-associative: lhs allows equal-precedence,
+                            // rhs requires strictly tighter precedence.
+                            fmt_at(&positional[0], p as u8, f)?;
+                            write!(f, " {} ", name)?;
+                            fmt_at(&positional[1], (p as u8) + 1, f)?;
+                            return Ok(());
                         }
-                        _ => {}
+                        if positional.len() == 1 && is_unary_op(name) {
+                            write!(f, "{}", name)?;
+                            return fmt_at(&positional[0], Precedence::Unary as u8, f);
+                        }
                     }
-                    if arguments.len() == 2
-                        && let Some(p) = binary_op_precedence(name)
-                    {
-                        // Left-associative: lhs allows equal-precedence,
-                        // rhs requires strictly tighter precedence.
-                        fmt_at(&arguments[0], p as u8, f)?;
-                        write!(f, " {} ", name)?;
-                        fmt_at(&arguments[1], (p as u8) + 1, f)?;
-                        return Ok(());
+                    // Single-binding function literal LHS → `let p = arg in body`.
+                    if as_let_binding(function, positional, named).is_some() {
+                        return fmt_as_let(function, positional, f);
                     }
-                    if is_unary_op(name) && arguments.len() == 1 {
-                        write!(f, "{}", name)?;
-                        return fmt_at(&arguments[0], Precedence::Unary as u8, f);
+                    // Application LHS with one argument → `arg | function` pipe.
+                    if positional.len() == 1 && matches!(function.expr, Expr::Application { .. }) {
+                        fmt_at(&positional[0], Precedence::ReverseApp as u8, f)?;
+                        write!(f, " | ")?;
+                        return fmt_at(function, (Precedence::ReverseApp as u8) + 1, f);
                     }
-                }
-                // Single-binding function literal LHS → `let p = arg in body`.
-                if as_let_binding(function, arguments).is_some() {
-                    return fmt_as_let(function, arguments, f);
-                }
-                // Application LHS with one argument → `arg | function` pipe.
-                if matches!(function.expr, Expr::Application { .. }) && arguments.len() == 1 {
-                    fmt_at(&arguments[0], Precedence::ReverseApp as u8, f)?;
-                    write!(f, " | ")?;
-                    return fmt_at(function, (Precedence::ReverseApp as u8) + 1, f);
                 }
                 // Default: function-call form. The head is printed at
                 // `Application` precedence — anything looser (Function,
                 // IfThenElse, an operator app) gets wrapped.
                 fmt_at(function, Precedence::Application as u8, f)?;
                 write!(f, "(")?;
-                for (i, argument) in arguments.iter().enumerate() {
+                for (i, argument) in positional.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
                     write!(f, "{}", argument)?;
                 }
+                fmt_named(named, positional.is_empty(), f)?;
                 write!(f, ")")
             }
             Expr::Tuple(exprs) => {
@@ -847,7 +946,9 @@ fn is_clean<M, S>(node: &SourceExpr<M, S>) -> bool {
         | Expr::Waveform(_)
         | Expr::BuiltIn { .. }
         | Expr::Error(_) => node.span.is_some(),
-        Expr::Function { body, .. } => node.span.is_some() && is_clean(body),
+        Expr::Function { named, body, .. } => {
+            node.span.is_some() && named.iter().all(|(_, value)| is_clean(value)) && is_clean(body)
+        }
         Expr::Seq { offset, waveform } => {
             node.span.is_some() && is_clean(offset) && is_clean(waveform)
         }
@@ -858,8 +959,14 @@ fn is_clean<M, S>(node: &SourceExpr<M, S>) -> bool {
         } => node.span.is_some() && is_clean(condition) && is_clean(then) && is_clean(else_),
         Expr::Application {
             function,
-            arguments,
-        } => node.span.is_some() && is_clean(function) && arguments.iter().all(is_clean),
+            positional,
+            named,
+        } => {
+            node.span.is_some()
+                && is_clean(function)
+                && positional.iter().all(is_clean)
+                && named.iter().all(|(_, value)| is_clean(value))
+        }
         // Tuples in source always have parens; we require a span.
         Expr::Tuple(items) => node.span.is_some() && items.iter().all(is_clean),
         // Lists in source always have brackets; we require a span.
@@ -961,14 +1068,19 @@ where
         Expr::Waveform(w) => write!(out, "{}", w),
         Expr::BuiltIn { name, .. } => write!(out, "{}", name),
         Expr::Variable(name) => write!(out, "{}", name),
-        Expr::Function { params, body } => {
+        Expr::Function {
+            positional,
+            named,
+            body,
+        } => {
             write!(out, "fn(")?;
-            for (i, param) in params.iter().enumerate() {
+            for (i, param) in positional.iter().enumerate() {
                 if i > 0 {
                     write!(out, ", ")?;
                 }
                 write!(out, "{}", param)?;
             }
+            write_preserving_named(named, positional.is_empty(), source, out)?;
             write!(out, ") => ")?;
             write_preserving(body, source, out)
         }
@@ -986,8 +1098,9 @@ where
         }
         Expr::Application {
             function,
-            arguments,
-        } => write_preserving_application(function, arguments, source, out),
+            positional,
+            named,
+        } => write_preserving_application(function, positional, named, source, out),
         Expr::Tuple(exprs) => {
             write!(out, "(")?;
             write_preserving_elements(exprs, source, out)?;
@@ -1039,9 +1152,11 @@ where
     Ok(())
 }
 
-fn write_preserving_application<M, S, W>(
-    function: &SourceExpr<M, S>,
-    arguments: &[SourceExpr<M, S>],
+/// Emit `name = value` pairs, continuing a comma-separated sequence and
+/// splicing each value's original source where possible.
+fn write_preserving_named<M, S, W>(
+    named: &[(String, SourceExpr<M, S>)],
+    mut first: bool,
     source: &str,
     out: &mut W,
 ) -> fmt::Result
@@ -1049,44 +1164,70 @@ where
     M: Display,
     W: fmt::Write,
 {
-    if let Expr::Variable(name) = &function.expr {
-        match name.as_str() {
-            "__chord" if arguments.len() == 1 => {
-                out.write_str("{")?;
-                write_preserving(&arguments[0], source, out)?;
-                return out.write_str("}");
-            }
-            "__sequence" if arguments.len() == 1 => {
-                out.write_str("<")?;
-                write_preserving(&arguments[0], source, out)?;
-                return out.write_str(">");
-            }
-            _ => {}
+    for (name, value) in named {
+        if !first {
+            out.write_str(", ")?;
         }
-        if arguments.len() == 2
-            && let Some(p) = binary_op_precedence(name)
-        {
-            write_preserving_at(&arguments[0], p as u8, source, out)?;
-            write!(out, " {} ", name)?;
-            return write_preserving_at(&arguments[1], (p as u8) + 1, source, out);
-        }
-        if arguments.len() == 1 && is_unary_op(name) {
-            write!(out, "{}", name)?;
-            return write_preserving_at(&arguments[0], Precedence::Unary as u8, source, out);
-        }
+        first = false;
+        write!(out, "{} = ", name)?;
+        write_preserving(value, source, out)?;
     }
-    if as_let_binding(function, arguments).is_some() {
-        return write_preserving_as_let(function, arguments, source, out);
-    }
-    if matches!(function.expr, Expr::Application { .. }) && arguments.len() == 1 {
-        write_preserving_at(&arguments[0], Precedence::ReverseApp as u8, source, out)?;
-        out.write_str(" | ")?;
-        return write_preserving_at(function, (Precedence::ReverseApp as u8) + 1, source, out);
+    Ok(())
+}
+
+fn write_preserving_application<M, S, W>(
+    function: &SourceExpr<M, S>,
+    arguments: &[SourceExpr<M, S>],
+    named: &[(String, SourceExpr<M, S>)],
+    source: &str,
+    out: &mut W,
+) -> fmt::Result
+where
+    M: Display,
+    W: fmt::Write,
+{
+    // None of the sugar forms can carry named arguments (mirrors Display).
+    if named.is_empty() {
+        if let Expr::Variable(name) = &function.expr {
+            match name.as_str() {
+                "__chord" if arguments.len() == 1 => {
+                    out.write_str("{")?;
+                    write_preserving(&arguments[0], source, out)?;
+                    return out.write_str("}");
+                }
+                "__sequence" if arguments.len() == 1 => {
+                    out.write_str("<")?;
+                    write_preserving(&arguments[0], source, out)?;
+                    return out.write_str(">");
+                }
+                _ => {}
+            }
+            if arguments.len() == 2
+                && let Some(p) = binary_op_precedence(name)
+            {
+                write_preserving_at(&arguments[0], p as u8, source, out)?;
+                write!(out, " {} ", name)?;
+                return write_preserving_at(&arguments[1], (p as u8) + 1, source, out);
+            }
+            if arguments.len() == 1 && is_unary_op(name) {
+                write!(out, "{}", name)?;
+                return write_preserving_at(&arguments[0], Precedence::Unary as u8, source, out);
+            }
+        }
+        if as_let_binding(function, arguments, named).is_some() {
+            return write_preserving_as_let(function, arguments, source, out);
+        }
+        if matches!(function.expr, Expr::Application { .. }) && arguments.len() == 1 {
+            write_preserving_at(&arguments[0], Precedence::ReverseApp as u8, source, out)?;
+            out.write_str(" | ")?;
+            return write_preserving_at(function, (Precedence::ReverseApp as u8) + 1, source, out);
+        }
     }
     // Default function-call form.
     write_preserving_with_parens(function, source, out)?;
     out.write_str("(")?;
     write_preserving_elements(arguments, source, out)?;
+    write_preserving_named(named, arguments.is_empty(), source, out)?;
     out.write_str(")")
 }
 
@@ -1148,7 +1289,7 @@ where
     let mut current_args = arguments;
     let mut first = true;
     loop {
-        let (pattern, argument, body) = as_let_binding(current_fn, current_args)
+        let (pattern, argument, body) = as_let_binding(current_fn, current_args, &[])
             .expect("write_preserving_as_let entered with a non-let-shaped application");
         if !first {
             out.write_str(", ")?;
@@ -1158,9 +1299,10 @@ where
         write_preserving(argument, source, out)?;
         if let Expr::Application {
             function: next_fn,
-            arguments: next_args,
+            positional: next_args,
+            named: next_named,
         } = &body.expr
-            && as_let_binding(next_fn, next_args).is_some()
+            && as_let_binding(next_fn, next_args, next_named).is_some()
         {
             current_fn = next_fn;
             current_args = next_args;
@@ -1197,13 +1339,10 @@ mod tests {
     #[test]
     fn test_stamp_bindings() {
         let expr = SourceExpr::with_span(
-            Expr::Application {
-                function: Box::new(SourceExpr::<u32>::with_span(
-                    Expr::Variable("f".to_string()),
-                    0..1,
-                )),
-                arguments: vec![SourceExpr::with_span(Expr::Float(1.0), 2..3)],
-            },
+            Expr::application(
+                SourceExpr::<u32>::with_span(Expr::Variable("f".to_string()), 0..1),
+                vec![SourceExpr::with_span(Expr::Float(1.0), 2..3)],
+            ),
             0..3,
         );
         let bindings = vec![SourceBinding::with_span(
@@ -1220,13 +1359,14 @@ mod tests {
         assert_eq!(source_of(&expr.span), 7);
         let Expr::Application {
             function,
-            arguments,
+            positional,
+            ..
         } = &expr.expr
         else {
             panic!("expected an application");
         };
         assert_eq!(source_of(&function.span), 7);
-        assert_eq!(source_of(&arguments[0].span), 7);
+        assert_eq!(source_of(&positional[0].span), 7);
     }
 
     #[test]

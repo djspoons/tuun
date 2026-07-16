@@ -110,7 +110,9 @@ impl InputHandler {
         use actions::Action;
         use sdl2::keyboard::{Mod, Scancode};
         let ctrl = keymod.contains(Mod::LCTRLMOD) || keymod.contains(Mod::RCTRLMOD);
+        // gui_mod is "command" on a Mac
         let gui_mod = keymod.contains(Mod::LGUIMOD) || keymod.contains(Mod::RGUIMOD);
+        // alt_mod is "option" on a Mac
         let alt_mod = keymod.contains(Mod::LALTMOD) || keymod.contains(Mod::RALTMOD);
         let shift = keymod.contains(Mod::LSHIFTMOD) || keymod.contains(Mod::RSHIFTMOD);
         // Keys mode: piano keystrokes → NoteOn (suppress on auto-repeat so a
