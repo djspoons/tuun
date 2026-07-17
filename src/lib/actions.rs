@@ -4,9 +4,11 @@
 //! `Action`s. `apply` then mutates `AppState` and returns `Effect`s, which
 //! the runner in `effects.rs` executes against the outside world.
 
+use std::collections::HashSet;
 use std::time::Instant;
 
 use crate::diagnostics::{self, Diagnostic, Source};
+use crate::evaluator;
 use crate::expr;
 use crate::ids::{MarkId, WaveformId};
 use crate::keys;
@@ -31,11 +33,34 @@ pub enum Mode {
         /// or evaluation errors after a failed evaluate. The renderer
         /// highlights their `program_range`s.
         errors: Vec<Diagnostic>,
+        /// In-progress `Action::Complete` cycle, if the last action was a
+        /// completion. Cleared by every text or cursor change, so a stored
+        /// cycle always describes the current text.
+        completion: Option<Completion>,
     },
     MoveSliders,
     /// Computer-keyboard piano: lower QWERTY row plays white keys, row above
     /// plays sharps. Only reachable when `state.keys` is installed.
     Keys,
+}
+
+/// The state of an identifier-completion cycle (`Action::Complete`).
+///
+/// The text from `start` to the cursor holds the ring entry inserted by the
+/// previous completion; the next `Action::Complete` replaces it with the
+/// following entry. The ring is `candidates` followed by `original`, so cycling
+/// past the last candidate restores what the user typed.
+#[derive(Debug, Clone)]
+pub struct Completion {
+    /// Byte offset where the completed identifier starts.
+    start: usize,
+    /// The identifier fragment the user typed, restored when the cycle wraps.
+    original: String,
+    /// In-scope names starting with `original`, most recently bound first.
+    candidates: Vec<String>,
+    /// Ring index of the entry the next completion inserts;
+    /// `candidates.len()` denotes `original`.
+    next: usize,
 }
 
 /// Behavior of the pads when the controller is in DAW pad mode. Cycled by
@@ -117,6 +142,9 @@ impl AppState {
 pub struct Context<'a> {
     pub status: &'a tracker::Status<WaveformId, MarkId>,
     pub now: Instant,
+    /// Evaluation environment (prelude, module cache) — used by
+    /// `Action::Complete` to find the names in scope.
+    pub evaluator: &'a evaluator::Evaluator,
 }
 
 /// Things that can happen, emitted by handlers as pure data.
@@ -194,6 +222,14 @@ pub enum Action {
     MoveCursorToEnd,
     MoveCursorToPreviousWord,
     MoveCursorToNextWord,
+    /// Program completion at the cursor.
+    ///
+    /// With an identifier fragment before the cursor, cycles it through the
+    /// in-scope names that share the prefix, most recently bound first,
+    /// wrapping back to the fragment itself. Right after a `(`, inserts a hints
+    /// parameter for the function being called instead, leaving the cursor on
+    /// the first parameter.
+    Complete,
 
     // --- sliders / level ---
     /// Set a slider on a program by normalized value [0.0, 1.0].
@@ -408,6 +444,7 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             state.mode = Mode::Edit {
                 cursor_position: cursor,
                 errors,
+                completion: None,
             };
             effects
         }
@@ -530,6 +567,7 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
         Action::MoveCursorToNextWord => edit_cursor_op(state, |current, cursor| {
             cursor + next_word_end(&current[cursor..])
         }),
+        Action::Complete => apply_complete(state, ctx),
 
         Action::SetSliderNormalized {
             program,
@@ -689,6 +727,166 @@ fn parse_program_errors(text: &str) -> Vec<Diagnostic> {
     }
 }
 
+/// Applies `Action::Complete` in Edit mode; does nothing in other modes.
+///
+/// Continues an in-progress cycle when one is stored; otherwise dispatches on
+/// the text before the cursor: an identifier fragment starts a completion cycle
+/// or a `(` inserts a parameter hint. See [`Action::Complete`] for the
+/// user-facing behavior.
+fn apply_complete(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
+    let Mode::Edit {
+        cursor_position,
+        completion,
+        ..
+    } = &state.mode
+    else {
+        return vec![];
+    };
+    let cursor = *cursor_position;
+
+    // Continue a cycle: replace the previous insertion with the next ring
+    // entry. The text from `start` to the cursor still holds the previous
+    // insertion — every other text or cursor action clears `completion`.
+    if let Some(cycle) = completion.clone() {
+        let replacement = cycle
+            .candidates
+            .get(cycle.next)
+            .unwrap_or(&cycle.original)
+            .clone();
+        let start = cycle.start;
+        edit_text_op(state, |current, cursor| {
+            let text = format!("{}{}{}", &current[..start], replacement, &current[cursor..]);
+            Some((text, start + replacement.len()))
+        });
+        if let Mode::Edit { completion, .. } = &mut state.mode {
+            *completion = Some(Completion {
+                next: (cycle.next + 1) % (cycle.candidates.len() + 1),
+                ..cycle
+            });
+        }
+        return vec![];
+    }
+
+    let text = state.active_program().text();
+    let before = &text[..cursor];
+    let fragment_start = before.trim_end_matches(is_word_char).len();
+    if fragment_start == cursor {
+        if before.ends_with('(') {
+            return apply_parameter_hint(state, ctx, cursor);
+        }
+        return vec![Effect::ShowMessage(
+            "Nothing to complete (the cursor must follow an identifier or \"(\")".to_string(),
+        )];
+    }
+
+    // An identifier fragment ends at the cursor: start a new cycle.
+    let fragment = before[fragment_start..].to_string();
+    let context = match ctx
+        .evaluator
+        .program_context(&state.programs, state.active_program_index)
+    {
+        Ok(context) => context,
+        Err(error) => return vec![Effect::ShowMessage(format!("Can't complete: {}", error))],
+    };
+    let mut seen = HashSet::new();
+    let mut candidates = Vec::new();
+    for (name, _) in context.iter().rev() {
+        // Walking from the end, the first occurrence of a name is the live
+        // binding; any earlier occurrence is shadowed.
+        if seen.insert(name.clone()) && name.starts_with(&fragment) && *name != fragment {
+            candidates.push(name.clone());
+        }
+    }
+    if candidates.is_empty() {
+        return vec![Effect::ShowMessage(format!(
+            "No completions for \"{}\"",
+            fragment
+        ))];
+    }
+
+    let replacement = candidates[0].clone();
+    edit_text_op(state, |current, cursor| {
+        let text = format!(
+            "{}{}{}",
+            &current[..fragment_start],
+            replacement,
+            &current[cursor..]
+        );
+        Some((text, fragment_start + replacement.len()))
+    });
+    if let Mode::Edit { completion, .. } = &mut state.mode {
+        *completion = Some(Completion {
+            start: fragment_start,
+            original: fragment,
+            candidates,
+            next: 1,
+        });
+    }
+    vec![]
+}
+
+/// Inserts a parameter hint for the call being typed: with the Edit-mode
+/// `cursor` just after `(` and the identifier before it bound to a function,
+/// inserts that function's positional parameters, its named parameters as
+/// `name = <default value>` pairs, and a closing `)`.
+///
+/// The hint previews the call's shape rather than typing it for the user:
+/// the cursor lands after the first parameter, ready to replace the
+/// positional placeholders with real arguments (or after the `)` when the
+/// function takes none).
+fn apply_parameter_hint(state: &mut AppState, ctx: &Context, cursor: usize) -> Vec<Effect> {
+    let text = state.active_program().text();
+    let head = &text[..cursor - 1];
+    let name_start = head.trim_end_matches(is_word_char).len();
+    let name = head[name_start..].to_string();
+    if name.is_empty() {
+        return vec![Effect::ShowMessage("Nothing to complete".to_string())];
+    }
+    let context = match ctx
+        .evaluator
+        .program_context(&state.programs, state.active_program_index)
+    {
+        Ok(context) => context,
+        Err(error) => return vec![Effect::ShowMessage(format!("Can't complete: {}", error))],
+    };
+    // The last occurrence of the name is the live binding.
+    let Some((_, value)) = context.iter().rev().find(|(n, _)| *n == name) else {
+        return vec![Effect::ShowMessage(format!("\"{}\" is not defined", name))];
+    };
+    match &value.expr {
+        expr::Expr::Function {
+            positional, named, ..
+        } => {
+            // Named defaults were evaluated when the function was defined,
+            // so they print as values even when the source wrote an
+            // expression (`y = 10 + 1` hints as `y = 11`).
+            let mut parts: Vec<String> = positional.iter().map(|p| p.to_string()).collect();
+            parts.extend(named.iter().map(|(n, v)| format!("{} = {}", n, v)));
+            let hint = format!("{})", parts.join(", "));
+            // Land the cursor after the first parameter, ready for a
+            // delete-word to kill the placeholder and type the real
+            // argument; with no parameters the call is complete, so land
+            // after the ")".
+            let advance = parts.first().map_or(hint.len(), |p| p.len());
+            edit_text_op(state, |current, cursor| {
+                let mut new_text = current.to_string();
+                new_text.insert_str(cursor, &hint);
+                Some((new_text, cursor + advance))
+            })
+        }
+        // TODO built-ins don't carry parameter names or arity; give BuiltIn
+        // signature metadata so calls like `sine(` can be hinted too.
+        expr::Expr::BuiltIn { name, .. } => vec![Effect::ShowMessage(format!(
+            "No parameter hint for built-in \"{}\"",
+            name
+        ))],
+        _ => vec![Effect::ShowMessage(format!(
+            "\"{}\" is not a function",
+            name
+        ))],
+    }
+}
+
 /// Refreshes `Mode::Edit.errors` from the active program's text. Called
 /// after every keystroke in Edit mode so the renderer's per-character
 /// syntax highlighting stays in sync. Leaves `cursor_position` and
@@ -704,8 +902,9 @@ fn refresh_edit_errors(state: &mut AppState) {
 ///
 /// Calls `f` with the current text and cursor position; when `f` returns a new
 /// (text, cursor) pair, writes both back, refreshes the Edit-mode parse errors,
-/// and clears the status message (whatever it described is stale once the text
-/// changes). Does nothing outside Edit mode or when `f` returns `None`.
+/// and clears the status message and any completion cycle (both describe text
+/// that just changed). Does nothing outside Edit mode or when `f` returns
+/// `None`.
 fn edit_text_op(
     state: &mut AppState,
     f: impl FnOnce(&str, usize) -> Option<(String, usize)>,
@@ -723,10 +922,13 @@ fn edit_text_op(
     if let Some((new_text, new_cursor)) = f(program.text(), cursor) {
         program.set_text(new_text);
         if let Mode::Edit {
-            cursor_position, ..
+            cursor_position,
+            completion,
+            ..
         } = &mut state.mode
         {
             *cursor_position = new_cursor;
+            *completion = None;
         }
         refresh_edit_errors(state);
         state.message.clear();
@@ -735,7 +937,9 @@ fn edit_text_op(
 }
 
 /// Moves the Edit-mode cursor: `f` maps (text, cursor) to the new position,
-/// which is clamped to the text's length. Does nothing outside Edit mode.
+/// which is clamped to the text's length. Clears any completion cycle (the
+/// cycle's insertion ends at the cursor, so moving it breaks the cycle).
+/// Does nothing outside Edit mode.
 fn edit_cursor_op(state: &mut AppState, f: impl FnOnce(&str, usize) -> usize) -> Vec<Effect> {
     let cursor = match &state.mode {
         Mode::Edit {
@@ -746,10 +950,13 @@ fn edit_cursor_op(state: &mut AppState, f: impl FnOnce(&str, usize) -> usize) ->
     let text = state.programs.programs()[state.active_program_index].text();
     let new_cursor = f(text, cursor).min(text.len());
     if let Mode::Edit {
-        cursor_position, ..
+        cursor_position,
+        completion,
+        ..
     } = &mut state.mode
     {
         *cursor_position = new_cursor;
+        *completion = None;
     }
     vec![]
 }
@@ -940,15 +1147,28 @@ mod tests {
         status
     }
 
-    /// Applies `action` against an empty tracker status.
-    fn apply_with_empty_status(state: &mut AppState, action: Action) -> Vec<Effect> {
-        let status = empty_status();
-        // XXX should we use Instant::now() or buffer_start?
+    /// Applies `action` against `status`, timestamped `now`. The evaluator
+    /// has the standard prelude but no library root, so `open`s of anything
+    /// but the prelude fail to resolve.
+    fn apply_with_status(
+        state: &mut AppState,
+        status: &tracker::Status<WaveformId, MarkId>,
+        now: Instant,
+        action: Action,
+    ) -> Vec<Effect> {
+        let evaluator = evaluator::Evaluator::new(48000, 120, std::path::PathBuf::new());
         let ctx = Context {
-            status: &status,
-            now: Instant::now(),
+            status,
+            now,
+            evaluator: &evaluator,
         };
         apply(state, &ctx, action)
+    }
+
+    /// Applies `action` against an empty tracker status.
+    fn apply_with_empty_status(state: &mut AppState, action: Action) -> Vec<Effect> {
+        // XXX should we use Instant::now() or buffer_start?
+        apply_with_status(state, &empty_status(), Instant::now(), action)
     }
 
     /// Builds a state whose slot 1 holds `_ = test;` (a program named by the
@@ -994,6 +1214,7 @@ mod tests {
         state.mode = Mode::Edit {
             cursor_position: 0,
             errors: vec![],
+            completion: None,
         };
         apply_with_empty_status(&mut state, Action::InsertText("(".to_string()));
         let Mode::Edit { errors, .. } = &state.mode else {
@@ -1025,6 +1246,7 @@ mod tests {
         state.mode = Mode::Edit {
             cursor_position: 0,
             errors: vec![],
+            completion: None,
         };
         apply_with_empty_status(&mut state, Action::InsertText("π".to_string()));
         apply_with_empty_status(&mut state, Action::MoveCursorBy(-1));
@@ -1048,6 +1270,7 @@ mod tests {
         state.mode = Mode::Edit {
             cursor_position: 0,
             errors: vec![],
+            completion: None,
         };
         apply_with_empty_status(&mut state, Action::InsertText("aπ".to_string()));
         apply_with_empty_status(&mut state, Action::DeleteCharBeforeCursor);
@@ -1070,6 +1293,7 @@ mod tests {
         state.mode = Mode::Edit {
             cursor_position: 0,
             errors: vec![],
+            completion: None,
         };
         apply_with_empty_status(&mut state, Action::InsertText("a\u{a0}bc".to_string()));
         apply_with_empty_status(&mut state, Action::DeleteWordBeforeCursor);
@@ -1103,6 +1327,7 @@ mod tests {
         state.mode = Mode::Edit {
             cursor_position: 0,
             errors: vec![],
+            completion: None,
         };
         apply_with_empty_status(
             &mut state,
@@ -1137,6 +1362,7 @@ mod tests {
         state.mode = Mode::Edit {
             cursor_position: 0,
             errors: vec![],
+            completion: None,
         };
         apply_with_empty_status(&mut state, Action::InsertText("sine(440)".to_string()));
         apply_with_empty_status(&mut state, Action::MoveCursorToStart);
@@ -1159,6 +1385,7 @@ mod tests {
         state.mode = Mode::Edit {
             cursor_position: 0,
             errors: vec![],
+            completion: None,
         };
         apply_with_empty_status(&mut state, Action::InsertText("πa".to_string()));
         apply_with_empty_status(&mut state, Action::MoveCursorToStart);
@@ -1177,6 +1404,7 @@ mod tests {
         state.mode = Mode::Edit {
             cursor_position: 0,
             errors: vec![],
+            completion: None,
         };
         apply_with_empty_status(&mut state, Action::InsertText("ab\ncd".to_string()));
         apply_with_empty_status(&mut state, Action::MoveCursorToStart);
@@ -1191,6 +1419,117 @@ mod tests {
         // No-op at the end of the text.
         apply_with_empty_status(&mut state, Action::DeleteToEndOfLine);
         assert_eq!(state.active_program().text(), "a");
+    }
+
+    /// Builds a state from `source` whose slot-0 program text is replaced by
+    /// `text`, in Edit mode with the cursor at `cursor`.
+    fn edit_state(source: &str, text: &str, cursor: usize) -> AppState {
+        let mut state = AppState::from_source(source.to_string(), std::path::PathBuf::new())
+            .expect("test source should parse");
+        state
+            .programs
+            .program_mut(0)
+            .unwrap()
+            .set_text(text.to_string());
+        state.mode = Mode::Edit {
+            cursor_position: cursor,
+            errors: vec![],
+            completion: None,
+        };
+        state
+    }
+
+    /// The active program's (text, cursor) pair; panics outside Edit mode.
+    fn edit_text_and_cursor(state: &AppState) -> (String, usize) {
+        let Mode::Edit {
+            cursor_position, ..
+        } = state.mode
+        else {
+            panic!("expected Edit mode, got {:?}", state.mode);
+        };
+        (state.active_program().text().to_string(), cursor_position)
+    }
+
+    #[test]
+    fn complete_cycles_through_matching_names_most_recent_first() {
+        let mut state = edit_state(
+            "za = 1;\nzb = 2;\nzab = 3;\n#{level_db=0}\n_ = test;",
+            "z",
+            1,
+        );
+        for (text, cursor) in [
+            ("zab", 3), // the most recently bound match comes first
+            ("zb", 2),
+            ("za", 2),
+            ("z", 1), // the ring wraps through the original fragment
+            ("zab", 3),
+        ] {
+            apply_with_empty_status(&mut state, Action::Complete);
+            assert_eq!(edit_text_and_cursor(&state), (text.to_string(), cursor));
+        }
+    }
+
+    #[test]
+    fn complete_skips_shadowed_names() {
+        let mut state = edit_state("za = 1;\nza = 2;\n#{level_db=0}\n_ = test;", "z", 1);
+        apply_with_empty_status(&mut state, Action::Complete);
+        assert_eq!(edit_text_and_cursor(&state), ("za".to_string(), 2));
+        // The shadowed za was skipped, so the next stop is the original.
+        apply_with_empty_status(&mut state, Action::Complete);
+        assert_eq!(edit_text_and_cursor(&state), ("z".to_string(), 1));
+    }
+
+    #[test]
+    fn complete_includes_prelude_names() {
+        let mut state = edit_state("#{level_db=0}\n_ = test;", "sin", 3);
+        apply_with_empty_status(&mut state, Action::Complete);
+        assert_eq!(edit_text_and_cursor(&state), ("sine".to_string(), 4));
+    }
+
+    #[test]
+    fn completion_cycle_resets_after_another_action() {
+        let mut state = edit_state("za = 1;\nzab = 2;\n#{level_db=0}\n_ = test;", "z", 1);
+        apply_with_empty_status(&mut state, Action::Complete);
+        assert_eq!(edit_text_and_cursor(&state), ("zab".to_string(), 3));
+        // Any cursor motion ends the cycle: the next completion starts fresh
+        // from the (now fully typed) fragment "zab", which matches nothing.
+        apply_with_empty_status(&mut state, Action::MoveCursorBy(-1));
+        apply_with_empty_status(&mut state, Action::MoveCursorBy(1));
+        let effects = apply_with_empty_status(&mut state, Action::Complete);
+        assert_eq!(edit_text_and_cursor(&state), ("zab".to_string(), 3));
+        assert!(
+            matches!(&effects[0], Effect::ShowMessage(m) if m.contains("No completions")),
+            "expected a no-completions message, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn complete_after_open_paren_inserts_parameter_hint() {
+        let mut state = edit_state(
+            "foo = fn(x, y = 10 + 1) => x * y;\n#{level_db=0}\n_ = test;",
+            "foo(",
+            4,
+        );
+        apply_with_empty_status(&mut state, Action::Complete);
+        // The named default was evaluated at definition (10 + 1 → 11), and
+        // the cursor lands after the first parameter, ready to replace it.
+        assert_eq!(
+            edit_text_and_cursor(&state),
+            ("foo(x, y = 11)".to_string(), 5)
+        );
+    }
+
+    #[test]
+    fn complete_after_open_paren_of_builtin_reports_no_hint() {
+        let mut state = edit_state("#{level_db=0}\n_ = test;", "sine(", 5);
+        let effects = apply_with_empty_status(&mut state, Action::Complete);
+        assert_eq!(edit_text_and_cursor(&state), ("sine(".to_string(), 5));
+        assert!(
+            matches!(&effects[0], Effect::ShowMessage(m) if m.contains("built-in")),
+            "expected a built-in message, got {:?}",
+            effects
+        );
     }
 
     #[test]
@@ -1329,11 +1668,7 @@ _ = saw(220);";
         let mut state = test_state();
         let now = Instant::now();
         let status = status_with_mark(now - Duration::from_secs(1));
-        let ctx = Context {
-            status: &status,
-            now,
-        };
-        let effects = apply(&mut state, &ctx, Action::ToggleProgramPlayback(0));
+        let effects = apply_with_status(&mut state, &status, now, Action::ToggleProgramPlayback(0));
         assert!(
             matches!(effects[0], Effect::StopProgram(0)),
             "expected StopProgram, got {:?}",
@@ -1376,11 +1711,12 @@ _ = saw(220);";
         let mut state = test_state();
         let now = Instant::now();
         let status = status_with_mark(now + Duration::from_secs(1));
-        let ctx = Context {
-            status: &status,
+        let effects = apply_with_status(
+            &mut state,
+            &status,
             now,
-        };
-        let effects = apply(&mut state, &ctx, Action::ToggleProgramPendingPlayback(0));
+            Action::ToggleProgramPendingPlayback(0),
+        );
         assert!(
             matches!(effects[0], Effect::RemovePendingProgram(0)),
             "expected RemovePendingProgram, got {:?}",
@@ -1423,11 +1759,7 @@ _ = saw(220);";
         let mut state = test_state();
         let now = Instant::now();
         let status = status_with_mark(now + Duration::from_secs(1));
-        let ctx = Context {
-            status: &status,
-            now,
-        };
-        let effects = apply(&mut state, &ctx, Action::EnterEditMode);
+        let effects = apply_with_status(&mut state, &status, now, Action::EnterEditMode);
         assert!(
             matches!(state.mode, Mode::Edit { .. }),
             "expected Edit mode, got {:?}",

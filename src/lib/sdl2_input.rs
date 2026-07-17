@@ -239,6 +239,8 @@ impl InputHandler {
             (Mode::Edit { .. }, Some(Scancode::Backspace)) if gui_mod => {
                 Some(vec![Action::DeleteWordBeforeCursor])
             }
+            // Completion on Cmd-/.
+            (Mode::Edit { .. }, Some(Scancode::Slash)) if gui_mod => Some(vec![Action::Complete]),
             (Mode::Edit { .. }, Some(Scancode::Left)) => Some(vec![Action::MoveCursorBy(-1)]),
             (Mode::Edit { .. }, Some(Scancode::Right)) => Some(vec![Action::MoveCursorBy(1)]),
             (Mode::Edit { .. }, Some(Scancode::Backspace)) => {
@@ -422,6 +424,7 @@ mod tests {
         let state = test_state(Mode::Edit {
             cursor_position: 4,
             errors: vec![],
+            completion: None,
         });
         let classify = |scancode, keymod| {
             let actions = handler
@@ -464,6 +467,11 @@ mod tests {
             classify(Scancode::Backspace, Mod::LGUIMOD),
             Action::DeleteWordBeforeCursor
         ));
+        // Completion on Cmd-/.
+        assert!(matches!(
+            classify(Scancode::Slash, Mod::LGUIMOD),
+            Action::Complete
+        ));
         // Forward delete works unmodified.
         assert!(matches!(
             classify(Scancode::Delete, Mod::NOMOD),
@@ -480,6 +488,7 @@ mod tests {
         let state = test_state(Mode::Edit {
             cursor_position: 4,
             errors: vec![],
+            completion: None,
         });
         let actions = handler
             .classify_keydown(Some(Scancode::Return), Mod::NOMOD, false, &state)

@@ -8,7 +8,7 @@ use std::fmt::{Debug, Display};
 use crate::expr::{Binding, Error, Expr, NamedExprs, Pattern, SourceBinding, SourceExpr};
 
 /// A context entry: a bound name and the closed value it evaluates to.
-type ContextEntry<M, S> = (String, SourceExpr<M, S>);
+pub type ContextEntry<M, S> = (String, SourceExpr<M, S>);
 
 /// Extends the context with a binding for each identifier in the pattern that is bound to
 /// itself.
@@ -423,9 +423,27 @@ where
     M: Clone + Display + Debug,
     S: Clone + Debug,
 {
-    let mut context: Vec<(String, SourceExpr<M, S>)> = Vec::new();
-    build_context(&resolve, bindings, &mut context)?;
+    let context = evaluate_bindings(resolve, bindings)?;
     evaluate_with_context(&context, expr)
+}
+
+/// Evaluates `bindings` and returns the resulting context: one entry per
+/// bound name, in binding order, so a later entry shadows an earlier one
+/// with the same name.
+///
+/// `resolve` loads `open`ed modules, as in [`evaluate`].
+pub fn evaluate_bindings<'a, M, S, F>(
+    resolve: F,
+    bindings: &'a [SourceBinding<M, S>],
+) -> Result<Vec<ContextEntry<M, S>>, Error<S>>
+where
+    F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
+    M: Clone + Display + Debug,
+    S: Clone + Debug,
+{
+    let mut context = Vec::new();
+    build_context(&resolve, bindings, &mut context)?;
+    Ok(context)
 }
 
 /// Substitutes `context` into `expr` and reduces the result to a value.

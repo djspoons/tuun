@@ -374,6 +374,20 @@ impl Evaluator {
         }
     }
 
+    /// Returns the evaluated (name, value) context the program at `index` is
+    /// evaluated under: the prelude, then the file's bindings preceding the
+    /// program, with `open`s resolved through the module cache. Later entries
+    /// shadow earlier ones with the same name.
+    pub fn program_context(
+        &self,
+        set: &ProgramSet,
+        index: usize,
+    ) -> Result<Vec<eval::ContextEntry<MarkId, Source>>, expr::Error<Source>> {
+        let mut bindings = set.evaluation_bindings(index);
+        bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
+        eval::evaluate_bindings(|path| self.resolve(path), &bindings)
+    }
+
     /// Applies a note function `expr` to the given `arguments`, expecting a
     /// pair of (note-on, note-off) waveforms as a result.
     ///

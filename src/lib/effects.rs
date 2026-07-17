@@ -79,6 +79,7 @@ impl EffectRunner {
         let ctx = actions::Context {
             status: world.status,
             now: Instant::now(),
+            evaluator: &self.evaluator,
         };
         let mut all_effects = Vec::new();
         for action in actions {
