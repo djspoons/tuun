@@ -1,18 +1,21 @@
-#  Tuun Language Overview
+#  Tuun Overview
 
-Tuun is an interactive, language-based sound and music generation system. It has two main components:
+Tuun is an interactive, language-based sound and music generation system. It has three main components:
 
- * A tracker, which interfaces with the underlying audio subsystem, managing things like sample rates and buffers. It takes commands like "play this!" and gives updates on the state of playback.
- * A visual UI that enables users to compose sounds, enter those commands, and see the results.
+ * A language-based way of specifying audio along with a way of converting those specifications into actual samples.
+ * A tracker, which interfaces with the underlying audio subsystem, managing things like sample rates, buffers, mixing, and scheduling.
+ * A visual UI that lets users compose sounds, enter commands, and see and hear the results.
 
-Tuun has two languages:
+> Tuun also supports a WebAssembly-based component that can be used in browsers – including this one! This component uses the same language and audio generation systems, but replaces the native app tracker and UI with simpler versions.
 
- * A language of low-level waveforms and waveform combinators that are used by the tracker to generate samples to feed to the audio system.
- * An expression language that's used in the UI to specify those waveforms.
+Tuun audio is specified through a combination of:
 
-We'll start with a brief introduction to the second one before we dive into the details.
+ * Low-level waveforms and waveform combinators.
+ * An expression language that provides convenient and reusable ways of describing those waveforms.
 
-Tuun's interactive expression language is a simple, functional language like OCaml or Standard ML. It supports floating point numbers, arithmetic, functions, and tuples. In addition, it has some built-in syntax and semantics that make it easy to express complicated waveforms. For example, the `$` operator takes a frequency and returns a waveform that will generate a tone at that frequency.
+We'll start with a brief introduction to the second one before we dive into the details of the first.
+
+Tuun's interactive expression language is a simple, functional language like OCaml or Standard ML. It supports floating point numbers, arithmetic, functions, and tuples. In addition, it has some built-in syntax and semantics that make it easy to express complicated waveforms. For example, the `$` operator takes a frequency (in hertz) and returns a waveform that will generate a tone at that frequency.
 
 <div class="container">
   <tuun-synth open='["std"]' expression="$220" />
@@ -28,7 +31,7 @@ The way that you use the Tuun language is up to you! There's nothing baked in ab
 
 ## Tuun Waveforms
 
-Tuun has several primitive waveforms and waveform combinators. These are the "assembly language" of Tuun, and akin to the "unit generators" of the [MUSIC languages](https://en.wikipedia.org/wiki/MUSIC-N). Waveforms are designed to be orthogonal (each serves a different purpose) and minimal (there are no extra waveforms).
+Tuun has several primitive waveforms and waveform combinators. These are the "assembly language" of Tuun, and akin to the "unit generators" of the [MUSIC languages](https://en.wikipedia.org/wiki/MUSIC-N). Waveforms are designed to be orthogonal (each serves a different purpose) and minimal (there are no extra waveforms). Waveforms are themselves finite (they can be written down!) but may specify infinite streams of samples.
 
 The first primitive, `Const`, isn't exactly a "wave" but is used to create waves: `Const` generates a stream where every sample is the same value. This can be used with the [`Sine` combinator](sine.md) to produce a sine wave. `Sine` takes two arguments: one for the angular frequency (in radians per second) and one for the phase offset. For example, the following will generate a tone at 220 Hz.
 
@@ -139,7 +142,7 @@ And finally, two combinators that are used to dynamically interact with waveform
 
 Since these last waveforms do not directly affect sample generation, we'll elide them for the remainder of this document.
 
-For comparison, here are the lengths and offsets of each waveform:
+For comparison, here are the lengths of each waveform:
 
 | Waveform                | Length
 | ----------------        | ------
@@ -162,33 +165,25 @@ This small set of combinators is enough to create synthesizers, filters, and eve
 
 While Tuun waveforms are designed to be simple, Tuun expressions form a higher-order functional language that can be used to build abstractions and easily create complex sounds and even music!
 
+Tuun includes standard features like floating point literals, strings, booleans, functions, variables, application, tuples, lists, operators, and `let` bindings. Values include floating point literals, booleans, and strings. Below is a simplified expression syntax: 
+
 ```
 expr ::= float
-     | string
-     | bool
-     | "fn" "(" var "," ... ")" "=>" expr
-     | var 
-     | expr "(" expr ")"
-     | "(" expr "," ... ")"
-     | "[" expr "," ... "]"
-     | expr binary_op expr
-     | unary_op expr
-     | "if" expr "then" expr "else" expr
-     | "let" binding "," ... "in" expr
-     | "{" expr "}"
-     | ...
-
-pattern ::= var
-        | "(" pattern, ... ")"
-
-binding ::= pattern "=" expr
-        | ...
+       | string
+       | bool
+       | "fn" "(" id "," ... ")" "=>" expr
+       | id
+       | expr "(" expr ")"
+       | "[" expr "," ... "]"
+       | expr binary_op expr
+       | unary_op expr
+       | "let" id "=" expr "," ... "in" expr
+       | "{" expr "}"
+       | ...
 
 unary_op ::= "-" | "$" | "@" | ...
 binary_op ::= "+" | "-" | "*" | "/" | "&" | "|" | "==" | "!=" | "<" | ...
 ```
-
-Tuun includes standard features like floating point literals, strings, booleans, functions, variables, application, tuples, lists, operators, and `let` bindings. Values include floating point literals, booleans, and strings. 
 
 Tuun *waveforms* are also values, and Tuun provides built-in functions like `sine` to create them. Functions like `sine` are overloaded so that they can take either floating point values or waveforms. When a floating point value appears as argument to a built-in function like `sine`, it's implicitly coerced into a constant waveform. Note that the expression language built-ins for creating waveforms (like `fin`, `alt`, and `time`) are written in lowercase. Binary operators are written infix, with `&` used as the `Merge` waveform operator.
 
@@ -199,7 +194,7 @@ Tuun also includes a `|` ("pipe") operator, which denotes reverse application, e
 
 Tuun supports special syntax for chords, combining waveforms so that they are played simultaneously using `Merge`. Curly brackets (`{` and `}`) take a list of waveforms and return a single waveform that plays them simultaneously. This is used both for chords as well as for creating complex tones with multiple overtones. 
 
-We can now give a more extensive — and more concise — version of the harmonics example, in part by defining a helper function that creates overtones. The dollar sign is shorthand for a sine wave with the given frequency in hertz and no phase offset. The `over` function creates an overtone whose amplitude in inversely proportional to the distance between that overtone and the fundamental. (`$` and `over` are both in the standard context.)
+We can now give a more extensive — and more concise — version of the harmonics example, in part by defining a helper function that creates overtones. The dollar sign is shorthand for a sine wave with the given frequency in hertz and no phase offset. The `over` function creates an overtone whose amplitude in inversely proportional to the distance between that overtone and the fundamental. (`$` and `over` are both in the standard context but repeated here for clarity.)
 
 <div class="container">
   <tuun-synth open='["std"]'>
@@ -234,7 +229,7 @@ While the `Append` waveform combinator offers a way of combining two waveforms s
 
 The second challenge is that using `Append` together with a silent waveform (as in the envelope example above) puts the onus of timing on the *second* waveform. However, it's usually the first note that "knows" when the second should start. For example, when we define the first waveform as a quarter note (in 4/4 time), we're saying that the second note should start one beat later.
 
-To solve this problem, Tuun defines a new type of waveform that extends the underlying notion of a waveform with a new property called its *offset*. The offset of a waveform indicates when the next waveform in the sequence (if any) should start. Not all waveforms have offsets, but if they do, they can be put into sequences, and we call them "sequence-able" waveforms or (for reasons that will be clear in a moment) "seq" waveforms. A seq waveform has both a length and an offset. Its length determines how many samples it will generate, while its offset determines how it will be combined with other waveforms.
+To solve this problem, Tuun provides an expression that extends the underlying notion of a waveform with a new property called its *offset*. The offset of a waveform indicates when the next waveform in the sequence (if any) should start. Not all waveforms have offsets, but if they do, they can be put into sequences, and we call them "sequence-able" waveforms or "seq" waveforms for short. A seq waveform has both a length and an offset. Its length determines how many samples it will generate, while its offset determines how it will be combined with other waveforms.
 
 Concretely, seq waveforms are created and consumed using the following expressions:
 
@@ -243,7 +238,7 @@ expr ::= ... | seq | unseq | "<" expr ">"
 binary_op ::= ... | "\"
 ```
 
-The first is `seq` (pronounced like "seek") and it take takes two waveforms: the first determines the offset, while the second is the waveform to be played. Effectively, it turns that second waveform into a seq waveform. Analogous to the first parameter to `fin`, the offset is determined by the first position at which the offset waveform is positive. Also like `fin`, `seq` is written in curried form, and it's not uncommon to see the two used together. The following plays three notes, each with a length of two seconds but with only one second from the start of one to the start of the next.
+The first is `seq` (pronounced like "seek"), a function that takes takes two waveforms: the first determines the offset, while the second is the waveform to be played, turning that second waveform into a seq waveform. Analogous to the first parameter to `fin`, the offset is determined by the first position at which the offset waveform is positive. Also like `fin`, `seq` is written in curried form, and it's not uncommon to see the two used together. The following plays three notes, each with a length of two seconds but with only one second from the start of one to the start of the next.
 
 <div class="container">
   <tuun-synth open='["std"]'>

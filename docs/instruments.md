@@ -19,7 +19,7 @@ This is obviously one of the most primitive instruments possible, having only a 
 There are also other ways of defining what it means to be an "instrument." See [MIDI instruments](#midi-instruments) below for another example.
 
 <!-- move down?
-If the waveform is finite and [sequenced](tuun-langs.md#sequencing) then then instrument can be used to play a series of notes.
+If the waveform is finite and [sequenced](overview.md#sequencing) then then instrument can be used to play a series of notes.
 
 
 When developing an instrument it can often be useful to hear several notes played on the instrument. Even if we are not handling MIDI events, we can still use MIDI note numbers as a convenient way of specifying each fundamental frequency. Here's an example of a simple instrument playing the first five notes of a C major scale.
@@ -131,6 +131,8 @@ Besides for the amplitude envelope, the overtones are one of the more important 
 
 Since [flutes are open at both ends](https://newt.phys.unsw.edu.au/jw/fluteacoustics.html), they produce all of the harmonics (not just the odd ones). In this sample, the fundamental and the next five harmonics are most clearly audible.
 
+The example below using the amplitude envelope from above but adds in these harmonics, whose levels can be controlled by the sliders.
+
 <div class="container">
   <tuun-synth description="Flute using additive synthesis" open='["std"]' sliders='["fundamental_db:-8.1:-60:6","second_harmonic_db:-11.6:-60:6","third_harmonic_db:-22.9:-60:6","fourth_harmonic_db:-31.7:-60:6","fifth_harmonic_db:-44.1:-60:6","sixth_harmonic_db:-47.8:-60:6"]'>
     <script type="text/tuun">
@@ -175,6 +177,7 @@ The ukulele sample has a rich set of overtones.
 
 <!-- 
 #### Oscillator types
+-->
 
 #### Filters
 
@@ -189,7 +192,7 @@ The flute sample can also be synthesized using subtractive synthesis.
           release_dur = 0.17,
           sustain_dur = dur - attack_dur - release_dur,
         in
-          $freq_hz
+          sawtooth(freq_hz)
           | lpf(0.5, lpf_cutoff)
           | ADSR(attack_dur, 0.0, 1.0, sustain_dur, release_dur)
       in
@@ -198,10 +201,10 @@ The flute sample can also be synthesized using subtractive synthesis.
   </tuun-synth>
 </div>
 
-
+<!--
 ### Pulse width modulation
+-->
 
- -->
 ### Frequency and phase modulation
 
 Frequency modulation (FM) and phase modulation (PM) are two related techniques for using a combination of sine waves to create rich tones. See [advanced synthesis using sine](sine.md#advanced-synthesis) for more details.
