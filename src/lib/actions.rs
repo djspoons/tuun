@@ -226,10 +226,16 @@ pub enum Action {
     ///
     /// With an identifier fragment before the cursor, cycles it through the
     /// in-scope names that share the prefix, most recently bound first,
-    /// wrapping back to the fragment itself. Right after a `(`, inserts a hints
-    /// parameter for the function being called instead, leaving the cursor on
-    /// the first parameter.
+    /// wrapping back to the fragment itself. Right after a `(`, inserts a
+    /// parameter hint for the function being called instead, leaving the
+    /// cursor on the first parameter.
     Complete,
+    /// Restore the active program's text and cursor from before the most recent
+    /// edit unit, remembering the current state for `Redo`.
+    Undo,
+    /// Restore the active program's text and cursor from the most recently
+    /// undone edit unit.
+    Redo,
 
     // --- sliders / level ---
     /// Set a slider on a program by normalized value [0.0, 1.0].
@@ -425,6 +431,11 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             // confusing (the stale waveform would start mid-edit), so cancel
             // any pending playback on the way in.
             let effects = remove_pending_effects(state, ctx, state.active_program_index);
+            // Re-entering edit starts fresh typing: the first keystroke must
+            // open a new undo unit, not coalesce with pre-exit typing.
+            if let Some(program) = state.programs.program_mut(state.active_program_index) {
+                program.close_insert_run();
+            }
             let program = state.active_program();
             let cursor = program.text().len();
             let errors = parse_program_errors(program.text());
@@ -488,21 +499,25 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             }
         }
 
-        Action::InsertText(text) => edit_text_op(state, |current, cursor| {
-            let mut new_text = current.to_string();
-            new_text.insert_str(cursor, &text);
-            Some((new_text, cursor + text.len()))
-        }),
-        Action::DeleteCharBeforeCursor => edit_text_op(state, |current, cursor| {
-            if cursor == 0 {
-                return None;
-            }
-            let start = prev_char_boundary(current, cursor);
-            let mut new_text = current.to_string();
-            new_text.replace_range(start..cursor, "");
-            Some((new_text, start))
-        }),
-        Action::DeleteCharAfterCursor => edit_text_op(state, |current, cursor| {
+        Action::InsertText(text) => {
+            edit_text_op(state, HistoryOp::Insert(&text), |current, cursor| {
+                let mut new_text = current.to_string();
+                new_text.insert_str(cursor, &text);
+                Some((new_text, cursor + text.len()))
+            })
+        }
+        Action::DeleteCharBeforeCursor => {
+            edit_text_op(state, HistoryOp::Unit, |current, cursor| {
+                if cursor == 0 {
+                    return None;
+                }
+                let start = prev_char_boundary(current, cursor);
+                let mut new_text = current.to_string();
+                new_text.replace_range(start..cursor, "");
+                Some((new_text, start))
+            })
+        }
+        Action::DeleteCharAfterCursor => edit_text_op(state, HistoryOp::Unit, |current, cursor| {
             if cursor == current.len() {
                 return None;
             }
@@ -511,16 +526,18 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             new_text.replace_range(cursor..end, "");
             Some((new_text, cursor))
         }),
-        Action::DeleteWordBeforeCursor => edit_text_op(state, |current, cursor| {
-            if cursor == 0 {
-                return None;
-            }
-            let new_cursor = prev_word_start(&current[..cursor]);
-            let mut new_text = current.to_string();
-            new_text.replace_range(new_cursor..cursor, "");
-            Some((new_text, new_cursor))
-        }),
-        Action::DeleteWordAfterCursor => edit_text_op(state, |current, cursor| {
+        Action::DeleteWordBeforeCursor => {
+            edit_text_op(state, HistoryOp::Unit, |current, cursor| {
+                if cursor == 0 {
+                    return None;
+                }
+                let new_cursor = prev_word_start(&current[..cursor]);
+                let mut new_text = current.to_string();
+                new_text.replace_range(new_cursor..cursor, "");
+                Some((new_text, new_cursor))
+            })
+        }
+        Action::DeleteWordAfterCursor => edit_text_op(state, HistoryOp::Unit, |current, cursor| {
             if cursor == current.len() {
                 return None;
             }
@@ -529,7 +546,7 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             new_text.replace_range(cursor..end, "");
             Some((new_text, cursor))
         }),
-        Action::DeleteToEndOfLine => edit_text_op(state, |current, cursor| {
+        Action::DeleteToEndOfLine => edit_text_op(state, HistoryOp::Unit, |current, cursor| {
             if cursor == current.len() {
                 return None;
             }
@@ -568,6 +585,8 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             cursor + next_word_end(&current[cursor..])
         }),
         Action::Complete => apply_complete(state, ctx),
+        Action::Undo => apply_history_restore(state, Program::undo, "Nothing to undo"),
+        Action::Redo => apply_history_restore(state, Program::redo, "Nothing to redo"),
 
         Action::SetSliderNormalized {
             program,
@@ -754,7 +773,9 @@ fn apply_complete(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
             .unwrap_or(&cycle.original)
             .clone();
         let start = cycle.start;
-        edit_text_op(state, |current, cursor| {
+        // Skip history: the whole cycle is one undo unit, recorded when the
+        // cycle's first press replaced the fragment.
+        edit_text_op(state, HistoryOp::Skip, |current, cursor| {
             let text = format!("{}{}{}", &current[..start], replacement, &current[cursor..]);
             Some((text, start + replacement.len()))
         });
@@ -805,7 +826,7 @@ fn apply_complete(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
     }
 
     let replacement = candidates[0].clone();
-    edit_text_op(state, |current, cursor| {
+    edit_text_op(state, HistoryOp::Unit, |current, cursor| {
         let text = format!(
             "{}{}{}",
             &current[..fragment_start],
@@ -868,7 +889,7 @@ fn apply_parameter_hint(state: &mut AppState, ctx: &Context, cursor: usize) -> V
             // argument; with no parameters the call is complete, so land
             // after the ")".
             let advance = parts.first().map_or(hint.len(), |p| p.len());
-            edit_text_op(state, |current, cursor| {
+            edit_text_op(state, HistoryOp::Unit, |current, cursor| {
                 let mut new_text = current.to_string();
                 new_text.insert_str(cursor, &hint);
                 Some((new_text, cursor + advance))
@@ -887,6 +908,44 @@ fn apply_parameter_hint(state: &mut AppState, ctx: &Context, cursor: usize) -> V
     }
 }
 
+/// Applies `Action::Undo` or `Action::Redo` in Edit mode: `restore` moves
+/// the active program's state between its undo and redo stacks and returns
+/// the restored cursor. On success the Edit-mode cursor, parse errors,
+/// status message, and completion cycle are refreshed, mirroring
+/// `edit_text_op`; when there is nothing to restore, shows `empty_message`.
+/// Does nothing outside Edit mode.
+fn apply_history_restore(
+    state: &mut AppState,
+    restore: impl FnOnce(&mut Program, usize) -> Option<usize>,
+    empty_message: &str,
+) -> Vec<Effect> {
+    let cursor = match &state.mode {
+        Mode::Edit {
+            cursor_position, ..
+        } => *cursor_position,
+        _ => return vec![],
+    };
+    let program = state
+        .programs
+        .program_mut(state.active_program_index)
+        .unwrap();
+    let Some(new_cursor) = restore(program, cursor) else {
+        return vec![Effect::ShowMessage(empty_message.to_string())];
+    };
+    if let Mode::Edit {
+        cursor_position,
+        completion,
+        ..
+    } = &mut state.mode
+    {
+        *cursor_position = new_cursor;
+        *completion = None;
+    }
+    refresh_edit_errors(state);
+    state.message.clear();
+    vec![]
+}
+
 /// Refreshes `Mode::Edit.errors` from the active program's text. Called
 /// after every keystroke in Edit mode so the renderer's per-character
 /// syntax highlighting stays in sync. Leaves `cursor_position` and
@@ -898,15 +957,32 @@ fn refresh_edit_errors(state: &mut AppState) {
     }
 }
 
+/// How a text edit participates in the active program's undo history.
+enum HistoryOp<'a> {
+    /// Typed text: extends an open insert run, starting a new undo unit only at
+    /// a word boundary.
+    Insert(&'a str),
+    /// A standalone edit that always forms its own undo unit and closes any
+    /// open insert run.
+    Unit,
+    /// An edit that must leave history untouched (e.g. one that itself restores
+    /// or replays a recorded state).
+    Skip,
+}
+
 /// Applies a text edit to the active program's Edit-mode text.
 ///
 /// Calls `f` with the current text and cursor position; when `f` returns a new
-/// (text, cursor) pair, writes both back, refreshes the Edit-mode parse errors,
-/// and clears the status message and any completion cycle (both describe text
-/// that just changed). Does nothing outside Edit mode or when `f` returns
-/// `None`.
+/// (text, cursor) pair, records the pre-edit state in the program's undo
+/// history per `history`, writes both back, refreshes the Edit-mode parse
+/// errors, and clears the status message and any completion cycle (both
+/// describe text that just changed). Does nothing outside Edit mode or when `f`
+/// returns `None` — except that a `HistoryOp::Unit` edit still closes any open
+/// insert run, so e.g. a no-op delete stops the next keystroke from coalescing
+/// with earlier typing.
 fn edit_text_op(
     state: &mut AppState,
+    history: HistoryOp,
     f: impl FnOnce(&str, usize) -> Option<(String, usize)>,
 ) -> Vec<Effect> {
     let cursor = match &state.mode {
@@ -920,6 +996,23 @@ fn edit_text_op(
         .program_mut(state.active_program_index)
         .unwrap();
     if let Some((new_text, new_cursor)) = f(program.text(), cursor) {
+        // Record before set_text: the snapshot is the pre-edit text.
+        match history {
+            HistoryOp::Insert(text) => {
+                if let (Some(first), Some(last)) = (text.chars().next(), text.chars().next_back()) {
+                    // A new undo unit starts at each word start (a word char
+                    // typed right after a non-word char); anything else extends
+                    // the open run.
+                    let new_unit = match program.last_inserted() {
+                        None => true,
+                        Some(prev) => is_word_char(first) && !is_word_char(prev),
+                    };
+                    program.record_insert(new_unit, last, cursor);
+                }
+            }
+            HistoryOp::Unit => program.record_edit(cursor),
+            HistoryOp::Skip => {}
+        }
         program.set_text(new_text);
         if let Mode::Edit {
             cursor_position,
@@ -932,14 +1025,17 @@ fn edit_text_op(
         }
         refresh_edit_errors(state);
         state.message.clear();
+    } else if let HistoryOp::Unit = history {
+        program.close_insert_run();
     }
     vec![]
 }
 
 /// Moves the Edit-mode cursor: `f` maps (text, cursor) to the new position,
 /// which is clamped to the text's length. Clears any completion cycle (the
-/// cycle's insertion ends at the cursor, so moving it breaks the cycle).
-/// Does nothing outside Edit mode.
+/// cycle's insertion ends at the cursor, so moving it breaks the cycle) and
+/// closes any insert-coalescing run (typing resumed elsewhere is a new undo
+/// unit). Does nothing outside Edit mode.
 fn edit_cursor_op(state: &mut AppState, f: impl FnOnce(&str, usize) -> usize) -> Vec<Effect> {
     let cursor = match &state.mode {
         Mode::Edit {
@@ -949,6 +1045,9 @@ fn edit_cursor_op(state: &mut AppState, f: impl FnOnce(&str, usize) -> usize) ->
     };
     let text = state.programs.programs()[state.active_program_index].text();
     let new_cursor = f(text, cursor).min(text.len());
+    if let Some(program) = state.programs.program_mut(state.active_program_index) {
+        program.close_insert_run();
+    }
     if let Mode::Edit {
         cursor_position,
         completion,
@@ -1530,6 +1629,169 @@ mod tests {
             "expected a built-in message, got {:?}",
             effects
         );
+    }
+
+    #[test]
+    fn undo_reverts_last_unit_and_redo_restores_it() {
+        let mut state = edit_state("", "", 0);
+        // Two units: "440" starts a new one ('4' typed right after '(').
+        apply_with_empty_status(&mut state, Action::InsertText("sine(".to_string()));
+        apply_with_empty_status(&mut state, Action::InsertText("440".to_string()));
+        apply_with_empty_status(&mut state, Action::Undo);
+        assert_eq!(edit_text_and_cursor(&state), ("sine(".to_string(), 5));
+        apply_with_empty_status(&mut state, Action::Undo);
+        assert_eq!(edit_text_and_cursor(&state), ("".to_string(), 0));
+        apply_with_empty_status(&mut state, Action::Redo);
+        assert_eq!(edit_text_and_cursor(&state), ("sine(".to_string(), 5));
+        apply_with_empty_status(&mut state, Action::Redo);
+        assert_eq!(edit_text_and_cursor(&state), ("sine(440".to_string(), 8));
+    }
+
+    #[test]
+    fn typing_coalesces_units_at_word_starts() {
+        let mut state = edit_state("", "", 0);
+        for c in "sine(440) | env".chars() {
+            apply_with_empty_status(&mut state, Action::InsertText(c.to_string()));
+        }
+        apply_with_empty_status(&mut state, Action::Undo);
+        assert_eq!(
+            edit_text_and_cursor(&state),
+            ("sine(440) | ".to_string(), 12)
+        );
+        apply_with_empty_status(&mut state, Action::Undo);
+        assert_eq!(edit_text_and_cursor(&state), ("sine(".to_string(), 5));
+        apply_with_empty_status(&mut state, Action::Undo);
+        assert_eq!(edit_text_and_cursor(&state), ("".to_string(), 0));
+        let effects = apply_with_empty_status(&mut state, Action::Undo);
+        assert!(
+            matches!(&effects[0], Effect::ShowMessage(m) if m == "Nothing to undo"),
+            "expected nothing-to-undo, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn undo_and_redo_show_message_when_history_is_empty() {
+        let mut state = edit_state("", "", 0);
+        let effects = apply_with_empty_status(&mut state, Action::Undo);
+        assert!(
+            matches!(&effects[0], Effect::ShowMessage(m) if m == "Nothing to undo"),
+            "expected nothing-to-undo, got {:?}",
+            effects
+        );
+        let effects = apply_with_empty_status(&mut state, Action::Redo);
+        assert!(
+            matches!(&effects[0], Effect::ShowMessage(m) if m == "Nothing to redo"),
+            "expected nothing-to-redo, got {:?}",
+            effects
+        );
+        assert_eq!(edit_text_and_cursor(&state), ("".to_string(), 0));
+    }
+
+    #[test]
+    fn fresh_edit_clears_redo_stack() {
+        let mut state = edit_state("", "", 0);
+        apply_with_empty_status(&mut state, Action::InsertText("ab".to_string()));
+        apply_with_empty_status(&mut state, Action::Undo);
+        apply_with_empty_status(&mut state, Action::InsertText("cd".to_string()));
+        let effects = apply_with_empty_status(&mut state, Action::Redo);
+        assert!(
+            matches!(&effects[0], Effect::ShowMessage(m) if m == "Nothing to redo"),
+            "expected nothing-to-redo, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn delete_ops_record_units_and_close_the_run() {
+        let mut state = edit_state("", "", 0);
+        apply_with_empty_status(&mut state, Action::InsertText("ab".to_string()));
+        apply_with_empty_status(&mut state, Action::DeleteCharBeforeCursor);
+        // 'c' after 'b' would coalesce if the delete hadn't closed the run.
+        apply_with_empty_status(&mut state, Action::InsertText("c".to_string()));
+        assert_eq!(edit_text_and_cursor(&state), ("ac".to_string(), 2));
+        apply_with_empty_status(&mut state, Action::Undo);
+        assert_eq!(edit_text_and_cursor(&state), ("a".to_string(), 1));
+        apply_with_empty_status(&mut state, Action::Undo);
+        assert_eq!(edit_text_and_cursor(&state), ("ab".to_string(), 2));
+        apply_with_empty_status(&mut state, Action::Undo);
+        assert_eq!(edit_text_and_cursor(&state), ("".to_string(), 0));
+    }
+
+    #[test]
+    fn completion_cycle_undoes_as_one_unit() {
+        let mut state = edit_state(
+            "za = 1;\nzb = 2;\nzab = 3;\n#{level_db=0}\n_ = test;",
+            "z",
+            1,
+        );
+        apply_with_empty_status(&mut state, Action::Complete);
+        apply_with_empty_status(&mut state, Action::Complete);
+        assert_eq!(edit_text_and_cursor(&state), ("zb".to_string(), 2));
+        apply_with_empty_status(&mut state, Action::Undo);
+        assert_eq!(edit_text_and_cursor(&state), ("z".to_string(), 1));
+        apply_with_empty_status(&mut state, Action::Redo);
+        assert_eq!(edit_text_and_cursor(&state), ("zb".to_string(), 2));
+    }
+
+    #[test]
+    fn undo_refreshes_edit_errors_and_clears_completion() {
+        let mut state = edit_state("", "", 0);
+        apply_with_empty_status(&mut state, Action::InsertText("(".to_string()));
+        let Mode::Edit { errors, .. } = &state.mode else {
+            panic!("expected Edit mode");
+        };
+        assert!(!errors.is_empty(), "expected parse errors for \"(\"");
+        apply_with_empty_status(&mut state, Action::Undo);
+        let Mode::Edit {
+            errors, completion, ..
+        } = &state.mode
+        else {
+            panic!("expected Edit mode");
+        };
+        assert!(errors.is_empty(), "expected no errors after undo");
+        assert!(completion.is_none());
+        apply_with_empty_status(&mut state, Action::Redo);
+        let Mode::Edit { errors, .. } = &state.mode else {
+            panic!("expected Edit mode");
+        };
+        assert!(!errors.is_empty(), "expected parse errors again after redo");
+    }
+
+    #[test]
+    fn noop_edit_records_no_history() {
+        let mut state = edit_state("", "", 0);
+        apply_with_empty_status(&mut state, Action::DeleteCharBeforeCursor);
+        let effects = apply_with_empty_status(&mut state, Action::Undo);
+        assert!(
+            matches!(&effects[0], Effect::ShowMessage(m) if m == "Nothing to undo"),
+            "expected nothing-to-undo, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn history_survives_mode_round_trip() {
+        let mut state = edit_state("", "", 0);
+        apply_with_empty_status(&mut state, Action::InsertText("ab".to_string()));
+        apply_with_empty_status(&mut state, Action::EnterSelectMode);
+        apply_with_empty_status(&mut state, Action::EnterEditMode);
+        // A new unit only because EnterEditMode closed the insert run —
+        // 'c' right after 'b' would otherwise coalesce.
+        apply_with_empty_status(&mut state, Action::InsertText("cd".to_string()));
+        assert_eq!(edit_text_and_cursor(&state), ("abcd".to_string(), 4));
+        apply_with_empty_status(&mut state, Action::Undo);
+        assert_eq!(edit_text_and_cursor(&state), ("ab".to_string(), 2));
+        apply_with_empty_status(&mut state, Action::Undo);
+        assert_eq!(edit_text_and_cursor(&state), ("".to_string(), 0));
+    }
+
+    #[test]
+    fn undo_outside_edit_mode_is_a_no_op() {
+        let mut state = test_state();
+        let effects = apply_with_empty_status(&mut state, Action::Undo);
+        assert!(effects.is_empty(), "expected no effects, got {:?}", effects);
+        assert!(matches!(state.mode, Mode::Select));
     }
 
     #[test]

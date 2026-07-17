@@ -140,6 +140,44 @@ pub enum Evaluation {
     Invalid(Vec<Diagnostic>),
 }
 
+/// Maximum number of undo units kept per program; recording past the cap drops
+/// the oldest unit.
+const MAX_UNDO_UNITS: usize = 100;
+
+/// A snapshot of a program's text and Edit-mode cursor, restored by undo/redo.
+///
+/// `cursor` is a byte offset lying on a char boundary of `text` (both are
+/// recorded together from a live Edit-mode state).
+#[derive(Debug, Clone)]
+struct EditSnapshot {
+    text: String,
+    cursor: usize,
+}
+
+/// Undo/redo history for Edit-mode changes to a program's text.
+#[derive(Debug, Clone, Default)]
+struct EditHistory {
+    /// Snapshots from before each undo unit, oldest first.
+    undo: Vec<EditSnapshot>,
+    /// Snapshots undone since the last fresh edit, most recently undone
+    /// last.
+    redo: Vec<EditSnapshot>,
+    /// The final character of the last coalesced insertion, or `None` when
+    /// no insert run is open.
+    last_inserted: Option<char>,
+}
+
+impl EditHistory {
+    /// Pushes an undo unit, dropping the oldest when the stack is at
+    /// `MAX_UNDO_UNITS`.
+    fn push_undo_capped(&mut self, snapshot: EditSnapshot) {
+        if self.undo.len() == MAX_UNDO_UNITS {
+            self.undo.remove(0);
+        }
+        self.undo.push(snapshot);
+    }
+}
+
 /// One program slot: its source text, sliders, level, color, and the
 /// cached results of its last evaluation.
 #[derive(Debug, Clone)]
@@ -159,6 +197,8 @@ pub struct Program {
     cached_waveform: Option<waveform::Waveform<MarkId>>,
     /// Set if the current text evaluates to a valid keys instrument.
     cached_keys_instrument: Option<expr::SourceExpr<MarkId, Source>>,
+    /// Undo/redo history for Edit-mode text changes.
+    history: EditHistory,
 }
 
 impl Program {
@@ -173,6 +213,7 @@ impl Program {
             level_db: 0.0,
             cached_waveform: None,
             cached_keys_instrument: None,
+            history: EditHistory::default(),
         }
     }
 
@@ -223,6 +264,7 @@ impl Program {
                     level_db,
                     cached_waveform: None,
                     cached_keys_instrument: None,
+                    history: EditHistory::default(),
                 })
             } else {
                 println!(
@@ -279,6 +321,80 @@ impl Program {
         self.text = text;
         self.cached_waveform = None;
         self.cached_keys_instrument = None;
+    }
+
+    /// Returns the final character of the last coalesced insertion, or
+    /// `None` when no insert run is open.
+    pub fn last_inserted(&self) -> Option<char> {
+        self.history.last_inserted
+    }
+
+    /// Records an undo point for typed text about to be inserted with the
+    /// Edit-mode cursor at `cursor`.
+    ///
+    /// When `new_unit` is true, the current text and `cursor` are pushed as a
+    /// fresh undo unit; otherwise the insertion extends the open insert run.
+    /// Either way `last` becomes the run's last-inserted character and the redo
+    /// stack is cleared.
+    pub fn record_insert(&mut self, new_unit: bool, last: char, cursor: usize) {
+        if new_unit {
+            self.history.push_undo_capped(EditSnapshot {
+                text: self.text.clone(),
+                cursor,
+            });
+        }
+        self.history.last_inserted = Some(last);
+        self.history.redo.clear();
+    }
+
+    /// Records an undo point for an edit about to replace the program's text,
+    /// with the Edit-mode cursor at `cursor`. The edit forms its own undo unit;
+    /// any open insert run is closed and the redo stack cleared.
+    pub fn record_edit(&mut self, cursor: usize) {
+        self.history.push_undo_capped(EditSnapshot {
+            text: self.text.clone(),
+            cursor,
+        });
+        self.history.last_inserted = None;
+        self.history.redo.clear();
+    }
+
+    /// Closes any open insert run so the next insertion starts a new undo unit.
+    pub fn close_insert_run(&mut self) {
+        self.history.last_inserted = None;
+    }
+
+    /// Restores the text and cursor from before the most recent undo unit,
+    /// remembering the current text and `cursor` for `redo`. Returns the
+    /// restored cursor position, or `None` when there is nothing to undo.
+    pub fn undo(&mut self, cursor: usize) -> Option<usize> {
+        let snapshot = self.history.undo.pop()?;
+        let current = EditSnapshot {
+            text: self.text().to_string(),
+            cursor,
+        };
+        self.history.redo.push(current);
+        self.set_text(snapshot.text);
+        self.history.last_inserted = None;
+        Some(snapshot.cursor)
+    }
+
+    /// Restores the most recently undone text and cursor, remembering the
+    /// current text and `cursor` for `undo`. Returns the restored cursor
+    /// position, or `None` when there is nothing to redo.
+    pub fn redo(&mut self, cursor: usize) -> Option<usize> {
+        let snapshot = self.history.redo.pop()?;
+        let current = EditSnapshot {
+            text: self.text().to_string(),
+            cursor,
+        };
+        // Re-push without the cap or a redo-clear: this entry came from an undo
+        // pop, so undo + redo together never exceed the cap, and redoing must
+        // not discard the rest of the redo stack.
+        self.history.undo.push(current);
+        self.set_text(snapshot.text);
+        self.history.last_inserted = None;
+        Some(snapshot.cursor)
     }
 
     /// Sets the program's output level in dB.
@@ -1197,6 +1313,22 @@ mod tests {
         );
         assert!(program.waveform().is_none());
         assert!(program.keys_instrument().is_none());
+    }
+
+    #[test]
+    fn undo_history_caps_at_max_units() {
+        let mut program = Program::from_string("", 0);
+        for i in 0..150 {
+            program.record_edit(0);
+            program.set_text(format!("t{}", i));
+        }
+        // Only the most recent 100 units survive; the oldest 50 were
+        // dropped as the cap was exceeded.
+        for _ in 0..100 {
+            assert!(program.undo(0).is_some());
+        }
+        assert_eq!(program.text(), "t49");
+        assert!(program.undo(0).is_none());
     }
 
     #[test]

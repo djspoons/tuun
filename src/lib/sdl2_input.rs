@@ -241,6 +241,15 @@ impl InputHandler {
             }
             // Completion on Cmd-/.
             (Mode::Edit { .. }, Some(Scancode::Slash)) if gui_mod => Some(vec![Action::Complete]),
+            // Undo / redo on Ctrl+Z or Cmd+Z; Shift reverses. The redo arm
+            // comes first so the shifted chord isn't captured by the undo
+            // arm.
+            (Mode::Edit { .. }, Some(Scancode::Z)) if (ctrl || gui_mod) && shift => {
+                Some(vec![Action::Redo])
+            }
+            (Mode::Edit { .. }, Some(Scancode::Z)) if (ctrl || gui_mod) && !shift => {
+                Some(vec![Action::Undo])
+            }
             (Mode::Edit { .. }, Some(Scancode::Left)) => Some(vec![Action::MoveCursorBy(-1)]),
             (Mode::Edit { .. }, Some(Scancode::Right)) => Some(vec![Action::MoveCursorBy(1)]),
             (Mode::Edit { .. }, Some(Scancode::Backspace)) => {
@@ -477,6 +486,39 @@ mod tests {
             classify(Scancode::Delete, Mod::NOMOD),
             Action::DeleteCharAfterCursor
         ));
+    }
+
+    #[test]
+    fn edit_mode_binds_undo_and_redo_on_z() {
+        let handler = InputHandler::new(false, 800, 600);
+        let state = test_state(Mode::Edit {
+            cursor_position: 4,
+            errors: vec![],
+            completion: None,
+        });
+        let classify = |keymod| {
+            let actions = handler
+                .classify_keydown(Some(Scancode::Z), keymod, false, &state)
+                .expect("Z chord in Edit mode should be classified");
+            assert_eq!(actions.len(), 1, "expected one action, got {:?}", actions);
+            actions.into_iter().next().unwrap()
+        };
+        assert!(matches!(classify(Mod::LCTRLMOD), Action::Undo));
+        assert!(matches!(classify(Mod::LGUIMOD), Action::Undo));
+        assert!(matches!(
+            classify(Mod::LCTRLMOD | Mod::LSHIFTMOD),
+            Action::Redo
+        ));
+        assert!(matches!(
+            classify(Mod::LGUIMOD | Mod::LSHIFTMOD),
+            Action::Redo
+        ));
+        // Plain Z is not a keydown binding — the character arrives through
+        // a TextInput event instead.
+        let actions = handler
+            .classify_keydown(Some(Scancode::Z), Mod::NOMOD, false, &state)
+            .expect("plain Z should be recognized");
+        assert!(actions.is_empty(), "expected no actions, got {:?}", actions);
     }
 
     #[test]
