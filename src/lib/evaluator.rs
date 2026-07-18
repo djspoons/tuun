@@ -317,6 +317,30 @@ impl Evaluator {
         eval::evaluate(|path| self.resolve(path), bindings, expr).map_err(|error| error.to_string())
     }
 
+    /// Evaluates a sub-expression of the program at `index` in that program's
+    /// evaluation context, expecting a waveform result.
+    ///
+    /// Returns `None` when evaluation fails or the result is neither a bare nor
+    /// a `seq`-wrapped waveform (the `seq` wrapper is stripped).
+    pub fn evaluate_program_waveform_expr(
+        &self,
+        set: &ProgramSet,
+        index: usize,
+        expr: &expr::SourceExpr<MarkId, Source>,
+    ) -> Option<waveform::Waveform<MarkId>> {
+        let mut bindings = set.evaluation_bindings(index);
+        bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
+        let expr = eval::evaluate(|path| self.resolve(path), &bindings, expr.clone()).ok()?;
+        match expr.expr {
+            expr::Expr::Waveform(w) => Some(w),
+            expr::Expr::Seq { waveform, .. } => match waveform.expr {
+                expr::Expr::Waveform(w) => Some(w),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// Evaluates the program at `index` and classifies the result as a
     /// playable waveform, a keys instrument, or invalid.
     ///

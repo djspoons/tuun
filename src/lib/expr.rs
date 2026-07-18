@@ -168,7 +168,7 @@ pub enum Expr<M, S = ()> {
         // Pure functions from a vector of values to a value
         function: BuiltInFn<M, S>,
     },
-    // A sequence-able waveform. In value form, both offset and waveform are Expr::Waveform.
+    // A sequenceable waveform. In value form, both offset and waveform are Expr::Waveform.
     Seq {
         offset: Box<SourceExpr<M, S>>,
         waveform: Box<SourceExpr<M, S>>,

@@ -412,7 +412,8 @@ pub fn main() {
             &status,
             vec![actions::Effect::EvaluateProgram {
                 program_index: i,
-                mode_on_failure: actions::Mode::Select,
+                mode_on_success: Some(actions::Mode::Select),
+                mode_on_failure: Some(actions::Mode::Select),
             }],
         );
         // A failed evaluation leaves both caches empty.

@@ -17,11 +17,11 @@ pub enum WaveformId {
     Beats(bool),
     /// A program identified by its 0-based index in the program set.
     Program(usize),
-    /// One sequencer step of a program: `slot` addresses a sixteenth within the
-    /// program's measure grid.
+    /// One sequencer step of a program: `sixteenth` addresses a quarter-beat
+    /// within the program's measure grid.
     Step {
         program: usize,
-        slot: u8,
+        sixteenth: u8,
     },
     /// Identifies a waveform playing in response to striking a key on a MIDI keyboard
     /// or equivalent controller.
@@ -110,7 +110,7 @@ mod tests {
         assert!(!selector.matches(&WaveformId::Program(0)));
         assert!(!selector.matches(&WaveformId::Step {
             program: 0,
-            slot: 0
+            sixteenth: 0
         }));
         assert!(!selector.matches(&WaveformId::Beats(false)));
     }
@@ -121,16 +121,16 @@ mod tests {
         assert!(selector.matches(&WaveformId::Program(2)));
         assert!(selector.matches(&WaveformId::Step {
             program: 2,
-            slot: 0
+            sixteenth: 0
         }));
         assert!(selector.matches(&WaveformId::Step {
             program: 2,
-            slot: u8::MAX
+            sixteenth: u8::MAX
         }));
         assert!(!selector.matches(&WaveformId::Program(3)));
         assert!(!selector.matches(&WaveformId::Step {
             program: 3,
-            slot: 0
+            sixteenth: 0
         }));
         assert!(!selector.matches(&WaveformId::Beats(true)));
         assert!(!selector.matches(&WaveformId::Key(60)));

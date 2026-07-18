@@ -66,6 +66,10 @@ pub enum Event {
     PreviousTrackDown,
     NextTrackBankDown,
     PreviousTrackBankDown,
+    /// The transport "play" button.
+    PlayDown,
+    /// The transport "stop" button.
+    StopDown,
     /// Encoder changes in plug-in mode: positive delta is clockwise, negative delta
     /// is counterclockwise.
     PluginEncoderChange {
@@ -458,6 +462,12 @@ impl DAWState {
                         (108, 0) => None,
                         (109, 127) => Some(Event::PreviousTrackBankDown),
                         (109, 0) => None,
+
+                        // Transport
+                        (115, 127) => Some(Event::PlayDown),
+                        (115, 0) => None,
+                        (116, 127) => Some(Event::StopDown),
+                        (116, 0) => None,
 
                         // Encoders in Relative output mode: each event
                         // on CC 55h-5Ch (85-92) carries `64 + delta`

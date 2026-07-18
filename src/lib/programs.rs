@@ -8,6 +8,7 @@ use crate::evaluator::Evaluator;
 use crate::expr;
 use crate::ids::MarkId;
 use crate::parser;
+use crate::sequencer;
 use crate::slider;
 use crate::waveform;
 
@@ -197,6 +198,9 @@ pub struct Program {
     cached_waveform: Option<waveform::Waveform<MarkId>>,
     /// Set if the current text evaluates to a valid keys instrument.
     cached_keys_instrument: Option<expr::SourceExpr<MarkId, Source>>,
+    /// Set if the current text is sequenceable (a top-level `on_beats` call
+    /// with a literal beat list) and its waveform argument evaluated.
+    cached_sequence: Option<sequencer::Sequence>,
     /// Undo/redo history for Edit-mode text changes.
     history: EditHistory,
 }
@@ -213,6 +217,7 @@ impl Program {
             level_db: 0.0,
             cached_waveform: None,
             cached_keys_instrument: None,
+            cached_sequence: None,
             history: EditHistory::default(),
         }
     }
@@ -264,6 +269,7 @@ impl Program {
                     level_db,
                     cached_waveform: None,
                     cached_keys_instrument: None,
+                    cached_sequence: None,
                     history: EditHistory::default(),
                 })
             } else {
@@ -315,12 +321,19 @@ impl Program {
         self.cached_keys_instrument.as_ref()
     }
 
-    /// Replaces the program's `text` and invalidates both cached
+    /// Returns the cached decomposed sequence if the current text is
+    /// sequenceable and evaluated to one.
+    pub fn sequence(&self) -> Option<&sequencer::Sequence> {
+        self.cached_sequence.as_ref()
+    }
+
+    /// Replaces the program's `text` and invalidates the cached
     /// evaluations.
     pub fn set_text(&mut self, text: String) {
         self.text = text;
         self.cached_waveform = None;
         self.cached_keys_instrument = None;
+        self.cached_sequence = None;
     }
 
     /// Returns the final character of the last coalesced insertion, or
@@ -421,6 +434,7 @@ impl Program {
     /// already clears them, the failure may have come from a changed dependency
     /// rather than this program's own text.
     fn record_evaluation(&mut self, evaluation: Evaluation) -> Result<(), Vec<Diagnostic>> {
+        self.cached_sequence = None;
         match evaluation {
             Evaluation::Waveform(w) => {
                 self.cached_waveform = Some(w);
@@ -700,17 +714,33 @@ impl ProgramSet {
         evaluator: &Evaluator,
         index: usize,
     ) -> Result<(), Vec<Diagnostic>> {
-        // An empty program is a deletion, not a parse error: clear both caches
+        // An empty program is a deletion, not a parse error: clear the caches
         // and succeed so the editor can leave Edit mode (the splice that
         // follows removes the binding from source).
         if self.programs[index].text().trim().is_empty() {
             let program = &mut self.programs[index];
             program.cached_waveform = None;
             program.cached_keys_instrument = None;
+            program.cached_sequence = None;
             return Ok(());
         }
         let evaluation = evaluator.evaluate_program(self, index);
-        self.programs[index].record_evaluation(evaluation)
+        let result = self.programs[index].record_evaluation(evaluation);
+        // A waveform program with the sequenceable shape additionally caches
+        // its decomposed form, so it can play (and be edited) one tracker
+        // entry per beat.
+        if result.is_ok() && self.programs[index].cached_waveform.is_some() {
+            let sequence = sequencer::analyze(self.programs[index].text()).and_then(|shape| {
+                let step_waveform =
+                    evaluator.evaluate_program_waveform_expr(self, index, &shape.waveform_expr)?;
+                Some(sequencer::Sequence {
+                    beats: shape.beats.iter().map(|(beat, _)| *beat).collect(),
+                    step_waveform,
+                })
+            });
+            self.programs[index].cached_sequence = sequence;
+        }
+        result
     }
 }
 

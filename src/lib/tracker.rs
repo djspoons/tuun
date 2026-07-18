@@ -43,9 +43,13 @@ pub enum Command<I: Id, M> {
         mark_id: M,
         waveform: waveform::Waveform<M>,
     },
+    // Remove matching pending waveforms. With `after`, only those starting at
+    // or after that instant are removed; matching pending waveforms starting
+    // earlier lose their repeat instead, so an in-progress cycle finishes but
+    // nothing re-queues.
     RemovePending {
-        // Selects the pending waveforms to remove
         selector: I::Selector,
+        after: Option<Instant>,
     },
     SendCurrentBuffer,
 }
@@ -91,6 +95,21 @@ where
         self.marks
             .iter()
             .any(|w| selector.matches(&w.waveform_id) && w.mark_id == *mark && w.start <= when)
+    }
+
+    /// Returns the earliest start among matching marks scheduled after
+    /// `when`, or `None` when no matching mark is pending.
+    pub fn next_pending_mark_start(
+        &self,
+        when: Instant,
+        selector: &I::Selector,
+        mark: &M,
+    ) -> Option<Instant> {
+        self.marks
+            .iter()
+            .filter(|w| selector.matches(&w.waveform_id) && w.mark_id == *mark && w.start > when)
+            .map(|w| w.start)
+            .min()
     }
 }
 
@@ -471,12 +490,23 @@ where
                     }
                 }
             }
-            Command::RemovePending { selector } => {
+            Command::RemovePending { selector, after } => {
                 println!(
-                    "Received command to remove pending waveforms {:?}",
-                    selector
+                    "Received command to remove pending waveforms {:?} after {:?}",
+                    selector, after
                 );
-                self.pending_waveforms.retain(|w| !selector.matches(&w.id));
+                match after {
+                    None => self.pending_waveforms.retain(|w| !selector.matches(&w.id)),
+                    Some(after) => {
+                        self.pending_waveforms
+                            .retain(|w| !(selector.matches(&w.id) && w.start >= after));
+                        for pending in &mut self.pending_waveforms {
+                            if selector.matches(&pending.id) {
+                                pending.repeat_every = None;
+                            }
+                        }
+                    }
+                }
             }
             Command::SendCurrentBuffer => {
                 self.send_current_buffer = true;
@@ -764,7 +794,7 @@ mod tests {
             WaveformId::Program(3),
             WaveformId::Step {
                 program: 3,
-                slot: 0,
+                sixteenth: 0,
             },
             WaveformId::Key(60),
         ] {
@@ -780,6 +810,7 @@ mod tests {
         sender
             .send(Command::RemovePending {
                 selector: WaveformSelector::ProgramVoices(3),
+                after: None,
             })
             .unwrap();
         tracker.callback(&mut out);
@@ -787,6 +818,54 @@ mod tests {
         let status = status_receiver.try_recv().expect("expected a status");
         let remaining: Vec<_> = status.marks.iter().map(|m| &m.waveform_id).collect();
         assert_eq!(remaining, vec![&WaveformId::Key(60)]);
+    }
+
+    #[test]
+    fn remove_pending_after_keeps_current_cycle_and_clears_repeat() {
+        let (mut tracker, sender, status_receiver) = test_tracker();
+        let mut out = vec![0.0f32; 64];
+
+        let now = Instant::now();
+        let current_cycle_step = WaveformId::Step {
+            program: 3,
+            sixteenth: 2,
+        };
+        // A step of the in-progress cycle: starts immediately, repeating.
+        sender
+            .send(Command::Play {
+                id: current_cycle_step.clone(),
+                waveform: marked(MarkId::TopLevel, 1.0),
+                start: None,
+                repeat_every: Some(Duration::from_secs(1)),
+            })
+            .unwrap();
+        // A step already re-queued for the next cycle.
+        sender
+            .send(Command::Play {
+                id: WaveformId::Step {
+                    program: 3,
+                    sixteenth: 0,
+                },
+                waveform: marked(MarkId::TopLevel, 1.0),
+                start: Some(now + Duration::from_secs(10)),
+                repeat_every: Some(Duration::from_secs(1)),
+            })
+            .unwrap();
+        sender
+            .send(Command::RemovePending {
+                selector: WaveformSelector::ProgramVoices(3),
+                after: Some(now + Duration::from_secs(5)),
+            })
+            .unwrap();
+        tracker.callback(&mut out);
+
+        // The next-cycle step is gone; the current-cycle step still played —
+        // and exactly once: with its repeat cleared it left no re-queued
+        // pending mark behind.
+        assert_eq!(out[0], 1.0);
+        let status = status_receiver.try_recv().expect("expected a status");
+        let remaining: Vec<_> = status.marks.iter().map(|m| &m.waveform_id).collect();
+        assert_eq!(remaining, vec![&current_cycle_step]);
     }
 
     #[test]
@@ -805,7 +884,7 @@ mod tests {
                 mark(
                     WaveformId::Step {
                         program: 3,
-                        slot: 4,
+                        sixteenth: 4,
                     },
                     now + Duration::from_secs(1),
                 ),

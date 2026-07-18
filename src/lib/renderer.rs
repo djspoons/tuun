@@ -490,6 +490,7 @@ impl Renderer {
                 // Reverse so we draw earlier ones last
                 let program_index = match &mark.waveform_id {
                     WaveformId::Program(index) => *index,
+                    WaveformId::Step { program, .. } => *program,
                     _ => continue,
                 };
                 // Only draw Mark(1)

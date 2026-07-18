@@ -972,15 +972,14 @@ where
     }
 }
 
-/// Adds all of the built-ins to `bindings`.
-/// Builds the `debug` built-in: applied, it renders its arguments as a
-/// line `debug: [a, b, ...]`, hands the line to `print`, and evaluates to
-/// its last argument (or an empty list when given none).
+/// Adds all of the built-ins to `bindings`. Builds the `debug` built-in:
+/// applied, it renders its arguments as a line `debug: [a, b, ...]`, hands the
+/// line to `print`, and evaluates to its last argument (or an empty list when
+/// given none).
 ///
-/// Passing the last value through lets a call wrap any sub-expression
-/// without changing what it evaluates to; earlier arguments can serve as
-/// labels. `print` supplies the embedder's logging sink (terminal,
-/// browser console, ...).
+/// Passing the last value through lets a call wrap any sub-expression without
+/// changing what it evaluates to; earlier arguments can serve as labels.
+/// `print` supplies the caller's logging sink (terminal, browser console, ...).
 ///
 /// # Example
 /// ```tuun

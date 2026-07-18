@@ -3,8 +3,10 @@ use std::time::Instant;
 use crate::actions;
 use crate::ids::{MarkId, WaveformId, WaveformSelector};
 use crate::launchkey;
+use crate::player;
 use crate::programs::{PROGRAMS_PER_BANK, Program};
 use crate::renderer;
+use crate::sequencer;
 use crate::tracker;
 
 /// The number of rotations of the encoder that represents the full range.
@@ -55,6 +57,12 @@ pub fn classify(
             Some(vec![Action::AdvanceProgram(-(PROGRAMS_PER_BANK as i32))])
         }
 
+        // Transport buttons act on the active program like the clip launcher's
+        // bottom pads: play queues at the next measure, stop removes the queued
+        // playback (which for a looping program ends the loop after the current
+        // cycle).
+        Event::PlayDown => Some(vec![Action::EnqueuePendingPlayback(active_program_index)]),
+        Event::StopDown => Some(vec![Action::RemovePendingProgram(active_program_index)]),
         Event::DAWTopPadDown { index } => match state.daw_pad_mode {
             actions::DawPadMode::ClipLauncher => {
                 let program_index = bank_start + *index as usize;
@@ -63,19 +71,27 @@ pub fn classify(
             }
             // Top row does nothing in the keys-installer mode.
             actions::DawPadMode::KeysInstaller => Some(vec![]),
-        },
-        Event::DAWBottomPadDown { index } => {
-            let program_index = bank_start + *index as usize;
-            programs.get(program_index)?;
-            match state.daw_pad_mode {
-                actions::DawPadMode::ClipLauncher => {
-                    Some(vec![Action::ToggleProgramPendingPlayback(program_index)])
-                }
-                actions::DawPadMode::KeysInstaller => {
-                    Some(vec![Action::ToggleInstalledKeys(program_index)])
-                }
+            // The top row is the first half-measure of the step grid.
+            actions::DawPadMode::Sequencer => {
+                Some(vec![Action::ToggleSequencerStep { sixteenth: *index }])
             }
-        }
+        },
+        Event::DAWBottomPadDown { index } => match state.daw_pad_mode {
+            actions::DawPadMode::ClipLauncher => {
+                let program_index = bank_start + *index as usize;
+                programs.get(program_index)?;
+                Some(vec![Action::ToggleProgramPendingPlayback(program_index)])
+            }
+            actions::DawPadMode::KeysInstaller => {
+                let program_index = bank_start + *index as usize;
+                programs.get(program_index)?;
+                Some(vec![Action::ToggleInstalledKeys(program_index)])
+            }
+            // The bottom row is the second half-measure of the step grid.
+            actions::DawPadMode::Sequencer => Some(vec![Action::ToggleSequencerStep {
+                sixteenth: *index + PROGRAMS_PER_BANK as u8,
+            }]),
+        },
         Event::PadFunctionDown => Some(vec![Action::CycleRepeatAfterMeasures]),
 
         Event::NoteOn { key, velocity } => Some(vec![Action::NoteOn {
@@ -120,7 +136,7 @@ pub fn update_launchkey_state(
     }
 
     let now = Instant::now();
-    let (_current_beat, current_beat_start, current_beat_duration) =
+    let (current_beat, current_beat_start, current_beat_duration) =
         renderer::current_beat_info(now, status);
     let bank_start = state.bank_start();
     if launchkey.pad_mode != launchkey::PadMode::DAW {
@@ -148,6 +164,17 @@ pub fn update_launchkey_state(
                 current_beat_start,
                 current_beat_duration,
                 bank_start,
+            );
+        }
+        actions::DawPadMode::Sequencer => {
+            update_pads_sequencer(
+                state,
+                status,
+                launchkey,
+                now,
+                current_beat,
+                current_beat_start,
+                current_beat_duration,
             );
         }
     }
@@ -285,6 +312,145 @@ fn update_pads_keys_installer(
             launchkey.set_daw_bottom_pad_color(i as u8, r, g, b);
         } else {
             launchkey.set_daw_bottom_pad_color(i as u8, red, green, blue);
+        }
+    }
+}
+
+/// Updates the controller state for sequencer mode: the 16 pads show the
+/// active program's step grid (top row sixteenths 0–7, bottom row 8–15),
+/// with a white playhead pulse on the current sixteenth while the program's
+/// step family is playing. All pads are dark when the active program isn't
+/// sequenceable.
+fn update_pads_sequencer(
+    state: &actions::AppState,
+    status: &tracker::Status<WaveformId, MarkId>,
+    launchkey: &mut launchkey::Launchkey,
+    now: Instant,
+    current_beat: u32,
+    current_beat_start: Instant,
+    current_beat_duration: std::time::Duration,
+) {
+    let program = state.active_program();
+    let beats: Option<Vec<f32>> = program
+        .sequence()
+        .map(|sequence| sequence.beats.clone())
+        .or_else(|| {
+            // A program that was edited (but not yet re-evaluated) or that
+            // isn't playable can still show its pattern from the text.
+            sequencer::analyze(program.text())
+                .map(|shape| shape.beats.iter().map(|(beat, _)| *beat).collect())
+        });
+
+    // The playhead only shows while the step family is sounding.
+    let anchor = WaveformSelector::Only(WaveformId::Step {
+        program: state.active_program_index,
+        sixteenth: player::ANCHOR_SIXTEENTH,
+    });
+    let playhead = if status.has_active_mark(now, &anchor, &MarkId::TopLevel) {
+        let sixteenth_duration = current_beat_duration / 4;
+        let sub = (now
+            .duration_since(current_beat_start)
+            .div_duration_f32(sixteenth_duration) as u32)
+            .min(3);
+        Some((
+            current_beat.saturating_sub(1) * 4 + sub,
+            current_beat_start + sixteenth_duration * sub,
+            sixteenth_duration,
+        ))
+    } else {
+        None
+    };
+
+    for sixteenth in 0..(2 * PROGRAMS_PER_BANK as u8) {
+        let color = match &beats {
+            None => (0, 0, 0),
+            Some(beats) => match sequencer::sixteenth_state(beats, sixteenth) {
+                sequencer::SixteenthState::Empty => (0, 0, 0),
+                sequencer::SixteenthState::OnGrid => program_pad_color(program),
+                sequencer::SixteenthState::OffGridOnly => {
+                    let (r, g, b) = program_pad_color(program);
+                    (r / 4, g / 4, b / 4)
+                }
+            },
+        };
+        let color = match playhead {
+            Some((position, sixteenth_start, sixteenth_duration))
+                if position == sixteenth as u32 =>
+            {
+                pulsed(
+                    (U7_MAX, U7_MAX, U7_MAX),
+                    now,
+                    sixteenth_start,
+                    sixteenth_duration,
+                )
+            }
+            _ => color,
+        };
+        if sixteenth < PROGRAMS_PER_BANK as u8 {
+            launchkey.set_daw_top_pad_color(sixteenth, color.0, color.1, color.2);
+        } else {
+            launchkey.set_daw_bottom_pad_color(
+                sixteenth - PROGRAMS_PER_BANK as u8,
+                color.0,
+                color.1,
+                color.2,
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::actions::{Action, AppState, DawPadMode};
+
+    use super::*;
+
+    fn test_state(daw_pad_mode: DawPadMode) -> AppState {
+        let mut state = AppState::from_source(
+            "#{level_db=0}\n_ = 1 | fin(time - 1);\n".to_string(),
+            std::path::PathBuf::new(),
+        )
+        .expect("test source should parse");
+        state.daw_pad_mode = daw_pad_mode;
+        state
+    }
+
+    #[test]
+    fn classify_sequencer_top_pad_toggles_sixteenths_0_to_7() {
+        let state = test_state(DawPadMode::Sequencer);
+        for index in 0..8u8 {
+            let actions = classify(&launchkey::Event::DAWTopPadDown { index }, &state)
+                .expect("top pads classify in sequencer mode");
+            assert_eq!(actions.len(), 1);
+            assert!(matches!(
+                actions[0],
+                Action::ToggleSequencerStep { sixteenth } if sixteenth == index
+            ));
+        }
+    }
+
+    #[test]
+    fn classify_transport_buttons_target_active_program() {
+        let state = test_state(DawPadMode::ClipLauncher);
+        let actions =
+            classify(&launchkey::Event::PlayDown, &state).expect("play button classifies");
+        assert!(matches!(actions[0], Action::EnqueuePendingPlayback(0)));
+        let actions =
+            classify(&launchkey::Event::StopDown, &state).expect("stop button classifies");
+        assert!(matches!(actions[0], Action::RemovePendingProgram(0)));
+    }
+
+    #[test]
+    fn classify_sequencer_bottom_pad_toggles_sixteenths_8_to_15() {
+        let state = test_state(DawPadMode::Sequencer);
+        for index in 0..8u8 {
+            let actions = classify(&launchkey::Event::DAWBottomPadDown { index }, &state)
+                .expect("bottom pads classify in sequencer mode");
+            assert_eq!(actions.len(), 1);
+            assert!(matches!(
+                actions[0],
+                Action::ToggleSequencerStep { sixteenth } if sixteenth == index + 8
+            ));
         }
     }
 }

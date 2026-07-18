@@ -121,15 +121,61 @@ impl EffectRunner {
                 start_at_next_measure,
                 repeat_after_measures,
             } => {
-                if let Some(message) = self.player.play_program(
+                // A sequenceable program always plays decomposed — one
+                // tracker entry per beat — so the sequencer can edit its
+                // steps live.
+                let sequenced = state
+                    .programs
+                    .program(program_index)
+                    .is_some_and(|p| p.sequence().is_some());
+                let message = if sequenced {
+                    self.player.play_program_steps(
+                        &state.programs,
+                        program_index,
+                        world.status,
+                        start_at_next_measure,
+                        repeat_after_measures,
+                    )
+                } else {
+                    self.player.play_program(
+                        &state.programs,
+                        program_index,
+                        world.status,
+                        start_at_next_measure,
+                        repeat_after_measures,
+                    )
+                };
+                if let Some(message) = message {
+                    state.message = message;
+                }
+            }
+            Effect::PlaySequencerStep {
+                program_index,
+                sixteenth,
+            } => {
+                // A no-op when the program lost its sequence (e.g. the
+                // evaluation preceding this effect failed).
+                if let Some(message) = self.player.play_step(
                     &state.programs,
                     program_index,
+                    sixteenth,
                     world.status,
-                    start_at_next_measure,
-                    repeat_after_measures,
+                    state.repeat_after_measures,
                 ) {
                     state.message = message;
                 }
+            }
+            Effect::RemovePendingSequencerStep {
+                program_index,
+                sixteenth,
+            } => {
+                self.player.remove_pending(
+                    WaveformSelector::Only(WaveformId::Step {
+                        program: program_index,
+                        sixteenth,
+                    }),
+                    None,
+                );
             }
             Effect::StopProgram(program_index) => {
                 if state.programs.program(program_index).is_none() {
@@ -141,14 +187,25 @@ impl EffectRunner {
                 // cycle; remove it so "stop" doesn't leave the fade ramp
                 // re-playing at every repeat.
                 self.player
-                    .remove_pending(WaveformSelector::ProgramVoices(program_index));
+                    .remove_pending(WaveformSelector::ProgramVoices(program_index), None);
             }
             Effect::RemovePendingProgram(program_index) => {
                 if state.programs.program(program_index).is_none() {
                     return;
                 }
-                self.player
-                    .remove_pending(WaveformSelector::ProgramVoices(program_index));
+                // Cancel playback from the next cycle boundary on — the
+                // pending TopLevel mark (a monolithic program's queued copy,
+                // or a sequence's anchor). Steps of the current cycle still
+                // play out, matching how a monolithic program's active
+                // waveform finishes its measure.
+                let selector = WaveformSelector::ProgramVoices(program_index);
+                if let Some(after) = world.status.next_pending_mark_start(
+                    Instant::now(),
+                    &selector,
+                    &MarkId::TopLevel,
+                ) {
+                    self.player.remove_pending(selector, Some(after));
+                }
             }
             Effect::ModifyWaveform {
                 selector,
@@ -160,21 +217,37 @@ impl EffectRunner {
 
             Effect::EvaluateProgram {
                 program_index,
-                mut mode_on_failure,
+                mode_on_success,
+                mode_on_failure,
             } => {
                 match state
                     .programs
                     .evaluate_and_record(&self.evaluator, program_index)
                 {
-                    Ok(()) => state.mode = actions::Mode::Select,
+                    Ok(()) => {
+                        if let Some(mode) = mode_on_success {
+                            state.mode = mode;
+                        }
+                    }
                     Err(diagnostics) => {
                         state.message = diagnostics::error_message(&diagnostics);
                         // Hand the diagnostics to the editor so evaluation
-                        // errors highlight like parse errors do.
-                        if let actions::Mode::Edit { errors, .. } = &mut mode_on_failure {
-                            *errors = diagnostics;
+                        // errors highlight like parse errors do — whether the
+                        // Edit mode comes from `mode_on_failure` or is the
+                        // mode being kept.
+                        match mode_on_failure {
+                            Some(mut mode) => {
+                                if let actions::Mode::Edit { errors, .. } = &mut mode {
+                                    *errors = diagnostics;
+                                }
+                                state.mode = mode;
+                            }
+                            None => {
+                                if let actions::Mode::Edit { errors, .. } = &mut state.mode {
+                                    *errors = diagnostics;
+                                }
+                            }
                         }
-                        state.mode = mode_on_failure;
                     }
                 }
             }
@@ -460,7 +533,8 @@ mod tests {
             &mut world,
             Effect::EvaluateProgram {
                 program_index: 0,
-                mode_on_failure: actions::Mode::Select,
+                mode_on_success: None,
+                mode_on_failure: None,
             },
         );
         runner.run_one(&mut state, &mut world, Effect::InstallKeys(0));
@@ -506,6 +580,62 @@ mod tests {
         let mut marks = Vec::new();
         slider_mark_values(&note_off, &mut marks);
         assert_eq!(marks, vec![("vol".to_string(), 1.0)]);
+    }
+
+    #[test]
+    fn remove_pending_program_cancels_from_the_next_cycle() {
+        let (precompute_sender, _precompute_receiver) = mpsc::channel();
+        let (fast_sender, fast_receiver) = mpsc::channel();
+        let (slider_sender, _slider_receiver) = mpsc::channel();
+        let player = player::Player::new(90, 4, precompute_sender, fast_sender);
+        let evaluator = evaluator::Evaluator::new(44100, 90, std::path::PathBuf::new());
+        let mut runner = EffectRunner::new(player, evaluator, slider_sender);
+
+        let mut state = AppState::from_source(
+            "#{level_db=0}\n_ = 1 | fin(time - 1);\n".to_string(),
+            std::path::PathBuf::new(),
+        )
+        .expect("test source should parse");
+
+        // With a pending TopLevel mark (here a sequence anchor's next
+        // cycle), remove-pending is bounded at that cycle boundary so the
+        // current cycle's steps play out.
+        let next_cycle = Instant::now() + std::time::Duration::from_secs(1);
+        let mut status = empty_status();
+        status.marks.push(tracker::Mark {
+            waveform_id: WaveformId::Step {
+                program: 0,
+                sixteenth: player::ANCHOR_SIXTEENTH,
+            },
+            mark_id: MarkId::TopLevel,
+            start: next_cycle,
+            duration: std::time::Duration::ZERO,
+        });
+        let mut world = World {
+            launchkey: None,
+            status: &status,
+        };
+        runner.run_one(&mut state, &mut world, Effect::RemovePendingProgram(0));
+        let command = fast_receiver.try_recv().expect("expected a command");
+        assert!(
+            matches!(
+                command,
+                tracker::Command::RemovePending {
+                    selector: WaveformSelector::ProgramVoices(0),
+                    after: Some(after),
+                } if after == next_cycle
+            ),
+            "expected a bounded RemovePending"
+        );
+
+        // Without any pending TopLevel mark there's nothing to cancel.
+        let status = empty_status();
+        let mut world = World {
+            launchkey: None,
+            status: &status,
+        };
+        runner.run_one(&mut state, &mut world, Effect::RemovePendingProgram(0));
+        assert!(fast_receiver.try_recv().is_err());
     }
 
     #[test]
@@ -589,7 +719,8 @@ mod tests {
             &mut world,
             Effect::EvaluateProgram {
                 program_index: 0,
-                mode_on_failure: actions::Mode::Select,
+                mode_on_success: None,
+                mode_on_failure: None,
             },
         );
         runner.run_one(&mut state, &mut world, Effect::InstallKeys(0));

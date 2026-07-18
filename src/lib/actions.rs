@@ -15,6 +15,7 @@ use crate::keys;
 use crate::launchkey;
 use crate::player;
 use crate::programs::{self, PROGRAMS_PER_BANK, Program};
+use crate::sequencer;
 use crate::tracker;
 use crate::waveform;
 
@@ -72,6 +73,9 @@ pub enum DawPadMode {
     ClipLauncher,
     /// Bottom row installs (or uninstalls) the program as the keys instrument.
     KeysInstaller,
+    /// Both rows toggle the active program's `on_beats` steps as a 16-pad
+    /// sixteenth grid.
+    Sequencer,
 }
 
 impl DawPadMode {
@@ -81,6 +85,7 @@ impl DawPadMode {
         match self {
             DawPadMode::ClipLauncher => "Clip Launcher",
             DawPadMode::KeysInstaller => "Keys Installer",
+            DawPadMode::Sequencer => "Sequencer",
         }
     }
 }
@@ -173,6 +178,16 @@ pub enum Action {
     /// it to play at the beginning of next measure (repeating per the app-wide
     /// default). Does nothing if the program isn't a waveform.
     ToggleProgramPendingPlayback(usize),
+    /// Queue the program to play at the beginning of the next measure
+    /// (repeating per the app-wide default). Does nothing if playback is
+    /// already pending or the program isn't a waveform.
+    EnqueuePendingPlayback(usize),
+    /// Toggle the given sixteenth of the active program's `on_beats` beat
+    /// list, in the source text and — when the program is live — on the
+    /// tracker.
+    ToggleSequencerStep {
+        sixteenth: u8,
+    },
 
     // --- MIDI keys ---
     /// Install the program at the given index as the keys instrument. If the
@@ -292,8 +307,14 @@ pub enum Effect {
     },
     /// Send a "stop" ramp for the program waveform.
     StopProgram(usize),
-    /// Remove a pending program from the tracker.
+    /// Cancel the program's queued playback from the next cycle boundary
+    /// on; anything already scheduled within the current cycle plays out.
     RemovePendingProgram(usize),
+    /// Schedule one step of a live sequenceable program at the next
+    /// occurrence of its sixteenth.
+    PlaySequencerStep { program_index: usize, sixteenth: u8 },
+    /// Remove one sequencer step's pending playback from the tracker.
+    RemovePendingSequencerStep { program_index: usize, sixteenth: u8 },
     /// Send a Modify command to the tracker for the selected waveforms.
     ModifyWaveform {
         selector: WaveformSelector,
@@ -301,11 +322,13 @@ pub enum Effect {
         waveform: waveform::Waveform<MarkId>,
     },
 
-    /// Parse and evaluate the current program, updating its state. On success,
-    /// return to Select mode; otherwise set the mode to `mode_on_failure`.
+    /// Parse and evaluate the given program, updating its state. On success,
+    /// switch to `mode_on_success`; on failure, switch to `mode_on_failure`
+    /// (`None` keeps the current mode either way).
     EvaluateProgram {
         program_index: usize,
-        mode_on_failure: Mode,
+        mode_on_success: Option<Mode>,
+        mode_on_failure: Option<Mode>,
     },
 
     /// Update the source file with the current text of the given program, then
@@ -404,6 +427,23 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             }
         }
 
+        Action::EnqueuePendingPlayback(i) => {
+            if ctx.status.has_pending_mark(
+                ctx.now,
+                &WaveformSelector::ProgramVoices(i),
+                &MarkId::TopLevel,
+            ) || state.keys.as_ref().is_some_and(|k| k.id == i)
+            {
+                vec![]
+            } else {
+                play_program_effects(i, true, state.repeat_after_measures)
+            }
+        }
+
+        Action::ToggleSequencerStep { sixteenth } => {
+            apply_toggle_sequencer_step(state, ctx, sixteenth)
+        }
+
         Action::ToggleInstalledKeys(i) => apply_install_keys(state, i),
         Action::NoteOn { key, velocity } => {
             if state.keys.is_some() {
@@ -451,7 +491,8 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             vec![
                 Effect::EvaluateProgram {
                     program_index: state.active_program_index,
-                    mode_on_failure,
+                    mode_on_success: Some(Mode::Select),
+                    mode_on_failure: Some(mode_on_failure),
                 },
                 Effect::UpdateSource(state.active_program_index),
             ]
@@ -597,12 +638,24 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
                 if previous == launchkey::PadMode::DAW {
                     state.daw_pad_mode = match state.daw_pad_mode {
                         DawPadMode::ClipLauncher => DawPadMode::KeysInstaller,
-                        DawPadMode::KeysInstaller => DawPadMode::ClipLauncher,
+                        DawPadMode::KeysInstaller => DawPadMode::Sequencer,
+                        DawPadMode::Sequencer => DawPadMode::ClipLauncher,
                     };
                 }
                 let label = state.daw_pad_mode.display_name().to_string();
                 effects.push(Effect::SetDawModeDisplay(label.clone()));
-                effects.push(Effect::ShowMessage(label));
+                let message = if state.daw_pad_mode == DawPadMode::Sequencer
+                    && sequencer::analyze(state.active_program().text()).is_none()
+                {
+                    format!(
+                        "{}: {} is not on_beats(w, [beats])",
+                        label,
+                        state.programs.display_name(state.active_program_index)
+                    )
+                } else {
+                    label
+                };
+                effects.push(Effect::ShowMessage(message));
             }
             effects
         }
@@ -698,6 +751,92 @@ fn apply_select_program(state: &mut AppState, i: usize) -> Vec<Effect> {
     let mut effects = vec![Effect::ShowMessage(state.programs.name(i))];
     if changed {
         effects.push(Effect::SyncEncoders);
+    }
+    effects
+}
+
+/// Toggles a sixteenth of the active program's beat list: rewrites the list
+/// literal in the program's text, re-evaluates and persists it, and — when the
+/// program is playing — schedules or removes that one step so the change sounds
+/// as soon as possible.
+fn apply_toggle_sequencer_step(state: &mut AppState, ctx: &Context, sixteenth: u8) -> Vec<Effect> {
+    if sixteenth >= 16 {
+        return vec![];
+    }
+    let i = state.active_program_index;
+    let display_name = state.programs.display_name(i);
+    let Some(program) = state.programs.program(i) else {
+        return vec![];
+    };
+    let Some(shape) = sequencer::analyze(program.text()) else {
+        return vec![Effect::ShowMessage(format!(
+            "{} is not sequenceable (expected on_beats(w, [beats]))",
+            display_name
+        ))];
+    };
+    let edit = sequencer::toggle_sixteenth_text(program.text(), &shape, sixteenth);
+
+    let program = state
+        .programs
+        .program_mut(i)
+        .expect("program existed above");
+    program.set_text(edit.new_text);
+    program.close_insert_run();
+    // The text changed under any Edit session on this program: shift a
+    // cursor sitting at or after the edited range and drop a stale
+    // completion cycle.
+    if let Mode::Edit {
+        cursor_position,
+        completion,
+        ..
+    } = &mut state.mode
+    {
+        if *cursor_position >= edit.edit_start {
+            *cursor_position = cursor_position
+                .saturating_add_signed(edit.delta)
+                .max(edit.edit_start);
+        }
+        *completion = None;
+    }
+    refresh_edit_errors(state);
+
+    let anchor = WaveformSelector::Only(WaveformId::Step {
+        program: i,
+        sixteenth: player::ANCHOR_SIXTEENTH,
+    });
+    let live = ctx
+        .status
+        .has_active_mark(ctx.now, &anchor, &MarkId::TopLevel)
+        || ctx
+            .status
+            .has_pending_mark(ctx.now, &anchor, &MarkId::TopLevel);
+
+    let mut effects = vec![
+        Effect::EvaluateProgram {
+            program_index: i,
+            mode_on_success: None,
+            mode_on_failure: None,
+        },
+        Effect::UpdateSource(i),
+        Effect::ShowMessage(format!(
+            "{} beat {} {}",
+            display_name,
+            edit.beat,
+            if edit.turned_on { "on" } else { "off" }
+        )),
+    ];
+    if live {
+        if edit.turned_on {
+            effects.push(Effect::PlaySequencerStep {
+                program_index: i,
+                sixteenth,
+            });
+        } else {
+            effects.push(Effect::RemovePendingSequencerStep {
+                program_index: i,
+                sixteenth,
+            });
+        }
     }
     effects
 }
@@ -1621,16 +1760,16 @@ mod tests {
     #[test]
     fn complete_cycles_through_matching_names_most_recent_first() {
         let mut state = edit_state(
-            "za = 1;\nzb = 2;\nzab = 3;\n#{level_db=0}\n_ = test;",
-            "z",
-            1,
+            "not_fo = 1;\nnot_fu = 2;\nnot_foo = 3;\n#{level_db=0}\n_ = test;",
+            "not_f",
+            5,
         );
         for (text, cursor) in [
-            ("zab", 3), // the most recently bound match comes first
-            ("zb", 2),
-            ("za", 2),
-            ("z", 1), // the ring wraps through the original fragment
-            ("zab", 3),
+            ("not_foo", 7), // the most recently bound match comes first
+            ("not_fu", 6),
+            ("not_fo", 6),
+            ("not_f", 5), // the ring wraps through the original fragment
+            ("not_foo", 7),
         ] {
             apply_with_empty_status(&mut state, Action::Complete);
             assert_eq!(edit_text_and_cursor(&state), (text.to_string(), cursor));
@@ -1656,15 +1795,19 @@ mod tests {
 
     #[test]
     fn completion_cycle_resets_after_another_action() {
-        let mut state = edit_state("za = 1;\nzab = 2;\n#{level_db=0}\n_ = test;", "z", 1);
+        let mut state = edit_state(
+            "not_ba = 1;\nnot_baz = 2;\n#{level_db=0}\n_ = test;",
+            "not_b",
+            5,
+        );
         apply_with_empty_status(&mut state, Action::Complete);
-        assert_eq!(edit_text_and_cursor(&state), ("zab".to_string(), 3));
+        assert_eq!(edit_text_and_cursor(&state), ("not_baz".to_string(), 7));
         // Any cursor motion ends the cycle: the next completion starts fresh
-        // from the (now fully typed) fragment "zab", which matches nothing.
+        // from the (now fully typed) fragment "not_baz", which matches nothing.
         apply_with_empty_status(&mut state, Action::MoveCursorBy(-1));
         apply_with_empty_status(&mut state, Action::MoveCursorBy(1));
         let effects = apply_with_empty_status(&mut state, Action::Complete);
-        assert_eq!(edit_text_and_cursor(&state), ("zab".to_string(), 3));
+        assert_eq!(edit_text_and_cursor(&state), ("not_baz".to_string(), 7));
         assert!(
             matches!(&effects[0], Effect::ShowMessage(m) if m.contains("No completions")),
             "expected a no-completions message, got {:?}",
@@ -1790,17 +1933,17 @@ mod tests {
     #[test]
     fn completion_cycle_undoes_as_one_unit() {
         let mut state = edit_state(
-            "za = 1;\nzb = 2;\nzab = 3;\n#{level_db=0}\n_ = test;",
-            "z",
-            1,
+            "not_fo = 1;\nnot_fu = 2;\nnot_foo = 3;\n#{level_db=0}\n_ = test;",
+            "not_f",
+            5,
         );
         apply_with_empty_status(&mut state, Action::Complete);
         apply_with_empty_status(&mut state, Action::Complete);
-        assert_eq!(edit_text_and_cursor(&state), ("zb".to_string(), 2));
+        assert_eq!(edit_text_and_cursor(&state), ("not_fu".to_string(), 6));
         apply_with_empty_status(&mut state, Action::Undo);
-        assert_eq!(edit_text_and_cursor(&state), ("z".to_string(), 1));
+        assert_eq!(edit_text_and_cursor(&state), ("not_f".to_string(), 5));
         apply_with_empty_status(&mut state, Action::Redo);
-        assert_eq!(edit_text_and_cursor(&state), ("zb".to_string(), 2));
+        assert_eq!(edit_text_and_cursor(&state), ("not_fu".to_string(), 6));
     }
 
     #[test]
@@ -2107,5 +2250,256 @@ _ = saw(220);";
             "expected the pending playback to be removed, got {:?}",
             effects
         );
+    }
+
+    /// Builds a state whose program 0 is a sequenceable on_beats call over
+    /// beats [1, 2.5], with on_beats stubbed so evaluation succeeds with
+    /// just the prelude.
+    fn sequencer_state() -> AppState {
+        AppState::from_source(
+            "on_beats = fn(w, bs) => w;\n\
+             #{level_db=0}\n\
+             _ = on_beats(1 | fin(time - 1), [1, 2.5]);\n"
+                .to_string(),
+            std::path::PathBuf::new(),
+        )
+        .expect("test source should parse")
+    }
+
+    /// A status with a TopLevel mark for program 0's anchor step starting at
+    /// `start` (before `now` = active, after `now` = pending).
+    fn status_with_anchor(start: Instant) -> tracker::Status<WaveformId, MarkId> {
+        let mut status = empty_status();
+        status.marks.push(tracker::Mark {
+            waveform_id: WaveformId::Step {
+                program: 0,
+                sixteenth: player::ANCHOR_SIXTEENTH,
+            },
+            mark_id: MarkId::TopLevel,
+            start,
+            duration: Duration::from_secs(1),
+        });
+        status
+    }
+
+    #[test]
+    fn toggle_sequencer_step_inserts_beat_and_emits_evaluate_then_update_source() {
+        let mut state = sequencer_state();
+        let effects =
+            apply_with_empty_status(&mut state, Action::ToggleSequencerStep { sixteenth: 8 });
+        assert_eq!(
+            state.active_program().text(),
+            "on_beats(1 | fin(time - 1), [1, 2.5, 3])"
+        );
+        assert!(matches!(
+            effects[0],
+            Effect::EvaluateProgram {
+                program_index: 0,
+                mode_on_success: None,
+                mode_on_failure: None,
+            }
+        ));
+        assert!(matches!(effects[1], Effect::UpdateSource(0)));
+        assert!(
+            matches!(&effects[2], Effect::ShowMessage(m) if m.contains("beat 3 on")),
+            "expected a beat-on message, got {:?}",
+            effects
+        );
+        // Not playing: the toggle is text-only, no tracker effect.
+        assert_eq!(effects.len(), 3);
+    }
+
+    #[test]
+    fn toggle_sequencer_step_off_removes_off_grid_beats_in_window() {
+        let mut state = AppState::from_source(
+            "on_beats = fn(w, bs) => w;\n\
+             #{level_db=0}\n\
+             _ = on_beats(1 | fin(time - 1), [1, 2.1, 2.2, 3]);\n"
+                .to_string(),
+            std::path::PathBuf::new(),
+        )
+        .expect("test source should parse");
+        let effects =
+            apply_with_empty_status(&mut state, Action::ToggleSequencerStep { sixteenth: 4 });
+        assert_eq!(
+            state.active_program().text(),
+            "on_beats(1 | fin(time - 1), [1, 3])"
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::ShowMessage(m) if m.contains("beat 2 off"))),
+            "expected a beat-off message, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn toggle_on_while_playing_emits_play_sequencer_step() {
+        let mut state = sequencer_state();
+        let now = Instant::now();
+        let status = status_with_anchor(now - Duration::from_secs(1));
+        let effects = apply_with_status(
+            &mut state,
+            &status,
+            now,
+            Action::ToggleSequencerStep { sixteenth: 4 },
+        );
+        assert!(
+            matches!(
+                effects.last(),
+                Some(Effect::PlaySequencerStep {
+                    program_index: 0,
+                    sixteenth: 4,
+                })
+            ),
+            "expected PlaySequencerStep last, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn toggle_off_while_playing_emits_remove_pending_step() {
+        let mut state = sequencer_state();
+        let now = Instant::now();
+        let status = status_with_anchor(now - Duration::from_secs(1));
+        let effects = apply_with_status(
+            &mut state,
+            &status,
+            now,
+            Action::ToggleSequencerStep { sixteenth: 0 },
+        );
+        assert_eq!(
+            state.active_program().text(),
+            "on_beats(1 | fin(time - 1), [2.5])"
+        );
+        assert!(
+            matches!(
+                effects.last(),
+                Some(Effect::RemovePendingSequencerStep {
+                    program_index: 0,
+                    sixteenth: 0,
+                })
+            ),
+            "expected RemovePendingSequencerStep last, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn toggle_with_pending_anchor_still_emits_play() {
+        let mut state = sequencer_state();
+        let now = Instant::now();
+        let status = status_with_anchor(now + Duration::from_secs(1));
+        let effects = apply_with_status(
+            &mut state,
+            &status,
+            now,
+            Action::ToggleSequencerStep { sixteenth: 4 },
+        );
+        assert!(
+            matches!(effects.last(), Some(Effect::PlaySequencerStep { .. })),
+            "expected PlaySequencerStep for a queued family, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn toggle_shifts_edit_cursor_after_edit_range() {
+        let mut state = sequencer_state();
+        let end = state.active_program().text().len();
+        state.mode = Mode::Edit {
+            cursor_position: end,
+            errors: vec![],
+            completion: None,
+        };
+        apply_with_empty_status(&mut state, Action::ToggleSequencerStep { sixteenth: 8 });
+        let Mode::Edit {
+            cursor_position, ..
+        } = state.mode
+        else {
+            panic!("expected to stay in Edit mode");
+        };
+        // ", 3" was inserted before the cursor.
+        assert_eq!(cursor_position, end + 3);
+
+        // A cursor before the edited range stays put.
+        state.mode = Mode::Edit {
+            cursor_position: 0,
+            errors: vec![],
+            completion: None,
+        };
+        apply_with_empty_status(&mut state, Action::ToggleSequencerStep { sixteenth: 8 });
+        let Mode::Edit {
+            cursor_position, ..
+        } = state.mode
+        else {
+            panic!("expected to stay in Edit mode");
+        };
+        assert_eq!(cursor_position, 0);
+    }
+
+    #[test]
+    fn toggle_on_non_sequenceable_program_only_shows_message() {
+        let mut state = AppState::from_source(
+            "#{level_db=0}\n_ = 1 | fin(time - 1);\n".to_string(),
+            std::path::PathBuf::new(),
+        )
+        .expect("test source should parse");
+        let text_before = state.active_program().text().to_string();
+        let effects =
+            apply_with_empty_status(&mut state, Action::ToggleSequencerStep { sixteenth: 0 });
+        assert_eq!(state.active_program().text(), text_before);
+        assert_eq!(effects.len(), 1);
+        assert!(
+            matches!(&effects[0], Effect::ShowMessage(m) if m.contains("not sequenceable")),
+            "expected a not-sequenceable message, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn enqueue_pending_playback_queues_at_next_measure() {
+        let mut state = test_state();
+        state.repeat_after_measures = Some(2);
+        let effects = apply_with_empty_status(&mut state, Action::EnqueuePendingPlayback(0));
+        assert!(
+            matches!(
+                effects[0],
+                Effect::PlayProgram {
+                    program_index: 0,
+                    start_at_next_measure: true,
+                    repeat_after_measures: Some(2),
+                }
+            ),
+            "expected a queued PlayProgram with the app-wide repeat, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn enqueue_pending_playback_noops_when_already_pending() {
+        let mut state = test_state();
+        let now = Instant::now();
+        let status = status_with_mark(now + Duration::from_secs(1));
+        let effects =
+            apply_with_status(&mut state, &status, now, Action::EnqueuePendingPlayback(0));
+        assert!(effects.is_empty(), "expected no effects, got {:?}", effects);
+    }
+
+    #[test]
+    fn pad_mode_cycles_through_three_sub_modes() {
+        let mut state = sequencer_state();
+        assert_eq!(state.daw_pad_mode, DawPadMode::ClipLauncher);
+        let cycle = || Action::PadModeChanged {
+            previous: launchkey::PadMode::DAW,
+            current: launchkey::PadMode::DAW,
+        };
+        apply_with_empty_status(&mut state, cycle());
+        assert_eq!(state.daw_pad_mode, DawPadMode::KeysInstaller);
+        apply_with_empty_status(&mut state, cycle());
+        assert_eq!(state.daw_pad_mode, DawPadMode::Sequencer);
+        apply_with_empty_status(&mut state, cycle());
+        assert_eq!(state.daw_pad_mode, DawPadMode::ClipLauncher);
     }
 }
