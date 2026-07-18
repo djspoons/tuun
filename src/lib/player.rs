@@ -75,8 +75,8 @@ impl Player {
 
     /// Plays the program at `program_index` as a waveform, substituting its
     /// current slider values. Returns the user-visible message, or `None`
-    /// when the program has no cached waveform (or the index is out of
-    /// range) and nothing was played.
+    /// when the program's text didn't evaluate to a waveform (or the index
+    /// is out of range) and nothing was played.
     ///
     /// `start_at_next_measure` routes through the precompute thread and
     /// schedules the start at the next measure boundary; otherwise the
@@ -132,8 +132,8 @@ impl Player {
     /// Plays the sequenceable program at `program_index` decomposed: one
     /// scheduled, independently repeating `WaveformId::Step` per listed
     /// beat, plus a silent anchor step carrying the `TopLevel` mark.
-    /// Returns the user-visible message, or `None` when the program has no
-    /// cached sequence and nothing was played.
+    /// Returns the user-visible message, or `None` when the program's text
+    /// didn't evaluate to a sequenceable waveform and nothing was played.
     ///
     /// `start_at_next_measure` routes through the precompute thread and
     /// anchors the cycle at the next measure boundary; otherwise the cycle
@@ -521,7 +521,7 @@ mod tests {
     }
 
     /// Builds a program set whose program 0 is sequenceable with beats
-    /// [1, 2.5] and a cached sequence.
+    /// [1, 2.5], evaluated so its sequence is available.
     fn sequenced_set() -> ProgramSet {
         let source = "on_beats = fn(w, bs) => w;\n\
                       #{level_db=0}\n\

@@ -17,7 +17,8 @@ use crate::eval;
 use crate::expr;
 use crate::ids::MarkId;
 use crate::parser;
-use crate::programs::{Evaluation, ProgramSet, ProgramSliders};
+use crate::programs::{Evaluated, ProgramSet, ProgramSliders};
+use crate::sequencer;
 use crate::slider;
 use crate::waveform;
 
@@ -342,11 +343,18 @@ impl Evaluator {
     }
 
     /// Evaluates the program at `index` and classifies the result as a
-    /// playable waveform, a keys instrument, or invalid.
+    /// playable waveform or a keys instrument, with the user-visible
+    /// diagnostics as the error when it is neither.
     ///
     /// Keys-instrument candidates (functions) are sanity-checked by
-    /// actually invoking them with dummy note/velocity arguments.
-    pub fn evaluate_program(&self, set: &ProgramSet, index: usize) -> Evaluation {
+    /// actually invoking them with dummy note/velocity arguments. Waveform
+    /// results additionally carry their decomposed sequence when the text
+    /// has the sequenceable `on_beats` shape.
+    pub fn evaluate_program(
+        &self,
+        set: &ProgramSet,
+        index: usize,
+    ) -> Result<Evaluated, Vec<Diagnostic>> {
         // TODO could improve error messages here
         const NOT_A_PROGRAM: &str = "Program is not a waveform or keys instrument";
         // Programs and their file's sibling bindings see the prelude through an
@@ -358,28 +366,26 @@ impl Evaluator {
 
         let expr = match parser::parse_program(text, Source::Program) {
             Err(errors) => {
-                return Evaluation::Invalid(
-                    errors
-                        .iter()
-                        .map(|error| self.diagnose(error, set, index))
-                        .collect(),
-                );
+                return Err(errors
+                    .iter()
+                    .map(|error| self.diagnose(error, set, index))
+                    .collect());
             }
             Ok(expr) => expr,
         };
         let expr = match eval::evaluate(|path| self.resolve(path), &bindings, expr) {
             Err(error) => {
-                return Evaluation::Invalid(vec![self.diagnose(&error, set, index)]);
+                return Err(vec![self.diagnose(&error, set, index)]);
             }
             Ok(expr) => expr,
         };
         match expr.expr {
-            expr::Expr::Waveform(w) => Evaluation::Waveform(w),
+            expr::Expr::Waveform(w) => Ok(self.evaluated_waveform(set, index, w)),
             expr::Expr::Seq { waveform, .. } => {
                 if let expr::Expr::Waveform(w) = waveform.expr {
-                    Evaluation::Waveform(w)
+                    Ok(self.evaluated_waveform(set, index, w))
                 } else {
-                    Evaluation::Invalid(vec![Diagnostic::message_only(NOT_A_PROGRAM.to_string())])
+                    Err(vec![Diagnostic::message_only(NOT_A_PROGRAM.to_string())])
                 }
             }
             expr::Expr::Function { .. } | expr::Expr::BuiltIn { .. } => {
@@ -390,12 +396,32 @@ impl Evaluator {
                     vec![expr::SourceExpr::float(60.0), expr::SourceExpr::float(0.7)],
                     set.programs()[index].sliders(),
                 ) {
-                    Ok(_) => Evaluation::KeysInstrument(expr),
-                    Err(error) => Evaluation::Invalid(vec![self.diagnose(&error, set, index)]),
+                    Ok(_) => Ok(Evaluated::KeysInstrument(expr)),
+                    Err(error) => Err(vec![self.diagnose(&error, set, index)]),
                 }
             }
-            _ => Evaluation::Invalid(vec![Diagnostic::message_only(NOT_A_PROGRAM.to_string())]),
+            _ => Err(vec![Diagnostic::message_only(NOT_A_PROGRAM.to_string())]),
         }
+    }
+
+    /// Builds the `Evaluated::Waveform` result for the program at `index`,
+    /// attaching the decomposed sequence when the program's text has the
+    /// sequenceable `on_beats` shape.
+    fn evaluated_waveform(
+        &self,
+        set: &ProgramSet,
+        index: usize,
+        waveform: waveform::Waveform<MarkId>,
+    ) -> Evaluated {
+        let sequence = sequencer::analyze(set.programs()[index].text()).and_then(|shape| {
+            let step_waveform =
+                self.evaluate_program_waveform_expr(set, index, &shape.waveform_expr)?;
+            Some(sequencer::Sequence {
+                beats: shape.beats.iter().map(|(beat, _)| *beat).collect(),
+                step_waveform,
+            })
+        });
+        Evaluated::Waveform { waveform, sequence }
     }
 
     /// Returns the evaluated (name, value) context the program at `index` is
@@ -515,7 +541,7 @@ mod tests {
         let evaluator = Evaluator::new(44100, 90, PathBuf::new());
 
         // The program classifies as a keys instrument.
-        let Evaluation::KeysInstrument(function) = evaluator.evaluate_program(&set, 0) else {
+        let Ok(Evaluated::KeysInstrument(function)) = evaluator.evaluate_program(&set, 0) else {
             panic!("expected a keys instrument");
         };
 
@@ -563,9 +589,9 @@ mod tests {
         let evaluator = Evaluator::new(44100, 90, std::path::PathBuf::from("./lib/v0"));
 
         let function = match evaluator.evaluate_program(&set, 0) {
-            Evaluation::KeysInstrument(function) => function,
-            Evaluation::Invalid(diagnostics) => panic!("invalid: {:?}", diagnostics),
-            Evaluation::Waveform(_) => panic!("classified as waveform"),
+            Ok(Evaluated::KeysInstrument(function)) => function,
+            Err(diagnostics) => panic!("invalid: {:?}", diagnostics),
+            Ok(Evaluated::Waveform { .. }) => panic!("classified as waveform"),
         };
         set.program_mut(0)
             .unwrap()
@@ -690,8 +716,8 @@ mod tests {
         .expect("test source should parse");
         let evaluator = Evaluator::new(44100, 90, PathBuf::new());
         match evaluator.evaluate_program(&set, 0) {
-            Evaluation::Waveform(_) => {}
-            Evaluation::Invalid(diagnostics) => {
+            Ok(Evaluated::Waveform { .. }) => {}
+            Err(diagnostics) => {
                 panic!("prelude names should resolve, got: {}", diagnostics[0])
             }
             _ => panic!("expected a waveform evaluation"),
@@ -706,7 +732,7 @@ mod tests {
         )
         .expect("test source should parse");
         let evaluator = Evaluator::new(44100, 90, PathBuf::new());
-        let Evaluation::Invalid(diagnostics) = evaluator.evaluate_program(&set, 0) else {
+        let Err(diagnostics) = evaluator.evaluate_program(&set, 0) else {
             panic!("expected an invalid evaluation");
         };
         assert_eq!(diagnostics.len(), 1);

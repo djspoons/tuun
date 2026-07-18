@@ -1,4 +1,4 @@
-//! Programs and their state: text, sliders, level, and evaluation caches.
+//! Programs and their state: text, sliders, level, and evaluation results.
 
 use std::fmt;
 use std::ops::Range;
@@ -130,15 +130,17 @@ pub struct SliderChange {
     pub value: f32,
 }
 
-/// The result of evaluating a program's text.
-pub enum Evaluation {
+/// The result of successfully evaluating a program's text.
+#[derive(Debug, Clone)]
+pub enum Evaluated {
     /// The program evaluated to a playable waveform.
-    Waveform(waveform::Waveform<MarkId>),
+    Waveform {
+        waveform: waveform::Waveform<MarkId>,
+        /// Present when the text also has the sequenceable `on_beats` shape.
+        sequence: Option<sequencer::Sequence>,
+    },
     /// The program evaluated to a function usable as a keys instrument.
     KeysInstrument(expr::SourceExpr<MarkId, Source>),
-    /// The program failed to parse or evaluate; holds the user-visible
-    /// diagnostics.
-    Invalid(Vec<Diagnostic>),
 }
 
 /// Maximum number of undo units kept per program; recording past the cap drops
@@ -180,11 +182,11 @@ impl EditHistory {
 }
 
 /// One program slot: its source text, sliders, level, color, and the
-/// cached results of its last evaluation.
+/// result of its last evaluation.
 #[derive(Debug, Clone)]
 pub struct Program {
-    /// The program's source expression text. Kept in sync with the caches
-    /// below: any change invalidates them (see `set_text` / `realign`).
+    /// The program's source expression text. Kept in sync with `evaluated`:
+    /// any change drops it (see `set_text` / `realign`).
     text: String,
     /// The span in the source file from which this program came. `0..0`
     /// marks a brand-new or padding slot.
@@ -194,13 +196,9 @@ pub struct Program {
     sliders: ProgramSliders,
     color: Option<(u8, u8, u8)>,
     level_db: f32,
-    /// Set if the current text evaluates to a valid waveform.
-    cached_waveform: Option<waveform::Waveform<MarkId>>,
-    /// Set if the current text evaluates to a valid keys instrument.
-    cached_keys_instrument: Option<expr::SourceExpr<MarkId, Source>>,
-    /// Set if the current text is sequenceable (a top-level `on_beats` call
-    /// with a literal beat list) and its waveform argument evaluated.
-    cached_sequence: Option<sequencer::Sequence>,
+    /// Cached result of the last evaluation of the current text; `None` when
+    /// never evaluated, failed, or the text is empty.
+    evaluated: Option<Evaluated>,
     /// Undo/redo history for Edit-mode text changes.
     history: EditHistory,
 }
@@ -215,9 +213,7 @@ impl Program {
             sliders: ProgramSliders::default(),
             color: None,
             level_db: 0.0,
-            cached_waveform: None,
-            cached_keys_instrument: None,
-            cached_sequence: None,
+            evaluated: None,
             history: EditHistory::default(),
         }
     }
@@ -267,9 +263,7 @@ impl Program {
                     sliders,
                     color,
                     level_db,
-                    cached_waveform: None,
-                    cached_keys_instrument: None,
-                    cached_sequence: None,
+                    evaluated: None,
                     history: EditHistory::default(),
                 })
             } else {
@@ -310,30 +304,46 @@ impl Program {
         &self.sliders
     }
 
-    /// Returns the cached waveform if the current text evaluated to one.
+    /// Returns what the current text evaluated to, if it has been evaluated
+    /// and did so successfully.
+    ///
+    /// The result reflects the evaluation context (sibling bindings, opened
+    /// modules) as of the evaluation: a dependency edited since is not
+    /// reflected until the program is evaluated again.
+    pub fn evaluated(&self) -> Option<&Evaluated> {
+        self.evaluated.as_ref()
+    }
+
+    /// Returns the waveform if the current text evaluated to one.
     pub fn waveform(&self) -> Option<&waveform::Waveform<MarkId>> {
-        self.cached_waveform.as_ref()
+        match &self.evaluated {
+            Some(Evaluated::Waveform { waveform, .. }) => Some(waveform),
+            _ => None,
+        }
     }
 
-    /// Returns the cached keys-instrument function if the current text
-    /// evaluated to one.
+    /// Returns the keys-instrument function if the current text evaluated
+    /// to one.
     pub fn keys_instrument(&self) -> Option<&expr::SourceExpr<MarkId, Source>> {
-        self.cached_keys_instrument.as_ref()
+        match &self.evaluated {
+            Some(Evaluated::KeysInstrument(expr)) => Some(expr),
+            _ => None,
+        }
     }
 
-    /// Returns the cached decomposed sequence if the current text is
-    /// sequenceable and evaluated to one.
+    /// Returns the decomposed sequence if the current text evaluated to a
+    /// sequenceable waveform.
     pub fn sequence(&self) -> Option<&sequencer::Sequence> {
-        self.cached_sequence.as_ref()
+        match &self.evaluated {
+            Some(Evaluated::Waveform { sequence, .. }) => sequence.as_ref(),
+            _ => None,
+        }
     }
 
-    /// Replaces the program's `text` and invalidates the cached
-    /// evaluations.
+    /// Replaces the program's `text`, dropping any evaluation result.
     pub fn set_text(&mut self, text: String) {
         self.text = text;
-        self.cached_waveform = None;
-        self.cached_keys_instrument = None;
-        self.cached_sequence = None;
+        self.evaluated = None;
     }
 
     /// Returns the final character of the last coalesced insertion, or
@@ -426,41 +436,13 @@ impl Program {
         self.sliders.set_normalized(slider_index, normalized)
     }
 
-    /// Records the result of evaluating the program's current text, replacing
-    /// both caches. Returns the user-visible diagnostics as an error when the
-    /// evaluation was invalid.
-    ///
-    /// An `Invalid` evaluation still clears both caches: even though editing
-    /// already clears them, the failure may have come from a changed dependency
-    /// rather than this program's own text.
-    fn record_evaluation(&mut self, evaluation: Evaluation) -> Result<(), Vec<Diagnostic>> {
-        self.cached_sequence = None;
-        match evaluation {
-            Evaluation::Waveform(w) => {
-                self.cached_waveform = Some(w);
-                self.cached_keys_instrument = None;
-                Ok(())
-            }
-            Evaluation::KeysInstrument(expr) => {
-                self.cached_waveform = None;
-                self.cached_keys_instrument = Some(expr);
-                Ok(())
-            }
-            Evaluation::Invalid(diagnostics) => {
-                self.cached_waveform = None;
-                self.cached_keys_instrument = None;
-                Err(diagnostics)
-            }
-        }
-    }
-
     /// Realigns the program with its binding after the source file was
     /// re-parsed: updates the binding index and span, and re-slices `text`
     /// from `source`.
     ///
-    /// Deliberately does NOT invalidate the evaluation caches — the text is
+    /// Deliberately does NOT drop the evaluation result — the text is
     /// unchanged semantically, only its location in the file moved. This is
-    /// the one sanctioned way to rewrite `text` without clearing caches.
+    /// the one sanctioned way to rewrite `text` without dropping it.
     fn realign(&mut self, binding_index: usize, span: Range<usize>, source: &str) {
         self.binding_index = binding_index;
         self.text = source[span.clone()].to_string();
@@ -705,42 +687,33 @@ impl ProgramSet {
         Some(expr::line_col(&self.source, offset))
     }
 
-    /// Evaluates the program at `index` and records the result in its
-    /// evaluation caches. Returns the user-visible diagnostics as an error
-    /// when the evaluation was invalid (the caches are still cleared in that
-    /// case).
+    /// Evaluates the program at `index` and records the result on the
+    /// program. Returns the user-visible diagnostics as an error when the
+    /// evaluation failed (any previous result is dropped in that case: even
+    /// though editing already drops it, the failure may have come from a
+    /// changed dependency rather than this program's own text).
     pub fn evaluate_and_record(
         &mut self,
         evaluator: &Evaluator,
         index: usize,
     ) -> Result<(), Vec<Diagnostic>> {
-        // An empty program is a deletion, not a parse error: clear the caches
+        // An empty program is a deletion, not a parse error: clear the cache
         // and succeed so the editor can leave Edit mode (the splice that
         // follows removes the binding from source).
         if self.programs[index].text().trim().is_empty() {
-            let program = &mut self.programs[index];
-            program.cached_waveform = None;
-            program.cached_keys_instrument = None;
-            program.cached_sequence = None;
+            self.programs[index].evaluated = None;
             return Ok(());
         }
-        let evaluation = evaluator.evaluate_program(self, index);
-        let result = self.programs[index].record_evaluation(evaluation);
-        // A waveform program with the sequenceable shape additionally caches
-        // its decomposed form, so it can play (and be edited) one tracker
-        // entry per beat.
-        if result.is_ok() && self.programs[index].cached_waveform.is_some() {
-            let sequence = sequencer::analyze(self.programs[index].text()).and_then(|shape| {
-                let step_waveform =
-                    evaluator.evaluate_program_waveform_expr(self, index, &shape.waveform_expr)?;
-                Some(sequencer::Sequence {
-                    beats: shape.beats.iter().map(|(beat, _)| *beat).collect(),
-                    step_waveform,
-                })
-            });
-            self.programs[index].cached_sequence = sequence;
+        match evaluator.evaluate_program(self, index) {
+            Ok(evaluated) => {
+                self.programs[index].evaluated = Some(evaluated);
+                Ok(())
+            }
+            Err(diagnostics) => {
+                self.programs[index].evaluated = None;
+                Err(diagnostics)
+            }
         }
-        result
     }
 }
 
@@ -1316,31 +1289,47 @@ mod tests {
     }
 
     #[test]
-    fn record_evaluation_replaces_both_caches() {
+    fn evaluate_and_record_attaches_sequence_to_waveform_programs() {
+        let (mut set, _) = ProgramSet::from_source(
+            "on_beats = fn(w, bs) => w;\n\
+             #{level_db=0}\n\
+             _ = on_beats(1 | fin(time - 1), [1, 2.5]);\n"
+                .to_string(),
+            PathBuf::new(),
+        )
+        .expect("test source should parse");
+        let evaluator = Evaluator::new(8000, 90, PathBuf::new());
+        set.evaluate_and_record(&evaluator, 0)
+            .expect("test program should evaluate");
+        let Some(Evaluated::Waveform {
+            sequence: Some(sequence),
+            ..
+        }) = set.programs()[0].evaluated()
+        else {
+            panic!("expected a waveform with an attached sequence");
+        };
+        assert_eq!(sequence.beats, vec![1.0, 2.5]);
+    }
+
+    #[test]
+    fn evaluated_accessors_follow_the_cached_variant() {
         let mut program = Program::from_string("x", 0);
-        assert!(
-            program
-                .record_evaluation(Evaluation::Waveform(waveform::Waveform::Const(1.0)))
-                .is_ok()
-        );
+        program.evaluated = Some(Evaluated::Waveform {
+            waveform: waveform::Waveform::Const(1.0),
+            sequence: None,
+        });
         assert!(program.waveform().is_some());
         assert!(program.keys_instrument().is_none());
+        assert!(program.sequence().is_none());
 
-        assert!(
-            program
-                .record_evaluation(Evaluation::KeysInstrument(expr::SourceExpr::float(1.0)))
-                .is_ok()
-        );
+        program.evaluated = Some(Evaluated::KeysInstrument(expr::SourceExpr::float(1.0)));
         assert!(program.waveform().is_none());
         assert!(program.keys_instrument().is_some());
+        assert!(program.sequence().is_none());
 
-        // Invalid clears both caches and hands back the diagnostics.
-        assert_eq!(
-            program.record_evaluation(Evaluation::Invalid(vec![Diagnostic::message_only(
-                "nope".to_string()
-            )])),
-            Err(vec![Diagnostic::message_only("nope".to_string())])
-        );
+        // Any text change invalidates the cache.
+        program.set_text("y".to_string());
+        assert!(program.evaluated().is_none());
         assert!(program.waveform().is_none());
         assert!(program.keys_instrument().is_none());
     }
