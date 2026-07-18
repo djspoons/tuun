@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use crate::actions;
-use crate::ids::{MarkId, WaveformId};
+use crate::ids::{MarkId, WaveformId, WaveformSelector};
 use crate::launchkey;
 use crate::programs::{PROGRAMS_PER_BANK, Program};
 use crate::renderer;
@@ -197,12 +197,12 @@ fn update_pads_clip_launcher(
         let (red, green, blue) = program_pad_color(program);
         let is_installed_keys = state.keys.as_ref().is_some_and(|k| k.id == program_index);
         // Top row is based on active waveforms
-        if status.has_active_mark(now, WaveformId::Program(program_index), MarkId::TopLevel)
-            || (is_installed_keys
-                && status
-                    .marks
-                    .iter()
-                    .any(|m| matches!(m.waveform_id, WaveformId::Key(_))))
+        if status.has_active_mark(
+            now,
+            &WaveformSelector::ProgramVoices(program_index),
+            &MarkId::TopLevel,
+        ) || (is_installed_keys
+            && status.has_active_mark(now, &WaveformSelector::AllKeys, &MarkId::TopLevel))
         {
             let (r, g, b) = pulsed(
                 (0, U7_MAX, 0),
@@ -221,7 +221,11 @@ fn update_pads_clip_launcher(
             launchkey.set_daw_top_pad_color(i as u8, 0, 0, 0);
         }
         // Bottom row is based on pending waveforms
-        if status.has_pending_mark(now, WaveformId::Program(program_index), MarkId::TopLevel) {
+        if status.has_pending_mark(
+            now,
+            &WaveformSelector::ProgramVoices(program_index),
+            &MarkId::TopLevel,
+        ) {
             launchkey.set_daw_bottom_pad_color(i as u8, 0, 127, 0);
         } else if is_installed_keys {
             // If it's the installed keys program, pulse the configured color.

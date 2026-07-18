@@ -12,7 +12,7 @@ use std::time;
 use crate::diagnostics::Source;
 use crate::evaluator::Evaluator;
 use crate::expr;
-use crate::ids::{MarkId, WaveformId};
+use crate::ids::{MarkId, WaveformId, WaveformSelector};
 use crate::optimizer;
 use crate::programs::{ProgramSet, ProgramSliders};
 use crate::slider;
@@ -136,47 +136,35 @@ impl Player {
         });
     }
 
-    /// Fades out the waveform with the given id over a short ramp. A no-op
-    /// if no matching waveform is playing.
-    pub fn stop_waveform(&self, id: WaveformId) {
-        use waveform::{Operator, Waveform::*};
-        const STOP_DURATION_SECS: f32 = 0.05;
+    /// Fades out the waveforms matched by the selector over a short ramp. A
+    /// no-op if no matching waveform is playing.
+    pub fn stop_waveform(&self, selector: WaveformSelector) {
         self.fast_sender
             .send(tracker::Command::Modify {
-                id,
+                selector,
                 mark_id: MarkId::Terminator,
-                waveform: Fin {
-                    length: Box::new(BinaryPointOp(
-                        Operator::Subtract,
-                        Box::new(Time(())),
-                        Box::new(Const(STOP_DURATION_SECS)),
-                    )),
-                    waveform: Box::new(BinaryPointOp(
-                        Operator::Subtract,
-                        Box::new(Const(1.0)),
-                        Box::new(BinaryPointOp(
-                            Operator::Multiply,
-                            Box::new(Time(())),
-                            Box::new(Const(1.0 / STOP_DURATION_SECS)),
-                        )),
-                    )),
-                },
+                waveform: stop_ramp(),
             })
             .unwrap();
     }
 
-    /// Removes the pending (not-yet-started) waveform with the given id.
-    pub fn remove_pending(&self, id: WaveformId) {
+    /// Removes the pending (not-yet-started) waveforms matched by the selector.
+    pub fn remove_pending(&self, selector: WaveformSelector) {
         let _ = self
             .fast_sender
-            .send(tracker::Command::RemovePending { id });
+            .send(tracker::Command::RemovePending { selector });
     }
 
-    /// Replaces the waveform under `mark_id` on the waveform with the given
-    /// id.
-    pub fn modify(&self, id: WaveformId, mark_id: MarkId, waveform: waveform::Waveform<MarkId>) {
+    /// Replaces the waveform under `mark_id` on every waveform matched by the
+    /// selector.
+    pub fn modify(
+        &self,
+        selector: WaveformSelector,
+        mark_id: MarkId,
+        waveform: waveform::Waveform<MarkId>,
+    ) {
         let _ = self.fast_sender.send(tracker::Command::Modify {
-            id,
+            selector,
             mark_id,
             waveform,
         });
@@ -257,6 +245,29 @@ impl Player {
             Ok(expr) => panic!("Error creating beats waveform, got {}", expr),
             Err(message) => panic!("Error evaluating beats waveform: {}", message),
         }
+    }
+}
+
+/// Builds the short fade-out ramp to be substituted at a `Terminator` mark to
+/// stop a waveform.
+pub fn stop_ramp() -> waveform::Waveform<MarkId> {
+    use waveform::{Operator, Waveform::*};
+    const STOP_DURATION_SECS: f32 = 0.05;
+    Fin {
+        length: Box::new(BinaryPointOp(
+            Operator::Subtract,
+            Box::new(Time(())),
+            Box::new(Const(STOP_DURATION_SECS)),
+        )),
+        waveform: Box::new(BinaryPointOp(
+            Operator::Subtract,
+            Box::new(Const(1.0)),
+            Box::new(BinaryPointOp(
+                Operator::Multiply,
+                Box::new(Time(())),
+                Box::new(Const(1.0 / STOP_DURATION_SECS)),
+            )),
+        )),
     }
 }
 

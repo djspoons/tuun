@@ -13,25 +13,50 @@ use crate::actions::{self, AppState, Effect};
 use crate::diagnostics;
 use crate::evaluator;
 use crate::expr;
-use crate::ids::{MarkId, WaveformId};
+use crate::ids::{MarkId, WaveformId, WaveformSelector};
 use crate::keys::Keys;
 use crate::player;
 use crate::programs::{self, PROGRAMS_PER_BANK};
 use crate::slider;
 use crate::tracker;
-use crate::waveform;
 use crate::{launchkey, optimizer};
 
 /// Events for the slider worker thread, which coalesces them per audio
 /// quantum into tracker `Modify` ramps.
 pub enum SliderEvent {
     UpdateSlider {
-        id: WaveformId,
+        selector: WaveformSelector,
         slider: String,
         value: f32,
     },
-    SetInitialValues(HashMap<(WaveformId, String), f32>),
-    UpdateInitialValues(HashMap<(WaveformId, String), f32>),
+    SetInitialValues(HashMap<(WaveformSelector, String), f32>),
+    UpdateInitialValues(HashMap<(WaveformSelector, String), f32>),
+}
+
+/// Converts one coalesced batch of slider targets into tracker ramp commands,
+/// ramping each from its last flushed value.
+///
+/// A selector/slider pair seen for the first time is seeded at the incoming
+/// target, producing a flat ramp.
+pub fn flush_slider_updates(
+    pending: &mut HashMap<(WaveformSelector, String), f32>,
+    last_slider_values: &mut HashMap<(WaveformSelector, String), f32>,
+    ramp_duration_secs: f32,
+) -> Vec<tracker::Command<WaveformId, MarkId>> {
+    let mut commands = Vec::with_capacity(pending.len());
+    for ((selector, slider), value) in pending.drain() {
+        let last_value = last_slider_values
+            .entry((selector.clone(), slider.clone()))
+            .or_insert(value);
+        let waveform = slider::make_ramp(*last_value, value, ramp_duration_secs);
+        *last_value = value;
+        commands.push(tracker::Command::Modify {
+            selector,
+            mark_id: MarkId::Slider(slider),
+            waveform,
+        });
+    }
+    commands
 }
 
 /// External handles the runner needs but doesn't own.
@@ -111,21 +136,26 @@ impl EffectRunner {
                     return;
                 }
                 self.player
-                    .stop_waveform(WaveformId::Program(program_index));
+                    .stop_waveform(WaveformSelector::ProgramVoices(program_index));
+                // A looping program keeps a pending copy queued for its next
+                // cycle; remove it so "stop" doesn't leave the fade ramp
+                // re-playing at every repeat.
+                self.player
+                    .remove_pending(WaveformSelector::ProgramVoices(program_index));
             }
             Effect::RemovePendingProgram(program_index) => {
                 if state.programs.program(program_index).is_none() {
                     return;
                 }
                 self.player
-                    .remove_pending(WaveformId::Program(program_index));
+                    .remove_pending(WaveformSelector::ProgramVoices(program_index));
             }
             Effect::ModifyWaveform {
-                id,
+                selector,
                 mark_id,
                 waveform,
             } => {
-                self.player.modify(id, mark_id, waveform);
+                self.player.modify(selector, mark_id, waveform);
             }
 
             Effect::EvaluateProgram {
@@ -200,17 +230,19 @@ impl EffectRunner {
                         // values from when the instrument was originally
                         // evaluated, so swap in the program's current runtime
                         // values and at the same time collect the (label,
-                        // value) pairs we need to seed the slider worker for
-                        // this fresh `Key` id (so its next ramp has a sensible
-                        // "previous value" to start from).
-                        let id = WaveformId::Key(key);
-                        let last_slider_values: HashMap<(WaveformId, String), f32> =
+                        // value) pairs we need to seed the slider worker's key
+                        // family (so its next ramp has a sensible "previous
+                        // value" to start from). All sounding keys hold the
+                        // same slider values — every note-on bakes the current
+                        // ones in, and later moves ramp the whole family — so
+                        // one family entry per slider is enough.
+                        let last_slider_values: HashMap<(WaveformSelector, String), f32> =
                             player::substitute_current_slider_values(
                                 &mut note_on,
                                 program.sliders(),
                             )
                             .into_iter()
-                            .map(|(label, value)| ((id.clone(), label), value))
+                            .map(|(label, value)| ((WaveformSelector::AllKeys, label), value))
                             .collect();
                         let _ = self
                             .slider_sender
@@ -238,42 +270,26 @@ impl EffectRunner {
                     if let Some(program) = state.programs.program(keys.id) {
                         player::substitute_current_slider_values(&mut note_off, program.sliders());
                     }
-                    self.player.modify(id, MarkId::Terminator, note_off);
+                    self.player
+                        .modify(WaveformSelector::Only(id), MarkId::Terminator, note_off);
                     return;
                 }
                 // No stored note-off (key wasn't NoteOn'd, or keys were
                 // uninstalled mid-note). Send a generic stop ramp; it's a
                 // no-op if there's no matching waveform on the tracker.
-                self.player.stop_waveform(id);
+                self.player.stop_waveform(WaveformSelector::Only(id));
             }
 
-            Effect::UpdateSlider { id, slider, value } => {
-                let _ = self
-                    .slider_sender
-                    .send(SliderEvent::UpdateSlider { id, slider, value });
-            }
-            Effect::UpdateActiveKeySliders { slider, value } => {
-                for mark in &world.status.marks {
-                    if let WaveformId::Key(_) = mark.waveform_id {
-                        let _ = self.slider_sender.send(SliderEvent::UpdateSlider {
-                            id: mark.waveform_id.clone(),
-                            slider: slider.clone(),
-                            value,
-                        });
-                    }
-                }
-            }
-            Effect::ModifyActiveKeysAmplitude { amplitude } => {
-                use waveform::Waveform;
-                for mark in &world.status.marks {
-                    if let WaveformId::Key(_) = mark.waveform_id {
-                        self.player.modify(
-                            mark.waveform_id.clone(),
-                            MarkId::Amplitude,
-                            Waveform::Const(amplitude),
-                        );
-                    }
-                }
+            Effect::UpdateSlider {
+                selector,
+                slider,
+                value,
+            } => {
+                let _ = self.slider_sender.send(SliderEvent::UpdateSlider {
+                    selector,
+                    slider,
+                    value,
+                });
             }
 
             Effect::ShowMessage(msg) => {
@@ -378,6 +394,8 @@ fn sync_encoders(state: &AppState, launchkey: &mut launchkey::Launchkey) {
 
 #[cfg(test)]
 mod tests {
+    use crate::waveform;
+
     use super::*;
 
     fn empty_status() -> tracker::Status<WaveformId, MarkId> {
@@ -476,7 +494,7 @@ mod tests {
         let mut note_off = None;
         while let Ok(command) = fast_receiver.try_recv() {
             if let tracker::Command::Modify {
-                id: WaveformId::Key(60),
+                selector: WaveformSelector::Only(WaveformId::Key(60)),
                 mark_id: MarkId::Terminator,
                 waveform,
             } = command
@@ -488,5 +506,112 @@ mod tests {
         let mut marks = Vec::new();
         slider_mark_values(&note_off, &mut marks);
         assert_eq!(marks, vec![("vol".to_string(), 1.0)]);
+    }
+
+    #[test]
+    fn flush_seeds_unknown_family_from_target_without_panicking() {
+        let key = (WaveformSelector::ProgramVoices(0), "cutoff".to_string());
+        let mut pending = HashMap::from([(key.clone(), 0.7)]);
+        let mut last_slider_values = HashMap::new();
+
+        let commands = flush_slider_updates(&mut pending, &mut last_slider_values, 0.02);
+
+        assert!(pending.is_empty());
+        assert_eq!(last_slider_values.get(&key), Some(&0.7));
+        assert_eq!(commands.len(), 1);
+        let tracker::Command::Modify {
+            selector,
+            mark_id,
+            waveform,
+        } = &commands[0]
+        else {
+            panic!("expected a Modify command");
+        };
+        assert_eq!(*selector, WaveformSelector::ProgramVoices(0));
+        assert_eq!(*mark_id, MarkId::Slider("cutoff".to_string()));
+        // Seeded from the target, so the ramp is flat.
+        assert_eq!(
+            format!("{}", waveform),
+            format!("{}", slider::make_ramp::<MarkId>(0.7, 0.7, 0.02))
+        );
+    }
+
+    #[test]
+    fn flush_ramps_from_last_flushed_value() {
+        let key = (WaveformSelector::AllKeys, "vol".to_string());
+        let mut last_slider_values = HashMap::from([(key.clone(), 0.2)]);
+
+        let mut pending = HashMap::from([(key.clone(), 0.8)]);
+        let commands = flush_slider_updates(&mut pending, &mut last_slider_values, 0.02);
+        let tracker::Command::Modify { waveform, .. } = &commands[0] else {
+            panic!("expected a Modify command");
+        };
+        assert_eq!(
+            format!("{}", waveform),
+            format!("{}", slider::make_ramp::<MarkId>(0.2, 0.8, 0.02))
+        );
+        assert_eq!(last_slider_values.get(&key), Some(&0.8));
+
+        // The next flush chains from the value just flushed.
+        let mut pending = HashMap::from([(key.clone(), 0.5)]);
+        let commands = flush_slider_updates(&mut pending, &mut last_slider_values, 0.02);
+        let tracker::Command::Modify { waveform, .. } = &commands[0] else {
+            panic!("expected a Modify command");
+        };
+        assert_eq!(
+            format!("{}", waveform),
+            format!("{}", slider::make_ramp::<MarkId>(0.8, 0.5, 0.02))
+        );
+        assert_eq!(last_slider_values.get(&key), Some(&0.5));
+    }
+
+    #[test]
+    fn note_on_seeds_all_keys_family_baseline() {
+        let (precompute_sender, _precompute_receiver) = mpsc::channel();
+        let (fast_sender, _fast_receiver) = mpsc::channel();
+        let (slider_sender, slider_receiver) = mpsc::channel();
+        let player = player::Player::new(90, 4, precompute_sender, fast_sender);
+        let evaluator = evaluator::Evaluator::new(44100, 90, std::path::PathBuf::new());
+        let mut runner = EffectRunner::new(player, evaluator, slider_sender);
+
+        let mut state = AppState::from_source(
+            "#{sliders=[\"vol:0.5:0:1\"]}\nk = fn(note, vel) => (vol, vol);".to_string(),
+            std::path::PathBuf::new(),
+        )
+        .expect("test source should parse");
+        let status = empty_status();
+        let mut world = World {
+            launchkey: None,
+            status: &status,
+        };
+        runner.run_one(
+            &mut state,
+            &mut world,
+            Effect::EvaluateProgram {
+                program_index: 0,
+                mode_on_failure: actions::Mode::Select,
+            },
+        );
+        runner.run_one(&mut state, &mut world, Effect::InstallKeys(0));
+        runner.run_one(
+            &mut state,
+            &mut world,
+            Effect::PlayNoteOn {
+                key: 60,
+                velocity: 127,
+            },
+        );
+
+        let mut seeded = None;
+        while let Ok(event) = slider_receiver.try_recv() {
+            if let SliderEvent::UpdateInitialValues(values) = event {
+                seeded = Some(values);
+            }
+        }
+        let seeded = seeded.expect("expected an UpdateInitialValues event");
+        assert_eq!(
+            seeded.get(&(WaveformSelector::AllKeys, "vol".to_string())),
+            Some(&0.5)
+        );
     }
 }

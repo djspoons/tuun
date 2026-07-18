@@ -10,7 +10,7 @@ use realfft::RealFftPlanner;
 use realfft::num_complex::{Complex, ComplexFloat};
 
 use crate::actions::{AppState, Mode};
-use crate::ids::{MarkId, WaveformId};
+use crate::ids::{MarkId, WaveformId, WaveformSelector};
 use crate::launchkey;
 use crate::metric::Metric;
 use crate::programs::{PROGRAMS_PER_BANK, SliderDisplay};
@@ -230,7 +230,11 @@ impl Renderer {
                 .unwrap_or(INACTIVE_COLOR);
             let color = match (
                 &mode,
-                status.has_active_mark(now, WaveformId::Program(index), MarkId::TopLevel),
+                status.has_active_mark(
+                    now,
+                    &WaveformSelector::ProgramVoices(index),
+                    &MarkId::TopLevel,
+                ),
             ) {
                 (_, true) => ACTIVE_COLOR,
                 (Mode::Edit { .. }, _) if index == active_program_index => EDIT_COLOR,
@@ -238,7 +242,11 @@ impl Renderer {
             };
             let number = char::from_u32(0x31 + i as u32).unwrap().to_string();
             let mut number_texture = make_texture(&font, color, &texture_creator, &number);
-            if status.has_active_mark(now, WaveformId::Program(index), MarkId::TopLevel) {
+            if status.has_active_mark(
+                now,
+                &WaveformSelector::ProgramVoices(index),
+                &MarkId::TopLevel,
+            ) {
                 let intensity = (now
                     .duration_since(current_beat_start)
                     .div_duration_f32(current_beat_duration)
@@ -261,7 +269,11 @@ impl Renderer {
                     )),
                 )
                 .unwrap();
-            if status.has_pending_mark(now, WaveformId::Program(index), MarkId::TopLevel) {
+            if status.has_pending_mark(
+                now,
+                &WaveformSelector::ProgramVoices(index),
+                &MarkId::TopLevel,
+            ) {
                 let circle = char::from_u32(0x25EF).unwrap().to_string();
                 let circle_texture =
                     make_texture(&circle_font, ACTIVE_COLOR, &texture_creator, &circle);

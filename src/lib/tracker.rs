@@ -13,7 +13,19 @@ use sdl2::audio;
 use crate::generator;
 use crate::waveform;
 
-pub enum Command<I, M> {
+/// Selects the waveforms a command or query applies to.
+pub trait Select<I>: Clone + fmt::Debug + Send {
+    /// Returns true when the waveform identified by `id` is selected.
+    fn matches(&self, id: &I) -> bool;
+}
+
+/// A waveform identifier with an associated selector type for addressing one
+/// waveform or a family of related waveforms.
+pub trait Id: Clone + fmt::Debug + Send + PartialEq {
+    type Selector: Select<Self>;
+}
+
+pub enum Command<I: Id, M> {
     Play {
         // A unique id for this waveform
         id: I,
@@ -23,16 +35,17 @@ pub enum Command<I, M> {
         // If set, play this waveform in a loop
         repeat_every: Option<Duration>,
     },
-    // Immediately modify the waveform with the given id to replace the contents of any marked waveform
-    // with the given mark_id with the new waveform.
+    // Immediately modify every active and pending waveform matched by the selector
+    // to replace the contents of any marked waveform with the given mark_id with
+    // the new waveform.
     Modify {
-        id: I,
+        selector: I::Selector,
         mark_id: M,
         waveform: waveform::Waveform<M>,
     },
     RemovePending {
-        // The id of the waveform to remove
-        id: I,
+        // Selects the pending waveforms to remove
+        selector: I::Selector,
     },
     SendCurrentBuffer,
 }
@@ -65,19 +78,19 @@ where
 
 impl<I, M> Status<I, M>
 where
-    I: Clone + Send + PartialEq,
+    I: Id,
     M: Clone + Send + PartialEq,
 {
-    pub fn has_pending_mark(&self, when: Instant, id: I, mark: M) -> bool {
+    pub fn has_pending_mark(&self, when: Instant, selector: &I::Selector, mark: &M) -> bool {
         self.marks
             .iter()
-            .any(|w| w.waveform_id == id && w.mark_id == mark && w.start > when)
+            .any(|w| selector.matches(&w.waveform_id) && w.mark_id == *mark && w.start > when)
     }
 
-    pub fn has_active_mark(&self, when: Instant, id: I, mark: M) -> bool {
+    pub fn has_active_mark(&self, when: Instant, selector: &I::Selector, mark: &M) -> bool {
         self.marks
             .iter()
-            .any(|w| w.waveform_id == id && w.mark_id == mark && w.start <= when)
+            .any(|w| selector.matches(&w.waveform_id) && w.mark_id == *mark && w.start <= when)
     }
 }
 
@@ -110,7 +123,7 @@ where
 
 pub struct Tracker<'a, I, M>
 where
-    I: Clone + Send,
+    I: Id,
     M: Clone + Send + fmt::Display,
 {
     generator: generator::Generator<'a>,
@@ -129,7 +142,7 @@ where
 
 impl<'a, I, M> Tracker<'a, I, M>
 where
-    I: Clone + Send,
+    I: Id,
     M: Clone + Send + Debug + PartialEq + fmt::Display,
 {
     pub fn new(
@@ -313,7 +326,7 @@ fn process_marked<I, M>(
 
 impl<'a, I, M> audio::AudioCallback for Tracker<'a, I, M>
 where
-    I: Clone + Debug + Send + PartialEq,
+    I: Id,
     M: Clone + Debug + Send + PartialEq + fmt::Display,
 {
     type Channel = f32;
@@ -369,7 +382,7 @@ where
 
 impl<'a, I, M> Tracker<'a, I, M>
 where
-    I: Clone + Debug + Send + PartialEq,
+    I: Id,
     M: Clone + Debug + Send + PartialEq + fmt::Display,
 {
     // buffer_start is the time corresponding to the beginning of the current buffer
@@ -413,17 +426,17 @@ where
                 self.pending_waveforms.sort_by_key(|w| w.start);
             }
             Command::Modify {
-                id,
+                selector,
                 mark_id,
                 waveform,
             } => {
                 println!(
-                    "Received command to replace mark {:?} in waveform {:?} with new waveform: {}",
-                    mark_id, id, waveform
+                    "Received command to replace mark {:?} in waveforms {:?} with new waveform: {}",
+                    mark_id, selector, waveform
                 );
                 let waveform = generator::initialize_state(waveform);
                 for active in &mut self.active_waveforms {
-                    if active.id == id {
+                    if selector.matches(&active.id) {
                         waveform::substitute(&mut active.waveform, &mark_id, &waveform);
                         println!("  new active waveform is: {}", active.waveform);
                         // Recompute the marks
@@ -442,7 +455,7 @@ where
                     }
                 }
                 for pending in &mut self.pending_waveforms {
-                    if pending.id == id {
+                    if selector.matches(&pending.id) {
                         waveform::substitute(&mut pending.waveform, &mark_id, &waveform);
                         println!("  new pending waveform is: {}", pending.waveform);
                         // Recompute the marks
@@ -458,9 +471,12 @@ where
                     }
                 }
             }
-            Command::RemovePending { id } => {
-                println!("Received command to remove pending waveform {:?}", id);
-                self.pending_waveforms.retain(|w| w.id != id);
+            Command::RemovePending { selector } => {
+                println!(
+                    "Received command to remove pending waveforms {:?}",
+                    selector
+                );
+                self.pending_waveforms.retain(|w| !selector.matches(&w.id));
             }
             Command::SendCurrentBuffer => {
                 self.send_current_buffer = true;
@@ -641,5 +657,175 @@ where
             segment_length = out.len() - filled;
         }
         (finished, allocations)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sdl2::audio::AudioCallback;
+
+    use crate::ids::{MarkId, WaveformId, WaveformSelector};
+
+    use super::*;
+
+    fn test_tracker() -> (
+        Tracker<'static, WaveformId, MarkId>,
+        mpsc::Sender<Command<WaveformId, MarkId>>,
+        mpsc::Receiver<Status<WaveformId, MarkId>>,
+    ) {
+        let (command_sender, command_receiver) = mpsc::channel();
+        let (status_sender, status_receiver) = mpsc::channel();
+        let tracker = Tracker::new(
+            8000,
+            path::PathBuf::new(),
+            String::new(),
+            command_receiver,
+            status_sender,
+        );
+        (tracker, command_sender, status_receiver)
+    }
+
+    fn marked(mark: MarkId, value: f32) -> waveform::Waveform<MarkId> {
+        waveform::Waveform::Marked {
+            id: mark,
+            waveform: Box::new(waveform::Waveform::Const(value)),
+        }
+    }
+
+    fn play(id: WaveformId, waveform: waveform::Waveform<MarkId>) -> Command<WaveformId, MarkId> {
+        Command::Play {
+            id,
+            waveform,
+            start: None,
+            repeat_every: None,
+        }
+    }
+
+    #[test]
+    fn modify_all_keys_rewrites_every_key_waveform() {
+        let (mut tracker, sender, _status_receiver) = test_tracker();
+        let mut out = vec![0.0f32; 64];
+
+        sender
+            .send(play(WaveformId::Key(60), marked(MarkId::Amplitude, 1.0)))
+            .unwrap();
+        sender
+            .send(play(WaveformId::Key(62), marked(MarkId::Amplitude, 1.0)))
+            .unwrap();
+        sender
+            .send(play(WaveformId::Program(0), marked(MarkId::Amplitude, 1.0)))
+            .unwrap();
+        tracker.callback(&mut out);
+        assert_eq!(out[0], 3.0);
+
+        sender
+            .send(Command::Modify {
+                selector: WaveformSelector::AllKeys,
+                mark_id: MarkId::Amplitude,
+                waveform: waveform::Waveform::Const(0.0),
+            })
+            .unwrap();
+        tracker.callback(&mut out);
+        assert_eq!(out[0], 1.0);
+    }
+
+    #[test]
+    fn modify_only_selector_targets_one_waveform() {
+        let (mut tracker, sender, _status_receiver) = test_tracker();
+        let mut out = vec![0.0f32; 64];
+
+        sender
+            .send(play(WaveformId::Key(60), marked(MarkId::Amplitude, 1.0)))
+            .unwrap();
+        sender
+            .send(play(WaveformId::Key(62), marked(MarkId::Amplitude, 2.0)))
+            .unwrap();
+        tracker.callback(&mut out);
+        assert_eq!(out[0], 3.0);
+
+        sender
+            .send(Command::Modify {
+                selector: WaveformSelector::Only(WaveformId::Key(60)),
+                mark_id: MarkId::Amplitude,
+                waveform: waveform::Waveform::Const(0.0),
+            })
+            .unwrap();
+        tracker.callback(&mut out);
+        assert_eq!(out[0], 2.0);
+    }
+
+    #[test]
+    fn remove_pending_program_voices_removes_program_and_step_waveforms() {
+        let (mut tracker, sender, status_receiver) = test_tracker();
+        let mut out = vec![0.0f32; 64];
+
+        let start = Some(Instant::now() + Duration::from_secs(60));
+        for id in [
+            WaveformId::Program(3),
+            WaveformId::Step {
+                program: 3,
+                slot: 0,
+            },
+            WaveformId::Key(60),
+        ] {
+            sender
+                .send(Command::Play {
+                    id,
+                    waveform: marked(MarkId::TopLevel, 1.0),
+                    start,
+                    repeat_every: None,
+                })
+                .unwrap();
+        }
+        sender
+            .send(Command::RemovePending {
+                selector: WaveformSelector::ProgramVoices(3),
+            })
+            .unwrap();
+        tracker.callback(&mut out);
+
+        let status = status_receiver.try_recv().expect("expected a status");
+        let remaining: Vec<_> = status.marks.iter().map(|m| &m.waveform_id).collect();
+        assert_eq!(remaining, vec![&WaveformId::Key(60)]);
+    }
+
+    #[test]
+    fn status_selector_queries_distinguish_active_and_pending() {
+        let now = Instant::now();
+        let mark = |id, start| Mark {
+            waveform_id: id,
+            mark_id: MarkId::TopLevel,
+            start,
+            duration: Duration::ZERO,
+        };
+        let status = Status {
+            buffer_start: now,
+            marks: vec![
+                mark(WaveformId::Program(3), now + Duration::from_secs(1)),
+                mark(
+                    WaveformId::Step {
+                        program: 3,
+                        slot: 4,
+                    },
+                    now + Duration::from_secs(1),
+                ),
+                mark(WaveformId::Key(60), now - Duration::from_secs(1)),
+            ],
+            buffer: None,
+            tracker_load: None,
+            allocations_per_sample: None,
+        };
+
+        let voices = WaveformSelector::ProgramVoices(3);
+        assert!(status.has_pending_mark(now, &voices, &MarkId::TopLevel));
+        assert!(!status.has_active_mark(now, &voices, &MarkId::TopLevel));
+
+        assert!(status.has_active_mark(now, &WaveformSelector::AllKeys, &MarkId::TopLevel));
+        assert!(!status.has_pending_mark(now, &WaveformSelector::AllKeys, &MarkId::TopLevel));
+
+        let only = WaveformSelector::Only(WaveformId::Key(60));
+        assert!(status.has_active_mark(now, &only, &MarkId::TopLevel));
+        let other = WaveformSelector::Only(WaveformId::Key(61));
+        assert!(!status.has_active_mark(now, &other, &MarkId::TopLevel));
     }
 }

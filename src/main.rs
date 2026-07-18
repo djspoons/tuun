@@ -28,7 +28,7 @@ use tuun::waveform;
 use metric::Metric;
 use renderer::Renderer;
 use tracker::Command;
-use tuun::ids::{MarkId, WaveformId};
+use tuun::ids::{MarkId, WaveformId, WaveformSelector};
 
 #[derive(ClapParser, Debug)]
 #[command(version, about, long_about = None)]
@@ -264,14 +264,17 @@ pub fn main() {
     player.start_beats(&evaluator, &status_receiver);
 
     // Copy initial values for each slider for all programs
-    let mut last_slider_values: HashMap<(WaveformId, String), f32> = HashMap::new();
+    let mut last_slider_values: HashMap<(WaveformSelector, String), f32> = HashMap::new();
     for (program_index, program) in state.programs.programs().iter().enumerate() {
         for (j, config) in program.sliders().configs().iter().enumerate() {
             let value =
                 slider::denormalize(&config.function, program.sliders().normalized_values()[j])
                     .unwrap_or(0.0);
             last_slider_values.insert(
-                (WaveformId::Program(program_index), config.label.clone()),
+                (
+                    WaveformSelector::ProgramVoices(program_index),
+                    config.label.clone(),
+                ),
                 value,
             );
         }
@@ -284,15 +287,19 @@ pub fn main() {
     thread::spawn(move || {
         let mut last_slider_values = last_slider_values;
         loop {
-            let mut pending: HashMap<(WaveformId, String), f32> = HashMap::new();
+            let mut pending: HashMap<(WaveformSelector, String), f32> = HashMap::new();
             let deadline;
 
             // Idle: block until the first slider update event arrives.
             loop {
                 use effects::SliderEvent;
                 match slider_receiver.recv() {
-                    Ok(SliderEvent::UpdateSlider { id, slider, value }) => {
-                        pending.insert((id, slider), value);
+                    Ok(SliderEvent::UpdateSlider {
+                        selector,
+                        slider,
+                        value,
+                    }) => {
+                        pending.insert((selector, slider), value);
                         deadline = Instant::now() + buffer_duration;
                         break;
                     }
@@ -317,8 +324,12 @@ pub fn main() {
                 }
                 use effects::SliderEvent;
                 match slider_receiver.recv_timeout(remaining) {
-                    Ok(SliderEvent::UpdateSlider { id, slider, value }) => {
-                        pending.insert((id, slider), value);
+                    Ok(SliderEvent::UpdateSlider {
+                        selector,
+                        slider,
+                        value,
+                    }) => {
+                        pending.insert((selector, slider), value);
                     }
                     Ok(SliderEvent::SetInitialValues(values)) => {
                         // What to do with these new values for waveforms that are playing? Especially ones
@@ -336,25 +347,15 @@ pub fn main() {
                 }
             }
 
-            // Flush: send one Modify command per changed slider
-            for ((id, slider), value) in pending.drain() {
-                // TODO: this unwrap can fail if programs are reloaded while a MIDI note is active.
-                // Should we just default to some value? Or maybe better to not to clear?
-                let last_value = last_slider_values
-                    .get_mut(&(id.clone(), slider.clone()))
-                    .unwrap();
-
-                let waveform = slider::make_ramp(*last_value, value, buffer_duration.as_secs_f32());
-
-                // Update the last value
-                *last_value = value;
-
-                // Technically we don't need to send a modify if the waveform is not playing...
-                let _ = slider_command_sender.send(Command::Modify {
-                    id,
-                    mark_id: MarkId::Slider(slider),
-                    waveform,
-                });
+            // Flush: send one Modify command per changed slider.
+            // Technically we don't need to send a modify if the waveform is
+            // not playing...
+            for command in effects::flush_slider_updates(
+                &mut pending,
+                &mut last_slider_values,
+                buffer_duration.as_secs_f32(),
+            ) {
+                let _ = slider_command_sender.send(command);
             }
         }
     });

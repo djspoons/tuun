@@ -10,7 +10,7 @@ use std::time::Instant;
 use crate::diagnostics::{self, Diagnostic, Source};
 use crate::evaluator;
 use crate::expr;
-use crate::ids::{MarkId, WaveformId};
+use crate::ids::{MarkId, WaveformId, WaveformSelector};
 use crate::keys;
 use crate::launchkey;
 use crate::player;
@@ -294,9 +294,9 @@ pub enum Effect {
     StopProgram(usize),
     /// Remove a pending program from the tracker.
     RemovePendingProgram(usize),
-    /// Send a Modify command to the tracker for one waveform.
+    /// Send a Modify command to the tracker for the selected waveforms.
     ModifyWaveform {
-        id: WaveformId,
+        selector: WaveformSelector,
         mark_id: MarkId,
         waveform: waveform::Waveform<MarkId>,
     },
@@ -324,29 +324,15 @@ pub enum Effect {
     /// no waveform was stored.
     PlayNoteOff { key: u8 },
 
-    /// Push a slider value change into the slider pipeline. The downstream
-    /// worker thread coalesces these per quantum and sends `Command::Modify`
-    /// to the tracker with a ramp from the previous value, so the running
-    /// waveform actually picks up the new slider value. (The renderer also
-    /// observes these events for visual feedback.)
+    /// Push a slider value change for the selected waveforms into the slider
+    /// pipeline. The downstream worker thread coalesces these per quantum and
+    /// sends `Command::Modify` to the tracker with a ramp from the previous
+    /// value, so the running waveforms actually pick up the new slider value.
     UpdateSlider {
-        id: WaveformId,
+        selector: WaveformSelector,
         slider: String,
         value: f32,
     },
-    /// Propagate a slider change to every currently active key waveform.
-    /// The runner walks the tracker status to find active Key marks.
-    UpdateActiveKeySliders {
-        // TODO consider using UpdateSlider?
-        slider: String,
-        value: f32,
-    },
-    /// Modify the Amplitude mark on every currently active key waveform.
-    //
-    // XXX Should this go through the slider pipeline like UpdateActiveKeySliders
-    // does (coalesce per quantum, ramp from prior value)? Currently each call
-    // sends a Const directly to the tracker, which can cause a step change.
-    ModifyActiveKeysAmplitude { amplitude: f32 },
 
     // --- launchkey hardware ---
     /// Update the controller's encoder display text.
@@ -392,10 +378,11 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
         Action::StopProgram(i) => stop_program_effects(state, ctx, i),
         Action::RemovePendingProgram(i) => remove_pending_effects(state, ctx, i),
         Action::ToggleProgramPlayback(i) => {
-            if ctx
-                .status
-                .has_active_mark(ctx.now, WaveformId::Program(i), MarkId::TopLevel)
-            {
+            if ctx.status.has_active_mark(
+                ctx.now,
+                &WaveformSelector::ProgramVoices(i),
+                &MarkId::TopLevel,
+            ) {
                 stop_program_effects(state, ctx, i)
             } else if state.keys.as_ref().is_some_and(|k| k.id == i) {
                 vec![]
@@ -404,10 +391,11 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             }
         }
         Action::ToggleProgramPendingPlayback(i) => {
-            if ctx
-                .status
-                .has_pending_mark(ctx.now, WaveformId::Program(i), MarkId::TopLevel)
-            {
+            if ctx.status.has_pending_mark(
+                ctx.now,
+                &WaveformSelector::ProgramVoices(i),
+                &MarkId::TopLevel,
+            ) {
                 remove_pending_effects(state, ctx, i)
             } else if state.keys.as_ref().is_some_and(|k| k.id == i) {
                 vec![]
@@ -663,10 +651,11 @@ fn play_program_effects(
 /// Returns the effects that stop the given program, or nothing if it isn't
 /// currently playing.
 fn stop_program_effects(state: &AppState, ctx: &Context, i: usize) -> Vec<Effect> {
-    if !ctx
-        .status
-        .has_active_mark(ctx.now, WaveformId::Program(i), MarkId::TopLevel)
-    {
+    if !ctx.status.has_active_mark(
+        ctx.now,
+        &WaveformSelector::ProgramVoices(i),
+        &MarkId::TopLevel,
+    ) {
         return vec![];
     }
     vec![
@@ -681,10 +670,11 @@ fn stop_program_effects(state: &AppState, ctx: &Context, i: usize) -> Vec<Effect
 /// Returns the effects that remove the given program's pending playback, or
 /// nothing if no playback is pending.
 fn remove_pending_effects(state: &AppState, ctx: &Context, i: usize) -> Vec<Effect> {
-    if !ctx
-        .status
-        .has_pending_mark(ctx.now, WaveformId::Program(i), MarkId::TopLevel)
-    {
+    if !ctx.status.has_pending_mark(
+        ctx.now,
+        &WaveformSelector::ProgramVoices(i),
+        &MarkId::TopLevel,
+    ) {
         return vec![];
     }
     vec![
@@ -719,7 +709,16 @@ fn apply_install_keys(state: &mut AppState, program_index: usize) -> Vec<Effect>
         && keys.id == program_index
     {
         state.keys = None;
-        return vec![Effect::ShowMessage("Uninstalled keys".to_string())];
+        return vec![
+            // Stop every held key; their stored note-off waveforms are gone
+            // with state.keys.
+            Effect::ModifyWaveform {
+                selector: WaveformSelector::AllKeys,
+                mark_id: MarkId::Terminator,
+                waveform: player::stop_ramp(),
+            },
+            Effect::ShowMessage("Uninstalled keys".to_string()),
+        ];
     }
     vec![Effect::InstallKeys(program_index)]
 }
@@ -1144,18 +1143,18 @@ fn apply_slider(
     let actual_value = change.value;
 
     let mut effects = vec![Effect::UpdateSlider {
-        id: WaveformId::Program(program_index),
+        selector: WaveformSelector::ProgramVoices(program_index),
         slider: label.clone(),
         value: actual_value,
     }];
 
     // If the keys were installed from this program, also propagate the new
-    // slider value to every active key waveform. The runner will look up
-    // active Key marks from the tracker status when handling this effect.
+    // slider value to every key waveform.
     if let Some(keys) = state.keys.as_mut()
         && keys.id == program_index
     {
-        effects.push(Effect::UpdateActiveKeySliders {
+        effects.push(Effect::UpdateSlider {
+            selector: WaveformSelector::AllKeys,
             slider: label.clone(),
             value: actual_value,
         });
@@ -1188,16 +1187,24 @@ fn apply_level_db(state: &mut AppState, program_index: usize, level_db: f32) -> 
     let amplitude = player::db_to_amplitude(level_db);
 
     let mut effects = vec![Effect::ModifyWaveform {
-        id: WaveformId::Program(program_index),
+        selector: WaveformSelector::ProgramVoices(program_index),
         mark_id: MarkId::Amplitude,
         waveform: waveform::Waveform::Const(amplitude),
     }];
 
     // Mirror onto installed keys.
+    //
+    // XXX Should this go through the slider pipeline like slider updates do
+    // (coalesce per quantum, ramp from prior value)? Currently each call
+    // sends a Const directly to the tracker, which can cause a step change.
     if let Some(keys) = state.keys.as_mut()
         && keys.id == program_index
     {
-        effects.push(Effect::ModifyActiveKeysAmplitude { amplitude });
+        effects.push(Effect::ModifyWaveform {
+            selector: WaveformSelector::AllKeys,
+            mark_id: MarkId::Amplitude,
+            waveform: waveform::Waveform::Const(amplitude),
+        });
     }
 
     // Bank-relative encoder index for the display update.
@@ -1295,10 +1302,72 @@ mod tests {
         assert!(matches!(
             effects[0],
             Effect::ModifyWaveform {
+                selector: WaveformSelector::ProgramVoices(0),
                 mark_id: MarkId::Amplitude,
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn level_change_on_keys_program_emits_all_keys_amplitude_modify() {
+        let mut state = test_state();
+        install_test_keys(&mut state);
+        let effects = apply_with_empty_status(
+            &mut state,
+            Action::SetLevelDb {
+                program: 0,
+                level_db: -6.0,
+            },
+        );
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::ModifyWaveform {
+                    selector: WaveformSelector::AllKeys,
+                    mark_id: MarkId::Amplitude,
+                    ..
+                }
+            )),
+            "expected an AllKeys Amplitude ModifyWaveform, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn uninstall_keys_stops_all_held_keys() {
+        let mut state = test_state();
+        install_test_keys(&mut state);
+        let effects = apply_with_empty_status(&mut state, Action::ToggleInstalledKeys(0));
+        assert!(state.keys.is_none());
+        assert!(
+            matches!(
+                effects[0],
+                Effect::ModifyWaveform {
+                    selector: WaveformSelector::AllKeys,
+                    mark_id: MarkId::Terminator,
+                    ..
+                }
+            ),
+            "expected an AllKeys Terminator ModifyWaveform first, got {:?}",
+            effects
+        );
+        assert!(
+            matches!(&effects[1], Effect::ShowMessage(m) if m == "Uninstalled keys"),
+            "expected the uninstall message second, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn install_toggle_on_uninstalled_program_emits_install_keys() {
+        let mut state = test_state();
+        let effects = apply_with_empty_status(&mut state, Action::ToggleInstalledKeys(0));
+        assert!(
+            matches!(effects[0], Effect::InstallKeys(0)),
+            "expected InstallKeys, got {:?}",
+            effects
+        );
     }
 
     #[test]
@@ -1903,24 +1972,28 @@ _ = saw(220);";
                 normalized: 0.8,
             },
         );
-        // The program's own waveform gets the update...
+        // The program's own voice family gets the update...
         assert!(
             effects.iter().any(|e| matches!(
                 e,
                 Effect::UpdateSlider {
-                    id: WaveformId::Program(0),
+                    selector: WaveformSelector::ProgramVoices(0),
                     ..
                 }
             )),
-            "expected UpdateSlider, got {:?}",
+            "expected a ProgramVoices UpdateSlider, got {:?}",
             effects
         );
-        // ...and so does every active key waveform of the installed instrument.
+        // ...and so does every key waveform of the installed instrument.
         assert!(
-            effects
-                .iter()
-                .any(|e| matches!(e, Effect::UpdateActiveKeySliders { .. })),
-            "expected UpdateActiveKeySliders, got {:?}",
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::UpdateSlider {
+                    selector: WaveformSelector::AllKeys,
+                    ..
+                }
+            )),
+            "expected an AllKeys UpdateSlider, got {:?}",
             effects
         );
     }
