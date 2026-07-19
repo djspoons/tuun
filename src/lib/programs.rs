@@ -1,7 +1,11 @@
 //! Programs and their state: text, sliders, level, and evaluation results.
 
+use std::cmp;
 use std::fmt;
+use std::fs;
 use std::ops::Range;
+use std::path;
+use std::time;
 
 use crate::diagnostics::{Diagnostic, Source};
 use crate::evaluator::Evaluator;
@@ -504,7 +508,7 @@ fn read_skip_slots(sb: &expr::SourceBinding<MarkId, Source>) -> u32 {
 fn walk_ui_positions(
     bindings: &[expr::SourceBinding<MarkId, Source>],
     source_len: usize,
-) -> Vec<(usize, usize, std::ops::Range<usize>)> {
+) -> Vec<(usize, usize, Range<usize>)> {
     let mut out = Vec::new();
     let mut position: usize = 0;
     for (i, sb) in bindings.iter().enumerate() {
@@ -534,7 +538,20 @@ pub struct ProgramSet {
     programs: Vec<Program>,
     bindings: Vec<expr::SourceBinding<MarkId, Source>>,
     source: String,
-    input_path: std::path::PathBuf,
+    input_path: path::PathBuf,
+    /// The backing file's modification time as of our last read or write, used
+    /// to detect external edits before overwriting them. `None` when there is
+    /// no backing file.
+    synced_mtime: Option<time::SystemTime>,
+}
+
+/// Returns the current modification time of `path`, or `None` when the path is
+/// empty or can't be stat-ed.
+fn file_mtime(path: &path::Path) -> Option<time::SystemTime> {
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+    fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 impl ProgramSet {
@@ -548,7 +565,7 @@ impl ProgramSet {
     /// `PathBuf` to suppress the write, e.g. in tests).
     pub fn from_source(
         source: String,
-        input_path: std::path::PathBuf,
+        input_path: path::PathBuf,
     ) -> Result<(ProgramSet, String), Vec<expr::Error<Source>>> {
         let mut message = String::new();
         let (bindings, errors) = parser::parse_module::<MarkId, _>(&source, Source::File)?;
@@ -584,15 +601,58 @@ impl ProgramSet {
                 position += 1;
             }
         }
+        let synced_mtime = file_mtime(&input_path);
         Ok((
             ProgramSet {
                 programs,
                 bindings,
                 source,
                 input_path,
+                synced_mtime,
             },
             message,
         ))
+    }
+
+    /// Returns true when the backing file has been modified (or removed) since
+    /// this set last read or wrote it.
+    pub fn disk_changed(&self) -> bool {
+        match self.synced_mtime {
+            None => false,
+            Some(synced) => file_mtime(&self.input_path) != Some(synced),
+        }
+    }
+
+    /// Reads the backing file again and builds a fresh program set from it.
+    ///
+    /// Returns the new set and the parse-warning message, or the error message
+    /// when the file can't be read or parsed (in which case nothing has
+    /// changed).
+    pub fn reload_from_disk(&self) -> Result<(ProgramSet, String), String> {
+        if self.input_path.as_os_str().is_empty() {
+            return Err("No backing file to reload".to_string());
+        }
+        let source = fs::read_to_string(&self.input_path).map_err(|e| {
+            format!(
+                "Failed to read {}: {}",
+                self.input_path.to_string_lossy(),
+                e
+            )
+        })?;
+        ProgramSet::from_source(source, self.input_path.clone()).map_err(|errors| {
+            match errors.first() {
+                Some(error) => format!("Parse error: {}", error),
+                None => "Parse error".to_string(),
+            }
+        })
+    }
+
+    /// Returns the backing file's name for user-visible messages.
+    pub fn display_path(&self) -> String {
+        self.input_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.input_path.to_string_lossy().into_owned())
     }
 
     /// Returns all program slots in slot order.
@@ -757,7 +817,7 @@ fn annotation_edits(
     program: &Program,
     binding: &expr::SourceBinding<MarkId, Source>,
     source: &str,
-) -> Vec<(std::ops::Range<usize>, String)> {
+) -> Vec<(Range<usize>, String)> {
     let mut edits = Vec::new();
     if let Some(edit) = level_edit(program, binding, source) {
         edits.push(edit);
@@ -774,7 +834,7 @@ fn level_edit(
     program: &Program,
     binding: &expr::SourceBinding<MarkId, Source>,
     source: &str,
-) -> Option<(std::ops::Range<usize>, String)> {
+) -> Option<(Range<usize>, String)> {
     let (parsed_value, parsed_span) = match last_annotation_of(binding, |a| match a {
         expr::Annotation::Level(v) => Some(*v),
         _ => None,
@@ -806,11 +866,7 @@ fn level_edit(
 /// Builds an `(range, replacement)` edit that inserts a fresh `#{…}`
 /// annotation line at `pos`, prepending or appending `\n` only when
 /// needed so the inserted line doesn't collapse onto a neighbor.
-fn insert_annotation_line(
-    pos: usize,
-    body: &str,
-    source: &str,
-) -> (std::ops::Range<usize>, String) {
+fn insert_annotation_line(pos: usize, body: &str, source: &str) -> (Range<usize>, String) {
     let bytes = source.as_bytes();
     let prefix = if pos == 0 || bytes.get(pos - 1) == Some(&b'\n') {
         ""
@@ -837,7 +893,7 @@ fn skip_slots_edit(
     new_skip: u32,
     level_db: f32,
     source: &str,
-) -> Option<(std::ops::Range<usize>, String)> {
+) -> Option<(Range<usize>, String)> {
     if read_skip_slots(binding) == new_skip {
         return None;
     }
@@ -871,10 +927,7 @@ fn skip_slots_edit(
 /// consuming an adjacent comma (and surrounding spacing) so the remaining
 /// annotations stay well-formed. When the annotation is alone in its set,
 /// removes the whole `#{…}` group and any trailing newline.
-fn remove_annotation_edit(
-    span: std::ops::Range<usize>,
-    source: &str,
-) -> (std::ops::Range<usize>, String) {
+fn remove_annotation_edit(span: Range<usize>, source: &str) -> (Range<usize>, String) {
     let bytes = source.as_bytes();
     // A following comma: the annotation is first or interior in its set.
     let mut end = span.end;
@@ -919,7 +972,7 @@ fn remove_annotation_edit(
 fn sliders_edit(
     program: &Program,
     binding: &expr::SourceBinding<MarkId, Source>,
-) -> Option<(std::ops::Range<usize>, String)> {
+) -> Option<(Range<usize>, String)> {
     if program.sliders().configs().is_empty() {
         return None;
     }
@@ -976,7 +1029,7 @@ fn sliders_edit(
 fn last_annotation_of<T, F>(
     binding: &expr::SourceBinding<MarkId, Source>,
     mut pick: F,
-) -> Option<(T, Option<std::ops::Range<usize>>)>
+) -> Option<(T, Option<Range<usize>>)>
 where
     F: FnMut(&expr::Annotation) -> Option<T>,
 {
@@ -1023,6 +1076,17 @@ impl ProgramSet {
     /// `self.bindings`, `self.source`, and the file on disk are all left
     /// unchanged.
     pub fn splice(&mut self, program_index: usize) -> Result<(), String> {
+        // Never overwrite external edits: a backing file newer than our last
+        // read or write means someone else wrote it. Refuse before touching any
+        // state; in-memory edits keep working and can be persisted after a
+        // reload.
+        // TODO double check this... seems like we can get into some weird states
+        if self.disk_changed() {
+            return Err(format!(
+                "Not saved: {} changed on disk (reload first)",
+                self.display_path()
+            ));
+        }
         let edited_span = self.programs[program_index].span.clone();
         let mut edited_text = self.programs[program_index].text().to_string();
         // Remove any semicolons since these aren't valid within an expression and
@@ -1042,7 +1106,7 @@ impl ProgramSet {
         // that bring level/slider state on disk in line with the runtime.
         // Applying in reverse-position order keeps each remaining edit's span
         // valid.
-        let mut edits: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+        let mut edits: Vec<(Range<usize>, String)> = Vec::new();
         if is_new {
             if edited_text.trim().is_empty() {
                 // Padding slot still empty after edit — nothing to do.
@@ -1184,7 +1248,7 @@ impl ProgramSet {
         }
 
         let mut new_source = self.source.clone();
-        edits.sort_by_key(|(span, _)| std::cmp::Reverse(span.start));
+        edits.sort_by_key(|(span, _)| cmp::Reverse(span.start));
         for (span, replacement) in edits {
             new_source.replace_range(span, &replacement);
         }
@@ -1197,9 +1261,8 @@ impl ProgramSet {
 
         // Realign each program to its position in the re-parsed source by
         // running the same position walk used at load time.
-        let slot_lookup: Vec<Option<(usize, std::ops::Range<usize>)>> = {
-            let mut lookup: Vec<Option<(usize, std::ops::Range<usize>)>> =
-                vec![None; self.programs.len()];
+        let slot_lookup: Vec<Option<(usize, Range<usize>)>> = {
+            let mut lookup: Vec<Option<(usize, Range<usize>)>> = vec![None; self.programs.len()];
             for (pos, i, span) in walk_ui_positions(&new_bindings, new_source.len()) {
                 if pos < lookup.len() {
                     lookup[pos] = Some((i, span));
@@ -1228,14 +1291,15 @@ impl ProgramSet {
 
         // Skip the file write when no path is set — tests use an empty
         // `PathBuf` so they can exercise the splice without touching disk.
-        if !self.input_path.as_os_str().is_empty()
-            && let Err(e) = std::fs::write(&self.input_path, &new_source)
-        {
-            return Err(format!(
-                "Warning: failed to write {}: {}",
-                self.input_path.display(),
-                e
-            ));
+        if !self.input_path.as_os_str().is_empty() {
+            if let Err(e) = fs::write(&self.input_path, &new_source) {
+                return Err(format!(
+                    "Warning: failed to write {}: {}",
+                    self.input_path.display(),
+                    e
+                ));
+            }
+            self.synced_mtime = file_mtime(&self.input_path);
         }
 
         self.source = new_source;
@@ -1271,6 +1335,7 @@ mod tests {
     //! without touching disk: `splice` skips the file write when
     //! `input_path` is empty.
     use super::*;
+    use std::env::temp_dir;
     use std::path::PathBuf;
 
     /// Builds a `ProgramSet` from inline source, with `input_path` empty
@@ -1333,6 +1398,87 @@ mod tests {
             panic!("expected a waveform with an attached sequence");
         };
         assert_eq!(sequence.beats, vec![1.0, 2.5]);
+    }
+
+    #[test]
+    fn splice_refuses_when_disk_changed() {
+        let path = temp_dir().join(format!("tuun_splice_guard_{}.tuun", std::process::id()));
+        fs::write(&path, "#{level_db=0}\ntone = 1 | fin(time - 1);\n").unwrap();
+        let (mut set, _) =
+            ProgramSet::from_source(fs::read_to_string(&path).unwrap(), path.clone())
+                .expect("test source should parse");
+
+        // An external edit lands after our read.
+        let external = "#{level_db=0}\nexternal = 2 | fin(time - 1);\n";
+        fs::write(&path, external).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(time::SystemTime::UNIX_EPOCH + time::Duration::from_secs(1))
+            .unwrap();
+
+        // An in-app edit then tries to persist: refused, file untouched.
+        set.program_mut(0).unwrap().set_text("2".to_string());
+        let error = set.splice(0).expect_err("stale disk should refuse");
+        assert!(error.contains("changed on disk"), "got: {}", error);
+        assert_eq!(fs::read_to_string(&path).unwrap(), external);
+
+        // Reloading adopts the external content and clears the staleness.
+        let (mut new_set, _) = set.reload_from_disk().expect("reload should succeed");
+        assert_eq!(new_set.display_name(0), "A:1 (external)");
+        new_set.program_mut(0).unwrap().set_text("3".to_string());
+        new_set.splice(0).expect("fresh set should splice");
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn reload_from_disk_rejects_empty_input_path() {
+        let (set, _) = ProgramSet::from_source(
+            "#{level_db=0}\n_ = 1 | fin(time - 1);\n".to_string(),
+            PathBuf::new(),
+        )
+        .expect("test source should parse");
+        assert!(set.reload_from_disk().is_err());
+    }
+
+    #[test]
+    fn reload_from_disk_picks_up_external_edits() {
+        let path = temp_dir().join(format!("tuun_reload_edits_{}.tuun", std::process::id()));
+        fs::write(&path, "#{level_db=0}\ntone = 1 | fin(time - 1);\n").unwrap();
+        let (set, _) = ProgramSet::from_source(fs::read_to_string(&path).unwrap(), path.clone())
+            .expect("test source should parse");
+        assert_eq!(set.programs()[0].kind(), ProgramKind::Waveform);
+
+        // An external edit renames the program and marks it as keys.
+        fs::write(&path, "#{level_db=0, keys}\nk = fn(note, vel) => (1, 1);\n").unwrap();
+        let (new_set, warning) = set.reload_from_disk().expect("reload should succeed");
+        fs::remove_file(&path).ok();
+        assert_eq!(warning, "");
+        assert_eq!(new_set.programs()[0].kind(), ProgramKind::Keys);
+        assert_eq!(new_set.display_name(0), "A:1 (k)");
+    }
+
+    #[test]
+    fn reload_from_disk_surfaces_parse_warnings_and_read_failures() {
+        let path = temp_dir().join(format!("tuun_reload_bad_{}.tuun", std::process::id()));
+        fs::write(&path, "#{level_db=0}\ntone = 1 | fin(time - 1);\n").unwrap();
+        let (set, _) = ProgramSet::from_source(fs::read_to_string(&path).unwrap(), path.clone())
+            .expect("test source should parse");
+
+        // A garbled binding is recoverable, exactly as at startup: the
+        // reload succeeds with a parse warning and the binding skipped.
+        fs::write(&path, "#{level_db=0}\ntone = ((;\n").unwrap();
+        let (_new_set, warning) = set.reload_from_disk().expect("recoverable garble reloads");
+        assert!(warning.contains("Parse error"), "got: {}", warning);
+
+        // A missing file is a hard failure.
+        fs::remove_file(&path).ok();
+        let error = match set.reload_from_disk() {
+            Ok(_) => panic!("missing file should fail"),
+            Err(error) => error,
+        };
+        assert!(error.contains("Failed to read"), "got: {}", error);
     }
 
     #[test]

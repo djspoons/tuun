@@ -154,6 +154,10 @@ pub struct Context<'a> {
     /// Evaluation environment (prelude, module cache) — used by
     /// `Action::Complete` to find the names in scope.
     pub evaluator: &'a evaluator::Evaluator,
+    /// True when the backing file has changed on disk since the program set
+    /// last read or wrote it. Editing gestures refuse while stale so in-app
+    /// changes can't pile up against external ones.
+    pub source_stale: bool,
 }
 
 /// Things that can happen, emitted by handlers as pure data.
@@ -195,6 +199,9 @@ pub enum Action {
     /// Shift the sequencer pad grid's page by the given number of (4 beat)
     /// measures, clamped to the valid page range.
     ChangeSequencerPage(i8),
+    /// Stop every playing program and rebuild the program set from the backing
+    /// file's current contents.
+    ReloadSource,
 
     // --- MIDI keys ---
     /// Install the program at the given index as the keys instrument. If the
@@ -385,6 +392,10 @@ pub enum Effect {
     SetDawModeDisplay(String),
 
     // --- I/O ---
+    /// Stop every voice on the tracker, then re-read the backing file and
+    /// rebuild the program set from it. A file that can't be read or parsed
+    /// leaves playback and state untouched.
+    ReloadSource,
     /// User-visible status message.
     ShowMessage(String),
     /// Print the waveform of the active program.
@@ -450,6 +461,16 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
         Action::ToggleSequencerStep { sixteenth } => {
             apply_toggle_sequencer_step(state, ctx, sixteenth)
         }
+        Action::ReloadSource => {
+            // Reloading under an active edit session would discard it silently;
+            // only Select mode may reload.
+            if matches!(state.mode, Mode::Select) {
+                vec![Effect::ReloadSource]
+            } else {
+                vec![]
+            }
+        }
+
         Action::ChangeSequencerPage(delta) => {
             state.sequencer_page = (state.sequencer_page as i16 + delta as i16)
                 .clamp(0, sequencer::MAX_PAGE as i16) as u8;
@@ -472,6 +493,13 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
         Action::NoteOff { key } => vec![Effect::PlayNoteOff { key }],
 
         Action::EnterEditMode => {
+            // Editing on top of external changes would set up a conflict the
+            // splice guard then has to refuse; reload first instead.
+            if ctx.source_stale {
+                return vec![Effect::ShowMessage(
+                    "File changed on disk (reload before editing)".to_string(),
+                )];
+            }
             // Editing a program whose playback is still queued would be
             // confusing (the stale waveform would start mid-edit), so cancel
             // any pending playback on the way in.
@@ -779,6 +807,12 @@ fn apply_select_program(state: &mut AppState, i: usize) -> Vec<Effect> {
 fn apply_toggle_sequencer_step(state: &mut AppState, ctx: &Context, sixteenth: u8) -> Vec<Effect> {
     if sixteenth >= (sequencer::MAX_PAGE + 1) * sequencer::SIXTEENTHS_PER_PAGE {
         return vec![];
+    }
+    // A toggle both edits and persists; refuse on top of external changes.
+    if ctx.source_stale {
+        return vec![Effect::ShowMessage(
+            "File changed on disk (reload before editing)".to_string(),
+        )];
     }
     let i = state.active_program_index;
     let display_name = state.programs.display_name(i);
@@ -1423,6 +1457,7 @@ mod tests {
             status,
             now,
             evaluator: &evaluator,
+            source_stale: false,
         };
         apply(state, &ctx, action)
     }
@@ -1431,6 +1466,19 @@ mod tests {
     fn apply_with_empty_status(state: &mut AppState, action: Action) -> Vec<Effect> {
         // XXX should we use Instant::now() or buffer_start?
         apply_with_status(state, &empty_status(), Instant::now(), action)
+    }
+
+    /// Applies `action` with the backing file flagged as changed on disk.
+    fn apply_with_stale_source(state: &mut AppState, action: Action) -> Vec<Effect> {
+        let evaluator = evaluator::Evaluator::new(48000, 120, std::path::PathBuf::new());
+        let status = empty_status();
+        let ctx = Context {
+            status: &status,
+            now: Instant::now(),
+            evaluator: &evaluator,
+            source_stale: true,
+        };
+        apply(state, &ctx, action)
     }
 
     /// Builds a state whose slot 1 holds `_ = test;` (a program named by the
@@ -2501,6 +2549,51 @@ _ = saw(220);";
         let status = status_with_mark(now + Duration::from_secs(1));
         let effects =
             apply_with_status(&mut state, &status, now, Action::EnqueuePendingPlayback(0));
+        assert!(effects.is_empty(), "expected no effects, got {:?}", effects);
+    }
+
+    #[test]
+    fn enter_edit_mode_refuses_when_source_stale() {
+        let mut state = test_state();
+        let effects = apply_with_stale_source(&mut state, Action::EnterEditMode);
+        assert!(
+            matches!(state.mode, Mode::Select),
+            "expected to stay in Select, got {:?}",
+            state.mode
+        );
+        assert!(
+            matches!(&effects[0], Effect::ShowMessage(m) if m.contains("changed on disk")),
+            "expected the stale-source message, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn toggle_sequencer_step_refuses_when_source_stale() {
+        let mut state = sequencer_state();
+        let text_before = state.active_program().text().to_string();
+        let effects =
+            apply_with_stale_source(&mut state, Action::ToggleSequencerStep { sixteenth: 0 });
+        assert_eq!(state.active_program().text(), text_before);
+        assert!(
+            matches!(&effects[0], Effect::ShowMessage(m) if m.contains("changed on disk")),
+            "expected the stale-source message, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn reload_source_only_applies_in_select_mode() {
+        let mut state = test_state();
+        let effects = apply_with_empty_status(&mut state, Action::ReloadSource);
+        assert!(matches!(effects[0], Effect::ReloadSource));
+
+        state.mode = Mode::Edit {
+            cursor_position: 0,
+            errors: vec![],
+            completion: None,
+        };
+        let effects = apply_with_empty_status(&mut state, Action::ReloadSource);
         assert!(effects.is_empty(), "expected no effects, got {:?}", effects);
     }
 

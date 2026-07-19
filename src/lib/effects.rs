@@ -105,6 +105,7 @@ impl EffectRunner {
             status: world.status,
             now: Instant::now(),
             evaluator: &self.evaluator,
+            source_stale: state.programs.disk_changed(),
         };
         let mut all_effects = Vec::new();
         for action in actions {
@@ -256,6 +257,45 @@ impl EffectRunner {
                 if let Err(message) = state.programs.splice(program_index) {
                     state.message = message;
                 }
+            }
+
+            Effect::ReloadSource => {
+                // Validate before silencing: a file that doesn't read or
+                // parse leaves playback and state untouched.
+                let (new_set, warning) = match state.programs.reload_from_disk() {
+                    Err(message) => {
+                        state.message = message;
+                        return;
+                    }
+                    Ok(reloaded) => reloaded,
+                };
+                self.player.stop_waveform(WaveformSelector::AllVoices);
+                self.player
+                    .remove_pending(WaveformSelector::AllVoices, None);
+                // The installed instrument was a snapshot of the old set.
+                state.keys = None;
+                state.programs = new_set;
+                let mut failed: Vec<String> = Vec::new();
+                for i in 0..state.programs.programs().len() {
+                    if state.programs.programs()[i].is_empty() {
+                        continue;
+                    }
+                    if state
+                        .programs
+                        .evaluate_and_record(&self.evaluator, i)
+                        .is_err()
+                    {
+                        failed.push(state.programs.display_name(i));
+                    }
+                }
+                let mut message = format!("Reloaded {}", state.programs.display_path());
+                if !warning.is_empty() {
+                    message = format!("{} — {}", message, warning);
+                }
+                if !failed.is_empty() {
+                    message = format!("{} — failed: {}", message, failed.join(", "));
+                }
+                state.message = message;
             }
 
             Effect::InstallKeys(program_index) => {
@@ -587,6 +627,95 @@ mod tests {
         let mut marks = Vec::new();
         slider_mark_values(&note_off, &mut marks);
         assert_eq!(marks, vec![("vol".to_string(), 1.0)]);
+    }
+
+    #[test]
+    fn reload_source_stops_all_and_swaps_programs() {
+        let (precompute_sender, _precompute_receiver) = mpsc::channel();
+        let (fast_sender, fast_receiver) = mpsc::channel();
+        let (slider_sender, _slider_receiver) = mpsc::channel();
+        let player = player::Player::new(90, 4, precompute_sender, fast_sender);
+        let evaluator = evaluator::Evaluator::new(44100, 90, std::path::PathBuf::new());
+        let mut runner = EffectRunner::new(player, evaluator, slider_sender);
+
+        let path =
+            std::env::temp_dir().join(format!("tuun_reload_runner_{}.tuun", std::process::id()));
+        std::fs::write(&path, "#{level_db=0}\ntone = 1 | fin(time - 1);\n").unwrap();
+        let mut state =
+            AppState::from_source(std::fs::read_to_string(&path).unwrap(), path.clone())
+                .expect("test source should parse");
+        state.keys = Some(Keys {
+            id: 0,
+            function: expr::SourceExpr::float(0.0),
+            note_off_waveforms: HashMap::new(),
+        });
+
+        // The reload picks up an external rename.
+        std::fs::write(&path, "#{level_db=0}\nrenamed = 1 | fin(time - 1);\n").unwrap();
+        let status = empty_status();
+        let mut world = World {
+            launchkey: None,
+            status: &status,
+        };
+        runner.run_one(&mut state, &mut world, Effect::ReloadSource);
+        std::fs::remove_file(&path).ok();
+
+        let commands: Vec<_> = fast_receiver.try_iter().collect();
+        assert!(
+            matches!(
+                commands[0],
+                tracker::Command::Modify {
+                    selector: WaveformSelector::AllVoices,
+                    mark_id: MarkId::Terminator,
+                    ..
+                }
+            ),
+            "expected a stop of all voices first"
+        );
+        assert!(matches!(
+            commands[1],
+            tracker::Command::RemovePending {
+                selector: WaveformSelector::AllVoices,
+                after: None,
+            }
+        ));
+        assert!(state.keys.is_none());
+        assert_eq!(state.programs.display_name(0), "A:1 (renamed)");
+        // The sweep evaluated the reloaded program.
+        assert!(state.programs.programs()[0].waveform().is_some());
+        assert!(
+            state.message.starts_with("Reloaded"),
+            "got: {}",
+            state.message
+        );
+    }
+
+    #[test]
+    fn reload_source_read_failure_leaves_everything_untouched() {
+        let (precompute_sender, _precompute_receiver) = mpsc::channel();
+        let (fast_sender, fast_receiver) = mpsc::channel();
+        let (slider_sender, _slider_receiver) = mpsc::channel();
+        let player = player::Player::new(90, 4, precompute_sender, fast_sender);
+        let evaluator = evaluator::Evaluator::new(44100, 90, std::path::PathBuf::new());
+        let mut runner = EffectRunner::new(player, evaluator, slider_sender);
+
+        // An empty input path can't be re-read: the reload must not touch
+        // playback or programs.
+        let mut state = AppState::from_source(
+            "#{level_db=0}\ntone = 1 | fin(time - 1);\n".to_string(),
+            std::path::PathBuf::new(),
+        )
+        .expect("test source should parse");
+        let status = empty_status();
+        let mut world = World {
+            launchkey: None,
+            status: &status,
+        };
+        runner.run_one(&mut state, &mut world, Effect::ReloadSource);
+
+        assert!(fast_receiver.try_iter().next().is_none());
+        assert_eq!(state.programs.display_name(0), "A:1 (tone)");
+        assert!(!state.message.is_empty());
     }
 
     #[test]

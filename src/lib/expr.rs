@@ -145,7 +145,7 @@ pub enum Pattern {
 }
 
 /// Named parameters (on a function) or named arguments (at a call site):
-/// each pairs a name with its default value or supplied value.
+/// each pairs a name with its default or supplied expression.
 pub type NamedExprs<M, S = ()> = Vec<(String, SourceExpr<M, S>)>;
 
 #[derive(Clone, Debug)]
@@ -157,15 +157,16 @@ pub enum Expr<M, S = ()> {
     Waveform(waveform::Waveform<M>),
     Function {
         positional: Vec<Pattern>,
-        /// Named parameters with their default values; call sites may
-        /// override them by name. Defaults are evaluated once, when the
-        /// function expression itself is evaluated.
+        /// Named parameters with their defaults; call sites may override them
+        /// by name. Defaults are evaluated once, when the function expression
+        /// itself is evaluated. A function is a value iff all of the defaults
+        /// are values.
         named: NamedExprs<M, S>,
         body: Box<SourceExpr<M, S>>,
     },
     BuiltIn {
         name: String,
-        // Pure functions from a vector of values to a value
+        // Functions from a vector of values to a value
         function: BuiltInFn<M, S>,
     },
     // A sequenceable waveform. In value form, both offset and waveform are Expr::Waveform.

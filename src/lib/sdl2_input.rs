@@ -140,6 +140,7 @@ impl InputHandler {
         }
         match (mode, scancode) {
             (_, Some(Scancode::C)) if ctrl => Some(vec![Action::Exit]),
+            (Mode::Select, Some(Scancode::R)) if gui_mod => Some(vec![Action::ReloadSource]),
             (Mode::Select, Some(Scancode::Up)) => Some(vec![Action::AdvanceProgram(-1)]),
             (Mode::Select, Some(Scancode::Down)) => Some(vec![Action::AdvanceProgram(1)]),
             (Mode::Select, Some(Scancode::Right)) => {
@@ -486,6 +487,21 @@ mod tests {
             classify(Scancode::Delete, Mod::NOMOD),
             Action::DeleteCharAfterCursor
         ));
+    }
+
+    #[test]
+    fn select_mode_binds_reload_on_cmd_r() {
+        let handler = InputHandler::new(false, 800, 600);
+        let state = test_state(Mode::Select);
+        let actions = handler
+            .classify_keydown(Some(Scancode::R), Mod::LGUIMOD, false, &state)
+            .expect("Cmd+R in Select mode should be classified");
+        assert!(matches!(actions[0], Action::ReloadSource));
+        // Plain R is inert in Select mode.
+        let actions = handler
+            .classify_keydown(Some(Scancode::R), Mod::NOMOD, false, &state)
+            .expect("plain R falls through");
+        assert!(actions.is_empty());
     }
 
     #[test]

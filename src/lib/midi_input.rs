@@ -65,7 +65,7 @@ pub fn classify(
         Event::StopDown => Some(vec![Action::RemovePendingProgram(active_program_index)]),
 
         // The pad-navigation arrows page the sequencer grid through the
-        // pattern's measures: down moves toward later beats, Ableton-style.
+        // pattern's measures: down moves toward later beats.
         Event::PadPageUpDown => match state.daw_pad_mode {
             actions::DawPadMode::Sequencer => Some(vec![Action::ChangeSequencerPage(-1)]),
             _ => Some(vec![]),

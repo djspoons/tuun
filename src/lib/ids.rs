@@ -45,6 +45,8 @@ pub enum WaveformSelector {
     /// A program's whole voice family: its top-level waveform and any of its
     /// step waveforms.
     ProgramVoices(usize),
+    /// Every program, step, and key waveform; not the Beats timekeepers.
+    AllVoices,
 }
 
 impl tracker::Select<WaveformId> for WaveformSelector {
@@ -56,6 +58,7 @@ impl tracker::Select<WaveformId> for WaveformSelector {
                 id,
                 WaveformId::Program(i) | WaveformId::Step { program: i, .. } if i == p
             ),
+            WaveformSelector::AllVoices => !id.is_beats(),
         }
     }
 }
@@ -113,6 +116,19 @@ mod tests {
             sixteenth: 0
         }));
         assert!(!selector.matches(&WaveformId::Beats(false)));
+    }
+
+    #[test]
+    fn selector_all_voices_matches_everything_but_beats() {
+        let selector = WaveformSelector::AllVoices;
+        assert!(selector.matches(&WaveformId::Program(0)));
+        assert!(selector.matches(&WaveformId::Step {
+            program: 3,
+            sixteenth: 7
+        }));
+        assert!(selector.matches(&WaveformId::Key(60)));
+        assert!(!selector.matches(&WaveformId::Beats(false)));
+        assert!(!selector.matches(&WaveformId::Beats(true)));
     }
 
     #[test]
