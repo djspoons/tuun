@@ -70,6 +70,10 @@ pub enum Event {
     PlayDown,
     /// The transport "stop" button.
     StopDown,
+    /// The pad-navigation up arrow (left of the pads).
+    PadPageUpDown,
+    /// The pad-navigation down arrow (left of the pads).
+    PadPageDownDown,
     /// Encoder changes in plug-in mode: positive delta is clockwise, negative delta
     /// is counterclockwise.
     PluginEncoderChange {
@@ -462,6 +466,12 @@ impl DAWState {
                         (108, 0) => None,
                         (109, 127) => Some(Event::PreviousTrackBankDown),
                         (109, 0) => None,
+
+                        // Pad navigation (the up/down arrows left of the pads)
+                        (106, 127) => Some(Event::PadPageUpDown),
+                        (106, 0) => None,
+                        (107, 127) => Some(Event::PadPageDownDown),
+                        (107, 0) => None,
 
                         // Transport
                         (115, 127) => Some(Event::PlayDown),

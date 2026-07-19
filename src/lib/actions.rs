@@ -101,6 +101,9 @@ pub struct AppState {
     pub repeat_after_measures: Option<u32>,
     /// Active behavior for the DAW pad.
     pub daw_pad_mode: DawPadMode,
+    /// The measure the sequencer pad grid is showing: page 0 = beats [1, 5),
+    /// page 1 = beats [5, 9), and so on.
+    pub sequencer_page: u8,
     /// Set by `Effect::Exit`; `main` checks at top of loop and breaks.
     pub should_exit: bool,
     /// Last user-visible status message. Set by `Effect::ShowMessage` (and
@@ -129,6 +132,7 @@ impl AppState {
             keys: None,
             repeat_after_measures: None,
             daw_pad_mode: DawPadMode::ClipLauncher,
+            sequencer_page: 0,
             should_exit: false,
             message,
         })
@@ -188,6 +192,9 @@ pub enum Action {
     ToggleSequencerStep {
         sixteenth: u8,
     },
+    /// Shift the sequencer pad grid's page by the given number of (4 beat)
+    /// measures, clamped to the valid page range.
+    ChangeSequencerPage(i8),
 
     // --- MIDI keys ---
     /// Install the program at the given index as the keys instrument. If the
@@ -442,6 +449,16 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
 
         Action::ToggleSequencerStep { sixteenth } => {
             apply_toggle_sequencer_step(state, ctx, sixteenth)
+        }
+        Action::ChangeSequencerPage(delta) => {
+            state.sequencer_page = (state.sequencer_page as i16 + delta as i16)
+                .clamp(0, sequencer::MAX_PAGE as i16) as u8;
+            let first_beat = state.sequencer_page as u32 * 4 + 1;
+            vec![Effect::ShowMessage(format!(
+                "Sequencer beats {}–{}",
+                first_beat,
+                first_beat + 3
+            ))]
         }
 
         Action::ToggleInstalledKeys(i) => apply_install_keys(state, i),
@@ -760,7 +777,7 @@ fn apply_select_program(state: &mut AppState, i: usize) -> Vec<Effect> {
 /// program is playing — schedules or removes that one step so the change sounds
 /// as soon as possible.
 fn apply_toggle_sequencer_step(state: &mut AppState, ctx: &Context, sixteenth: u8) -> Vec<Effect> {
-    if sixteenth >= 16 {
+    if sixteenth >= (sequencer::MAX_PAGE + 1) * sequencer::SIXTEENTHS_PER_PAGE {
         return vec![];
     }
     let i = state.active_program_index;
@@ -2485,6 +2502,37 @@ _ = saw(220);";
         let effects =
             apply_with_status(&mut state, &status, now, Action::EnqueuePendingPlayback(0));
         assert!(effects.is_empty(), "expected no effects, got {:?}", effects);
+    }
+
+    #[test]
+    fn change_sequencer_page_clamps_and_reports() {
+        let mut state = sequencer_state();
+        // Already at the first page: down stays put.
+        apply_with_empty_status(&mut state, Action::ChangeSequencerPage(-1));
+        assert_eq!(state.sequencer_page, 0);
+
+        let effects = apply_with_empty_status(&mut state, Action::ChangeSequencerPage(1));
+        assert_eq!(state.sequencer_page, 1);
+        assert!(
+            matches!(&effects[0], Effect::ShowMessage(m) if m.contains("beats 5–8")),
+            "expected the page's beat range, got {:?}",
+            effects
+        );
+
+        state.sequencer_page = sequencer::MAX_PAGE;
+        apply_with_empty_status(&mut state, Action::ChangeSequencerPage(1));
+        assert_eq!(state.sequencer_page, sequencer::MAX_PAGE);
+    }
+
+    #[test]
+    fn toggle_on_a_later_page_edits_later_beats() {
+        let mut state = sequencer_state();
+        // Sixteenth 16 is beat 5, the first pad of page 1.
+        apply_with_empty_status(&mut state, Action::ToggleSequencerStep { sixteenth: 16 });
+        assert_eq!(
+            state.active_program().text(),
+            "on_beats(1 | fin(time - 1), [1, 2.5, 5])"
+        );
     }
 
     #[test]

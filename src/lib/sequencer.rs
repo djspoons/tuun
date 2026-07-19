@@ -16,6 +16,15 @@ use crate::waveform;
 /// Beat-comparison tolerance for classifying a literal as on-grid.
 const EPS: f32 = 1e-3;
 
+/// Sixteenths shown by the 16-pad grid at once: one (4 beat) measure per page.
+pub const SIXTEENTHS_PER_PAGE: u8 = 16;
+
+/// Highest grid page.
+///
+/// Must be bounded so the last page's final sixteenth stays clear of the anchor
+/// sentinel (`u8::MAX`).
+pub const MAX_PAGE: u8 = 8;
+
 /// The decomposed form of a sequenceable program: what the sequencer plays
 /// one tracker entry per beat from.
 #[derive(Debug, Clone)]
