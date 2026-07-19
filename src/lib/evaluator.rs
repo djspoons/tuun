@@ -17,7 +17,7 @@ use crate::eval;
 use crate::expr;
 use crate::ids::MarkId;
 use crate::parser;
-use crate::programs::{Evaluated, ProgramSet, ProgramSliders};
+use crate::programs::{Evaluated, ProgramKind, ProgramSet, ProgramSliders};
 use crate::sequencer;
 use crate::slider;
 use crate::waveform;
@@ -342,26 +342,25 @@ impl Evaluator {
         }
     }
 
-    /// Evaluates the program at `index` and classifies the result as a
-    /// playable waveform or a keys instrument, with the user-visible
-    /// diagnostics as the error when it is neither.
+    /// Evaluates the program at `index` against its declared kind: an unmarked
+    /// program must evaluate to a playable waveform, and one marked `#{keys}`
+    /// must evaluate to a keys-instrument note function. Returns the
+    /// user-visible diagnostics as the error otherwise.
     ///
-    /// Keys-instrument candidates (functions) are sanity-checked by
-    /// actually invoking them with dummy note/velocity arguments. Waveform
-    /// results additionally carry their decomposed sequence when the text
-    /// has the sequenceable `on_beats` shape.
+    /// Keys instruments are sanity-checked by actually invoking them with dummy
+    /// note/velocity arguments. Waveform results additionally carry their
+    /// decomposed sequence when the text has the sequenceable `on_beats` shape.
     pub fn evaluate_program(
         &self,
         set: &ProgramSet,
         index: usize,
     ) -> Result<Evaluated, Vec<Diagnostic>> {
-        // TODO could improve error messages here
-        const NOT_A_PROGRAM: &str = "Program is not a waveform or keys instrument";
         // Programs and their file's sibling bindings see the prelude through an
         // implicit leading `open __prelude`, the same way modules do (see
         // `resolve`).
         let mut bindings = set.evaluation_bindings(index);
         bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
+        let kind = set.programs()[index].kind();
         let text = set.programs()[index].text();
 
         let expr = match parser::parse_program(text, Source::Program) {
@@ -379,28 +378,45 @@ impl Evaluator {
             }
             Ok(expr) => expr,
         };
+        let message_only = |message: &str| vec![Diagnostic::message_only(message.to_string())];
         match expr.expr {
-            expr::Expr::Waveform(w) => Ok(self.evaluated_waveform(set, index, w)),
-            expr::Expr::Seq { waveform, .. } => {
-                if let expr::Expr::Waveform(w) = waveform.expr {
+            expr::Expr::Waveform(w) => match kind {
+                ProgramKind::Waveform => Ok(self.evaluated_waveform(set, index, w)),
+                ProgramKind::Keys => Err(message_only(
+                    "Program is marked #{keys} but evaluates to a waveform",
+                )),
+            },
+            expr::Expr::Seq { waveform, .. } => match (kind, waveform.expr) {
+                (ProgramKind::Waveform, expr::Expr::Waveform(w)) => {
                     Ok(self.evaluated_waveform(set, index, w))
-                } else {
-                    Err(vec![Diagnostic::message_only(NOT_A_PROGRAM.to_string())])
                 }
-            }
-            expr::Expr::Function { .. } | expr::Expr::BuiltIn { .. } => {
-                // Sanity check: actually invoke with dummy args.
-                // TODO use a waveform for velocity
-                match self.apply_note_function(
-                    &expr,
-                    vec![expr::SourceExpr::float(60.0), expr::SourceExpr::float(0.7)],
-                    set.programs()[index].sliders(),
-                ) {
-                    Ok(_) => Ok(Evaluated::KeysInstrument(expr)),
-                    Err(error) => Err(vec![self.diagnose(&error, set, index)]),
+                (ProgramKind::Keys, expr::Expr::Waveform(_)) => Err(message_only(
+                    "Program is marked #{keys} but evaluates to a waveform",
+                )),
+                (ProgramKind::Waveform, _) => Err(message_only("Program is not a waveform")),
+                (ProgramKind::Keys, _) => Err(message_only("Program is not a keys instrument")),
+            },
+            expr::Expr::Function { .. } | expr::Expr::BuiltIn { .. } => match kind {
+                ProgramKind::Keys => {
+                    // Sanity check: actually invoke with dummy args.
+                    // TODO use a waveform for velocity
+                    match self.apply_note_function(
+                        &expr,
+                        vec![expr::SourceExpr::float(60.0), expr::SourceExpr::float(0.7)],
+                        set.programs()[index].sliders(),
+                    ) {
+                        Ok(_) => Ok(Evaluated::KeysInstrument(expr)),
+                        Err(error) => Err(vec![self.diagnose(&error, set, index)]),
+                    }
                 }
-            }
-            _ => Err(vec![Diagnostic::message_only(NOT_A_PROGRAM.to_string())]),
+                ProgramKind::Waveform => Err(message_only(
+                    "Program evaluates to a function (annotate with #{keys}?)",
+                )),
+            },
+            _ => Err(message_only(match kind {
+                ProgramKind::Waveform => "Program is not a waveform",
+                ProgramKind::Keys => "Program is not a keys instrument",
+            })),
         }
     }
 
@@ -534,7 +550,7 @@ mod tests {
         // itself a (marked) waveform, so `(vol, vol)` is a valid
         // (note-on, note-off) pair.
         let (mut set, _) = ProgramSet::from_source(
-            "#{sliders=[\"vol:0.5:0:1\"]}\nk = fn(note, vel) => (vol, vol);".to_string(),
+            "#{sliders=[\"vol:0.5:0:1\"], keys}\nk = fn(note, vel) => (vol, vol);".to_string(),
             PathBuf::new(),
         )
         .expect("test source should parse");
@@ -580,7 +596,7 @@ mod tests {
         // Uses the real std library so the instrument shape (let-bindings,
         // filters, envelopes, seq/fin) matches live usage.
         let (mut set, warning) = ProgramSet::from_source(
-            "open std;\n#{sliders=[\"vol:0.5:0:1\"]}\nk = fn(note, vel) => ((harmonica(H, @note) | unseq()) * vol, (harmonica(H, @note) | unseq()) * vol);"
+            "open std;\n#{sliders=[\"vol:0.5:0:1\"], keys}\nk = fn(note, vel) => ((harmonica(H, @note) | unseq()) * vol, (harmonica(H, @note) | unseq()) * vol);"
                 .to_string(),
             std::path::PathBuf::new(),
         )
@@ -722,6 +738,45 @@ mod tests {
             }
             _ => panic!("expected a waveform evaluation"),
         }
+    }
+
+    #[test]
+    fn unmarked_function_errors_with_a_missing_arguments_hint() {
+        // A function without #{keys} is no longer silently classified as a
+        // keys instrument — the likely cause is missing arguments.
+        let (set, _) = ProgramSet::from_source(
+            "#{level_db=0}\nk = fn(note, vel) => (1, 1);\n".to_string(),
+            PathBuf::new(),
+        )
+        .expect("test source should parse");
+        let evaluator = Evaluator::new(44100, 90, PathBuf::new());
+        let Err(diagnostics) = evaluator.evaluate_program(&set, 0) else {
+            panic!("expected an error for an unmarked function");
+        };
+        assert!(
+            diagnostics[0].to_string().contains("annotate with #{keys}"),
+            "expected the annotation hint, got: {}",
+            diagnostics[0]
+        );
+        assert!(diagnostics[0].to_string().contains("#{keys}"));
+    }
+
+    #[test]
+    fn marked_keys_program_evaluating_to_a_waveform_is_an_error() {
+        let (set, _) = ProgramSet::from_source(
+            "#{level_db=0, keys}\nk = 1 | fin(time - 1);\n".to_string(),
+            PathBuf::new(),
+        )
+        .expect("test source should parse");
+        let evaluator = Evaluator::new(44100, 90, PathBuf::new());
+        let Err(diagnostics) = evaluator.evaluate_program(&set, 0) else {
+            panic!("expected an error for a marked waveform");
+        };
+        assert!(
+            diagnostics[0].to_string().contains("marked #{keys}"),
+            "expected the marked-keys message, got: {}",
+            diagnostics[0]
+        );
     }
 
     #[test]

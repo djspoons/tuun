@@ -272,7 +272,14 @@ impl EffectRunner {
                         state.programs.display_name(program_index)
                     );
                 } else {
-                    state.message = "Not a valid keys instrument".to_string();
+                    state.message = match program.kind() {
+                        programs::ProgramKind::Waveform => {
+                            "Not a keys program (annotate it with #{keys})".to_string()
+                        }
+                        programs::ProgramKind::Keys => {
+                            "Keys program hasn't evaluated; fix its errors first".to_string()
+                        }
+                    };
                 }
             }
 
@@ -519,7 +526,7 @@ mod tests {
         let mut runner = EffectRunner::new(player, evaluator, slider_sender);
 
         let mut state = AppState::from_source(
-            "#{sliders=[\"vol:0.5:0:1\"]}\nk = fn(note, vel) => (vol, vol);".to_string(),
+            "#{sliders=[\"vol:0.5:0:1\"], keys}\nk = fn(note, vel) => (vol, vol);".to_string(),
             std::path::PathBuf::new(),
         )
         .expect("test source should parse");
@@ -705,7 +712,7 @@ mod tests {
         let mut runner = EffectRunner::new(player, evaluator, slider_sender);
 
         let mut state = AppState::from_source(
-            "#{sliders=[\"vol:0.5:0:1\"]}\nk = fn(note, vel) => (vol, vol);".to_string(),
+            "#{sliders=[\"vol:0.5:0:1\"], keys}\nk = fn(note, vel) => (vol, vol);".to_string(),
             std::path::PathBuf::new(),
         )
         .expect("test source should parse");

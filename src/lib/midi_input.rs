@@ -4,7 +4,7 @@ use crate::actions;
 use crate::ids::{MarkId, WaveformId, WaveformSelector};
 use crate::launchkey;
 use crate::player;
-use crate::programs::{PROGRAMS_PER_BANK, Program};
+use crate::programs::{PROGRAMS_PER_BANK, Program, ProgramKind};
 use crate::renderer;
 use crate::sequencer;
 use crate::tracker;
@@ -293,16 +293,11 @@ fn update_pads_keys_installer(
             }
         };
         let installed = state.keys.as_ref().is_some_and(|k| k.id == program_index);
-        // If this program is the installed keys instrument, light it up
-        // regardless of whether the current text is still a valid keys
-        // program — the installed function is what's actually playing.
-        // Otherwise only color pads that can be installed right now.
-        if !installed && program.keys_instrument().is_none() {
-            launchkey.set_daw_bottom_pad_color(i as u8, 0, 0, 0);
-            continue;
-        }
         let (red, green, blue) = program_pad_color(program);
         if installed {
+            // The installed keys instrument pulses regardless of whether
+            // the current text is still valid — the installed function is
+            // what's actually playing.
             let (r, g, b) = pulsed(
                 (red, green, blue),
                 now,
@@ -310,8 +305,21 @@ fn update_pads_keys_installer(
                 current_beat_duration,
             );
             launchkey.set_daw_bottom_pad_color(i as u8, r, g, b);
-        } else {
-            launchkey.set_daw_bottom_pad_color(i as u8, red, green, blue);
+            continue;
+        }
+        match program.kind() {
+            // Installable right now: full color.
+            ProgramKind::Keys if program.keys_instrument().is_some() => {
+                launchkey.set_daw_bottom_pad_color(i as u8, red, green, blue);
+            }
+            // Marked as a keys slot but currently invalid: dim, so the
+            // slot still reads as a keys slot while its text is broken.
+            ProgramKind::Keys => {
+                launchkey.set_daw_bottom_pad_color(i as u8, red / 4, green / 4, blue / 4);
+            }
+            ProgramKind::Waveform => {
+                launchkey.set_daw_bottom_pad_color(i as u8, 0, 0, 0);
+            }
         }
     }
 }

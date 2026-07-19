@@ -1079,6 +1079,7 @@ fn parse_annotation(input: Input) -> IResult<SourceAnnotation> {
         parse_color.map(|(r, g, b)| Annotation::Color(r, g, b)),
         parse_level.map(Annotation::Level),
         parse_skip_slots.map(Annotation::SkipSlots),
+        tag("keys").map(|_| Annotation::Keys),
     ))
     .parse(input)?;
     let end = rest.location_offset();
@@ -1941,5 +1942,11 @@ synth = saw(220);";
         // SkipSlots alone.
         let annos = parse_one_annotation_set("#{skip_slots=5}").unwrap();
         assert!(matches!(annos[0], Annotation::SkipSlots(5)));
+
+        // The bare keys marker, alone and combined.
+        let annos = parse_one_annotation_set("#{keys}").unwrap();
+        assert!(matches!(annos[0], Annotation::Keys));
+        let annos = parse_one_annotation_set("#{level_db=0, keys}").unwrap();
+        assert!(matches!(annos[1], Annotation::Keys));
     }
 }

@@ -130,6 +130,17 @@ pub struct SliderChange {
     pub value: f32,
 }
 
+/// The declared role of a program slot, from its annotations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProgramKind {
+    /// The text must evaluate to a playable waveform.
+    #[default]
+    Waveform,
+    /// Marked `#{keys}`: the text must evaluate to a keys-instrument note
+    /// function.
+    Keys,
+}
+
 /// The result of successfully evaluating a program's text.
 #[derive(Debug, Clone)]
 pub enum Evaluated {
@@ -196,6 +207,8 @@ pub struct Program {
     sliders: ProgramSliders,
     color: Option<(u8, u8, u8)>,
     level_db: f32,
+    /// The declared kind, from a `#{keys}` annotation (or its absence).
+    kind: ProgramKind,
     /// Cached result of the last evaluation of the current text; `None` when
     /// never evaluated, failed, or the text is empty.
     evaluated: Option<Evaluated>,
@@ -213,6 +226,7 @@ impl Program {
             sliders: ProgramSliders::default(),
             color: None,
             level_db: 0.0,
+            kind: ProgramKind::Waveform,
             evaluated: None,
             history: EditHistory::default(),
         }
@@ -234,6 +248,7 @@ impl Program {
         let mut sliders = ProgramSliders::default();
         let mut color: Option<(u8, u8, u8)> = None;
         let mut level_db: f32 = 0.0;
+        let mut kind = ProgramKind::Waveform;
         for sa in &sb.annotations {
             match &sa.annotation {
                 expr::Annotation::Sliders(configs) => {
@@ -247,6 +262,9 @@ impl Program {
                 }
                 expr::Annotation::SkipSlots(_) => {
                     // Consumed by the position walk, not stored on Program.
+                }
+                expr::Annotation::Keys => {
+                    kind = ProgramKind::Keys;
                 }
             }
         }
@@ -263,6 +281,7 @@ impl Program {
                     sliders,
                     color,
                     level_db,
+                    kind,
                     evaluated: None,
                     history: EditHistory::default(),
                 })
@@ -292,6 +311,11 @@ impl Program {
     /// Returns the program's display color from its `color=` annotation.
     pub fn color(&self) -> Option<(u8, u8, u8)> {
         self.color
+    }
+
+    /// Returns the program's declared kind.
+    pub fn kind(&self) -> ProgramKind {
+        self.kind
     }
 
     /// Returns the program's output level in dB.
@@ -1309,6 +1333,19 @@ mod tests {
             panic!("expected a waveform with an attached sequence");
         };
         assert_eq!(sequence.beats, vec![1.0, 2.5]);
+    }
+
+    #[test]
+    fn keys_annotation_sets_program_kind() {
+        let (set, _) = ProgramSet::from_source(
+            "#{level_db=0, keys}\nk = fn(note, vel) => (1, 1);\n\
+             #{level_db=0}\ntone = 1 | fin(time - 1);\n"
+                .to_string(),
+            PathBuf::new(),
+        )
+        .expect("test source should parse");
+        assert_eq!(set.programs()[0].kind(), ProgramKind::Keys);
+        assert_eq!(set.programs()[1].kind(), ProgramKind::Waveform);
     }
 
     #[test]
