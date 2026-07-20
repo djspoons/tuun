@@ -219,23 +219,33 @@ export class Tuun {
      * before evaluating, e.g. `["std", "foo.bar"]`. Each entry behaves like an
      * `open` binding at the top of the expression. Pass `"[]"` for no opens.
      *
+     * `use_json` is a JSON array of dotted module paths to bind as module
+     * values, e.g. `["synth.pm"]`. Each entry behaves like a `use` binding
+     * at the top of the expression: the module is bound to its last path
+     * component and its bindings are reached by `.name` projection. Pass
+     * `"[]"` for no uses.
+     *
      * # Examples
      * ```javascript
-     * tuun.install("sine(2764, 0)", "{}", "[]");
-     * tuun.install("$440 | lpf(0.5, 1900)", "{}", '["std"]');
+     * tuun.install("sine(2764, 0)", "{}", "[]", "[]");
+     * tuun.install("$440", "{}", '["std"]', "[]");
+     * tuun.install("std.square(220) * 0.3", "{}", "[]", '["std"]');
      * ```
      * @param {string} expression
      * @param {string} slider_json
      * @param {string} open_json
+     * @param {string} use_json
      */
-    install(expression, slider_json, open_json) {
+    install(expression, slider_json, open_json, use_json) {
         const ptr0 = passStringToWasm0(expression, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passStringToWasm0(slider_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
         const ptr2 = passStringToWasm0(open_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len2 = WASM_VECTOR_LEN;
-        const ret = wasm.tuun_install(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        const ptr3 = passStringToWasm0(use_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ret = wasm.tuun_install(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
         if (ret[1]) {
             throw takeFromExternrefTable0(ret[0]);
         }
@@ -273,7 +283,7 @@ export class Tuun {
      *
      * # Examples
      * ```javascript
-     * tuun.install("$440", "{}", "[]");
+     * tuun.install("$440", "{}", '["std"]', "[]");
      * const done = tuun.process(output);
      * ```
      * @param {Float32Array} out
@@ -459,4 +469,4 @@ export { initSync };
 export default __wbg_init;
 
 // The git revision this build was made from (stamped by build-wasm.sh).
-export const tuunBuild = '0f0ded6';
+export const tuunBuild = 'd5e932b';

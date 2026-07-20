@@ -49,13 +49,20 @@ export class Tuun {
    * before evaluating, e.g. `["std", "foo.bar"]`. Each entry behaves like an
    * `open` binding at the top of the expression. Pass `"[]"` for no opens.
    *
+   * `use_json` is a JSON array of dotted module paths to bind as module
+   * values, e.g. `["synth.pm"]`. Each entry behaves like a `use` binding
+   * at the top of the expression: the module is bound to its last path
+   * component and its bindings are reached by `.name` projection. Pass
+   * `"[]"` for no uses.
+   *
    * # Examples
    * ```javascript
-   * tuun.install("sine(2764, 0)", "{}", "[]");
-   * tuun.install("$440 | lpf(0.5, 1900)", "{}", '["std"]');
+   * tuun.install("sine(2764, 0)", "{}", "[]", "[]");
+   * tuun.install("$440", "{}", '["std"]', "[]");
+   * tuun.install("std.square(220) * 0.3", "{}", "[]", '["std"]');
    * ```
    */
-  install(expression: string, slider_json: string, open_json: string): void;
+  install(expression: string, slider_json: string, open_json: string, use_json: string): void;
   /**
    * Drops the current waveform.
    */
@@ -81,7 +88,7 @@ export class Tuun {
    *
    * # Examples
    * ```javascript
-   * tuun.install("$440", "{}", "[]");
+   * tuun.install("$440", "{}", '["std"]', "[]");
    * const done = tuun.process(output);
    * ```
    */
@@ -102,7 +109,7 @@ export interface InitOutput {
   readonly memory: WebAssembly.Memory;
   readonly __wbg_tuun_free: (a: number, b: number) => void;
   readonly tuun_new: (a: number, b: number) => [number, number, number];
-  readonly tuun_install: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
+  readonly tuun_install: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
   readonly tuun_stop: (a: number) => void;
   readonly tuun_update_slider: (a: number, b: number, c: number, d: number) => void;
   readonly tuun_process: (a: number, b: number, c: number, d: any) => number;
