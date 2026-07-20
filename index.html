@@ -26,10 +26,12 @@
         <p>The following show different configurations of the Tuun synthesizer web component.</p>
 
         <h2>Complete</h2>
+        <p>This example leverages the <code>open</code> and <code>use</code> attributes, which import additional bindings (see code).</p>
         <tuun-synth
             description="Low-pass filter example"
             open='["std"]'
-            expression="square(220) | lpf(Q, cutoff)"
+            use='["filters.rbj"]'
+            expression="square(220) | rbj.lpf(Q, cutoff)"
             sliders='["Q:0.707:0.1:1","cutoff:0.5886:fn(x) => 200 * pow(50, x)"]'
             controls
             expanded>
@@ -39,7 +41,8 @@
         <tuun-synth
             description="Harmonica"
             open='["std"]'
-            expression="<map(fn(n) => harmonica(H, @n), [60, 62, 64, 65, 67, 69, 71, 72])>"
+            use='["synth.sub"]'
+            expression="<map(fn(n) => sub.harmonica(H, @n), [60, 62, 64, 65, 67, 69, 71, 72])>"
             controls>
         </tuun-synth>
 

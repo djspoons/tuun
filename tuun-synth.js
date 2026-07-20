@@ -58,8 +58,8 @@ class TuunRuntime {
         await this.audioContext.audioWorklet.addModule(processorUrl);
     }
 
-    install(expression, sliders, opens) {
-        const result = this.tuun.install(expression, sliders, opens);
+    install(expression, sliders, opens, uses) {
+        const result = this.tuun.install(expression, sliders, opens, uses);
         // If successful, tell the module to discard any state.
         this.tuun.stop();
     }
@@ -327,7 +327,7 @@ input[type="number"]:focus {
 // ─── <tuun-synth> Custom Element ─────────────────────────────────
 
 class TuunSynthElement extends HTMLElement {
-    static observedAttributes = ['expression', 'description', 'controls', 'expanded', 'tempo', 'sliders', 'open'];
+    static observedAttributes = ['expression', 'description', 'controls', 'expanded', 'tempo', 'sliders', 'open', 'use'];
 
     constructor() {
         super();
@@ -561,9 +561,10 @@ class TuunSynthElement extends HTMLElement {
         await runtime.ensureInitialized(this._getSampleRate(), this._getTempo());
         const sliders = JSON.stringify(Object.fromEntries(this._sliderValues) || {});
         const opens = this._getOpens();
+        const uses = this._getUses();
         // First, check that the expression installs (parses and
         // evaluates) before involving the worklet.
-        runtime.install(expression, sliders, opens);
+        runtime.install(expression, sliders, opens, uses);
         // Claim our status as the active instance.
         runtime.setPlaying(this);
 
@@ -579,6 +580,7 @@ class TuunSynthElement extends HTMLElement {
             expression,
             sliders,
             opens,
+            uses,
         });
         this._isPlaying = true;
         this._updatePlayButton();
@@ -589,6 +591,15 @@ class TuunSynthElement extends HTMLElement {
     // `Tuun.parse`; an absent or empty attribute means no opens.
     _getOpens() {
         const attr = this.getAttribute('open');
+        return attr && attr.trim() ? attr : '[]';
+    }
+
+    // The `use` attribute is a JSON array of dotted module paths to bind as
+    // module values (e.g. `use='["synth.pm"]'`); each is bound to its last
+    // path component and accessed as `<name>.<binding>`. Passed through
+    // verbatim; an absent or empty attribute means no uses.
+    _getUses() {
+        const attr = this.getAttribute('use');
         return attr && attr.trim() ? attr : '[]';
     }
 
