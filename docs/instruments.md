@@ -168,7 +168,8 @@ The example below using the amplitude envelope from above but adds in these harm
 
 ### Subtractive synthesis
 
-Subtractive synthesis was a popular technique used in many analog synthesizers in the 1970s and 1980s. Instead of building up a complex sound by adding additional frequencies (as in additive synthesis), subtractive synthesis starts with a waveform rich in overtones and then removes 
+Subtractive synthesis was a popular technique used in many analog synthesizers in the 1970s and 1980s. Instead of _building up_ a complex sound by adding additional frequencies (as in additive synthesis), subtractive synthesis starts with a waveform rich in overtones and then _removes_ some of them using one or more filters.
+
 
 <!-- Welsh's Synthesizer Cookbook -->
 
@@ -184,7 +185,8 @@ The ukulele sample has a rich set of overtones.
 The flute sample can also be synthesized using subtractive synthesis. 
 
 <div class="container">
-  <tuun-synth open='["std"]' sliders='["lpf_cutoff:2000:200:10000"]'>
+  <tuun-synth open='["std"]' use='["filters.rbj"]'
+    sliders='["lpf_cutoff:1500:200:10000"]'>
     <script type="text/tuun">
       let
         flute = fn(dur, freq_hz) => let
@@ -193,7 +195,7 @@ The flute sample can also be synthesized using subtractive synthesis.
           sustain_dur = dur - attack_dur - release_dur,
         in
           sawtooth(freq_hz)
-          | lpf(0.5, lpf_cutoff)
+          | rbj.lpf(0.5, lpf_cutoff)
           | ADSR(attack_dur, 0.0, 1.0, sustain_dur, release_dur)
       in
         reset($(1/3), flute(1.75, 546))

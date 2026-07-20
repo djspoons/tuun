@@ -67,7 +67,9 @@ Subtractive synthesis starts with a waveform with many component frequencies and
 In this example, the two pulse waves are combined and then passed through a low-pass filter (which removes higher frequencies). This example is based on one from [Welsh's Synthesizer Cookbook](https://synthesizer-cookbook.com/).
 
 <div>
-  <tuun-synth description="Subtractive synthesis" open='["std"]' expanded>
+  <tuun-synth description="Subtractive synthesis" expanded
+    open='["std"]'
+    use='["filters.rbj"]'>
     <script type="text/tuun">
       let harmonica = fn(dur, freq) =>
         let
@@ -78,7 +80,7 @@ In this example, the two pulse waves are combined and then passed through a low-
           a = 0.13, d = 0.33, r = 0.33, s = max(dur - (a + d + r), 0)
         in
           osc
-          | lpf(0.5, 1900)
+          | rbj.lpf(0.5, 1900)
           | ADSR(a, d, 0.5, s, r)
           | seq(time - dur),
       in

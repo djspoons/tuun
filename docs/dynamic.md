@@ -32,7 +32,7 @@ Q:0.707:0.1:1.1
 In the native app, sliders are written as annotations that appear on the lines just before the binding that they annotate.
 ```
 #{sliders=["Q:0.707:0.1:1.1"]}
-_ = square(220) | lpf(Q, 2000)
+_ = square(220) | rbj.lpf(Q, 2000)
 ```
 If a MIDI controller is detected, sliders are mapped to encoders or faders. If no MIDI controller is detected, the first two sliders are mapped to the x- and y-axis of the mouse position.
 
@@ -40,8 +40,9 @@ In the web component, sliders are configured using an HTML attribute.
 ```html
 <tuun-synth
   open='["std"]'
+  use='["filters.rbj"]'
   sliders='["Q:0.707:0.1:1.1"]'
-  expression="square(220) | lpf(Q, 2000)"
+  expression="square(220) | rbj.lpf(Q, 2000)"
   />
 ```
 
@@ -49,8 +50,9 @@ You can play with this example here:
 <div class="container">
   <tuun-synth
     open='["std"]'
+    use='["filters.rbj"]'
     sliders='["Q:0.707:0.1:1.1"]'
-    expression="square(220) | lpf(Q, 2000)" />
+    expression="square(220) | rbj.lpf(Q, 2000)" />
 </div>
 
 ### Custom range mappings
@@ -72,8 +74,9 @@ This can then be used in a different version of our low-pass filter example.
 <div class="container">
   <tuun-synth
     open='["std"]'
+    use='["filters.rbj"]'
     sliders='["cutoff:0.5:fn(x) => 100 * pow(100, x)"]'
-    expression="square(220) | lpf(0.707, cutoff)" />
+    expression="square(220) | rbj.lpf(0.707, cutoff)" />
 </div>
 
 ### Implementation
@@ -83,7 +86,7 @@ Sliders are implemented by prepending a waveform expression with a set of bindin
 let
   Q = 0.707 | mark(slider("Q"))
 in
-  square(220) | lpf(Q, 2000)
+  square(220) | rbj.lpf(Q, 2000)
 ```
 Note that this `mark` pseudo-syntax is not supported by the parser, but is added automatically before waveform expressions are evaluated. In the example above, this corresponds to the following waveform:
 ```
@@ -171,11 +174,11 @@ When a note-on event is received from a controller, the note (or key) number and
 The following example of a MIDI instrument (based on parameters from [Jim Woodhouse's Euphonics site](https://euphonics.org/3-3-marimbas-and-xylophones/)) has a long (but finite) sustain when keys are held.
 
 ```
-(fn(key, vel) =>
+fn(key, vel) =>
   ({map(over(@key), [1.0, 3.92, 9.24, 16.27, 24.22, 33.54, 42.97])}
       * vel
       | ADSR(0, 0.1, 0.3, 3.0, 2.0),
-   Rw(0.5, 1.0)))
+   Rw(0.5, 1.0))
 ```
 (Unfortunately, the Tuun web component doesn't yet support MIDI!)
 

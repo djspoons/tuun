@@ -119,7 +119,8 @@ When a function is applied, providing arguments for named parameters is optional
 Here is an example of a function definition and application using named parameters and arguments.
 ```
 open std;
-filtered = fn(freq_hz, cutoff_freq_hz = 2000) => sawtooth(freq_hz) | lpf(0.6, cutoff_freq_hz);
+use filters.rbj;
+filtered = fn(freq_hz, cutoff_freq_hz = 2000) => sawtooth(freq_hz) | rbj.lpf(0.6, cutoff_freq_hz);
 
 uses_default = filtered(440);
 low_cutoff = filtered(440, cutoff_freq_hz = 600);
