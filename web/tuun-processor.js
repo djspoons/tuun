@@ -24,6 +24,7 @@ class TuunProcessor extends AudioWorkletProcessor {
                             event.data.expression,
                             event.data.sliders,
                             event.data.opens,
+                            event.data.uses,
                         );
                         this.playing = true;
                     } catch (e) {

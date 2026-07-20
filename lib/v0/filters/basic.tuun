@@ -1,0 +1,5 @@
+open std;
+
+// Returns a moving average filter with the given order (i.e., with length n+1)
+moving_average = fn(n) =>
+  filter(unfold(fn(x) => 1/(n+1), 1/(n+1), n+1), []);

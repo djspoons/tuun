@@ -5,10 +5,12 @@
 use std::fmt;
 use std::fmt::{Debug, Display};
 
-use crate::expr::{Binding, Error, Expr, NamedExprs, Pattern, SourceBinding, SourceExpr};
+use crate::expr::{
+    Binding, Error, Expr, NamedExpr, NamedExprs, Pattern, SourceBinding, SourceExpr,
+};
 
 /// A context entry: a bound name and the closed value it evaluates to.
-pub type ContextEntry<M, S> = (String, SourceExpr<M, S>);
+pub type ContextEntry<M, S> = NamedExpr<M, S>;
 
 /// Extends the context with a binding for each identifier in the pattern that is bound to
 /// itself.
@@ -94,12 +96,31 @@ where
             expr: Expr::BuiltIn { name, function },
             span,
         },
+        // A bound module's entries are closed values (see `BoundModule`), so
+        // there is nothing to substitute into.
+        Expr::BoundModule(entries) => SourceExpr {
+            expr: Expr::BoundModule(entries),
+            span,
+        },
+        Expr::Project { module, name } => SourceExpr {
+            expr: Expr::Project {
+                module: Box::new(substitute(context, *module)),
+                name,
+            },
+            span,
+        },
         Variable(name) => {
             for (var_name, value) in context.iter().rev() {
                 if var_name == &name {
                     return value.clone();
                 }
             }
+            // TODO consider failing fast (returning Result) instead of leaving
+            // an Error value: substitution pushes trivial self-bindings under
+            // every binder, so a miss is a genuinely unbound name. That would
+            // surface unbound references at definition time instead of first
+            // application, but needs an audit for anything relying on the
+            // current late binding.
             SourceExpr {
                 expr: Error(format!("Variable '{}' not found in context", name)),
                 span,
@@ -382,6 +403,23 @@ where
                 )),
             }
         }
+        Expr::BoundModule(entries) => Ok(SourceExpr {
+            expr: Expr::BoundModule(entries),
+            span,
+        }),
+        Expr::Project { module, name } => match evaluate_closed(*module)?.expr {
+            Expr::BoundModule(entries) => match entries.into_iter().find(|(n, _)| n == &name) {
+                Some((_, value)) => Ok(value),
+                None => Err(Error::with_span(
+                    format!("Module has no binding '{}'", name),
+                    span,
+                )),
+            },
+            other => Err(Error::with_span(
+                format!("Cannot project '{}' from a non-module: {}", name, other),
+                span,
+            )),
+        },
         Tuple(exprs) => Ok(SourceExpr {
             expr: Tuple(
                 exprs
@@ -479,6 +517,21 @@ where
                 let exports = build_context(resolve, module, &mut module_context)?;
                 context.extend(exports);
             }
+            Binding::Use(path) => {
+                let Some(name) = path.last() else {
+                    return Err(Error::with_span(
+                        "`use` requires a module path".to_string(),
+                        source_binding.span.clone(),
+                    ));
+                };
+                let module = resolve(path)?;
+                let mut module_context = Vec::new();
+                let exports = build_context(resolve, module, &mut module_context)?;
+                context.push((
+                    name.clone(),
+                    SourceExpr::from(Expr::BoundModule(dedup_last_wins(exports))),
+                ));
+            }
             Binding::Definition(pattern, def_expr) => {
                 let substituted = substitute(context, def_expr.clone());
                 let value = evaluate_closed(substituted)?;
@@ -492,6 +545,19 @@ where
         }
     }
     Ok(own)
+}
+
+/// Returns `entries` with duplicate names collapsed so each name appears
+/// once, bound to the value of its last occurrence.
+fn dedup_last_wins<M, S>(entries: Vec<ContextEntry<M, S>>) -> Vec<ContextEntry<M, S>> {
+    let mut out: Vec<ContextEntry<M, S>> = Vec::new();
+    for (name, value) in entries {
+        match out.iter_mut().find(|(n, _)| *n == name) {
+            Some(existing) => existing.1 = value,
+            None => out.push((name, value)),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -644,6 +710,126 @@ mod tests {
         let expr = parse_program::<u32, _>("two", ()).unwrap();
         let error = evaluate(resolve, &bindings, expr).unwrap_err();
         assert_eq!(error.message(), "Variable 'two' not found in context");
+    }
+
+    #[test]
+    fn test_map_propagates_element_errors() {
+        // A failing element application fails the whole `map`; the error must
+        // not be demoted to an Error value inside the result list, where it
+        // would flow onward as ordinary data.
+        let error = eval_with_builtins("map(fn(x) => nope(x), [1, 2])").unwrap_err();
+        assert_eq!(error.message(), "Variable 'nope' not found in context");
+    }
+
+    #[test]
+    fn test_use_binds_module_value() {
+        let (b, errors) = parse_module::<u32, _>("two = 2;", ()).unwrap();
+        assert!(errors.is_empty());
+        let resolve = |path: &[String]| {
+            if path == ["b"] || path == ["nested", "b"] {
+                Ok(&b[..])
+            } else {
+                Err(Error::new(format!("no module {:?}", path)))
+            }
+        };
+
+        let (bindings, errors) = parse_module::<u32, _>("use b;", ()).unwrap();
+        assert!(errors.is_empty());
+        let expr = parse_program::<u32, _>("b.two", ()).unwrap();
+        let evaluated = evaluate(resolve, &bindings, expr).unwrap();
+        assert_eq!(format!("{}", evaluated), "2");
+
+        // A dotted path binds its last component.
+        let (bindings, errors) = parse_module::<u32, _>("use nested.b;", ()).unwrap();
+        assert!(errors.is_empty());
+        let expr = parse_program::<u32, _>("b.two", ()).unwrap();
+        let evaluated = evaluate(resolve, &bindings, expr).unwrap();
+        assert_eq!(format!("{}", evaluated), "2");
+    }
+
+    #[test]
+    fn test_use_projection_errors() {
+        let (b, errors) = parse_module::<u32, _>("two = 2;", ()).unwrap();
+        assert!(errors.is_empty());
+        let resolve = |path: &[String]| {
+            if path == ["b"] {
+                Ok(&b[..])
+            } else {
+                Err(Error::new(format!("no module {:?}", path)))
+            }
+        };
+        let (bindings, errors) = parse_module::<u32, _>("use b;", ()).unwrap();
+        assert!(errors.is_empty());
+
+        // Projecting a name the module doesn't bind.
+        let expr = parse_program::<u32, _>("b.three", ()).unwrap();
+        let error = evaluate(resolve, &bindings, expr).unwrap_err();
+        assert_eq!(error.message(), "Module has no binding 'three'");
+
+        // Projecting from a non-module value.
+        let expr = parse_program::<u32, _>("let x = 1 in x.y", ()).unwrap();
+        let error = evaluate(resolve, &bindings, expr).unwrap_err();
+        assert_eq!(error.message(), "Cannot project 'y' from a non-module: 1");
+    }
+
+    #[test]
+    fn test_use_module_last_definition_wins() {
+        let (b, errors) = parse_module::<u32, _>("x = 1; x = 2;", ()).unwrap();
+        assert!(errors.is_empty());
+        let resolve = |path: &[String]| {
+            if path == ["b"] {
+                Ok(&b[..])
+            } else {
+                Err(Error::new(format!("no module {:?}", path)))
+            }
+        };
+        let (bindings, errors) = parse_module::<u32, _>("use b;", ()).unwrap();
+        assert!(errors.is_empty());
+
+        let expr = parse_program::<u32, _>("b.x", ()).unwrap();
+        let evaluated = evaluate(resolve, &bindings, expr).unwrap();
+        assert_eq!(format!("{}", evaluated), "2");
+
+        // The bound value keeps one entry per name (observable via Display,
+        // which lists the bound names).
+        let context = evaluate_bindings(resolve, &bindings).unwrap();
+        assert_eq!(context.len(), 1);
+        assert_eq!(context[0].0, "b");
+        assert_eq!(format!("{}", context[0].1), "module {x}");
+    }
+
+    #[test]
+    fn test_uses_are_scoped() {
+        let (b, errors) = parse_module::<u32, _>("two = 2;", ()).unwrap();
+        assert!(errors.is_empty());
+        let (a, errors) = parse_module::<u32, _>("use b; alias = b.two;", ()).unwrap();
+        assert!(errors.is_empty());
+        let resolve = |path: &[String]| {
+            if path == ["a"] {
+                Ok(&a[..])
+            } else if path == ["b"] {
+                Ok(&b[..])
+            } else {
+                Err(Error::new(format!("no module {:?}", path)))
+            }
+        };
+        let (bindings, errors) = parse_module::<u32, _>("use a;", ()).unwrap();
+        assert!(errors.is_empty());
+
+        // `a`'s own definitions can project from the module `a` used...
+        let expr = parse_program::<u32, _>("a.alias", ()).unwrap();
+        let evaluated = evaluate(resolve, &bindings, expr).unwrap();
+        assert_eq!(format!("{}", evaluated), "2");
+
+        // ...but using `a` does not re-export the module binding `b`...
+        let expr = parse_program::<u32, _>("a.b", ()).unwrap();
+        let error = evaluate(resolve, &bindings, expr).unwrap_err();
+        assert_eq!(error.message(), "Module has no binding 'b'");
+
+        // ...nor is `b` in scope directly.
+        let expr = parse_program::<u32, _>("b.two", ()).unwrap();
+        let error = evaluate(resolve, &bindings, expr).unwrap_err();
+        assert_eq!(error.message(), "Variable 'b' not found in context");
     }
 
     #[test]

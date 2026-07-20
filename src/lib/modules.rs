@@ -1,4 +1,4 @@
-//! Embedded built-in tuun modules and helpers for the `open` syntax.
+//! Embedded built-in tuun modules and helpers for module-path attributes.
 //!
 //! [`EMBEDDED_MODULES`] is the single source of truth for which modules
 //! are bundled into binaries that don't have filesystem access (the wasm
@@ -11,15 +11,21 @@
 pub const EMBEDDED_MODULES: &[(&str, &str)] = &[
     ("std", include_str!("../../lib/v0/std.tuun")),
     ("env_minmax", include_str!("../../lib/v0/env_minmax.tuun")),
-    ("pm_synth", include_str!("../../lib/v0/pm_synth.tuun")),
+    (
+        "filters.basic",
+        include_str!("../../lib/v0/filters/basic.tuun"),
+    ),
+    ("filters.rbj", include_str!("../../lib/v0/filters/rbj.tuun")),
+    ("synth.pm", include_str!("../../lib/v0/synth/pm.tuun")),
+    ("synth.sub", include_str!("../../lib/v0/synth/sub.tuun")),
 ];
 
 /// Parses a JSON array of dotted module paths like `["std", "foo.bar"]`
-/// into the path-component vectors that `Binding::Open` expects. `"[]"`
-/// (or whitespace around it) yields an empty list. Both `"…"` and
-/// `'…'` quoting are accepted since HTML attributes commonly use
-/// single quotes.
-pub fn parse_open_json(json: &str) -> Result<Vec<Vec<String>>, String> {
+/// into the path-component vectors that `Binding::Open` and
+/// `Binding::Use` carry. `"[]"` (or whitespace around it) yields an
+/// empty list. Both `"…"` and `'…'` quoting are accepted since HTML
+/// attributes commonly use single quotes.
+pub fn parse_module_paths_json(json: &str) -> Result<Vec<Vec<String>>, String> {
     let trimmed = json.trim();
     if trimmed == "[]" {
         return Ok(Vec::new());
@@ -53,14 +59,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_open_json() {
-        assert_eq!(parse_open_json("[]").unwrap(), Vec::<Vec<String>>::new());
+    fn test_parse_module_paths_json() {
         assert_eq!(
-            parse_open_json(r#"["std"]"#).unwrap(),
+            parse_module_paths_json("[]").unwrap(),
+            Vec::<Vec<String>>::new()
+        );
+        assert_eq!(
+            parse_module_paths_json(r#"["std"]"#).unwrap(),
             vec![vec!["std".to_string()]]
         );
         assert_eq!(
-            parse_open_json(r#"["std", "foo.bar"]"#).unwrap(),
+            parse_module_paths_json(r#"["std", "foo.bar"]"#).unwrap(),
             vec![
                 vec!["std".to_string()],
                 vec!["foo".to_string(), "bar".to_string()]
@@ -68,15 +77,15 @@ mod tests {
         );
         // Single-quoted entries (HTML attributes often use them).
         assert_eq!(
-            parse_open_json("['std', 'foo.bar']").unwrap(),
+            parse_module_paths_json("['std', 'foo.bar']").unwrap(),
             vec![
                 vec!["std".to_string()],
                 vec!["foo".to_string(), "bar".to_string()]
             ]
         );
         // Not an array.
-        assert!(parse_open_json(r#""std""#).is_err());
+        assert!(parse_module_paths_json(r#""std""#).is_err());
         // Unquoted entry.
-        assert!(parse_open_json("[std]").is_err());
+        assert!(parse_module_paths_json("[std]").is_err());
     }
 }

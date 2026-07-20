@@ -596,7 +596,7 @@ mod tests {
         // Uses the real std library so the instrument shape (let-bindings,
         // filters, envelopes, seq/fin) matches live usage.
         let (mut set, warning) = ProgramSet::from_source(
-            "open std;\n#{sliders=[\"vol:0.5:0:1\"], keys}\nk = fn(note, vel) => ((harmonica(H, @note) | unseq()) * vol, (harmonica(H, @note) | unseq()) * vol);"
+            "open std;\n#{sliders=[\"vol:0.5:0:1\"], keys}\nk = fn(note, vel) => ($(@note) * vol * vel | ADS(0.2, 0.4, 0.6), Rw(0.4, 1.0));"
                 .to_string(),
             std::path::PathBuf::new(),
         )

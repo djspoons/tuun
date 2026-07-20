@@ -176,16 +176,24 @@ impl Wasm {
     /// before evaluating, e.g. `["std", "foo.bar"]`. Each entry behaves like an
     /// `open` binding at the top of the expression. Pass `"[]"` for no opens.
     ///
+    /// `use_json` is a JSON array of dotted module paths to bind as module
+    /// values, e.g. `["synth.pm"]`. Each entry behaves like a `use` binding
+    /// at the top of the expression: the module is bound to its last path
+    /// component and its bindings are reached by `.name` projection. Pass
+    /// `"[]"` for no uses.
+    ///
     /// # Examples
     /// ```javascript
-    /// tuun.install("sine(2764, 0)", "{}", "[]");
-    /// tuun.install("$440 | lpf(0.5, 1900)", "{}", '["std"]');
+    /// tuun.install("sine(2764, 0)", "{}", "[]", "[]");
+    /// tuun.install("$440", "{}", '["std"]', "[]");
+    /// tuun.install("std.square(220) * 0.3", "{}", "[]", '["std"]');
     /// ```
     pub fn install(
         &mut self,
         expression: &str,
         slider_json: &str,
         open_json: &str,
+        use_json: &str,
     ) -> Result<(), String> {
         let parsed_expr = parser::parse_program::<MarkId, _>(expression, Source::Expression)
             .map_err(|errors| {
@@ -196,16 +204,20 @@ impl Wasm {
                 format!("Parse errors: {}", rendered.join("; "))
             })?;
         let sliders = parse_json(slider_json)?;
-        let opens = modules::parse_open_json(open_json)?;
+        let opens = modules::parse_module_paths_json(open_json)?;
+        let uses = modules::parse_module_paths_json(use_json)?;
 
         // Build the bindings vec passed to `evaluate`. Implicit
         // `open __prelude` first so the user expression can reference
         // prelude names directly (same prefix each embedded module
-        // gets). Then user-requested opens, then slider bindings.
+        // gets). Then user-requested opens and uses, then slider bindings.
         let mut bindings: Vec<expr::SourceBinding<MarkId, Source>> = Vec::new();
         bindings.push(expr::Binding::Open(vec!["__prelude".to_string()]).into());
         for path in opens {
             bindings.push(expr::Binding::Open(path).into());
+        }
+        for path in uses {
+            bindings.push(expr::Binding::Use(path).into());
         }
         for (name, value) in &sliders {
             bindings.push(def_binding(
@@ -303,7 +315,7 @@ impl Wasm {
     ///
     /// # Examples
     /// ```javascript
-    /// tuun.install("$440", "{}", "[]");
+    /// tuun.install("$440", "{}", '["std"]', "[]");
     /// const done = tuun.process(output);
     /// ```
     pub fn process(&mut self, out: &mut [f32]) -> bool {
@@ -448,7 +460,7 @@ mod tests {
         for (expr, description) in examples {
             println!("Testing: {} - {}", description, expr);
 
-            tuun.install(expr, "{}", "[]")
+            tuun.install(expr, "{}", "[]", "[]")
                 .unwrap_or_else(|e| panic!("Failed to install '{}': {}", expr, e));
 
             let mut out = vec![0.0; 100];
@@ -479,7 +491,7 @@ mod tests {
 
         for expr in invalid_examples {
             println!("Testing invalid expression: {}", expr);
-            let result = tuun.install(expr, "{}", "[]");
+            let result = tuun.install(expr, "{}", "[]", "[]");
             assert!(
                 result.is_err(),
                 "Expected error for invalid expression '{}', but got success",
@@ -491,8 +503,9 @@ mod tests {
 
     #[test]
     fn test_context_functions() {
-        // These all rely on names from the embedded `std` module (`Qw`,
-        // `lpf`, `sawtooth`), so each install opens it explicitly.
+        // These all rely on names from the embedded `std` and `filters.rbj`
+        // modules (`Qw`, `lpf`, `sawtooth`), so each install opens it
+        // explicitly.
         let mut tuun = Wasm::new(44100, 120.0).expect("Failed to create Tuun instance");
 
         let lpf_examples = vec![
@@ -507,7 +520,7 @@ mod tests {
         for (expr, description) in lpf_examples {
             println!("Testing lpf: {} - {}", description, expr);
 
-            tuun.install(expr, "{}", r#"["std"]"#)
+            tuun.install(expr, "{}", r#"["std", "filters.rbj"]"#, "[]")
                 .unwrap_or_else(|e| panic!("Failed to install '{}': {}", expr, e));
 
             let mut out = vec![0.0; 100];
@@ -532,7 +545,7 @@ mod tests {
     #[test]
     fn test_open_unknown_module_errors() {
         let mut tuun = Wasm::new(44100, 120.0).expect("Failed to create Tuun instance");
-        let result = tuun.install("sine(2764, 0)", "{}", r#"["does_not_exist"]"#);
+        let result = tuun.install("sine(2764, 0)", "{}", r#"["does_not_exist"]"#, "[]");
         let message = result.expect_err("opening an unknown module should fail");
         assert!(
             message.contains("does_not_exist"),

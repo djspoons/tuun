@@ -191,7 +191,8 @@ fn parse_identifier(input: Input) -> IResult<String> {
                 |s: &Input| *s.fragment() != "fn" &&
                     *s.fragment() != "let" && *s.fragment() != "in" &&
                     *s.fragment() != "if" && *s.fragment() != "then" &&
-                    *s.fragment() != "else" && *s.fragment() != "open",
+                    *s.fragment() != "else" && *s.fragment() != "open" &&
+                    *s.fragment() != "use",
             ),
             parse_unary_operator,
             // A lonely underscore is also ok.
@@ -375,6 +376,10 @@ fn parse_binding<M>(input: Input) -> IResult<SourceBinding<M>> {
                 many0(terminated(parse_annotation_set, trivia0)),
                 alt((
                     preceded((tag("open"), trivia1), parse_import_path).map(Binding::Open),
+                    preceded(
+                        (tag("use"), trivia1),
+                        expect(parse_import_path, "expected module path after 'use'"),
+                    ).map(|path| Binding::Use(path.unwrap_or_default())),
                     separated_pair(
                         parse_pattern,
                         ws(expect(char('='), "expected '=' in definition")),
@@ -429,8 +434,8 @@ fn parse_let<M>(input: Input) -> IResult<SourceExpr<M>> {
     let end = rest.location_offset();
     let body = body.unwrap_or_else(error_placeholder);
     // Extract `Definition`s for `make_let` (the de-sugared lambda form doesn't
-    // model spans). `Open` directives aren't valid inside `let` so report each
-    // one as an error.
+    // model spans). `Open` and `Use` directives aren't valid inside `let` so
+    // report each one as an error.
     let mut definitions: Vec<(Pattern, SourceExpr<M>)> = Vec::new();
     for source_binding in bindings {
         match source_binding.binding {
@@ -438,6 +443,12 @@ fn parse_let<M>(input: Input) -> IResult<SourceExpr<M>> {
             Binding::Open(_) => {
                 rest.extra.report_error(Error::with_span(
                     "`open` is not allowed inside `let`; use it at the top level".to_string(),
+                    source_binding.span,
+                ));
+            }
+            Binding::Use(_) => {
+                rest.extra.report_error(Error::with_span(
+                    "`use` is not allowed inside `let`; use it at the top level".to_string(),
                     source_binding.span,
                 ));
             }
@@ -608,6 +619,17 @@ fn parse_arguments<M>(input: Input) -> IResult<(Vec<SourceExpr<M>>, NamedExprs<M
     Ok((rest, (positional, named)))
 }
 
+/// Parses the name of a `.name` projection: an identifier that starts
+/// with a letter or underscore (so `x.5` and `x.-` are rejected).
+///
+// TODO why is this not parse_identifier?
+fn parse_projection_name(input: Input) -> IResult<String> {
+    verify(parse_identifier, |name: &String| {
+        name.starts_with(|c: char| c.is_alphabetic() || c == '_')
+    })
+    .parse(input)
+}
+
 fn parse_application<M>(input: Input) -> IResult<SourceExpr<M>> {
     let start = input.location_offset();
     let (mut rest, mut result) = parse_primitive(input)?;
@@ -615,15 +637,37 @@ fn parse_application<M>(input: Input) -> IResult<SourceExpr<M>> {
         // Peek-and-consume one (whitespace + argument-list) iteration to
         // track positions.
         let attempt = preceded(trivia0, parse_arguments).parse(rest);
+        if let Ok((new_rest, (positional, named))) = attempt {
+            let end = new_rest.location_offset();
+            let app = Expr::Application {
+                function: Box::new(result),
+                positional,
+                named,
+            };
+            result = SourceExpr::with_span(app, start..end);
+            rest = new_rest;
+            continue;
+        }
+        // Projection postfix: `.name`, chaining freely with argument lists.
+        let attempt = preceded(
+            (trivia0, char('.'), trivia0),
+            expect(parse_projection_name, "expected identifier after '.'"),
+        )
+        .parse(rest);
         match attempt {
-            Ok((new_rest, (positional, named))) => {
+            Ok((new_rest, name)) => {
                 let end = new_rest.location_offset();
-                let app = Expr::Application {
-                    function: Box::new(result),
-                    positional,
-                    named,
+                let expr = match name {
+                    Some(name) => Expr::Project {
+                        module: Box::new(result),
+                        name,
+                    },
+                    // The dot is consumed but the name is missing: `expect`
+                    // reported the recoverable error; the placeholder carries
+                    // the same message so evaluation fails the same way.
+                    None => Expr::Error("expected identifier after '.'".to_string()),
                 };
-                result = SourceExpr::with_span(app, start..end);
+                result = SourceExpr::with_span(expr, start..end);
                 rest = new_rest;
             }
             Err(_) => break,
@@ -1668,6 +1712,97 @@ x = 1;";
         assert!(matches!(bindings[3].binding, Binding::Definition(..)));
         // Full round-trip.
         assert_eq!(print_preserving_module(&bindings, input), input);
+    }
+
+    #[test]
+    fn test_parse_use_bindings() {
+        // `use path.to.module` is a binding with a `.`-separated module
+        // path, binding the module to the path's last component.
+        let input = "\
+use foo;
+use bar.baz;
+x = 1;";
+        let bindings = parse_module_successfully(input);
+        assert_eq!(bindings.len(), 3);
+
+        match &bindings[0].binding {
+            Binding::Use(p) => assert_eq!(p, &vec!["foo".to_string()]),
+            other => panic!("expected Use for [0], got {:?}", other),
+        }
+        match &bindings[1].binding {
+            Binding::Use(p) => {
+                assert_eq!(p, &vec!["bar".to_string(), "baz".to_string()]);
+            }
+            other => panic!("expected Use for [1], got {:?}", other),
+        }
+        assert!(matches!(bindings[2].binding, Binding::Definition(..)));
+        // Full round-trip.
+        assert_eq!(print_preserving_module(&bindings, input), input);
+    }
+
+    #[test]
+    fn test_use_is_reserved() {
+        // `use` cannot be an identifier...
+        assert!(parse_program_unstamped::<u32>("use").is_err());
+        // ...but identifiers merely starting with "use" are unaffected.
+        assert_round_trip("user", "user");
+        assert_round_trip("use_it", "use_it");
+    }
+
+    #[test]
+    fn test_use_rejected_inside_let() {
+        let errors = parse_program_unstamped::<u32>("let use foo, x = 1 in x").unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message().contains("`use` is not allowed inside `let`")),
+            "got {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_parse_projection() {
+        assert_round_trip("pm.osc", "pm.osc");
+        assert_round_trip("pm.osc(440)", "pm.osc(440)");
+        assert_round_trip("a.b.c", "a.b.c");
+        assert_round_trip("f(x).y", "f(x).y");
+        assert_round_trip("pm.osc(440).out", "pm.osc(440).out");
+        // Trivia is allowed around the dot; Display canonicalizes it away.
+        assert_round_trip("pm .osc", "pm.osc");
+        // Unary operators bind tighter than postfix projection, matching
+        // how `$f(x)` parses as `($f)(x)`.
+        assert_round_trip("$pm.osc", "($pm).osc");
+    }
+
+    #[test]
+    fn test_projection_error_recovery() {
+        // A dangling dot in a program is an error (the recoverable report
+        // fails the program path).
+        let errors = parse_program_unstamped::<u32>("pm.").unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message().contains("expected identifier after '.'")),
+            "got {:?}",
+            errors
+        );
+
+        // In a module, the dangling dot reports one recoverable error and
+        // the placeholder keeps the module parseable.
+        let (bindings, errors) = parse_module_unstamped::<u32>("x = pm.;").unwrap();
+        assert_eq!(errors.len(), 1, "got {:?}", errors);
+        assert!(
+            errors[0]
+                .message()
+                .contains("expected identifier after '.'")
+        );
+        assert_eq!(bindings.len(), 1);
+
+        // A digit can't be a projection name, so floats keep their meaning
+        // and `pm.5` fails to parse.
+        assert!(parse_module_unstamped::<u32>("x = pm.5;").is_err());
+        assert_round_trip("1.5", "1.5");
     }
 
     #[test]

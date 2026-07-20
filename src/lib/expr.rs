@@ -125,8 +125,12 @@ impl<S> Display for Error<S> {
     }
 }
 
-/// The shared function backing a [`BuiltInFn`]: a pure function from a
+/// The shared function backing a [`BuiltInFn`]: a function from a
 /// vector of values to a value.
+// TODO consider returning Result<Expr, Error<S>> instead of signaling failure with
+// Expr::Error, so a failure nested inside a compound result can't escape
+// as an ordinary value and element-level spans survive (e.g. `map` could
+// point at the failing element's origin).
 pub type BuiltInImpl<M, S> = Rc<dyn Fn(Vec<Expr<M, S>>) -> Expr<M, S>>;
 
 #[derive(Clone)]
@@ -144,9 +148,11 @@ pub enum Pattern {
     Tuple(Vec<Pattern>),
 }
 
-/// Named parameters (on a function) or named arguments (at a call site):
-/// each pairs a name with its default or supplied expression.
-pub type NamedExprs<M, S = ()> = Vec<(String, SourceExpr<M, S>)>;
+/// A name paired with the expression bound to it.
+pub type NamedExpr<M, S = ()> = (String, SourceExpr<M, S>);
+
+/// Name–expression pairs, in source order.
+pub type NamedExprs<M, S = ()> = Vec<NamedExpr<M, S>>;
 
 #[derive(Clone, Debug)]
 pub enum Expr<M, S = ()> {
@@ -173,6 +179,17 @@ pub enum Expr<M, S = ()> {
     Seq {
         offset: Box<SourceExpr<M, S>>,
         waveform: Box<SourceExpr<M, S>>,
+    },
+    /// A module represented as a single value in which each exported binding of
+    /// that module appears as a named expression. Never produced by the parser.
+    ///
+    /// Each entry's expression is a closed value, and each name appears exactly
+    /// once.
+    BoundModule(NamedExprs<M, S>),
+    /// Projection of one binding out of a module value.
+    Project {
+        module: Box<SourceExpr<M, S>>,
+        name: String,
     },
     // If-Then-Else expression
     IfThenElse {
@@ -314,6 +331,13 @@ pub enum Binding<M, S = ()> {
     /// current scope. These bindings are not public in the current scope.
     // TODO make it just bind public ones
     Open(Vec<String>),
+    /// An import that binds the module at `path` to a single name (the last
+    /// path component) as a module value whose bindings are accessed by
+    /// projection.
+    ///
+    /// Like `Open`, the binding is not exported from the current scope.
+    // TODO support `use path.to.module as name` to choose the bound name.
+    Use(Vec<String>),
     /// Binds variables in `pattern` to the corresponding values in `expr`.
     Definition(Pattern, SourceExpr<M, S>),
     /// A placeholder that carries only trivia (e.g., trailing comments at end
@@ -408,6 +432,7 @@ fn stamp_binding<M, S: Copy>(binding: SourceBinding<M>, source: S) -> SourceBind
     SourceBinding {
         binding: match binding {
             Binding::Open(path) => Binding::Open(path),
+            Binding::Use(path) => Binding::Use(path),
             Binding::Definition(pattern, expr) => {
                 Binding::Definition(pattern, stamp_expr(expr, source))
             }
@@ -437,6 +462,9 @@ pub(crate) fn stamp_expr<M, S: Copy>(expr: SourceExpr<M>, source: S) -> SourceEx
         // Built-ins exist only in synthesized trees (the prelude), never in
         // parser output, and their closures cannot change span type.
         Expr::BuiltIn { .. } => unreachable!("cannot stamp a built-in"),
+        // Bound modules exist only in evaluated trees (the result of a `use`
+        // binding), never in parser output.
+        Expr::BoundModule(_) => unreachable!("cannot stamp a bound module"),
         Expr::Function {
             positional,
             named,
@@ -470,6 +498,10 @@ pub(crate) fn stamp_expr<M, S: Copy>(expr: SourceExpr<M>, source: S) -> SourceEx
                 .map(|a| stamp_expr(a, source))
                 .collect(),
             named: stamp_named(named, source),
+        },
+        Expr::Project { module, name } => Expr::Project {
+            module: Box::new(stamp_expr(*module, source)),
+            name,
         },
         Expr::Tuple(exprs) => {
             Expr::Tuple(exprs.into_iter().map(|e| stamp_expr(e, source)).collect())
@@ -640,10 +672,11 @@ fn expr_precedence<M, S>(expr: &Expr<M, S>) -> Precedence {
         | Expr::Variable(_)
         | Expr::Waveform(_)
         | Expr::BuiltIn { .. }
+        | Expr::BoundModule(_)
         | Expr::Tuple(_)
         | Expr::List(_)
         | Expr::Error(_) => Precedence::Atom,
-        Expr::Seq { .. } => Precedence::Application,
+        Expr::Seq { .. } | Expr::Project { .. } => Precedence::Application,
         Expr::Application {
             function,
             positional,
@@ -768,6 +801,22 @@ where
         write!(f, "{} = {}", name, value)?;
     }
     Ok(())
+}
+
+/// Writes the terse `module {a, b, …}` form of a bound module: bound
+/// names only, without their values.
+fn fmt_bound_module_names<M, S, W>(entries: &[NamedExpr<M, S>], f: &mut W) -> fmt::Result
+where
+    W: fmt::Write,
+{
+    write!(f, "module {{")?;
+    for (i, (name, _)) in entries.iter().enumerate() {
+        if i > 0 {
+            write!(f, ", ")?;
+        }
+        write!(f, "{}", name)?;
+    }
+    write!(f, "}}")
 }
 
 /// Format `expr` in an operator context with minimum precedence `min_precedence`,
@@ -909,6 +958,11 @@ where
                 fmt_named(named, positional.is_empty(), f)?;
                 write!(f, ")")
             }
+            Expr::Project { module, name } => {
+                fmt_at(module, Precedence::Application as u8, f)?;
+                write!(f, ".{}", name)
+            }
+            Expr::BoundModule(entries) => fmt_bound_module_names(entries, f),
             Expr::Tuple(exprs) => {
                 write!(f, "(")?;
                 for (i, expr) in exprs.iter().enumerate() {
@@ -982,6 +1036,9 @@ fn is_clean<M, S>(node: &SourceExpr<M, S>) -> bool {
                 && positional.iter().all(is_clean)
                 && named.iter().all(|(_, value)| is_clean(value))
         }
+        Expr::Project { module, .. } => node.span.is_some() && is_clean(module),
+        // Bound modules are synthesized by evaluation, never parsed.
+        Expr::BoundModule(_) => false,
         // Tuples in source always have parens; we require a span.
         Expr::Tuple(items) => node.span.is_some() && items.iter().all(is_clean),
         // Lists in source always have brackets; we require a span.
@@ -1033,6 +1090,9 @@ where
             }
             Binding::Open(path) => {
                 writeln!(out, "open {};", path.join(".")).expect("write to String");
+            }
+            Binding::Use(path) => {
+                writeln!(out, "use {};", path.join(".")).expect("write to String");
             }
             // No body for an `Empty` binding — any annotations it carries
             // were emitted above.
@@ -1116,6 +1176,11 @@ where
             positional,
             named,
         } => write_preserving_application(function, positional, named, source, out),
+        Expr::Project { module, name } => {
+            write_preserving_at(module, Precedence::Application as u8, source, out)?;
+            write!(out, ".{}", name)
+        }
+        Expr::BoundModule(entries) => fmt_bound_module_names(entries, out),
         Expr::Tuple(exprs) => {
             write!(out, "(")?;
             write_preserving_elements(exprs, source, out)?;
@@ -1280,6 +1345,7 @@ where
         | Expr::Variable(_)
         | Expr::BuiltIn { .. }
         | Expr::Application { .. }
+        | Expr::Project { .. }
         | Expr::Tuple(_) => write_preserving(expr, source, out),
         _ => {
             out.write_str("(")?;
@@ -1382,6 +1448,19 @@ mod tests {
         };
         assert_eq!(source_of(&function.span), 7);
         assert_eq!(source_of(&positional[0].span), 7);
+    }
+
+    #[test]
+    fn test_display_bound_module() {
+        let entries: NamedExprs<u32> = vec![
+            ("a".to_string(), SourceExpr::float(1.0)),
+            ("b".to_string(), SourceExpr::float(2.0)),
+        ];
+        assert_eq!(format!("{}", Expr::BoundModule(entries)), "module {a, b}");
+        assert_eq!(
+            format!("{}", Expr::<u32>::BoundModule(Vec::new())),
+            "module {}"
+        );
     }
 
     #[test]

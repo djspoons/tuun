@@ -289,19 +289,32 @@ fn check_block(
     // honors — each entry becomes a `Binding::Open(path)` resolved
     // against the embedded modules table.
     let open_attr = extract_attr(block, "open").unwrap_or("[]");
-    let opens = match modules::parse_open_json(open_attr) {
+    let opens = match modules::parse_module_paths_json(open_attr) {
         Ok(o) => o,
         Err(e) => {
             return CheckResult::Fail(format!("[FAIL] \"{}\" open parsing error: {}", label, e));
         }
     };
 
+    // Uses: `use='["synth.pm"]'`. Each entry becomes a `Binding::Use(path)`
+    // binding the module value to its last path component.
+    let use_attr = extract_attr(block, "use").unwrap_or("[]");
+    let uses = match modules::parse_module_paths_json(use_attr) {
+        Ok(u) => u,
+        Err(e) => {
+            return CheckResult::Fail(format!("[FAIL] \"{}\" use parsing error: {}", label, e));
+        }
+    };
+
     // Build the bindings the same way the wasm runtime does:
-    // implicit `open __prelude` → opens → sliders → expression.
+    // implicit `open __prelude` → opens → uses → sliders → expression.
     let mut bindings: Bindings = Vec::new();
     bindings.push(expr::Binding::Open(vec!["__prelude".to_string()]).into());
     for path in opens {
         bindings.push(expr::Binding::Open(path).into());
+    }
+    for path in uses {
+        bindings.push(expr::Binding::Use(path).into());
     }
     slider::append_slider_bindings(
         &slider_configs,

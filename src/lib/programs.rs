@@ -1621,6 +1621,31 @@ tone = saw(220);"
     }
 
     #[test]
+    fn editing_program_does_not_disturb_use_bindings() {
+        // A `use` binding must ride through splices verbatim, like `open`.
+        let source = "\
+use util.synths;
+#{level_db=0}
+tone = synths.saw(440);";
+        let mut state = state_from(source);
+        assert_eq!(state.programs()[0].text(), "synths.saw(440)");
+
+        state
+            .program_mut(0)
+            .unwrap()
+            .set_text("synths.saw(220)".to_string());
+        state.splice(0).unwrap();
+
+        assert_eq!(
+            state.source,
+            "\
+use util.synths;
+#{level_db=0}
+tone = synths.saw(220);"
+        );
+    }
+
+    #[test]
     fn new_program_is_appended_at_end_when_no_next_ui_program() {
         // Editing a previously-empty padding slot (span 0..0) with no UI
         // program after it should append a fresh `#{skip_slots=…,

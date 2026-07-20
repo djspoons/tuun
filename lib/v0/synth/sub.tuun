@@ -1,0 +1,43 @@
+open std;
+use filters.rbj;
+
+// An example of subtractive synthesis from Welsh's Synthesizer Cookbook
+harmonica = fn(dur, freq) =>
+  let
+    // These are approximately Welsh's values but not exactly
+    osc1 = pulse(0.93 + 0.05 * $(1.6), freq),
+    osc2 = reset(osc1, pulse(0.7, add_cents(add_semitones(freq, 8), 7))),
+    osc = 0.375 * osc1 + 0.5 * osc2,
+    a = 0.13,
+    r = 0.33,
+    d = max(0.33, dur - (a + r)),
+    s = max(dur - (a + d + r), 0),
+  in
+    osc
+    | rbj.lpf(0.5, 1900)
+    | ADSR(a, d, 0.5, s, r)
+    | fin(time - dur) // redundant with the ADSR
+    | seq(time - dur);
+
+// Played on a harmonica
+// I = I(harmonica);
+// II = II(harmonica);
+// III = III(harmonica);
+// i = i(harmonica);
+
+// Just notes on harmonica
+// Hh = fn(freq) => harmonica(H, freq) | seq(time - H);
+
+// <[I H, III H, i H]>
+// <[Hh(@67), Hh(@69)]>
+
+
+flute = fn(dur, freq_hz, lpf_Q = 0.6, lpf_cutoff = 1600) =>
+  let
+    attack_dur = 0.27,
+    release_dur = 0.17,
+    sustain_dur = dur - attack_dur - release_dur,
+  in
+    sawtooth(freq_hz)
+    | rbj.lpf(lpf_Q, lpf_cutoff)
+    | ADSR(attack_dur, 0.0, 1.0, sustain_dur, release_dur);

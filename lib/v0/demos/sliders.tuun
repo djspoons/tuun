@@ -14,9 +14,11 @@ _ = pulse(width, 220);
 #{color=rgb(110, 144, 255),sliders=["frequency:25:1:110","depth:0.5:0:1"]}
 _ = pulse($frequency * depth, 220);
 
+use filters.rbj;
+
 // Filters
 #{color=rgb(231, 130, 251),sliders=["Q:0.707:0.1:1","cutoff:0.637:fn(x) => 100 * pow(110, x)"]}
-_ = square(220) | lpf(Q, cutoff);
+_ = square(220) | rbj.lpf(Q, cutoff);
 // Frequency
 #{color=rgb(255, 185, 190),sliders=["frequency:0.463:fn(x) => 50 * pow(20, x)"]}
 _ = $(frequency);

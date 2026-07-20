@@ -32,6 +32,7 @@ where
     }
 }
 
+// TODO maybe use Display instead of Debug for errors?
 fn binary_op<M, S>(
     mut arguments: Vec<Expr<M, S>>,
     name: String,
@@ -482,7 +483,7 @@ where
                 ));
                 match result {
                     Ok(expr) => results.push(expr),
-                    Err(err) => results.push(SourceExpr::error(err.to_string())),
+                    Err(err) => return Error(err.to_string()),
                 }
             }
             Expr::List(results)

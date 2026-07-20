@@ -1,13 +1,13 @@
 open std;
 
 // A pure PM synth. Note that any of I, D, or fc can control the length of the output.
-pure_pm_synth = fn(I, D) => fn(fc) =>
+pure_synth = fn(I, D) => fn(fc) =>
   let
     fm = D/2 * fc
   in
     sine(2*pi * fc, I * sine(2*pi * fm, 0));
 
-pure_pm_brass = fn(fc, dur) => let
+pure_brass = fn(fc, dur) => let
   // Roughly from Chowning (1977)
   D = 1,
   I_max = 5,
@@ -21,12 +21,12 @@ pure_pm_brass = fn(fc, dur) => let
   I = I_max | envelope,
 
   // Build the instrument
-  synth = pure_pm_synth(I, D)
+  synth = pure_synth(I, D)
 in
   synth(fc) | envelope;
 
 
-pm_synth = fn(I_max, D, a, d, s_level, r) => fn(fc, dur) =>
+synth = fn(I_max, D, a, d, s_level, r) => fn(fc, dur) =>
   let
     s = max(dur - (a + d + r), 0),
     envelope = ADSR(a, d, s_level, s, r),
@@ -35,11 +35,11 @@ pm_synth = fn(I_max, D, a, d, s_level, r) => fn(fc, dur) =>
   in
     sine(2*pi * fc, sine(2*pi * fm, 0) * I) | envelope;
 
-pm_brass = pm_synth(5, 1, 0.1, 0.1, 0.7, 0.1);
+brass = synth(5, 1, 0.1, 0.1, 0.7, 0.1);
 
 open env_minmax;
 
-pm_piano_keys = fn(k, v) =>
+piano_keys = fn(k, v) =>
   let
     I1_max = 6,
     amp_attack = 0.01,
@@ -75,7 +75,7 @@ pm_piano_keys = fn(k, v) =>
   in
     (note_on, note_off);
 
-pm_ukulele = fn(I_max, decay_dur, mod_decay_dur) => fn(dur, freq_hz) =>
+ukulele = fn(I_max, decay_dur, mod_decay_dur) => fn(dur, freq_hz) =>
   let
     //I_max = 10,
     attack_dur = 0.01,
@@ -99,7 +99,7 @@ pm_ukulele = fn(I_max, decay_dur, mod_decay_dur) => fn(dur, freq_hz) =>
     osc | envelope | seq(time - dur) | fin(time - dur);
 
 
-pm_ukulele_keys = fn(I_max) => fn(k, v) =>
+ukulele_keys = fn(I_max) => fn(k, v) =>
   let
     //I_max = 10,
     amp_attack = 0.01,
