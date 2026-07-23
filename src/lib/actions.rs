@@ -57,7 +57,8 @@ pub struct Completion {
     start: usize,
     /// The identifier fragment the user typed, restored when the cycle wraps.
     original: String,
-    /// In-scope names starting with `original`, most recently bound first.
+    /// Names starting with `original` (in-scope names or a module's bindings
+    /// when the fragment is qualified) most recently bound first.
     candidates: Vec<String>,
     /// Ring index of the entry the next completion inserts;
     /// `candidates.len()` denotes `original`.
@@ -255,8 +256,10 @@ pub enum Action {
     ///
     /// With an identifier fragment before the cursor, cycles it through the
     /// in-scope names that share the prefix, most recently bound first,
-    /// wrapping back to the fragment itself. Right after a `(`, inserts a
-    /// parameter hint for the function being called instead, leaving the
+    /// wrapping back to the fragment itself. A fragment qualified by a module
+    /// projection (`pm.pia`) completes among that module's bindings instead,
+    /// and a bare `pm.` cycles through all of them. Right after a `(`, inserts
+    /// a parameter hint for the function being called instead, leaving the
     /// cursor on the first parameter.
     Complete,
     /// Restore the active program's text and cursor from before the most recent
@@ -938,9 +941,9 @@ fn parse_program_errors(text: &str) -> Vec<Diagnostic> {
 /// Applies `Action::Complete` in Edit mode; does nothing in other modes.
 ///
 /// Continues an in-progress cycle when one is stored; otherwise dispatches on
-/// the text before the cursor: an identifier fragment starts a completion cycle
-/// or a `(` inserts a parameter hint. See [`Action::Complete`] for the
-/// user-facing behavior.
+/// the text before the cursor: an identifier fragment (optionally qualified by
+/// a `module.` projection) starts a completion cycle or a `(` inserts a
+/// parameter hint. See [`Action::Complete`] for the user-facing behavior.
 fn apply_complete(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
     let Mode::Edit {
         cursor_position,
@@ -980,7 +983,8 @@ fn apply_complete(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
     let text = state.active_program().text();
     let before = &text[..cursor];
     let fragment_start = before.trim_end_matches(is_word_char).len();
-    if fragment_start == cursor {
+    let qualifier = projection_qualifier(before, fragment_start);
+    if fragment_start == cursor && qualifier.is_empty() {
         if before.ends_with('(') {
             return apply_parameter_hint(state, ctx, cursor);
         }
@@ -989,7 +993,8 @@ fn apply_complete(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
         )];
     }
 
-    // An identifier fragment ends at the cursor: start a new cycle.
+    // A fragment (possibly empty when after a `.`) ends at the cursor: start a
+    // new cycle.
     let fragment = before[fragment_start..].to_string();
     let context = match ctx
         .evaluator
@@ -998,20 +1003,47 @@ fn apply_complete(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
         Ok(context) => context,
         Err(error) => return vec![Effect::ShowMessage(format!("Can't complete: {}", error))],
     };
-    let mut seen = HashSet::new();
-    let mut candidates = Vec::new();
-    for (name, _) in context.iter().rev() {
-        // Walking from the end, the first occurrence of a name is the live
-        // binding; any earlier occurrence is shadowed.
-        if seen.insert(name.clone()) && name.starts_with(&fragment) && *name != fragment {
-            candidates.push(name.clone());
+    // A fragment qualified by a module projection (`pm.pia`) completes
+    // among that module's bindings. An unresolvable qualifier falls back to
+    // the unqualified scan, since its dot may not be a projection at all
+    // (e.g. the fragment `5` in `0.5`).
+    let module = resolve_module_path(&context, &qualifier);
+    let candidates: Vec<String> = match module {
+        Some(entries) => entries
+            .iter()
+            .rev()
+            .filter(|(name, _)| name.starts_with(&fragment) && *name != fragment)
+            .map(|(name, _)| name.clone())
+            .collect(),
+        None if !fragment.is_empty() => {
+            let mut seen = HashSet::new();
+            let mut candidates = Vec::new();
+            for (name, _) in context.iter().rev() {
+                // Walking from the end, the first occurrence of a name is the
+                // live binding; any earlier occurrence is shadowed.
+                if seen.insert(name.clone()) && name.starts_with(&fragment) && *name != fragment {
+                    candidates.push(name.clone());
+                }
+            }
+            candidates
         }
-    }
+        // An empty fragment whose qualifier resolves to nothing: likely the
+        // middle of a float (`0.`), not a projection awaiting a name.
+        None => {
+            return vec![Effect::ShowMessage("Nothing to complete".to_string())];
+        }
+    };
     if candidates.is_empty() {
-        return vec![Effect::ShowMessage(format!(
-            "No completions for \"{}\"",
-            fragment
-        ))];
+        let message = if module.is_some() {
+            format!(
+                "No completions for \"{}\" in module \"{}\"",
+                fragment,
+                qualifier.join(".")
+            )
+        } else {
+            format!("No completions for \"{}\"", fragment)
+        };
+        return vec![Effect::ShowMessage(message)];
     }
 
     let replacement = candidates[0].clone();
@@ -1036,14 +1068,10 @@ fn apply_complete(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
 }
 
 /// Inserts a parameter hint for the call being typed: with the Edit-mode
-/// `cursor` just after `(` and the identifier before it bound to a function,
-/// inserts that function's positional parameters, its named parameters as
-/// `name = <default value>` pairs, and a closing `)`.
-///
-/// The hint previews the call's shape rather than typing it for the user:
-/// the cursor lands after the first parameter, ready to replace the
-/// positional placeholders with real arguments (or after the `)` when the
-/// function takes none).
+/// `cursor` just after `(` and the identifier before it (possibly a module
+/// projection) bound to a function, inserts that function's positional
+/// parameters, its named parameters as `name = <default value>` pairs, and a
+/// closing `)`.
 fn apply_parameter_hint(state: &mut AppState, ctx: &Context, cursor: usize) -> Vec<Effect> {
     let text = state.active_program().text();
     let head = &text[..cursor - 1];
@@ -1052,6 +1080,7 @@ fn apply_parameter_hint(state: &mut AppState, ctx: &Context, cursor: usize) -> V
     if name.is_empty() {
         return vec![Effect::ShowMessage("Nothing to complete".to_string())];
     }
+    let qualifier = projection_qualifier(head, name_start);
     let context = match ctx
         .evaluator
         .program_context(&state.programs, state.active_program_index)
@@ -1059,9 +1088,26 @@ fn apply_parameter_hint(state: &mut AppState, ctx: &Context, cursor: usize) -> V
         Ok(context) => context,
         Err(error) => return vec![Effect::ShowMessage(format!("Can't complete: {}", error))],
     };
-    // The last occurrence of the name is the live binding.
-    let Some((_, value)) = context.iter().rev().find(|(n, _)| *n == name) else {
-        return vec![Effect::ShowMessage(format!("\"{}\" is not defined", name))];
+    // A name qualified by a module projection (`pm.osc(`) is looked up in
+    // that module's bindings; otherwise the last occurrence of the name in
+    // the context is the live binding.
+    let (display, value) = match resolve_module_path(&context, &qualifier) {
+        Some(entries) => {
+            let display = format!("{}.{}", qualifier.join("."), name);
+            match entries.iter().find(|(n, _)| *n == name) {
+                Some((_, value)) => (display, value),
+                None => {
+                    return vec![Effect::ShowMessage(format!(
+                        "\"{}\" is not defined",
+                        display
+                    ))];
+                }
+            }
+        }
+        None => match context.iter().rev().find(|(n, _)| *n == name) {
+            Some((_, value)) => (name.clone(), value),
+            None => return vec![Effect::ShowMessage(format!("\"{}\" is not defined", name))],
+        },
     };
     match &value.expr {
         expr::Expr::Function {
@@ -1092,7 +1138,7 @@ fn apply_parameter_hint(state: &mut AppState, ctx: &Context, cursor: usize) -> V
         ))],
         _ => vec![Effect::ShowMessage(format!(
             "\"{}\" is not a function",
-            name
+            display
         ))],
     }
 }
@@ -1278,6 +1324,51 @@ fn next_char_boundary(text: &str, cursor: usize) -> usize {
 /// else (whitespace, operators, punctuation) separates words.
 fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '#'
+}
+
+/// Returns the dotted path qualifying the word starting at `start` in `text`
+/// (the `["a", "b"]` in `a.b.osc`) outermost component first.
+///
+/// Empty when the word is not written as a `.name` projection of preceding
+/// words (no dot, or the dot follows a non-word character as in `f(x).y`).
+fn projection_qualifier(text: &str, start: usize) -> Vec<String> {
+    let mut path = Vec::new();
+    let mut end = start;
+    while let Some(head) = text[..end].strip_suffix('.') {
+        let word_start = head.trim_end_matches(is_word_char).len();
+        if word_start == head.len() {
+            break;
+        }
+        path.insert(0, head[word_start..].to_string());
+        end = word_start;
+    }
+    path
+}
+
+/// Returns the bindings of the module value that `path` names in `context`: the
+/// last binding of the path's first component, projected through nested module
+/// values for the remaining components. `None` when `path` is empty or any step
+/// is unbound or not a module value.
+fn resolve_module_path<'a, M, S>(
+    context: &'a [expr::NamedExpr<M, S>],
+    path: &[String],
+) -> Option<&'a [expr::NamedExpr<M, S>]> {
+    let (first, rest) = path.split_first()?;
+    // The last occurrence of the name is the live binding.
+    let (_, value) = context.iter().rev().find(|(n, _)| n == first)?;
+    let mut entries = match &value.expr {
+        expr::Expr::BoundModule(entries) => entries.as_slice(),
+        _ => return None,
+    };
+    for component in rest {
+        // Module entries have unique names, so any occurrence is the binding.
+        let (_, value) = entries.iter().find(|(n, _)| n == component)?;
+        entries = match &value.expr {
+            expr::Expr::BoundModule(entries) => entries.as_slice(),
+            _ => return None,
+        };
+    }
+    Some(entries)
 }
 
 /// Returns the byte offset where the word preceding the end of `prefix`
@@ -1904,6 +1995,153 @@ mod tests {
         assert!(
             matches!(&effects[0], Effect::ShowMessage(m) if m.contains("built-in")),
             "expected a built-in message, got {:?}",
+            effects
+        );
+    }
+
+    /// Writes a library root holding modules for completion tests — `pm`
+    /// with two `piano_*` bindings and `outer` re-exporting `pm` as
+    /// `alias` — and returns that root.
+    ///
+    /// The files are written once per process: tests sharing the root run
+    /// in parallel, and a rewrite is not atomic, so a concurrent reader
+    /// could otherwise see a truncated module.
+    fn completion_library_root() -> std::path::PathBuf {
+        static ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        ROOT.get_or_init(|| {
+            let dir = std::env::temp_dir().join("tuun_test_completion_modules");
+            std::fs::create_dir_all(&dir).expect("temp module dir");
+            std::fs::write(
+                dir.join("pm.tuun"),
+                "piano_keys = fn(freq, gain = 1 + 1) => freq;\npiano_bass = 2;\n",
+            )
+            .expect("write pm module");
+            std::fs::write(dir.join("outer.tuun"), "use pm;\nalias = pm;\n")
+                .expect("write outer module");
+            dir
+        })
+        .clone()
+    }
+
+    /// Applies `action` with an evaluator resolving modules under `root`.
+    fn apply_with_library_root(
+        state: &mut AppState,
+        root: std::path::PathBuf,
+        action: Action,
+    ) -> Vec<Effect> {
+        let evaluator = evaluator::Evaluator::new(48000, 120, root);
+        let status = empty_status();
+        let ctx = Context {
+            status: &status,
+            now: Instant::now(),
+            evaluator: &evaluator,
+            source_stale: false,
+        };
+        apply(state, &ctx, action)
+    }
+
+    #[test]
+    fn complete_qualified_fragment_uses_module_bindings() {
+        let mut state = edit_state("use pm;\n#{level_db=0}\n_ = test;", "pm.pia", 6);
+        let root = completion_library_root();
+        for (text, cursor) in [
+            ("pm.piano_bass", 13), // the module's most recent match comes first
+            ("pm.piano_keys", 13),
+            ("pm.pia", 6), // the ring wraps through the original fragment
+        ] {
+            apply_with_library_root(&mut state, root.clone(), Action::Complete);
+            assert_eq!(edit_text_and_cursor(&state), (text.to_string(), cursor));
+        }
+    }
+
+    #[test]
+    fn complete_after_module_dot_cycles_all_bindings() {
+        let mut state = edit_state("use pm;\n#{level_db=0}\n_ = test;", "pm.", 3);
+        let root = completion_library_root();
+        apply_with_library_root(&mut state, root.clone(), Action::Complete);
+        assert_eq!(
+            edit_text_and_cursor(&state),
+            ("pm.piano_bass".to_string(), 13)
+        );
+        apply_with_library_root(&mut state, root, Action::Complete);
+        assert_eq!(
+            edit_text_and_cursor(&state),
+            ("pm.piano_keys".to_string(), 13)
+        );
+    }
+
+    #[test]
+    fn complete_through_nested_module_values() {
+        let mut state = edit_state(
+            "use outer;\n#{level_db=0}\n_ = test;",
+            "outer.alias.piano_k",
+            19,
+        );
+        let root = completion_library_root();
+        apply_with_library_root(&mut state, root, Action::Complete);
+        assert_eq!(
+            edit_text_and_cursor(&state),
+            ("outer.alias.piano_keys".to_string(), 22)
+        );
+    }
+
+    #[test]
+    fn complete_qualified_fragment_without_matches_names_the_module() {
+        let mut state = edit_state("use pm;\n#{level_db=0}\n_ = test;", "pm.zzz", 6);
+        let root = completion_library_root();
+        let effects = apply_with_library_root(&mut state, root, Action::Complete);
+        assert_eq!(edit_text_and_cursor(&state), ("pm.zzz".to_string(), 6));
+        assert!(
+            matches!(&effects[0], Effect::ShowMessage(m)
+                if m == "No completions for \"zzz\" in module \"pm\""),
+            "expected a no-completions message, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn complete_with_unresolved_qualifier_completes_unqualified() {
+        // `x.` doesn't name a module value, so the dot may not be a
+        // projection at all; the fragment completes against the context.
+        let mut state = edit_state("#{level_db=0}\n_ = test;", "x.sin", 5);
+        apply_with_empty_status(&mut state, Action::Complete);
+        assert_eq!(edit_text_and_cursor(&state), ("x.sine".to_string(), 6));
+    }
+
+    #[test]
+    fn complete_after_number_dot_reports_nothing_to_complete() {
+        // Mid-float (`0.`) the dot looks like a projection of `0`; with no
+        // fragment and no module to list, there is nothing to do.
+        let mut state = edit_state("#{level_db=0}\n_ = test;", "_ = 0.", 6);
+        let effects = apply_with_empty_status(&mut state, Action::Complete);
+        assert_eq!(edit_text_and_cursor(&state), ("_ = 0.".to_string(), 6));
+        assert!(
+            matches!(&effects[0], Effect::ShowMessage(m) if m.contains("Nothing to complete")),
+            "expected a nothing-to-complete message, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn complete_after_open_paren_hints_module_binding_parameters() {
+        let mut state = edit_state("use pm;\n#{level_db=0}\n_ = test;", "pm.piano_keys(", 14);
+        let root = completion_library_root();
+        apply_with_library_root(&mut state, root, Action::Complete);
+        // The named default was evaluated when the module loaded (1 + 1 → 2).
+        assert_eq!(
+            edit_text_and_cursor(&state),
+            ("pm.piano_keys(freq, gain = 2)".to_string(), 18)
+        );
+    }
+
+    #[test]
+    fn parameter_hint_for_missing_module_binding_names_the_projection() {
+        let mut state = edit_state("use pm;\n#{level_db=0}\n_ = test;", "pm.nope(", 8);
+        let root = completion_library_root();
+        let effects = apply_with_library_root(&mut state, root, Action::Complete);
+        assert!(
+            matches!(&effects[0], Effect::ShowMessage(m) if m == "\"pm.nope\" is not defined"),
+            "expected a not-defined message, got {:?}",
             effects
         );
     }
