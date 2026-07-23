@@ -7,7 +7,7 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take_till, take_while, take_while1},
     character::complete as character,
-    character::complete::{alphanumeric1, char},
+    character::complete::{alpha1, alphanumeric1, char},
     combinator::{all_consuming, not, opt, peek, recognize, verify},
     multi::{many0, many1, separated_list0, separated_list1},
     number::complete as number,
@@ -181,11 +181,8 @@ fn parse_identifier(input: Input) -> IResult<String> {
     let (rest, value) =
         alt((
             verify(recognize((
-                    alt((
-                        alphanumeric1,
-                        // One leading underscore is ok
-                        recognize((tag("_"), alphanumeric1)),
-                    )),
+                    opt(tag("_")),
+                    alpha1,
                     many0(alt((alphanumeric1, tag("_"), tag("#")))),
                 )),
                 |s: &Input| *s.fragment() != "fn" &&
@@ -195,8 +192,6 @@ fn parse_identifier(input: Input) -> IResult<String> {
                     *s.fragment() != "use",
             ),
             parse_unary_operator,
-            // A lonely underscore is also ok.
-            terminated(tag("_"), not(peek(alt((tag("_"), alphanumeric1))))),
         )).parse(input)?;
     Ok((rest, value.to_string()))
 }
@@ -220,6 +215,8 @@ fn parse_pattern(input: Input) -> IResult<Pattern> {
     let (rest, pattern) =
         alt((
             parse_identifier.map(Pattern::Identifier),
+            // In a pattern, "_" is the wildcard
+            tag("_").map(|s: Input| Pattern::Identifier(s.fragment().to_string())),
             delimited(
                 (char('('), trivia0),
                 separated_list0(
@@ -275,8 +272,8 @@ fn pattern_names(pattern: &Pattern, names: &mut Vec<String>) {
     }
 }
 
-/// Parses one entry of a function's parameter list, along with its source range
-/// (used to locate validation errors).
+/// Parses one entry of a function's parameter list, along with its source
+/// range.
 fn parse_parameter<M>(input: Input) -> IResult<(Range<usize>, Parameter<M>)> {
     let start = input.location_offset();
     let (rest, item) = alt((
@@ -500,21 +497,7 @@ fn parse_unary_application<M>(input: Input) -> IResult<SourceExpr<M>> {
 
 fn parse_variable<M>(input: Input) -> IResult<SourceExpr<M>> {
     let start = input.location_offset();
-    // Variables are the same as identifiers (i.e., trivial patterns) except:
-    //   "_" is only a identifier: it may be bound but *not* referenced
-    //   "__chord" and others with double-underscore prefixes may be
-    //     referenced but *not* bound
-    #[rustfmt::skip]
-    let (rest, name) = verify(
-        alt((
-            parse_identifier,
-            recognize((
-                tag("__"),
-                many0(alt((alphanumeric1, tag("_"), tag("#")))),
-            )).map(|v: Input| v.fragment().to_string()),
-        )),
-        |name: &String| name != "_",
-    ).parse(input)?;
+    let (rest, name) = parse_identifier.parse(input)?;
     let end = rest.location_offset();
     Ok((
         rest,
@@ -1228,12 +1211,9 @@ mod tests {
         assert_round_trip("my_var", "my_var");
         assert_round_trip("$", "$");
         assert_round_trip("_private", "_private");
-        assert_round_trip("__chord", "__chord");
 
-        // Double underscore identifiers are internal-only
-        let errors = RefCell::new(Vec::new());
-        let input = Input::new_extra("__chord", ParseState(&errors));
-        let result = parse_identifier(input);
+        // Double underscore identifiers are internal-only and unparseable
+        let result = parse_program_unstamped::<u32>("__chord");
         assert!(result.is_err());
     }
 
