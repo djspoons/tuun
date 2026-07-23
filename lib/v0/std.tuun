@@ -4,6 +4,11 @@
 // Define min and max in a waveform-compatible way.
 min = fn(x, y) => alt(x - y, y, x);
 max = fn(x, y) => alt(x - y, x, y);
+abs = fn(x) => alt(x, x, -x);
+sign = fn(x) => alt(x, 1, -1);
+clamp = fn(x, lower, upper) => min(max(x, lower), upper);
+clamp01 = fn(x) => clamp(x, 0, 1);
+
 pi = 3.14159265;
 sinh = fn(x) => (exp(x) - exp(-x)) / 2;
 
@@ -17,6 +22,8 @@ sin = fn(phase) => sine(0, phase);
 // `$` computes a sine wave at the given frequency in hertz (which must be a float or waveform).
 $ = fn(freq_hz) => sine(2*pi * freq_hz, 0);
 // `sawtooth` computes a sawtooth wave at the given frequency in hertz.
+// Note that this is an inverse sawtooth (used so that it meets the
+// negative/positive constraint described above).
 sawtooth = fn(freq_hz) => (reset($freq_hz, -freq_hz * time) + 0.5) * 2;
 // `square` computes a square wave at the given frequency in hertz.
 square = fn(freq_hz) => alt($freq_hz, 1, -1);

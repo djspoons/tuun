@@ -276,6 +276,8 @@ where
                 (Fixed(a, _), _) if a.is_empty() => Fixed(vec![], ()),
                 (_, Fixed(b, _)) if b.is_empty() => Fixed(vec![], ()),
                 (a, Const(1.0)) => a,
+                // If a is infinite, then we can replace multiplication of zero with zero
+                //(a, Const(0.0)) => Const(0.0)
                 (Const(a), Const(b)) => Const(a * b),
                 (Fixed(a, _), Const(b)) => Fixed(a.into_iter().map(|x| x * b).collect(), ()),
                 // Commute (moving constants to the right)

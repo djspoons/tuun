@@ -376,7 +376,7 @@ where
     }
 }
 
-// TODO: can this be moved to context?
+// TODO: can this be moved to std?
 pub fn cos<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug + Clone,

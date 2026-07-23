@@ -1,6 +1,6 @@
-open std;
+// RBJ Cookbook https://webaudio.github.io/Audio-EQ-Cookbook/Audio-EQ-Cookbook.txt
 
-// RBJ Cookbook
+open std;
 
 lpf = fn(Q, fc) =>
   let
