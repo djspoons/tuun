@@ -16,6 +16,7 @@ use crate::diagnostics::{Diagnostic, Source, render_snippet};
 use crate::eval;
 use crate::expr;
 use crate::ids::MarkId;
+use crate::optimizer;
 use crate::parser;
 use crate::programs::{Evaluated, ProgramKind, ProgramSet, ProgramSliders};
 use crate::sequencer;
@@ -321,8 +322,9 @@ impl Evaluator {
     /// Evaluates a sub-expression of the program at `index` in that program's
     /// evaluation context, expecting a waveform result.
     ///
-    /// Returns `None` when evaluation fails or the result is neither a bare nor
-    /// a `seq`-wrapped waveform (the `seq` wrapper is stripped).
+    /// The waveform is returned optimized. Returns `None` when evaluation fails
+    /// or the result is neither a bare nor a `seq`-wrapped waveform (the `seq`
+    /// wrapper is stripped).
     pub fn evaluate_program_waveform_expr(
         &self,
         set: &ProgramSet,
@@ -332,14 +334,15 @@ impl Evaluator {
         let mut bindings = set.evaluation_bindings(index);
         bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
         let expr = eval::evaluate(|path| self.resolve(path), &bindings, expr.clone()).ok()?;
-        match expr.expr {
-            expr::Expr::Waveform(w) => Some(w),
+        let waveform = match expr.expr {
+            expr::Expr::Waveform(w) => w,
             expr::Expr::Seq { waveform, .. } => match waveform.expr {
-                expr::Expr::Waveform(w) => Some(w),
-                _ => None,
+                expr::Expr::Waveform(w) => w,
+                _ => return None,
             },
-            _ => None,
-        }
+            _ => return None,
+        };
+        Some(optimizer::optimize(waveform))
     }
 
     /// Evaluates the program at `index` against its declared kind: an unmarked
@@ -437,7 +440,10 @@ impl Evaluator {
                 step_waveform,
             })
         });
-        Evaluated::Waveform { waveform, sequence }
+        Evaluated::Waveform {
+            waveform: optimizer::optimize(waveform),
+            sequence,
+        }
     }
 
     /// Returns the evaluated (name, value) context the program at `index` is
@@ -455,7 +461,8 @@ impl Evaluator {
     }
 
     /// Applies a note function `expr` to the given `arguments`, expecting a
-    /// pair of (note-on, note-off) waveforms as a result.
+    /// pair of (note-on, note-off) waveforms as a result. Both returned
+    /// waveforms are optimized.
     ///
     /// The expressions `expr` and `arguments` should be closed except for references
     /// to `sliders`, which are bound at their current values.
@@ -493,7 +500,9 @@ impl Evaluator {
                     )));
                 }
                 match (exprs.remove(0).expr, exprs.remove(0).expr) {
-                    (Waveform(note_on), Waveform(note_off)) => Ok((note_on, note_off)),
+                    (Waveform(note_on), Waveform(note_off)) => {
+                        Ok((optimizer::optimize(note_on), optimizer::optimize(note_off)))
+                    }
                     (expr, Waveform(_)) => Err(expr::Error::new(format!(
                         "Expected waveform for note-on, got: {}",
                         expr
@@ -515,7 +524,6 @@ impl Evaluator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::optimizer;
     use crate::player::substitute_current_slider_values;
     use std::path::PathBuf;
 
@@ -563,12 +571,11 @@ mod tests {
 
         // A note played at the initial slider position carries vol = 0.5.
         let args = vec![expr::SourceExpr::float(60.0), expr::SourceExpr::float(0.5)];
-        let (note_on, _note_off) = evaluator
+        let (mut note_on, _note_off) = evaluator
             .apply_note_function(&function, args.clone(), set.programs()[0].sliders())
             .expect("note function should apply");
-        // Optimize first, exactly as Effect::PlayNoteOn does — the marks
-        // must survive optimization for substitution and live updates.
-        let mut note_on = optimizer::optimize(note_on);
+        // The marks must survive the optimization apply_note_function
+        // performs for substitution and live updates to work.
         let seeded = substitute_current_slider_values(&mut note_on, set.programs()[0].sliders());
         assert_eq!(seeded, vec![("vol".to_string(), 0.5)]);
         let mut marks = Vec::new();
@@ -580,10 +587,9 @@ mod tests {
             .unwrap()
             .set_slider_normalized(0, 1.0)
             .expect("program has a vol slider");
-        let (note_on, _note_off) = evaluator
+        let (mut note_on, _note_off) = evaluator
             .apply_note_function(&function, args, set.programs()[0].sliders())
             .expect("note function should apply");
-        let mut note_on = optimizer::optimize(note_on);
         let seeded = substitute_current_slider_values(&mut note_on, set.programs()[0].sliders());
         assert_eq!(seeded, vec![("vol".to_string(), 1.0)]);
         let mut marks = Vec::new();
@@ -615,10 +621,9 @@ mod tests {
             .expect("program has a vol slider");
 
         let args = vec![expr::SourceExpr::float(60.0), expr::SourceExpr::float(0.5)];
-        let (note_on, _note_off) = evaluator
+        let (mut note_on, _note_off) = evaluator
             .apply_note_function(&function, args, set.programs()[0].sliders())
             .expect("note function should apply");
-        let mut note_on = optimizer::optimize(note_on);
         let seeded = substitute_current_slider_values(&mut note_on, set.programs()[0].sliders());
         assert_eq!(seeded, vec![("vol".to_string(), 1.0)]);
         let mut marks = Vec::new();

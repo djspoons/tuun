@@ -15,11 +15,11 @@ use crate::evaluator;
 use crate::expr;
 use crate::ids::{MarkId, WaveformId, WaveformSelector};
 use crate::keys::Keys;
+use crate::launchkey;
 use crate::player;
 use crate::programs::{self, PROGRAMS_PER_BANK};
 use crate::slider;
 use crate::tracker;
-use crate::{launchkey, optimizer};
 
 /// Events for the slider worker thread, which coalesces them per audio
 /// quantum into tracker `Modify` ramps.
@@ -342,9 +342,7 @@ impl EffectRunner {
                     .evaluator
                     .apply_note_function(&keys.function, args, program.sliders())
                 {
-                    Ok((note_on, note_off)) => {
-                        let mut note_on = optimizer::optimize(note_on);
-                        let note_off = optimizer::optimize(note_off);
+                    Ok((mut note_on, note_off)) => {
                         keys.note_off_waveforms.insert(key, note_off);
                         // `note_on`'s `Marked(Slider(_))` nodes still hold the
                         // values from when the instrument was originally

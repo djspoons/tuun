@@ -150,6 +150,8 @@ pub enum ProgramKind {
 pub enum Evaluated {
     /// The program evaluated to a playable waveform.
     Waveform {
+        /// The evaluated waveform, optimized; slider values and the level
+        /// wrap are applied per play.
         waveform: waveform::Waveform<MarkId>,
         /// Present when the text also has the sequenceable `on_beats` shape.
         sequence: Option<sequencer::Sequence>,

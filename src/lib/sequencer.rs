@@ -31,8 +31,8 @@ pub const MAX_PAGE: u8 = 8;
 pub struct Sequence {
     /// The listed beats, in source order.
     pub beats: Vec<f32>,
-    /// The waveform argument `w`, evaluated in the program's context.
-    /// Unoptimized; slider values and the level wrap are applied per play.
+    /// The waveform argument `w`, evaluated in the program's context and
+    /// optimized; slider values and the level wrap are applied per play.
     pub step_waveform: waveform::Waveform<MarkId>,
 }
 

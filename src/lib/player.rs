@@ -107,9 +107,7 @@ impl Player {
         } else {
             None
         };
-        let waveform = program.waveform().cloned()?;
-        let mut waveform = optimizer::optimize(waveform);
-        println!("optimizer::optimize returned: {}", &waveform);
+        let mut waveform = program.waveform().cloned()?;
         // Substitute the program's current slider positions before handing
         // the waveform to the tracker (since the cached ones may be old).
         substitute_current_slider_values(&mut waveform, program.sliders());
@@ -164,7 +162,7 @@ impl Player {
         } else {
             time::Instant::now()
         };
-        let mut step = optimizer::optimize(sequence.step_waveform.clone());
+        let mut step = sequence.step_waveform.clone();
         substitute_current_slider_values(&mut step, program.sliders());
         let sender = if start_at_next_measure {
             &self.precompute_sender
@@ -267,7 +265,7 @@ impl Player {
                 duration_from_beats(self.tempo, (measures * self.beats_per_measure) as u64)
             }),
         };
-        let mut step = optimizer::optimize(sequence.step_waveform.clone());
+        let mut step = sequence.step_waveform.clone();
         substitute_current_slider_values(&mut step, program.sliders());
         let _ = self.fast_sender.send(tracker::Command::Play {
             id: WaveformId::Step {

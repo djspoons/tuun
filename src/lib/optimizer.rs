@@ -48,7 +48,6 @@ where
 //   * pulling Fin's up and combining nested Fin's
 //   * replacing zero-length waveforms with the canonical `Fixed(vec![])`
 //   * handling some common cases of Fin in Sum and DotProduct
-// This function must be called after replace_seq.
 pub fn optimize<M>(waveform: Waveform<M>) -> Waveform<M>
 where
     M: Clone + PartialEq,
