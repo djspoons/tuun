@@ -483,9 +483,15 @@ fn parse_if_then_else<M>(input: Input) -> IResult<SourceExpr<M>> {
     Ok((rest, SourceExpr::with_span(expr, start..end)))
 }
 
+/// Parses a unary application: `$x`, `-f(x)`, `@a.b`.
+///
+/// The operator applies to the whole application chain that follows, so
+/// `$f(x)` parses as `$(f(x))` and `$a.b` as `$(a.b)`; write `($f)(x)` to
+/// apply the operator first. No whitespace is allowed between the operator
+/// and its operand.
 fn parse_unary_application<M>(input: Input) -> IResult<SourceExpr<M>> {
     let start = input.location_offset();
-    let (rest, (op, expr)) = (parse_unary_operator, parse_primitive).parse(input)?;
+    let (rest, (op, expr)) = (parse_unary_operator, parse_application).parse(input)?;
     let end = rest.location_offset();
     let var = SourceExpr::with_span(
         Expr::Variable(op.fragment().to_string()),
@@ -512,8 +518,6 @@ fn parse_primitive<M>(input: Input) -> IResult<SourceExpr<M>> {
         parse_function,
         parse_let,
         parse_if_then_else,
-        // Should come before identifiers, since operators also match the identifier rule
-        parse_unary_application,
         parse_variable,
         parse_chord,
         parse_sequence,
@@ -603,6 +607,19 @@ fn parse_arguments<M>(input: Input) -> IResult<(Vec<SourceExpr<M>>, NamedExprs<M
 }
 
 fn parse_application<M>(input: Input) -> IResult<SourceExpr<M>> {
+    #[rustfmt::skip]
+    let (rest, value) = alt((
+        // Comes first so that `$x` isn't taken as the bare variable `$`
+        // (operators also match the identifier rule).
+        parse_unary_application,
+        parse_postfix_application,
+    )).parse(input)?;
+    Ok((rest, value))
+}
+
+/// Parses a primitive followed by any number of argument lists and `.name`
+/// projections: `f(x)`, `pm.osc(440).out`.
+fn parse_postfix_application<M>(input: Input) -> IResult<SourceExpr<M>> {
     let start = input.location_offset();
     let (mut rest, mut result) = parse_primitive(input)?;
     loop {
@@ -1739,9 +1756,22 @@ x = 1;";
         assert_round_trip("pm.osc(440).out", "pm.osc(440).out");
         // Trivia is allowed around the dot; Display canonicalizes it away.
         assert_round_trip("pm .osc", "pm.osc");
-        // Unary operators bind tighter than postfix projection, matching
-        // how `$f(x)` parses as `($f)(x)`.
-        assert_round_trip("$pm.osc", "($pm).osc");
+        // A unary operator applies to the whole projection: `$(pm.osc)`.
+        assert_round_trip("$pm.osc", "$pm.osc");
+        assert_round_trip("($pm).osc", "($pm).osc");
+    }
+
+    #[test]
+    fn test_parse_unary_application() {
+        // A unary operator applies to the whole application chain that
+        // follows it.
+        assert_round_trip("$f(x)", "$f(x)");
+        assert_round_trip("$f(x).y", "$f(x).y");
+        assert_round_trip("$$x", "$$x");
+        assert_round_trip("-f(x)", "-f(x)");
+        // Parenthesize to apply the operator before the arguments; a
+        // one-argument application of an application displays as a pipe.
+        assert_round_trip("($f)(x)", "x | $f");
     }
 
     #[test]
