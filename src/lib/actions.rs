@@ -1003,10 +1003,10 @@ fn apply_complete(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
         Ok(context) => context,
         Err(error) => return vec![Effect::ShowMessage(format!("Can't complete: {}", error))],
     };
-    // A fragment qualified by a module projection (`pm.pia`) completes
-    // among that module's bindings. An unresolvable qualifier falls back to
-    // the unqualified scan, since its dot may not be a projection at all
-    // (e.g. the fragment `5` in `0.5`).
+    // A fragment qualified by a projection (`pm.pia`) completes among that
+    // module's bindings. A qualifier that doesn't name a module value has
+    // no completions at all — no projection of it can evaluate (`sine.f`,
+    // or the `0.` inside a float).
     let module = resolve_module_path(&context, &qualifier);
     let candidates: Vec<String> = match module {
         Some(entries) => entries
@@ -1015,7 +1015,13 @@ fn apply_complete(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
             .filter(|(name, _)| name.starts_with(&fragment) && *name != fragment)
             .map(|(name, _)| name.clone())
             .collect(),
-        None if !fragment.is_empty() => {
+        None if !qualifier.is_empty() => {
+            return vec![Effect::ShowMessage(format!(
+                "\"{}\" is not a module",
+                qualifier.join(".")
+            ))];
+        }
+        None => {
             let mut seen = HashSet::new();
             let mut candidates = Vec::new();
             for (name, _) in context.iter().rev() {
@@ -1026,11 +1032,6 @@ fn apply_complete(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
                 }
             }
             candidates
-        }
-        // An empty fragment whose qualifier resolves to nothing: likely the
-        // middle of a float (`0.`), not a projection awaiting a name.
-        None => {
-            return vec![Effect::ShowMessage("Nothing to complete".to_string())];
         }
     };
     if candidates.is_empty() {
@@ -1088,9 +1089,10 @@ fn apply_parameter_hint(state: &mut AppState, ctx: &Context, cursor: usize) -> V
         Ok(context) => context,
         Err(error) => return vec![Effect::ShowMessage(format!("Can't complete: {}", error))],
     };
-    // A name qualified by a module projection (`pm.osc(`) is looked up in
-    // that module's bindings; otherwise the last occurrence of the name in
-    // the context is the live binding.
+    // A name qualified by a projection (`pm.osc(`) is looked up in that
+    // module's bindings — a qualifier that doesn't name a module value
+    // can't be hinted; otherwise the last occurrence of the name in the
+    // context is the live binding.
     let (display, value) = match resolve_module_path(&context, &qualifier) {
         Some(entries) => {
             let display = format!("{}.{}", qualifier.join("."), name);
@@ -1103,6 +1105,12 @@ fn apply_parameter_hint(state: &mut AppState, ctx: &Context, cursor: usize) -> V
                     ))];
                 }
             }
+        }
+        None if !qualifier.is_empty() => {
+            return vec![Effect::ShowMessage(format!(
+                "\"{}\" is not a module",
+                qualifier.join(".")
+            ))];
         }
         None => match context.iter().rev().find(|(n, _)| *n == name) {
             Some((_, value)) => (name.clone(), value),
@@ -2100,24 +2108,57 @@ mod tests {
     }
 
     #[test]
-    fn complete_with_unresolved_qualifier_completes_unqualified() {
-        // `x.` doesn't name a module value, so the dot may not be a
-        // projection at all; the fragment completes against the context.
+    fn complete_after_non_module_qualifier_reports_not_a_module() {
+        // `sine` is bound, but not to a module value: no projection of it
+        // can evaluate, so the fragment must not complete against the
+        // context (`sine.f` must not become `sine.filter`).
+        let mut state = edit_state("#{level_db=0}\n_ = test;", "sine.f", 6);
+        let effects = apply_with_empty_status(&mut state, Action::Complete);
+        assert_eq!(edit_text_and_cursor(&state), ("sine.f".to_string(), 6));
+        assert!(
+            matches!(&effects[0], Effect::ShowMessage(m) if m == "\"sine\" is not a module"),
+            "expected a not-a-module message, got {:?}",
+            effects
+        );
+
+        // Same for an unbound qualifier.
         let mut state = edit_state("#{level_db=0}\n_ = test;", "x.sin", 5);
-        apply_with_empty_status(&mut state, Action::Complete);
-        assert_eq!(edit_text_and_cursor(&state), ("x.sine".to_string(), 6));
+        let effects = apply_with_empty_status(&mut state, Action::Complete);
+        assert_eq!(edit_text_and_cursor(&state), ("x.sin".to_string(), 5));
+        assert!(
+            matches!(&effects[0], Effect::ShowMessage(m) if m == "\"x\" is not a module"),
+            "expected a not-a-module message, got {:?}",
+            effects
+        );
     }
 
     #[test]
-    fn complete_after_number_dot_reports_nothing_to_complete() {
-        // Mid-float (`0.`) the dot looks like a projection of `0`; with no
-        // fragment and no module to list, there is nothing to do.
+    fn complete_after_number_dot_reports_not_a_module() {
+        // Mid-float (`0.`) the dot looks like a projection of `0`; there
+        // is nothing to complete there, only a (truthful) message.
         let mut state = edit_state("#{level_db=0}\n_ = test;", "_ = 0.", 6);
         let effects = apply_with_empty_status(&mut state, Action::Complete);
         assert_eq!(edit_text_and_cursor(&state), ("_ = 0.".to_string(), 6));
         assert!(
-            matches!(&effects[0], Effect::ShowMessage(m) if m.contains("Nothing to complete")),
-            "expected a nothing-to-complete message, got {:?}",
+            matches!(&effects[0], Effect::ShowMessage(m) if m == "\"0\" is not a module"),
+            "expected a not-a-module message, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn parameter_hint_for_non_module_qualifier_reports_not_a_module() {
+        // Without this, `sine.filter(` would hint the parameters of the
+        // unrelated bare `filter` binding.
+        let mut state = edit_state("#{level_db=0}\n_ = test;", "sine.filter(", 12);
+        let effects = apply_with_empty_status(&mut state, Action::Complete);
+        assert_eq!(
+            edit_text_and_cursor(&state),
+            ("sine.filter(".to_string(), 12)
+        );
+        assert!(
+            matches!(&effects[0], Effect::ShowMessage(m) if m == "\"sine\" is not a module"),
+            "expected a not-a-module message, got {:?}",
             effects
         );
     }
