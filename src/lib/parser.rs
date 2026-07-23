@@ -602,17 +602,6 @@ fn parse_arguments<M>(input: Input) -> IResult<(Vec<SourceExpr<M>>, NamedExprs<M
     Ok((rest, (positional, named)))
 }
 
-/// Parses the name of a `.name` projection: an identifier that starts
-/// with a letter or underscore (so `x.5` and `x.-` are rejected).
-///
-// TODO why is this not parse_identifier?
-fn parse_projection_name(input: Input) -> IResult<String> {
-    verify(parse_identifier, |name: &String| {
-        name.starts_with(|c: char| c.is_alphabetic() || c == '_')
-    })
-    .parse(input)
-}
-
 fn parse_application<M>(input: Input) -> IResult<SourceExpr<M>> {
     let start = input.location_offset();
     let (mut rest, mut result) = parse_primitive(input)?;
@@ -634,7 +623,7 @@ fn parse_application<M>(input: Input) -> IResult<SourceExpr<M>> {
         // Projection postfix: `.name`, chaining freely with argument lists.
         let attempt = preceded(
             (trivia0, char('.'), trivia0),
-            expect(parse_projection_name, "expected identifier after '.'"),
+            expect(parse_identifier, "expected identifier after '.'"),
         )
         .parse(rest);
         match attempt {
