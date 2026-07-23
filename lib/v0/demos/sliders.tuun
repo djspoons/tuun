@@ -23,6 +23,8 @@ _ = square(220) | rbj.lpf(Q, cutoff);
 #{color=rgb(255, 185, 190),sliders=["frequency:0.463:fn(x) => 50 * pow(20, x)"]}
 _ = $(frequency);
 
+open env.minmax;
+
 // Amplitude envelope
 #{color=rgb(250, 132, 105),sliders=["attack:0.5:0:1","decay:0.5:0:1"]}
 _ = $220 | ADSR(attack, decay, 0, 0, 0);

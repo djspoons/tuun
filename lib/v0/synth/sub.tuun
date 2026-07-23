@@ -1,5 +1,6 @@
 open std;
 use filters.rbj;
+use env.minmax;
 
 // An example of subtractive synthesis from Welsh's Synthesizer Cookbook
 harmonica = fn(dur, freq) =>
@@ -15,7 +16,7 @@ harmonica = fn(dur, freq) =>
   in
     osc
     | rbj.lpf(0.5, 1900)
-    | ADSR(a, d, 0.5, s, r)
+    | minmax.ADSR(a, d, 0.5, s, r)
     | fin(time - dur) // redundant with the ADSR
     | seq(time - dur);
 
@@ -32,7 +33,7 @@ harmonica = fn(dur, freq) =>
 // <[Hh(@67), Hh(@69)]>
 
 
-flute = fn(dur, freq_hz, lpf_Q = 0.6, lpf_cutoff = 1600) =>
+flute = fn(dur, freq_hz, lpf_Q = 0.6, lpf_cutoff = 1600, hpf_Q = 0.6, hpf_cutoff = 1600) =>
   let
     attack_dur = 0.27,
     release_dur = 0.17,
@@ -40,4 +41,6 @@ flute = fn(dur, freq_hz, lpf_Q = 0.6, lpf_cutoff = 1600) =>
   in
     sawtooth(freq_hz)
     | rbj.lpf(lpf_Q, lpf_cutoff)
-    | ADSR(attack_dur, 0.0, 1.0, sustain_dur, release_dur);
+    | rbj.lpf(lpf_Q, lpf_cutoff)
+    | rbj.hpf(hpf_Q, hpf_cutoff)
+    | minmax.ADSR(attack_dur, 0.0, 1.0, sustain_dur, release_dur);
