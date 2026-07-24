@@ -32,16 +32,17 @@ fn extend_with_trivial_context<M, S>(
 
 /// Substitutes any occurrences of the variables in `context` that are found in
 /// `expr` with the corresponding expressions. All of the expressions in
-/// `context` should be closed values. The resulting expression will be closed.
+/// `context` should be closed values. On success, the resulting expression will
+/// be closed.
+///
+/// Fails on expressions which are open with respect to context.
 ///
 /// Rebuilt nodes keep their spans as provenance (a substituted variable keeps
-/// the span of the value's defining expression), so the result's spans locate
-/// where each part originated but no longer promise verbatim source text —
-/// see the span contract on [`SourceExpr`].
+/// the span of the value's defining expression).
 fn substitute<M, S>(
     context: &[(String, SourceExpr<M, S>)],
     expr: SourceExpr<M, S>,
-) -> SourceExpr<M, S>
+) -> Result<SourceExpr<M, S>, Error<S>>
 where
     M: Clone,
     S: Clone,
@@ -51,7 +52,7 @@ where
         Variable,
     };
     let SourceExpr { expr, span } = expr;
-    match expr {
+    Ok(match expr {
         Bool(_) | Float(_) | String(_) => SourceExpr { expr, span },
         Expr::Waveform(w) => SourceExpr {
             expr: Expr::Waveform(w),
@@ -59,8 +60,8 @@ where
         },
         Expr::Seq { offset, waveform } => SourceExpr {
             expr: Expr::Seq {
-                offset: Box::new(substitute(context, *offset)),
-                waveform: Box::new(substitute(context, *waveform)),
+                offset: Box::new(substitute(context, *offset)?),
+                waveform: Box::new(substitute(context, *waveform)?),
             },
             span,
         },
@@ -73,8 +74,8 @@ where
             // the incoming context, not the parameters.
             let named: NamedExprs<M, S> = named
                 .into_iter()
-                .map(|(name, value)| (name, substitute(context, value)))
-                .collect();
+                .map(|(name, value)| Ok((name, substitute(context, value)?)))
+                .collect::<Result<_, self::Error<S>>>()?;
             let mut context = Vec::from(context);
             for param in &positional {
                 extend_with_trivial_context(&mut context, param);
@@ -82,7 +83,7 @@ where
             for (name, _) in &named {
                 context.push((name.clone(), SourceExpr::variable(name.clone())));
             }
-            let body = substitute(&context, *body);
+            let body = substitute(&context, *body)?;
             SourceExpr {
                 expr: Expr::Function {
                     positional,
@@ -104,7 +105,7 @@ where
         },
         Expr::Project { module, name } => SourceExpr {
             expr: Expr::Project {
-                module: Box::new(substitute(context, *module)),
+                module: Box::new(substitute(context, *module)?),
                 name,
             },
             span,
@@ -112,28 +113,22 @@ where
         Variable(name) => {
             for (var_name, value) in context.iter().rev() {
                 if var_name == &name {
-                    return value.clone();
+                    return Ok(value.clone());
                 }
             }
-            // TODO consider failing fast (returning Result) instead of leaving
-            // an Error value: substitution pushes trivial self-bindings under
-            // every binder, so a miss is a genuinely unbound name. That would
-            // surface unbound references at definition time instead of first
-            // application, but needs an audit for anything relying on the
-            // current late binding.
-            SourceExpr {
-                expr: Error(format!("Variable '{}' not found in context", name)),
+            return Err(self::Error::with_span(
+                format!("Variable '{}' not found in context", name),
                 span,
-            }
+            ));
         }
         IfThenElse {
             condition,
             then,
             else_,
         } => {
-            let condition = Box::new(substitute(context, *condition));
-            let then = Box::new(substitute(context, *then));
-            let else_ = Box::new(substitute(context, *else_));
+            let condition = Box::new(substitute(context, *condition)?);
+            let then = Box::new(substitute(context, *then)?);
+            let else_ = Box::new(substitute(context, *else_)?);
             SourceExpr {
                 expr: Expr::IfThenElse {
                     condition,
@@ -148,15 +143,15 @@ where
             positional,
             named,
         } => {
-            let function = substitute(context, *function);
+            let function = substitute(context, *function)?;
             let positional = positional
                 .into_iter()
                 .map(|a| substitute(context, a))
-                .collect();
+                .collect::<Result<_, _>>()?;
             let named = named
                 .into_iter()
-                .map(|(name, value)| (name, substitute(context, value)))
-                .collect();
+                .map(|(name, value)| Ok((name, substitute(context, value)?)))
+                .collect::<Result<_, self::Error<S>>>()?;
             SourceExpr {
                 expr: Expr::Application {
                     function: Box::new(function),
@@ -167,18 +162,28 @@ where
             }
         }
         Tuple(exprs) => SourceExpr {
-            expr: Expr::Tuple(exprs.into_iter().map(|e| substitute(context, e)).collect()),
+            expr: Expr::Tuple(
+                exprs
+                    .into_iter()
+                    .map(|e| substitute(context, e))
+                    .collect::<Result<_, _>>()?,
+            ),
             span,
         },
         List(exprs) => SourceExpr {
-            expr: Expr::List(exprs.into_iter().map(|e| substitute(context, e)).collect()),
+            expr: Expr::List(
+                exprs
+                    .into_iter()
+                    .map(|e| substitute(context, e))
+                    .collect::<Result<_, _>>()?,
+            ),
             span,
         },
         Error(s) => SourceExpr {
             expr: Error(s),
             span,
         },
-    }
+    })
 }
 
 fn extend_context<M, S>(
@@ -371,7 +376,7 @@ where
                             .unwrap_or_else(|| default.clone());
                         context.push((name.clone(), value));
                     }
-                    let body = substitute(&context, *body);
+                    let body = substitute(&context, *body)?;
                     evaluate_closed(body)
                 }
                 (BuiltIn { name, function }, arguments) => {
@@ -493,7 +498,7 @@ where
     M: Clone + Display + Debug,
     S: Clone + Debug,
 {
-    let expr = substitute(context, expr);
+    let expr = substitute(context, expr)?;
     evaluate_closed(expr)
 }
 
@@ -533,7 +538,7 @@ where
                 ));
             }
             Binding::Definition(pattern, def_expr) => {
-                let substituted = substitute(context, def_expr.clone());
+                let substituted = substitute(context, def_expr.clone())?;
                 let value = evaluate_closed(substituted)?;
                 let before = context.len();
                 extend_context(context, pattern, &value)?;
@@ -716,8 +721,28 @@ mod tests {
     fn test_map_propagates_element_errors() {
         // A failing element application fails the whole `map`; the error must
         // not be demoted to an Error value inside the result list, where it
-        // would flow onward as ordinary data.
-        let error = eval_with_builtins("map(fn(x) => nope(x), [1, 2])").unwrap_err();
+        // would flow onward as ordinary data. (Applying the float 1 can only
+        // fail at application time, past substitution's unbound-name check.)
+        let error = eval_with_builtins("map(fn(x) => x(1), [1, 2])").unwrap_err();
+        assert_eq!(error.message(), "Invalid application: 1");
+    }
+
+    #[test]
+    fn test_unbound_variable_fails_at_definition() {
+        // The function is never applied: the unbound name in its body still
+        // fails when the definition itself is evaluated, with the span of
+        // the unbound reference.
+        let input = "let f = fn(x) => nope(x) in 1";
+        let error = eval_with_builtins(input).unwrap_err();
+        assert_eq!(error.message(), "Variable 'nope' not found in context");
+        let start = input.find("nope").unwrap();
+        assert_eq!(error.range(), Some(start..start + 4));
+
+        // Same for a binding: the context build fails at the definition.
+        let (bindings, errors) = parse_module::<u32, _>("f = fn(x) => nope(x);", ()).unwrap();
+        assert!(errors.is_empty());
+        let resolve = |_: &[String]| Err(Error::new("no modules".to_string()));
+        let error = evaluate_bindings(resolve, &bindings).unwrap_err();
         assert_eq!(error.message(), "Variable 'nope' not found in context");
     }
 

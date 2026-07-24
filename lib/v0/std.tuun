@@ -87,7 +87,7 @@ add_cents = fn(freq, n) => pow(2, n/1200) * freq;
 
 odd_hrm = fn(freq) => {map(over(freq), [1, 3, 5, 7, 9, 11])};
 just_third = fn(freq) => {[odd_hrm(freq), odd_hrm(freq * 5/4)]};
-equal_third = fn(freq) => {[odd_hrm(freq), odd_hrm(step(freq, 4))]};
+equal_third = fn(freq) => {[odd_hrm(freq), odd_hrm(add_semitones(freq, 4))]};
 
 
 
