@@ -984,7 +984,7 @@ fn apply_complete(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
     let before = &text[..cursor];
     let fragment_start = before.trim_end_matches(is_word_char).len();
     let qualifier = projection_qualifier(before, fragment_start);
-    if fragment_start == cursor && qualifier.is_empty() {
+    if fragment_start == cursor && qualifier.is_none() {
         if before.ends_with('(') {
             return apply_parameter_hint(state, ctx, cursor);
         }
@@ -1003,24 +1003,31 @@ fn apply_complete(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
         Ok(context) => context,
         Err(error) => return vec![Effect::ShowMessage(format!("Can't complete: {}", error))],
     };
-    // A fragment qualified by a projection (`pm.pia`) completes among that
-    // module's bindings. A qualifier that doesn't name a module value has
-    // no completions at all — no projection of it can evaluate (`sine.f`,
-    // or the `0.` inside a float).
-    let module = resolve_module_path(&context, &qualifier);
-    let candidates: Vec<String> = match module {
-        Some(entries) => entries
-            .iter()
-            .rev()
-            .filter(|(name, _)| name.starts_with(&fragment) && *name != fragment)
-            .map(|(name, _)| name.clone())
-            .collect(),
-        None if !qualifier.is_empty() => {
-            return vec![Effect::ShowMessage(format!(
-                "\"{}\" is not a module",
-                qualifier.join(".")
-            ))];
-        }
+    // A fragment after a `.` is a projection name and completes only among
+    // the qualifying module's bindings — when the qualifier doesn't resolve
+    // to a module value there is nothing the projection could mean, so
+    // nothing to offer (`sine.f`, `.sq`, or the `0.` inside a float). A
+    // fragment without a `.` completes among the in-scope names.
+    let candidates: Vec<String> = match &qualifier {
+        Some(path) => match resolve_module_path(&context, path) {
+            Some(entries) => entries
+                .iter()
+                .rev()
+                .filter(|(name, _)| name.starts_with(&fragment) && *name != fragment)
+                .map(|(name, _)| name.clone())
+                .collect(),
+            None if path.is_empty() => {
+                return vec![Effect::ShowMessage(
+                    "Nothing to complete (no module name before '.')".to_string(),
+                )];
+            }
+            None => {
+                return vec![Effect::ShowMessage(format!(
+                    "\"{}\" is not a module",
+                    path.join(".")
+                ))];
+            }
+        },
         None => {
             let mut seen = HashSet::new();
             let mut candidates = Vec::new();
@@ -1035,14 +1042,13 @@ fn apply_complete(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
         }
     };
     if candidates.is_empty() {
-        let message = if module.is_some() {
-            format!(
+        let message = match &qualifier {
+            Some(path) => format!(
                 "No completions for \"{}\" in module \"{}\"",
                 fragment,
-                qualifier.join(".")
-            )
-        } else {
-            format!("No completions for \"{}\"", fragment)
+                path.join(".")
+            ),
+            None => format!("No completions for \"{}\"", fragment),
         };
         return vec![Effect::ShowMessage(message)];
     }
@@ -1090,28 +1096,35 @@ fn apply_parameter_hint(state: &mut AppState, ctx: &Context, cursor: usize) -> V
         Err(error) => return vec![Effect::ShowMessage(format!("Can't complete: {}", error))],
     };
     // A name qualified by a projection (`pm.osc(`) is looked up in that
-    // module's bindings — a qualifier that doesn't name a module value
-    // can't be hinted; otherwise the last occurrence of the name in the
-    // context is the live binding.
-    let (display, value) = match resolve_module_path(&context, &qualifier) {
-        Some(entries) => {
-            let display = format!("{}.{}", qualifier.join("."), name);
-            match entries.iter().find(|(n, _)| *n == name) {
-                Some((_, value)) => (display, value),
-                None => {
-                    return vec![Effect::ShowMessage(format!(
-                        "\"{}\" is not defined",
-                        display
-                    ))];
+    // module's bindings — a `.` whose qualifier doesn't resolve to a module
+    // value can't be hinted; otherwise the last occurrence of the name in
+    // the context is the live binding.
+    let (display, value) = match &qualifier {
+        Some(path) => match resolve_module_path(&context, path) {
+            Some(entries) => {
+                let display = format!("{}.{}", path.join("."), name);
+                match entries.iter().find(|(n, _)| *n == name) {
+                    Some((_, value)) => (display, value),
+                    None => {
+                        return vec![Effect::ShowMessage(format!(
+                            "\"{}\" is not defined",
+                            display
+                        ))];
+                    }
                 }
             }
-        }
-        None if !qualifier.is_empty() => {
-            return vec![Effect::ShowMessage(format!(
-                "\"{}\" is not a module",
-                qualifier.join(".")
-            ))];
-        }
+            None if path.is_empty() => {
+                return vec![Effect::ShowMessage(
+                    "Nothing to complete (no module name before '.')".to_string(),
+                )];
+            }
+            None => {
+                return vec![Effect::ShowMessage(format!(
+                    "\"{}\" is not a module",
+                    path.join(".")
+                ))];
+            }
+        },
         None => match context.iter().rev().find(|(n, _)| *n == name) {
             Some((_, value)) => (name.clone(), value),
             None => return vec![Effect::ShowMessage(format!("\"{}\" is not defined", name))],
@@ -1337,9 +1350,13 @@ fn is_word_char(c: char) -> bool {
 /// Returns the dotted path qualifying the word starting at `start` in `text`
 /// (the `["a", "b"]` in `a.b.osc`) outermost component first.
 ///
-/// Empty when the word is not written as a `.name` projection of preceding
-/// words (no dot, or the dot follows a non-word character as in `f(x).y`).
-fn projection_qualifier(text: &str, start: usize) -> Vec<String> {
+/// `None` when the word doesn't follow a `.` at all; `Some(vec![])` when it
+/// does but no module name precedes the dot (`.x`, or `f(x).y` where the
+/// module is not a name), so the projection has no resolvable path.
+fn projection_qualifier(text: &str, start: usize) -> Option<Vec<String>> {
+    if !text[..start].ends_with('.') {
+        return None;
+    }
     let mut path = Vec::new();
     let mut end = start;
     while let Some(head) = text[..end].strip_suffix('.') {
@@ -1350,7 +1367,7 @@ fn projection_qualifier(text: &str, start: usize) -> Vec<String> {
         path.insert(0, head[word_start..].to_string());
         end = word_start;
     }
-    path
+    Some(path)
 }
 
 /// Returns the bindings of the module value that `path` names in `context`: the
@@ -2144,6 +2161,26 @@ mod tests {
             "expected a not-a-module message, got {:?}",
             effects
         );
+    }
+
+    #[test]
+    fn complete_after_dot_without_module_name_refuses() {
+        // A fragment after a `.` is a projection name; with no module name
+        // before the dot there is nothing it could complete to (`.s` must
+        // not become `.square`). Same for the bare dot and for a dot after
+        // a call result, which can't be resolved statically.
+        for (text, cursor) in [(".s", 2), (".", 1), ("fin(1).s", 8)] {
+            let mut state = edit_state("#{level_db=0}\n_ = test;", text, cursor);
+            let effects = apply_with_empty_status(&mut state, Action::Complete);
+            assert_eq!(edit_text_and_cursor(&state), (text.to_string(), cursor));
+            assert!(
+                matches!(&effects[0], Effect::ShowMessage(m)
+                    if m == "Nothing to complete (no module name before '.')"),
+                "for {:?}: expected a no-module-name message, got {:?}",
+                text,
+                effects
+            );
+        }
     }
 
     #[test]
