@@ -1,6 +1,7 @@
 open std;
 use filters.rbj;
 use env.minmax;
+use env.finseq;
 
 // An example of subtractive synthesis from Welsh's Synthesizer Cookbook
 harmonica = fn(dur, freq) =>
@@ -32,6 +33,11 @@ harmonica = fn(dur, freq) =>
 // <[I H, III H, i H]>
 // <[Hh(@67), Hh(@69)]>
 
+_flute_osc = fn(freq_hz, lpf_Q = 0.6, lpf_cutoff = 1600, hpf_Q = 0.6, hpf_cutoff = 1600) =>
+  sawtooth(freq_hz)
+  | rbj.lpf2(lpf_Q, lpf_cutoff)
+  | rbj.hpf(hpf_Q, hpf_cutoff);
+
 
 flute = fn(dur, freq_hz, lpf_Q = 0.6, lpf_cutoff = 1600, hpf_Q = 0.6, hpf_cutoff = 1600) =>
   let
@@ -39,8 +45,15 @@ flute = fn(dur, freq_hz, lpf_Q = 0.6, lpf_cutoff = 1600, hpf_Q = 0.6, hpf_cutoff
     release_dur = 0.17,
     sustain_dur = dur - attack_dur - release_dur,
   in
-    sawtooth(freq_hz)
-    | rbj.lpf(lpf_Q, lpf_cutoff)
-    | rbj.lpf(lpf_Q, lpf_cutoff)
-    | rbj.hpf(hpf_Q, hpf_cutoff)
+    _flute_osc(freq_hz, lpf_Q = lpf_Q, lpf_cutoff = lpf_cutoff, hpf_Q = hpf_Q)
     | minmax.ADSR(attack_dur, 0.0, 1.0, sustain_dur, release_dur);
+
+flute_keys = fn(lpf_Q = 0.6, lpf_cutoff = 1600, hpf_Q = 0.6, hpf_cutoff = 1600) =>
+  fn(k, v) =>
+  let
+    attack_dur = 0.27,
+    release_dur = 0.17,
+  in
+    (_flute_osc(@k, lpf_Q = lpf_Q, lpf_cutoff = lpf_cutoff, hpf_Q = hpf_Q)
+     | minmax.ADS(attack_dur, 0.0, 1.0),
+    finseq.Rw(release_dur, 1.0));
