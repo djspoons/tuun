@@ -26,6 +26,8 @@ pub enum Type {
     /// A unification variable (the paper's `α̂`, `β̂`; Appendix E.1), solved
     /// via the checker's substitution `S`.
     Meta(u32),
+    /// A number: a constant waveform (`Waveform::Const`) and the value form of
+    /// a number literal. Subset of `Waveform`.
     Float,
     Bool,
     String,

@@ -23,8 +23,10 @@
 //!   parameters already consumed — the style of the paper's §4.2 (rule
 //!   T-Lam-Alt), which Lemma 1 (Ψ coincides with typing results) justifies
 //!   against the §3 presentation.
-//! - Base coercions `float <: waveform` and `seq <: waveform` model the
-//!   evaluator's promotion of floats to constant waveforms.
+//! - Base subtypings `float <: waveform` and `seq <: waveform`. A float *is*
+//!   a constant waveform (`Waveform::Const` — see [`Expr::as_const_float`]), so
+//!   the first is genuine subset inclusion; the second compensates for the
+//!   single operator signatures (seq-accepting arms thread offsets).
 //! - The checker reports warnings, never errors: each failed check produces an
 //!   [`Error`] and inference recovers with [`Type::Dynamic`] so one mistake
 //!   does not cascade. Evaluation must not depend on the checker's verdict. The
@@ -38,6 +40,7 @@ use std::collections::HashMap;
 use crate::expr::{Binding, Error, Expr, Pattern, SourceBinding, SourceExpr, Span};
 use crate::signatures;
 use crate::types::Type;
+use crate::waveform;
 
 /// What a program's evaluated result is expected to be.
 ///
@@ -583,9 +586,17 @@ impl<S: Clone> Infer<S> {
             // AT-Int, extended to tuun's literal forms. A literal under a
             // non-empty Ψ falls into `app_subtype`'s cannot-apply case.
             Expr::Bool(_) => self.app_subtype(psi, Type::Bool),
-            Expr::Float(_) => self.app_subtype(psi, Type::Float),
             Expr::String(_) => self.app_subtype(psi, Type::String),
-            Expr::Waveform(_) => self.app_subtype(psi, Type::Waveform),
+            // A constant waveform is a number literal: it types as `float`,
+            // the refinement of waveforms the scalar-consuming built-ins
+            // require. Anything else waveform-valued types as `waveform`.
+            Expr::Waveform(waveform) => {
+                let ty = match waveform {
+                    waveform::Waveform::Const(_) => Type::Float,
+                    _ => Type::Waveform,
+                };
+                self.app_subtype(psi, ty)
+            }
             Expr::Seq { offset, waveform } => {
                 let offset_ty = self.infer(context, &mut Vec::new(), offset);
                 self.subtype_check(&offset_ty, &Type::Waveform, &offset.span);

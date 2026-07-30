@@ -138,9 +138,7 @@ pub fn analyze(text: &str) -> Option<SequenceShape> {
     };
     let mut beats = Vec::with_capacity(elements.len());
     for element in elements {
-        let Expr::Float(value) = element.expr else {
-            return None;
-        };
+        let value = element.expr.as_const_float()?;
         beats.push((value, element.span.as_ref()?.range.clone()));
     }
     Some(SequenceShape {

@@ -6,7 +6,7 @@ use crate::expr;
 use crate::expr::{BuiltInFn, Expr, SourceExpr, boxed};
 use crate::optimizer;
 use crate::waveform::{Operator, Waveform};
-use Expr::{Bool, BuiltIn, Error, Float, List, Seq};
+use Expr::{Bool, BuiltIn, Error, List, Seq};
 
 type WaveformBinOp<M> = fn(Box<Waveform<M>>, Box<Waveform<M>>) -> Waveform<M>;
 
@@ -26,7 +26,9 @@ where
         return Error(format!("Expected one argument for {}", name));
     }
     match arguments.remove(0) {
-        Float(a) => Expr::Float(float_op(a)),
+        // A constant folds eagerly, so arithmetic on constants stays
+        // constant (see `Expr::as_const_float`).
+        Expr::Waveform(Waveform::Const(a)) => Expr::float(float_op(a)),
         Expr::Waveform(a) => Expr::Waveform(waveform_op(Box::new(a))),
         a => Error(format!("Invalid argument for {}: {:?}", name, a)),
     }
@@ -36,7 +38,7 @@ where
 fn binary_op<M, S>(
     mut arguments: Vec<Expr<M, S>>,
     name: String,
-    float_op: fn(f32, f32) -> f32,
+    fold: fn(f32, f32) -> f32,
     waveform_op: WaveformBinOp<M>,
 ) -> Expr<M, S>
 where
@@ -64,16 +66,14 @@ where
             name, arguments
         ));
     }
-    match (arguments.remove(0), arguments.remove(0)) {
-        (Float(a), Float(b)) => Expr::Float(float_op(a, b)),
+    let (x, y) = (arguments.remove(0), arguments.remove(0));
+    // Two constants fold eagerly, so arithmetic on constants stays constant.
+    if let (Some(a), Some(b)) = (x.as_const_float(), y.as_const_float()) {
+        return Expr::float(fold(a, b));
+    }
+    match (x, y) {
         (Expr::Waveform(a), Expr::Waveform(b)) => {
             Expr::Waveform(waveform_op(Box::new(a), Box::new(b)))
-        }
-        (Expr::Waveform(a), Float(b)) => {
-            Expr::Waveform(waveform_op(Box::new(a), Box::new(Waveform::Const(b))))
-        }
-        (Float(a), Expr::Waveform(b)) => {
-            Expr::Waveform(waveform_op(Box::new(Waveform::Const(a)), Box::new(b)))
         }
         (Seq { offset, waveform }, Expr::Waveform(b)) => match waveform.expr {
             Expr::Waveform(a) => make_seq(offset, waveform_op, a, b),
@@ -81,14 +81,6 @@ where
         },
         (Expr::Waveform(a), Seq { offset, waveform }) => match waveform.expr {
             Expr::Waveform(b) => make_seq(offset, waveform_op, a, b),
-            expr => Error(format!("Invalid argument to seq in {}: {:?}", name, expr)),
-        },
-        (Seq { offset, waveform }, Float(b)) => match waveform.expr {
-            Expr::Waveform(a) => make_seq(offset, waveform_op, a, Waveform::Const(b)),
-            expr => Error(format!("Invalid argument to seq in {}: {:?}", name, expr)),
-        },
-        (Float(a), Seq { offset, waveform }) => match waveform.expr {
-            Expr::Waveform(b) => make_seq(offset, waveform_op, Waveform::Const(a), b),
             expr => Error(format!("Invalid argument to seq in {}: {:?}", name, expr)),
         },
         (a, b) => Error(format!(
@@ -157,22 +149,9 @@ where
     M: Debug,
     S: Debug,
 {
-    // It seems strange to ever apply & to two floats, so just promote them
-    // here.
-    if let [Float(a), Float(b)] = &arguments[..] {
-        return Expr::Waveform(Waveform::BinaryPointOp(
-            Operator::Merge,
-            Box::new(Waveform::Const(*a)),
-            Box::new(Waveform::Const(*b)),
-        ));
-    }
-    // Otherwise, just do the usual binary op thing.
-    binary_op(
-        arguments,
-        "&".to_string(),
-        |_, _| unreachable!("Should never reach the float/float case for merge"),
-        |a, b| Waveform::BinaryPointOp(Operator::Merge, a, b),
-    )
+    binary_op(arguments, "&".to_string(), std::ops::Add::add, |a, b| {
+        Waveform::BinaryPointOp(Operator::Merge, a, b)
+    })
 }
 
 // Given waveforms that represent offsets (and assuming offset waveforms are of the form
@@ -237,18 +216,6 @@ where
     };
 
     match arguments.remove(0) {
-        Float(b) => Expr::Waveform(Waveform::BinaryPointOp(
-            Operator::Merge,
-            Box::new(a),
-            Box::new(Waveform::Append(
-                Box::new(Waveform::Fin {
-                    length: Box::new(a_offset),
-                    waveform: Box::new(Waveform::Const(0.0)),
-                }),
-                Box::new(Waveform::Const(b)),
-                (),
-            )),
-        )),
         Expr::Waveform(b) => Expr::Waveform(Waveform::BinaryPointOp(
             Operator::Merge,
             Box::new(a),
@@ -315,7 +282,10 @@ where
     S: Debug,
 {
     match arguments[..] {
-        [Float(value), Float(base)] => Expr::Float(value.log(base)),
+        [
+            Expr::Waveform(Waveform::Const(value)),
+            Expr::Waveform(Waveform::Const(base)),
+        ] => Expr::float(value.log(base)),
         _ => Error("Invalid arguments for log".to_string()),
     }
 }
@@ -326,7 +296,7 @@ where
     S: Debug,
 {
     match arguments[..] {
-        [Float(value)] if value >= 0.0 => Expr::Float(value.sqrt()),
+        [Expr::Waveform(Waveform::Const(value))] if value >= 0.0 => Expr::float(value.sqrt()),
         _ => Error("Invalid argument for sqrt".to_string()),
     }
 }
@@ -337,7 +307,7 @@ where
     S: Debug,
 {
     match arguments[..] {
-        [Float(value)] => Expr::Float(value.exp()),
+        [Expr::Waveform(Waveform::Const(value))] => Expr::float(value.exp()),
         _ => Error("Invalid argument for exp".to_string()),
     }
 }
@@ -350,22 +320,11 @@ where
     // Like the waveform, Sine, the first argument is frequency in radians per
     // second, and the second is phase in radians.
     match &arguments[..] {
-        [Float(frequency), Float(value)] if *frequency == 0.0 => Float(value.sin()),
-        [Float(freq), Float(phase)] => Expr::Waveform(Waveform::Sine {
-            frequency: Box::new(Waveform::Const(*freq)),
-            phase: Box::new(Waveform::Const(*phase)),
-            state: (),
-        }),
-        [Expr::Waveform(freq), Float(phase)] => Expr::Waveform(Waveform::Sine {
-            frequency: Box::new(freq.clone()),
-            phase: Box::new(Waveform::Const(*phase)),
-            state: (),
-        }),
-        [Float(freq), Expr::Waveform(phase)] => Expr::Waveform(Waveform::Sine {
-            frequency: Box::new(Waveform::Const(*freq)),
-            phase: Box::new(phase.clone()),
-            state: (),
-        }),
+        // A zero-frequency sine of a constant phase folds to a constant.
+        [
+            Expr::Waveform(Waveform::Const(frequency)),
+            Expr::Waveform(Waveform::Const(phase)),
+        ] if *frequency == 0.0 => Expr::float(phase.sin()),
         [Expr::Waveform(freq), Expr::Waveform(phase)] => Expr::Waveform(Waveform::Sine {
             frequency: Box::new(freq.clone()),
             phase: Box::new(phase.clone()),
@@ -383,7 +342,7 @@ where
     S: Clone + Debug,
 {
     match &arguments[..] {
-        [Float(value)] => Expr::Float(value.cos()),
+        [Expr::Waveform(Waveform::Const(value))] => Expr::float(value.cos()),
         [Expr::Waveform(a)] => Expr::Waveform(Waveform::Sine {
             frequency: Box::new(Waveform::Const(0.0)),
             phase: Box::new(Waveform::BinaryPointOp(
@@ -405,7 +364,12 @@ where
 {
     match &arguments[..] {
         [Bool(a), Bool(b)] => Expr::Bool(a == b),
-        [Float(a), Float(b)] => Expr::Bool(a == b),
+        // TODO could consider a more general form of equality on waveforms but
+        // this seems to be enough for now.
+        [
+            Expr::Waveform(Waveform::Const(a)),
+            Expr::Waveform(Waveform::Const(b)),
+        ] => Expr::Bool(a == b),
         [Expr::String(a), Expr::String(b)] => Expr::Bool(a == b),
         _ => Error("Invalid arguments for ==".to_string()),
     }
@@ -418,7 +382,11 @@ where
 {
     match &arguments[..] {
         [Bool(a), Bool(b)] => Expr::Bool(a != b),
-        [Float(a), Float(b)] => Expr::Bool(a != b),
+        // TODO same as for ==, equality on Waveform?
+        [
+            Expr::Waveform(Waveform::Const(a)),
+            Expr::Waveform(Waveform::Const(b)),
+        ] => Expr::Bool(a != b),
         [Expr::String(a), Expr::String(b)] => Expr::Bool(a != b),
         _ => Error("Invalid arguments for !=".to_string()),
     }
@@ -430,7 +398,10 @@ where
     S: Debug,
 {
     match arguments[..] {
-        [Float(a), Float(b)] => Expr::Bool(a < b),
+        [
+            Expr::Waveform(Waveform::Const(a)),
+            Expr::Waveform(Waveform::Const(b)),
+        ] => Expr::Bool(a < b),
         _ => Error("Invalid arguments for <".to_string()),
     }
 }
@@ -441,7 +412,10 @@ where
     S: Debug,
 {
     match arguments[..] {
-        [Float(a), Float(b)] => Expr::Bool(a <= b),
+        [
+            Expr::Waveform(Waveform::Const(a)),
+            Expr::Waveform(Waveform::Const(b)),
+        ] => Expr::Bool(a <= b),
         _ => Error("Invalid arguments for <=".to_string()),
     }
 }
@@ -452,7 +426,10 @@ where
     S: Debug,
 {
     match arguments[..] {
-        [Float(a), Float(b)] => Expr::Bool(a > b),
+        [
+            Expr::Waveform(Waveform::Const(a)),
+            Expr::Waveform(Waveform::Const(b)),
+        ] => Expr::Bool(a > b),
         _ => Error("Invalid arguments for >".to_string()),
     }
 }
@@ -463,7 +440,10 @@ where
     S: Debug,
 {
     match arguments[..] {
-        [Float(a), Float(b)] => Expr::Bool(a >= b),
+        [
+            Expr::Waveform(Waveform::Const(a)),
+            Expr::Waveform(Waveform::Const(b)),
+        ] => Expr::Bool(a >= b),
         _ => Error("Invalid arguments for >=".to_string()),
     }
 }
@@ -522,7 +502,7 @@ where
     S: Clone + Debug,
 {
     match &arguments[..] {
-        [function, seed, Float(n)] if *n >= 0.0 && n.fract() == 0.0 => {
+        [function, seed, Expr::Waveform(Waveform::Const(n))] if *n >= 0.0 && n.fract() == 0.0 => {
             let mut results: Vec<SourceExpr<M, S>> = Vec::new();
             let mut current: SourceExpr<M, S> = SourceExpr::from(seed.clone());
             for _ in 0..(*n as u32) {
@@ -582,7 +562,7 @@ where
     S: Clone,
 {
     match &arguments[..] {
-        [Float(a), List(b)] => {
+        [Expr::Waveform(Waveform::Const(a)), List(b)] => {
             if let Some(element) = b.get(*a as usize) {
                 element.expr.clone()
             } else {
@@ -603,7 +583,7 @@ where
             let mut fixed_samples = Vec::new();
             for sample in samples {
                 match &sample.expr {
-                    Float(value) => fixed_samples.push(*value),
+                    Expr::Waveform(Waveform::Const(value)) => fixed_samples.push(*value),
                     _ => return Error("Invalid sample in fixed waveform".to_string()),
                 }
             }
@@ -625,7 +605,6 @@ where
             let waveform = arguments.remove(0);
             match waveform {
                 Expr::Waveform(a) => Expr::Waveform(f(Box::new(a))),
-                Expr::Float(value) => Expr::Waveform(f(Box::new(Waveform::Const(value)))),
                 Seq { offset, waveform } => match waveform.expr {
                     Expr::Waveform(waveform) => Seq {
                         offset,
@@ -636,7 +615,7 @@ where
                         expr
                     )),
                 },
-                expr => Error(format!("Expected waveform, seq, or float, got {}", expr)),
+                expr => Error(format!("Expected waveform or seq, got {}", expr)),
             }
         },
     ))
@@ -654,17 +633,6 @@ where
     }
     let arg = arguments.remove(0);
     match arg {
-        // Note that we are treating floats here as a const waveform, not a duration
-        Expr::Float(f) => {
-            let w = Waveform::Const(f);
-            BuiltIn {
-                name: format!("fin({})", w),
-                function: curry(move |waveform: Box<Waveform<M>>| Waveform::Fin {
-                    length: Box::new(w.clone()),
-                    waveform,
-                }),
-            }
-        }
         Expr::Waveform(length) => {
             let length = length;
             BuiltIn {
@@ -691,7 +659,6 @@ where
     }
     let offset = match arguments.remove(0) {
         Expr::Waveform(offset) => offset,
-        Expr::Float(value) => Waveform::Const(value),
         expr => {
             return Expr::Error(format!("Invalid argument for seq: {}", expr));
         }
@@ -713,10 +680,6 @@ where
                     Expr::Waveform(waveform) => Seq {
                         offset: boxed(Expr::Waveform(offset)),
                         waveform: boxed(Expr::Waveform(waveform)),
-                    },
-                    Expr::Float(f) => Seq {
-                        offset: boxed(Expr::Waveform(offset)),
-                        waveform: boxed(Expr::Waveform(Waveform::Const(f))),
                     },
                     expr => Error(format!(
                         "Expected argument to seq({}) to be a waveform or float, got {}",
@@ -795,7 +758,6 @@ where
             for expr in exprs {
                 match expr.expr {
                     Expr::Waveform(a) => feed_forward.push(a),
-                    Float(value) => feed_forward.push(Waveform::Const(value)),
                     _ => {
                         return Error("Filter feed_forward argument must be a list".to_string());
                     }
@@ -811,7 +773,6 @@ where
             for expr in exprs {
                 match expr.expr {
                     Expr::Waveform(a) => feedback.push(a),
-                    Float(value) => feedback.push(Waveform::Const(value)),
                     _ => return Error("Filter feedback argument must be a list".to_string()),
                 }
             }
@@ -858,8 +819,7 @@ where
     };
     let waveform = match arguments.remove(0) {
         Expr::Waveform(a) => a,
-        Float(value) => Waveform::Const(value),
-        _ => return Error("Second argument must be a waveform or a float".to_string()),
+        _ => return Error("Second argument must be a waveform".to_string()),
     };
     Expr::Waveform(Waveform::Reset {
         trigger: Box::new(trigger),
@@ -879,18 +839,15 @@ where
     }
     let trigger = match arguments.remove(0) {
         Expr::Waveform(a) => a,
-        Expr::Float(value) => Waveform::Const(value),
         _ => return Error("First argument must be a waveform".to_string()),
     };
     let positive_waveform = match arguments.remove(0) {
         Expr::Waveform(a) => a,
-        Float(value) => Waveform::Const(value),
-        _ => return Error("Second argument must be a waveform or a float".to_string()),
+        _ => return Error("Second argument must be a waveform".to_string()),
     };
     let negative_waveform = match arguments.remove(0) {
         Expr::Waveform(a) => a,
-        Float(value) => Waveform::Const(value),
-        _ => return Error("Third argument must be a waveform or a float".to_string()),
+        _ => return Error("Third argument must be a waveform".to_string()),
     };
     Expr::Waveform(Waveform::Alt {
         trigger: Box::new(trigger),
@@ -934,7 +891,6 @@ where
             for expr in exprs.iter().rev() {
                 let waveform: Box<Waveform<M>> = match &expr.expr {
                     Expr::Waveform(waveform) => Box::new(waveform.clone()),
-                    Expr::Float(value) => Box::new(Waveform::Const(*value)),
                     _ => return Error(format!("Invalid element in chord: {}", expr)),
                 };
                 result = Waveform::BinaryPointOp(Operator::Merge, waveform, Box::new(result));
@@ -960,7 +916,6 @@ where
             } else if exprs.len() == 1 {
                 return match &exprs[0].expr {
                     Expr::Waveform(waveform) => Expr::Waveform(waveform.clone()),
-                    Expr::Float(value) => Expr::Waveform(Waveform::Const(*value)),
                     _ => return Error("Invalid argument for sequence".to_string()),
                 };
             }
@@ -1090,7 +1045,7 @@ mod tests {
         };
 
         // Logs all arguments, evaluates to the last.
-        let result = function.0(vec![Expr::String("freq".to_string()), Float(440.0)]);
+        let result = function.0(vec![Expr::String("freq".to_string()), Expr::float(440.0)]);
         assert_eq!(format!("{}", result), "440");
         assert_eq!(printed.borrow().as_slice(), ["debug: [freq, 440]"]);
 
@@ -1129,7 +1084,7 @@ mod tests {
                 name: "plus".to_string(),
                 function: BuiltInFn(Rc::new(plus)),
             },
-            Float(1.0),
+            Expr::float(1.0),
             List(exprs),
         ]);
         assert_eq!(format!("{}", result), "10");

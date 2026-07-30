@@ -9,9 +9,8 @@
 //! §3.1 (polytypes quantify only at the top), playing the role that typing
 //! context entries `x : A` play in the paper's rule AT-Var (Fig. 16).
 //!
-//! Signatures deliberately simplify: each built-in gets a single type, with
-//! the coercions `float <: waveform` and `seq <: waveform` standing in for
-//! the run-time promotion of floats to constant waveforms. Where the run-time
+//! Signatures deliberately simplify: each built-in gets a single type, with the
+//! subtypings `float <: waveform` and `seq <: waveform`. Where the run-time
 //! behavior is wider than the signature (e.g. `append` on waveforms), the
 //! checker reports a spurious warning; where it is narrower (e.g. `1 + 2`
 //! producing a float), the checker reports the wider type. Both are accepted

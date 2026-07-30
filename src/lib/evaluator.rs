@@ -28,8 +28,15 @@ use crate::waveform;
 /// mark.
 fn mark<S: 'static>(arguments: Vec<expr::Expr<MarkId, S>>) -> expr::Expr<MarkId, S> {
     match &arguments[..] {
-        [expr::Expr::Float(id)] if *id >= 1.0 && id.fract() == 0.0 => {
-            let id = id.round() as u32;
+        [argument]
+            if argument
+                .as_const_float()
+                .is_some_and(|id| id >= 1.0 && id.fract() == 0.0) =>
+        {
+            let id = arguments[0]
+                .as_const_float()
+                .expect("guard checked")
+                .round() as u32;
             expr::Expr::BuiltIn {
                 name: format!("mark({})", id),
                 function: builtins::curry(move |waveform: Box<waveform::Waveform<MarkId>>| {

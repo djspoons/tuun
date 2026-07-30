@@ -169,7 +169,7 @@ fn parse_float<M>(input: Input) -> IResult<SourceExpr<M>> {
         number::float,
     ).parse(input)?;
     let end = rest.location_offset();
-    Ok((rest, SourceExpr::with_span(Expr::Float(value), start..end)))
+    Ok((rest, SourceExpr::with_span(Expr::float(value), start..end)))
 }
 
 fn parse_literal<M>(input: Input) -> IResult<SourceExpr<M>> {

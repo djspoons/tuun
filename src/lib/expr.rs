@@ -158,8 +158,9 @@ pub type NamedExprs<M, S = ()> = Vec<NamedExpr<M, S>>;
 pub enum Expr<M, S = ()> {
     // Values
     Bool(bool),
-    Float(f32),
     String(String),
+    /// A series of floating point numbers, including constant series, which
+    /// represent number literals.
     Waveform(waveform::Waveform<M>),
     Function {
         positional: Vec<Pattern>,
@@ -262,6 +263,21 @@ impl<M, S> Expr<M, S> {
             named: Vec::new(),
         }
     }
+
+    /// Builds the constant waveform holding `value` (for example, the value
+    /// form of a number literal).
+    pub fn float(value: f32) -> Expr<M, S> {
+        Expr::Waveform(waveform::Waveform::Const(value))
+    }
+
+    /// Returns the scalar value of a constant waveform, or `None` for any other
+    /// expression.
+    pub fn as_const_float(&self) -> Option<f32> {
+        match self {
+            Expr::Waveform(waveform::Waveform::Const(value)) => Some(*value),
+            _ => None,
+        }
+    }
 }
 
 impl<M> SourceExpr<M> {
@@ -280,7 +296,7 @@ impl<M, S> SourceExpr<M, S> {
         SourceExpr::from(Expr::Bool(v))
     }
     pub fn float(v: f32) -> SourceExpr<M, S> {
-        SourceExpr::from(Expr::Float(v))
+        SourceExpr::from(Expr::float(v))
     }
     pub fn string(v: String) -> SourceExpr<M, S> {
         SourceExpr::from(Expr::String(v))
@@ -454,7 +470,6 @@ pub(crate) fn stamp_expr<M, S: Copy>(expr: SourceExpr<M>, source: S) -> SourceEx
     let SourceExpr { expr, span } = expr;
     let expr = match expr {
         Expr::Bool(v) => Expr::Bool(v),
-        Expr::Float(v) => Expr::Float(v),
         Expr::String(v) => Expr::String(v),
         Expr::Variable(name) => Expr::Variable(name),
         Expr::Waveform(w) => Expr::Waveform(w),
@@ -667,7 +682,6 @@ fn is_unary_op(op: &str) -> bool {
 fn expr_precedence<M, S>(expr: &Expr<M, S>) -> Precedence {
     match expr {
         Expr::Bool(_)
-        | Expr::Float(_)
         | Expr::String(_)
         | Expr::Variable(_)
         | Expr::Waveform(_)
@@ -866,8 +880,9 @@ where
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Expr::Bool(value) => write!(f, "{}", value),
-            Expr::Float(value) => write!(f, "{}", value),
             Expr::String(value) => write!(f, "{}", value),
+            // Render the bare number, not the waveform constructor.
+            Expr::Waveform(waveform::Waveform::Const(value)) => write!(f, "{}", value),
             Expr::Waveform(waveform) => {
                 write!(f, "{}", waveform)
             }
@@ -1009,7 +1024,6 @@ fn is_clean<M, S>(node: &SourceExpr<M, S>) -> bool {
     match &node.expr {
         // Leaves: must have been stamped by the parser.
         Expr::Bool(_)
-        | Expr::Float(_)
         | Expr::String(_)
         | Expr::Variable(_)
         | Expr::Waveform(_)
@@ -1138,8 +1152,9 @@ where
 {
     match expr {
         Expr::Bool(v) => write!(out, "{}", v),
-        Expr::Float(v) => write!(out, "{}", v),
         Expr::String(v) => write!(out, "{}", v),
+        // See `Display`: a constant waveform renders as its number literal.
+        Expr::Waveform(waveform::Waveform::Const(v)) => write!(out, "{}", v),
         Expr::Waveform(w) => write!(out, "{}", w),
         Expr::BuiltIn { name, .. } => write!(out, "{}", name),
         Expr::Variable(name) => write!(out, "{}", name),
@@ -1340,8 +1355,7 @@ where
     W: fmt::Write,
 {
     match &expr.expr {
-        Expr::Float(_)
-        | Expr::Waveform(_)
+        Expr::Waveform(_)
         | Expr::Variable(_)
         | Expr::BuiltIn { .. }
         | Expr::Application { .. }
@@ -1422,7 +1436,7 @@ mod tests {
         let expr = SourceExpr::with_span(
             Expr::application(
                 SourceExpr::<u32>::with_span(Expr::Variable("f".to_string()), 0..1),
-                vec![SourceExpr::with_span(Expr::Float(1.0), 2..3)],
+                vec![SourceExpr::with_span(Expr::float(1.0), 2..3)],
             ),
             0..3,
         );

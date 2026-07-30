@@ -48,12 +48,11 @@ where
     S: Clone,
 {
     use Expr::{
-        Application, Bool, BuiltIn, Error, Float, Function, IfThenElse, List, String, Tuple,
-        Variable,
+        Application, Bool, BuiltIn, Error, Function, IfThenElse, List, String, Tuple, Variable,
     };
     let SourceExpr { expr, span } = expr;
     Ok(match expr {
-        Bool(_) | Float(_) | String(_) => SourceExpr { expr, span },
+        Bool(_) | String(_) => SourceExpr { expr, span },
         Expr::Waveform(w) => SourceExpr {
             expr: Expr::Waveform(w),
             span,
@@ -241,12 +240,12 @@ where
     S: Clone + fmt::Debug,
 {
     use Expr::{
-        Application, Bool, BuiltIn, Float, Function, IfThenElse, List, Seq, String, Tuple,
-        Variable, Waveform,
+        Application, Bool, BuiltIn, Function, IfThenElse, List, Seq, String, Tuple, Variable,
+        Waveform,
     };
     let SourceExpr { expr, span } = expr;
     match expr {
-        Bool(_) | Float(_) | String(_) | Waveform(_) => {
+        Bool(_) | String(_) | Waveform(_) => {
             // For values, we can preserve the input span, since it still faithfully
             // represents the value.
             Ok(SourceExpr { expr, span })
@@ -581,6 +580,22 @@ mod tests {
             &bindings,
             expr,
         )
+    }
+
+    #[test]
+    fn test_merge_of_constants_folds() {
+        // `&` on two constants is their sum: both are endless, so the merge
+        // is pointwise addition everywhere and the shorter-operand extension
+        // never applies.
+        assert_eq!(format!("{}", eval_with_builtins("1 & 2").unwrap()), "3");
+        // A constant merged with a non-constant stays a merge tree.
+        assert_eq!(
+            format!("{}", eval_with_builtins("1 & sine(440, 0)").unwrap()),
+            format!(
+                "{}",
+                eval_with_builtins("(fn(w) => 1 & w)(sine(440, 0))").unwrap()
+            )
+        );
     }
 
     #[test]

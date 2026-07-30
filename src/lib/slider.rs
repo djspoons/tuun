@@ -43,11 +43,11 @@ pub fn denormalize(function: &expr::SliderFunction, normalized: f32) -> Result<f
             };
             let result = eval::evaluate(resolve, &bindings, expr)
                 .map_err(|e| format!("slider function eval error: {}", e))?;
-            match result.expr {
-                expr::Expr::Float(v) => Ok(v),
-                other => Err(format!(
-                    "slider function did not return a number, got: {:?}",
-                    other
+            match result.expr.as_const_float() {
+                Some(v) => Ok(v),
+                None => Err(format!(
+                    "slider function did not return a constant, got: {:?}",
+                    result.expr
                 )),
             }
         }
