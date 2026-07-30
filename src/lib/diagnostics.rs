@@ -28,7 +28,29 @@ pub enum Source {
     Module(u32),
 }
 
-/// A user-visible error with its source position resolved, where known.
+/// How serious a diagnostic is.
+///
+/// Errors block the action that produced them (a program that fails to
+/// evaluate is not played); warnings are informational only — in
+/// particular, the type checker's findings never block evaluation.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum Severity {
+    Error,
+    Warning,
+}
+
+impl Severity {
+    /// The label shown before a diagnostic of this severity.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Severity::Error => "Error",
+            Severity::Warning => "Warning",
+        }
+    }
+}
+
+/// A user-visible error or warning with its source position resolved, where
+/// known.
 ///
 /// Produced from an `expr::Error` at the evaluator boundary. Only errors
 /// from `open`ed modules carry a file (relative to the library root);
@@ -51,11 +73,13 @@ pub struct Diagnostic {
     /// should ignore it.
     pub snippet: Option<String>,
     pub message: String,
+    pub severity: Severity,
 }
 
 impl Diagnostic {
     /// Builds a diagnostic that carries only a message, with no position
-    /// information.
+    /// information. The severity defaults to `Error`; see
+    /// [`Diagnostic::as_warning`].
     pub fn message_only(message: String) -> Diagnostic {
         Diagnostic {
             file: None,
@@ -63,12 +87,14 @@ impl Diagnostic {
             program_range: None,
             snippet: None,
             message,
+            severity: Severity::Error,
         }
     }
 
     /// Builds a diagnostic for an error at `range` of a program's own `text`: a
     /// bare `line:col` position matching the editor's display, with the range
-    /// kept for editor highlighting.
+    /// kept for editor highlighting. The severity defaults to `Error`; see
+    /// [`Diagnostic::as_warning`].
     pub fn in_program(message: String, range: Range<usize>, text: &str) -> Diagnostic {
         Diagnostic {
             file: None,
@@ -76,7 +102,14 @@ impl Diagnostic {
             snippet: Some(render_snippet(text, &range)),
             program_range: Some(range),
             message,
+            severity: Severity::Error,
         }
+    }
+
+    /// Returns this diagnostic downgraded to a warning.
+    pub fn as_warning(mut self) -> Diagnostic {
+        self.severity = Severity::Warning;
+        self
     }
 }
 
@@ -93,7 +126,8 @@ impl fmt::Display for Diagnostic {
     }
 }
 
-/// Formats `diagnostics` as a user-facing error message.
+/// Formats `diagnostics` as a user-facing message, each line prefixed by
+/// its diagnostic's severity.
 ///
 /// The first line summarizes: the first diagnostic's position and message,
 /// with a count of any further diagnostics. Each diagnostic's snippet
@@ -105,15 +139,19 @@ pub fn error_message(diagnostics: &[Diagnostic]) -> String {
         return String::new();
     };
     let mut message = match rest.len() {
-        0 => format!("Error: {}", first),
-        n => format!("Error: {} (+{} more)", first, n),
+        0 => format!("{}: {}", first.severity.label(), first),
+        n => format!("{}: {} (+{} more)", first.severity.label(), first, n),
     };
     if let Some(snippet) = &first.snippet {
         message.push('\n');
         message.push_str(snippet);
     }
     for diagnostic in rest {
-        message.push_str(&format!("\nError: {}", diagnostic));
+        message.push_str(&format!(
+            "\n{}: {}",
+            diagnostic.severity.label(),
+            diagnostic
+        ));
         if let Some(snippet) = &diagnostic.snippet {
             message.push('\n');
             message.push_str(snippet);
@@ -189,6 +227,18 @@ mod tests {
         assert_eq!(
             error_message(&[first, second]),
             "Error: 1:5: unknown (+1 more)\n  |\n1 | x = nope;\n  |     ^^^^\nError: boom"
+        );
+    }
+
+    #[test]
+    fn test_warning_severity_rendering() {
+        // A warning renders with its own prefix, per diagnostic.
+        let warning = Diagnostic::in_program("iffy".to_string(), 4..8, "x = nope;").as_warning();
+        assert_eq!(warning.severity, Severity::Warning);
+        let error = Diagnostic::message_only("boom".to_string());
+        assert_eq!(
+            error_message(&[warning, error]),
+            "Warning: 1:5: iffy (+1 more)\n  |\n1 | x = nope;\n  |     ^^^^\nError: boom"
         );
     }
 

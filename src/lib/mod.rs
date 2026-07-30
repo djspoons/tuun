@@ -2,11 +2,14 @@ pub mod builtins;
 pub mod eval;
 pub mod expr;
 pub mod generator;
+pub mod infer;
 pub mod metric;
 pub mod modules;
 pub mod optimizer;
 pub mod parser;
+pub mod signatures;
 pub mod slider;
+pub mod types;
 pub mod waveform;
 
 // Native-only modules (SDL2-dependent)

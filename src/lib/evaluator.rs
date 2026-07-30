@@ -12,10 +12,11 @@ use std::path;
 use std::time;
 
 use crate::builtins;
-use crate::diagnostics::{Diagnostic, Source, render_snippet};
+use crate::diagnostics::{Diagnostic, Severity, Source, render_snippet};
 use crate::eval;
 use crate::expr;
 use crate::ids::MarkId;
+use crate::infer;
 use crate::optimizer;
 use crate::parser;
 use crate::programs::{Evaluated, ProgramKind, ProgramSet, ProgramSliders};
@@ -279,6 +280,7 @@ impl Evaluator {
                     program_range: None,
                     snippet: Some(render_snippet(set.source(), &range)),
                     message,
+                    severity: Severity::Error,
                 },
                 None => Diagnostic::message_only(message),
             },
@@ -295,12 +297,47 @@ impl Evaluator {
                         program_range: None,
                         snippet: Some(render_snippet(&info.source, &range)),
                         message,
+                        severity: Severity::Error,
                     },
                     None => Diagnostic::message_only(message),
                 }
             }
             _ => Diagnostic::message_only(message),
         }
+    }
+
+    /// Type-checks the program at `index` and returns the findings as
+    /// `Severity::Warning` diagnostics.
+    ///
+    /// Mirrors [`Evaluator::evaluate_program`]'s setup — same bindings,
+    /// implicit prelude open, and module resolver — but never blocks
+    /// anything: the checker is warnings-only. Findings are filtered to
+    /// those located in the program's own text or its source file; warnings
+    /// inside `open`ed modules would repeat on every evaluation of every
+    /// dependent program without being actionable from the editor. Parse
+    /// failures return no warnings — they are `evaluate_program`'s to
+    /// report.
+    pub fn check_program(&self, set: &ProgramSet, index: usize) -> Vec<Diagnostic> {
+        let mut bindings = set.evaluation_bindings(index);
+        bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
+        let text = set.programs()[index].text();
+        let Ok(expr) = parser::parse_program(text, Source::Program) else {
+            return Vec::new();
+        };
+        let expectation = match set.programs()[index].kind() {
+            ProgramKind::Waveform => infer::Expectation::Waveform,
+            ProgramKind::Keys => infer::Expectation::NoteFunction,
+        };
+        infer::check_program(
+            |path| self.resolve(path),
+            &bindings,
+            &expr,
+            Some(expectation),
+        )
+        .iter()
+        .filter(|warning| matches!(warning.source(), Some(Source::Program) | Some(Source::File)))
+        .map(|warning| self.diagnose(warning, set, index).as_warning())
+        .collect()
     }
 
     /// Parses and evaluates `text` under `bindings`, resolving `open`
@@ -698,6 +735,63 @@ mod tests {
         assert!(diagnostic.file.is_none());
         assert!(diagnostic.position.is_none());
         assert_eq!(diagnostic.message, "boom");
+    }
+
+    #[test]
+    fn check_program_reports_warnings_with_positions() {
+        let (mut set, warning) = ProgramSet::from_source(
+            "#{level_db=0}\nw = sine(\"a\", 0);\n".to_string(),
+            PathBuf::from("song.tuun"),
+        )
+        .expect("test source should parse");
+        assert_eq!(warning, "");
+        let evaluator = Evaluator::new(44100, 90, PathBuf::from("./lib/v0"));
+
+        // The type warning is a Severity::Warning diagnostic positioned in
+        // the program's own text: `"a"` starts at column 6 of `sine("a", 0)`.
+        let diagnostics = evaluator.check_program(&set, 0);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].severity, Severity::Warning);
+        assert_eq!(
+            diagnostics[0].to_string(),
+            "1:6: expected waveform, found string"
+        );
+        assert_eq!(diagnostics[0].program_range, Some(5..8));
+
+        // The checker runs even when evaluation fails: the eval error and
+        // the type warning for the same mistake report side by side, eval
+        // error first.
+        let diagnostics = set
+            .evaluate_and_record(&evaluator, 0)
+            .expect_err("sine(\"a\", 0) fails at evaluation");
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(diagnostics[0].severity, Severity::Error);
+        assert_eq!(diagnostics[1].severity, Severity::Warning);
+        assert_eq!(
+            diagnostics[1].to_string(),
+            "1:6: expected waveform, found string"
+        );
+
+        // A clean program returns no warnings; one with a static-only issue
+        // (1 + 2 is a float at runtime but types as waveform) returns the
+        // warning on the Ok path while still evaluating successfully.
+        set.program_mut(0)
+            .unwrap()
+            .set_text("sine(440, 0)".to_string());
+        assert_eq!(set.evaluate_and_record(&evaluator, 0), Ok(Vec::new()));
+        set.program_mut(0)
+            .unwrap()
+            .set_text("fin(nth(1 + 2, [1, 2, 4, 8]))(sine(440, 0))".to_string());
+        let warnings = set
+            .evaluate_and_record(&evaluator, 0)
+            .expect("program evaluates despite the warning");
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].severity, Severity::Warning);
+        // Column 9 points at `1 + 2` — the mismatched argument itself.
+        assert_eq!(
+            warnings[0].to_string(),
+            "1:9: expected float, found waveform"
+        );
     }
 
     #[test]

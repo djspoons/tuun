@@ -543,6 +543,7 @@ where
 }
 
 // Appends two or more lists or waveforms together
+// TODO consider moving lists to `concat` and keeping `append` just for waveforms.
 pub fn append<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug + Clone,

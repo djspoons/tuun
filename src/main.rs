@@ -134,7 +134,10 @@ pub fn main() {
                 .programs
                 .evaluate_and_record(&evaluator, program_index)
             {
-                Ok(()) => {
+                Ok(warnings) => {
+                    for warning in &warnings {
+                        println!("Warning: {}", warning);
+                    }
                     if state.programs.programs()[program_index]
                         .waveform()
                         .is_some()
@@ -146,7 +149,7 @@ pub fn main() {
                 }
                 Err(diagnostics) => {
                     for diagnostic in &diagnostics {
-                        println!("Error: {}", diagnostic);
+                        println!("{}: {}", diagnostic.severity.label(), diagnostic);
                         if let Some(snippet) = &diagnostic.snippet {
                             println!("{}", snippet);
                         }

@@ -225,9 +225,14 @@ impl EffectRunner {
                     .programs
                     .evaluate_and_record(&self.evaluator, program_index)
                 {
-                    Ok(()) => {
+                    Ok(warnings) => {
                         if let Some(mode) = mode_on_success {
                             state.mode = mode;
+                        }
+                        // Type warnings are informational: the program plays
+                        // regardless, and only the status line reports them.
+                        if !warnings.is_empty() {
+                            state.message = diagnostics::error_message(&warnings);
                         }
                     }
                     Err(diagnostics) => {

@@ -774,29 +774,33 @@ impl ProgramSet {
     }
 
     /// Evaluates the program at `index` and records the result on the
-    /// program. Returns the user-visible diagnostics as an error when the
-    /// evaluation failed (any previous result is dropped in that case: even
-    /// though editing already drops it, the failure may have come from a
-    /// changed dependency rather than this program's own text).
+    /// program. The type checker runs in either case: on success its
+    /// warnings (possibly empty; see [`Evaluator::check_program`]) are the
+    /// `Ok` value, and on failure they are appended after the evaluation
+    /// diagnostics in the `Err` value, so both views of a problem show side
+    /// by side (a failure drops any previous result: even though editing
+    /// already drops it, the failure may have come from a changed dependency
+    /// rather than this program's own text).
     pub fn evaluate_and_record(
         &mut self,
         evaluator: &Evaluator,
         index: usize,
-    ) -> Result<(), Vec<Diagnostic>> {
+    ) -> Result<Vec<Diagnostic>, Vec<Diagnostic>> {
         // An empty program is a deletion, not a parse error: clear the cache
         // and succeed so the editor can leave Edit mode (the splice that
         // follows removes the binding from source).
         if self.programs[index].text().trim().is_empty() {
             self.programs[index].evaluated = None;
-            return Ok(());
+            return Ok(Vec::new());
         }
         match evaluator.evaluate_program(self, index) {
             Ok(evaluated) => {
                 self.programs[index].evaluated = Some(evaluated);
-                Ok(())
+                Ok(evaluator.check_program(self, index))
             }
-            Err(diagnostics) => {
+            Err(mut diagnostics) => {
                 self.programs[index].evaluated = None;
+                diagnostics.extend(evaluator.check_program(self, index));
                 Err(diagnostics)
             }
         }
