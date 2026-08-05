@@ -10,12 +10,12 @@ Sw = fn(dur, a) => a | fin(time - dur) | seq(time - dur);
 Rw = fn(dur, level) => linear(level, -level / dur) | fin(time - dur);
 // Combine them to create a new filter.
 ADSR = fn(attack_dur, decay_dur, sustain_level, sustain_dur, release_dur) =>
-  fn(w) => w * <[Aw(attack_dur),
-                 Dw(decay_dur, sustain_level),
-                 Sw(sustain_dur, sustain_level),
-                 Rw(release_dur, sustain_level)]>;
+  fn(w) => w * (Aw(attack_dur)
+                \ Dw(decay_dur, sustain_level)
+                \ Sw(sustain_dur, sustain_level)
+                \ Rw(release_dur, sustain_level));
 ADS = fn(attack_dur, decay_dur, sustain_level) =>
-  fn(w) => w * <[Aw(attack_dur), Dw(decay_dur, sustain_level), sustain_level]>;
+  fn(w) => w * (Aw(attack_dur) \ Dw(decay_dur, sustain_level) \ sustain_level);
 
 // Also, we can create component filters... though note that the first three
 // don't change the length, so they need to be combined with R (or fin).

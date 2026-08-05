@@ -39,7 +39,7 @@ use std::collections::HashMap;
 
 use crate::expr::{Binding, Error, Expr, Pattern, SourceBinding, SourceExpr, Span};
 use crate::signatures;
-use crate::types::Type;
+use crate::types::{Refinement, Sort, Type};
 use crate::waveform;
 
 /// What a program's evaluated result is expected to be.
@@ -84,19 +84,22 @@ where
         }
         Some(Expectation::Waveform) => {
             let ty = checker.infer(&mut context, &mut Vec::new(), expr);
-            checker.subtype_check(&ty, &Type::Waveform, &expr.span);
+            checker.subtype_check(&ty, &Type::number(), &expr.span);
         }
         Some(Expectation::NoteFunction) => {
             let mut psi = vec![Frame {
                 positional: vec![
-                    (Type::Float, expr.span.clone()),
-                    (Type::Float, expr.span.clone()),
+                    // TODO could the first arg be int?
+                    (Type::float(), expr.span.clone()),
+                    (Type::float(), expr.span.clone()),
                 ],
                 named: Vec::new(),
                 span: expr.span.clone(),
             }];
             let ty = checker.infer(&mut context, &mut psi, expr);
-            let expected = Type::Tuple(vec![Type::Waveform, Type::Waveform]);
+            // The runtime requires a pair whose elements are waveform
+            // values; a constant qualifies, a seq does not.
+            let expected = Type::Tuple(vec![Type::float_or_waveform(), Type::float_or_waveform()]);
             checker.subtype_check(&ty, &expected, &expr.span);
         }
     }
@@ -138,9 +141,25 @@ enum ContextEntry {
 /// entries shadow earlier ones, mirroring the evaluation context.
 type TypeContext = Vec<(String, ContextEntry)>;
 
-/// The algorithmic state threaded through every judgment: the paper's
-/// substitution `S` and name supply `N` (Appendix E.1), plus the warnings
-/// accumulated so far.
+/// The most atom vectors `tabulate` will enumerate for one definition:
+/// 4^4, covering functions of up to four numeric parameters.
+const MAX_TABULATION_VECTORS: usize = 256;
+
+/// How selection decided one intersection against one frame.
+enum Selection {
+    /// A row applied; the application's result type.
+    Selected(Type),
+    /// No conjunct has the frame's shape; selection does not apply, and callers
+    /// fall back to plain conjunct subtyping.
+    NoMatchingRows,
+    /// Conjuncts match the frame's shape but none accepts the arguments — a
+    /// definite violation (the runtime has no matching arm).
+    NoApplicableRow,
+}
+
+/// The algorithmic state threaded through every judgment: the Xie and
+/// Oliveria's substitution `S` and name supply `N` (Appendix E.1), plus the
+/// warnings accumulated so far.
 struct Infer<S> {
     /// Solutions for meta variables — the paper's `S`. Kept acyclic by the
     /// occurs check; solutions may mention other solved metas, so readers
@@ -149,14 +168,46 @@ struct Infer<S> {
     /// Fresh-id supply — the paper's `N`, shared by metas and rigid
     /// variables.
     supply: u32,
+    /// Bounds for refinement variables, indexed by `Refinement::Var` id.
+    refs: Vec<RefVar>,
+    /// The undo journal: every solver step since the start of the check,
+    /// so failed attempts roll back by popping (see `mark`/`rollback`).
+    journal: Vec<Undo>,
     warnings: Vec<Error<S>>,
 }
+
+/// The bounds of one refinement variable: the join of the guarantees that
+/// flowed into it (lower) and the meet of the contracts imposed on it (upper).
+/// `may` reads the lower when any guarantee arrived, else the upper, else ⊤ —
+/// the atoms the value may turn out to inhabit.
+#[derive(Clone, Copy)]
+struct RefVar {
+    lower: Sort,
+    upper: Option<Sort>,
+}
+
+/// One reversible solver step, recorded in the journal so a failed attempt can
+/// be undone without cloning the whole state.
+enum Undo {
+    /// A meta was solved; undoing removes the solution.
+    Solved(u32),
+    /// A refinement variable was allocated; undoing pops it.
+    Allocated,
+    /// A refinement variable's bounds changed; undoing restores them.
+    Bounds(u32, RefVar),
+}
+
+/// A point in the solver's history; everything after it can be rolled back.
+/// Marks nest LIFO: roll back an inner mark before an outer one.
+struct Mark(usize);
 
 impl<S: Clone> Infer<S> {
     fn new() -> Infer<S> {
         Infer {
             subst: HashMap::new(),
             supply: 0,
+            refs: Vec::new(),
+            journal: Vec::new(),
             warnings: Vec::new(),
         }
     }
@@ -174,6 +225,169 @@ impl<S: Clone> Infer<S> {
         Type::Meta(self.fresh_id())
     }
 
+    /// The current point in the solver's history, for `rollback`.
+    fn mark(&self) -> Mark {
+        Mark(self.journal.len())
+    }
+
+    /// Undoes every solver step recorded since `mark`.
+    fn rollback(&mut self, mark: Mark) {
+        while self.journal.len() > mark.0 {
+            match self.journal.pop().expect("journal is non-empty") {
+                Undo::Solved(id) => {
+                    self.subst.remove(&id);
+                }
+                Undo::Allocated => {
+                    self.refs.pop();
+                }
+                Undo::Bounds(id, var) => self.refs[id as usize] = var,
+            }
+        }
+    }
+
+    /// Solves a meta, recording the step for rollback.
+    fn solve(&mut self, id: u32, ty: Type) {
+        let previous = self.subst.insert(id, ty);
+        debug_assert!(previous.is_none(), "metas are solved only once");
+        self.journal.push(Undo::Solved(id));
+    }
+
+    /// Allocates a fresh, unconstrained refinement variable.
+    fn fresh_refinement(&mut self) -> Refinement {
+        self.refs.push(RefVar {
+            lower: Sort::NONE,
+            upper: None,
+        });
+        self.journal.push(Undo::Allocated);
+        Refinement::Var((self.refs.len() - 1) as u32)
+    }
+
+    /// The sort a numeric may turn out to inhabit.
+    fn may_of(&self, rep: &Refinement) -> Sort {
+        match rep {
+            Refinement::Ground(sort) => *sort,
+            Refinement::Var(id) => {
+                let var = &self.refs[*id as usize];
+                if !var.lower.is_empty() {
+                    var.lower
+                } else {
+                    var.upper.unwrap_or(Sort::TOP)
+                }
+            }
+        }
+    }
+
+    /// The sort a numeric position requires (its contract).
+    fn contract_of(&self, rep: &Refinement) -> Sort {
+        match rep {
+            Refinement::Ground(sort) => *sort,
+            Refinement::Var(id) => self.refs[*id as usize].upper.unwrap_or(Sort::TOP),
+        }
+    }
+
+    /// Records a guarantee flowing into a refinement variable.
+    fn join_lower(&mut self, id: u32, sort: Sort) {
+        let var = self.refs[id as usize];
+        let joined = var.lower.union(sort);
+        if joined == var.lower {
+            return;
+        }
+        self.journal.push(Undo::Bounds(id, var));
+        self.refs[id as usize].lower = joined;
+    }
+
+    /// Records a contract imposed on a refinement variable; fails when the
+    /// combined contracts admit no value at all.
+    fn meet_upper(&mut self, id: u32, sort: Sort) -> Result<(), ()> {
+        let var = self.refs[id as usize];
+        let met = var.upper.map_or(sort, |upper| upper.intersect(sort));
+        if met.is_empty() {
+            return Err(());
+        }
+        if var.upper != Some(met) {
+            self.journal.push(Undo::Bounds(id, var));
+            self.refs[id as usize].upper = Some(met);
+        }
+        Ok(())
+    }
+
+    /// Checks that a found numeric may satisfy an expected numeric — the
+    /// definite-violation rule, warn iff may(found) ∩ contract(expected) = ∅ —
+    /// then records the flows: the found sort joins the expected side's
+    /// guarantees, and the expected side's contract bounds the found side.
+    fn numeric_subtype(&mut self, found: &Refinement, expected: &Refinement) -> Result<(), ()> {
+        let may = self.may_of(found);
+        let contract = self.contract_of(expected);
+        if may.intersect(contract).is_empty() {
+            return Err(());
+        }
+        if let Refinement::Var(id) = expected {
+            self.join_lower(*id, may);
+        }
+        if let Refinement::Var(id) = found {
+            self.meet_upper(*id, contract)?;
+        }
+        Ok(())
+    }
+
+    /// Merges two numerics met in an invariant position: guarantees and
+    /// contracts flow both ways. Numerics never fail against each other
+    /// structurally — differing sorts are an over-approximation, sound for a
+    /// warnings-only checker.
+    fn numeric_unify(&mut self, x: &Refinement, y: &Refinement) {
+        let may_x = self.may_of(x);
+        let may_y = self.may_of(y);
+        if let Refinement::Var(id) = y {
+            self.join_lower(*id, may_x);
+        }
+        if let Refinement::Var(id) = x {
+            self.join_lower(*id, may_y);
+        }
+    }
+
+    /// Returns `ty` with refinement variables replaced by the sorts they may
+    /// currently inhabit, for rendering.
+    fn resolve_refinements(&self, ty: &Type) -> Type {
+        match ty {
+            Type::Numeric(rep @ Refinement::Var(_)) => Type::ground(self.may_of(rep)),
+            Type::Function {
+                positional,
+                named,
+                result,
+            } => Type::Function {
+                positional: positional
+                    .iter()
+                    .map(|t| self.resolve_refinements(t))
+                    .collect(),
+                named: named
+                    .iter()
+                    .map(|(n, t)| (n.clone(), self.resolve_refinements(t)))
+                    .collect(),
+                result: Box::new(self.resolve_refinements(result)),
+            },
+            Type::And(conjuncts) => Type::And(
+                conjuncts
+                    .iter()
+                    .map(|t| self.resolve_refinements(t))
+                    .collect(),
+            ),
+            Type::Tuple(items) => {
+                Type::Tuple(items.iter().map(|t| self.resolve_refinements(t)).collect())
+            }
+            Type::List(item) => Type::List(Box::new(self.resolve_refinements(item))),
+            Type::Module(entries) => Type::Module(
+                entries
+                    .iter()
+                    .map(|(n, t)| (n.clone(), self.resolve_refinements(t)))
+                    .collect(),
+            ),
+            Type::Forall(vars, body) => {
+                Type::Forall(vars.clone(), Box::new(self.resolve_refinements(body)))
+            }
+            _ => ty.clone(),
+        }
+    }
+
     /// Follows substitution chains at the root of `ty` only.
     fn resolve(&self, ty: &Type) -> Type {
         let mut ty = ty.clone();
@@ -186,9 +400,10 @@ impl<S: Clone> Infer<S> {
         ty
     }
 
-    /// Renders `ty` for a warning message, with solutions applied.
+    /// Renders `ty` for a warning message, with meta solutions applied and
+    /// refinement variables resolved to the sorts they may inhabit.
     fn display(&self, ty: &Type) -> String {
-        ty.apply(&self.subst).to_string()
+        self.resolve_refinements(&ty.apply(&self.subst)).to_string()
     }
 
     /// Replaces the quantified `vars` in `body` with fresh metas — the
@@ -212,6 +427,19 @@ impl<S: Clone> Infer<S> {
     /// higher-rank types (§2.4).
     fn generalize(&mut self, context: &TypeContext, ty: Type) -> Type {
         let applied = ty.apply(&self.subst);
+        // Refinement variables local to the type freeze with variance:
+        // covariant positions to the join of their guarantees, contravariant
+        // (parameter) positions to the meet of their contracts; no information
+        // means "any numeric". Variables still reachable from the context (an
+        // outer parameter's) stay live, mirroring the meta exclusion below.
+        // There is no bounded quantification.
+        let mut context_refinements = Vec::new();
+        for (_, entry) in context.iter() {
+            if let ContextEntry::Ty(ty) = entry {
+                ty.free_refinements(&self.subst, &mut context_refinements);
+            }
+        }
+        let applied = self.freeze_refinements(&applied, true, &context_refinements);
         let mut metas = Vec::new();
         applied.free_metas(&self.subst, &mut metas);
         if metas.is_empty() {
@@ -240,6 +468,225 @@ impl<S: Clone> Infer<S> {
         Type::Forall(vars, Box::new(applied.substitute_metas(&mapping)))
     }
 
+    /// Freezes the refinement variables of `ty` at generalization time,
+    /// with `positive` tracking variance (parameters flip it). Variables in
+    /// `keep` stay live.
+    fn freeze_refinements(&mut self, ty: &Type, positive: bool, keep: &[u32]) -> Type {
+        match ty {
+            Type::Numeric(Refinement::Var(id)) if !keep.contains(id) => {
+                let var = &self.refs[*id as usize];
+                let sort = if positive {
+                    if !var.lower.is_empty() {
+                        var.lower
+                    } else {
+                        Sort::TOP
+                    }
+                } else {
+                    var.upper.unwrap_or(Sort::TOP)
+                };
+                Type::ground(sort)
+            }
+            Type::Function {
+                positional,
+                named,
+                result,
+            } => Type::Function {
+                positional: positional
+                    .iter()
+                    .map(|t| self.freeze_refinements(t, !positive, keep))
+                    .collect(),
+                named: named
+                    .iter()
+                    .map(|(n, t)| (n.clone(), self.freeze_refinements(t, !positive, keep)))
+                    .collect(),
+                result: Box::new(self.freeze_refinements(result, positive, keep)),
+            },
+            Type::And(conjuncts) => Type::And(
+                conjuncts
+                    .iter()
+                    .map(|t| self.freeze_refinements(t, positive, keep))
+                    .collect(),
+            ),
+            Type::Tuple(items) => Type::Tuple(
+                items
+                    .iter()
+                    .map(|t| self.freeze_refinements(t, positive, keep))
+                    .collect(),
+            ),
+            Type::List(item) => Type::List(Box::new(self.freeze_refinements(item, positive, keep))),
+            Type::Module(entries) => Type::Module(
+                entries
+                    .iter()
+                    .map(|(n, t)| (n.clone(), self.freeze_refinements(t, positive, keep)))
+                    .collect(),
+            ),
+            Type::Forall(vars, body) => Type::Forall(
+                vars.clone(),
+                Box::new(self.freeze_refinements(body, positive, keep)),
+            ),
+            _ => ty.clone(),
+        }
+    }
+
+    /// Infers the type of a definition's right-hand side: the ordinary
+    /// inference pass, plus tabulation into an intersection of arrows for
+    /// the functions `tabulate` covers. Callers generalize the result as
+    /// they would any inferred type.
+    fn infer_definition<M>(&mut self, context: &mut TypeContext, expr: &SourceExpr<M, S>) -> Type {
+        let base = self.infer(context, &mut Vec::new(), expr);
+        self.tabulate(context, expr, &base).unwrap_or(base)
+    }
+
+    /// Tabulates a definition-bound function over its numeric parameters —
+    /// Freeman and Pfenning §4: the principal refinement type of a
+    /// definition is a finite intersection of arrows, found by re-checking
+    /// the body at each point of the finite refinement lattice, here each
+    /// vector of atoms over the numeric parameters (positional and named
+    /// alike). Structural parameters ride along as fresh unknowns (solved
+    /// per row by the body, quantified by the caller's generalization),
+    /// and a structural named parameter's default flows in as a guarantee,
+    /// as in the base pass. A vector whose body check warns contributes no
+    /// row (the function is not applicable there), and the exploratory
+    /// warnings are discarded — the base pass has already reported
+    /// anything unconditional.
+    ///
+    /// Beyond `MAX_TABULATION_VECTORS`, enumeration retries on the
+    /// two-point unseq/seq split — keeping the relational seq holes, the
+    /// soundness-critical part, at the cost of the int/float distinctions
+    /// — and returns `None` (keep the base type, R1's freeze-at-generalize
+    /// summary) only past that, or for functions with no numeric
+    /// parameters.
+    ///
+    /// This is what makes parameter contracts *relational* rather than
+    /// per-position: `fn(a, b) => a + b` gets no `(seq, seq)` row, so a
+    /// two-seq call warns even though each position separately admits a
+    /// seq.
+    fn tabulate<M>(
+        &mut self,
+        context: &mut TypeContext,
+        expr: &SourceExpr<M, S>,
+        base: &Type,
+    ) -> Option<Type> {
+        let Expr::Function {
+            positional,
+            named,
+            body,
+        } = &expr.expr
+        else {
+            return None;
+        };
+        if positional.is_empty() && named.is_empty() {
+            return None;
+        }
+        let Type::Function {
+            positional: parameters,
+            named: named_parameters,
+            ..
+        } = self.resolve(base)
+        else {
+            return None;
+        };
+        if parameters.len() != positional.len() || named_parameters.len() != named.len() {
+            return None;
+        }
+        let numeric: Vec<bool> = parameters
+            .iter()
+            .map(|parameter| matches!(self.resolve(parameter), Type::Numeric(_)))
+            .collect();
+        let named_numeric: Vec<bool> = named_parameters
+            .iter()
+            .map(|(_, parameter)| matches!(self.resolve(parameter), Type::Numeric(_)))
+            .collect();
+        let tabulated = numeric
+            .iter()
+            .chain(&named_numeric)
+            .filter(|numeric| **numeric)
+            .count();
+        if tabulated == 0 {
+            return None;
+        }
+        let full: &[Sort] = &[Sort::INT, Sort::NON_INT_ONLY, Sort::WAVE, Sort::SEQ];
+        let coarse: &[Sort] = &[Sort::FLOAT_OR_WAVE, Sort::SEQ];
+        let fits = |set: &[Sort]| {
+            set.len()
+                .checked_pow(u32::try_from(tabulated).ok()?)
+                .filter(|vectors| *vectors <= MAX_TABULATION_VECTORS)
+        };
+        let (atoms, vectors) = if let Some(vectors) = fits(full) {
+            (full, vectors)
+        } else if let Some(vectors) = fits(coarse) {
+            (coarse, vectors)
+        } else {
+            return None;
+        };
+        // Refinement variables reachable from the enclosing context belong
+        // to outer scopes and must stay live in the rows (mirroring
+        // `generalize`'s exclusion).
+        let mut keep = Vec::new();
+        for (_, entry) in context.iter() {
+            if let ContextEntry::Ty(ty) = entry {
+                ty.free_refinements(&self.subst, &mut keep);
+            }
+        }
+        let mut rows = Vec::new();
+        for index in 0..vectors {
+            let warnings = self.warnings.len();
+            let mark = self.mark();
+            let depth = context.len();
+            let mut cursor = 0u32;
+            let mut domains = Vec::with_capacity(positional.len());
+            for (pattern, numeric) in positional.iter().zip(&numeric) {
+                if *numeric {
+                    let atom = atoms[(index / atoms.len().pow(cursor)) % atoms.len()];
+                    cursor += 1;
+                    self.bind_pattern(context, pattern, Type::ground(atom), &expr.span, false);
+                    domains.push(Type::ground(atom));
+                } else {
+                    domains.push(self.pattern_param_type(context, pattern));
+                }
+            }
+            let mut named_domains = Vec::with_capacity(named.len());
+            for ((name, default), numeric) in named.iter().zip(&named_numeric) {
+                let parameter = if *numeric {
+                    let atom = atoms[(index / atoms.len().pow(cursor)) % atoms.len()];
+                    cursor += 1;
+                    Type::ground(atom)
+                } else {
+                    let default_ty = self.infer(context, &mut Vec::new(), default);
+                    let parameter = self.fresh_meta();
+                    self.subtype_check(&default_ty, &parameter, &default.span);
+                    parameter
+                };
+                context.push((name.clone(), ContextEntry::Ty(parameter.clone())));
+                named_domains.push((name.clone(), parameter));
+            }
+            let result = self.infer(context, &mut Vec::new(), body);
+            context.truncate(depth);
+            if self.warnings.len() == warnings {
+                // Resolve the row fully before rolling back the state it
+                // was solved in.
+                let row = Type::Function {
+                    positional: domains,
+                    named: named_domains,
+                    result: Box::new(result),
+                }
+                .apply(&self.subst);
+                rows.push(self.freeze_refinements(&row, true, &keep));
+            }
+            self.warnings.truncate(warnings);
+            self.rollback(mark);
+        }
+        if rows.is_empty() {
+            return None;
+        }
+        let mut rows = merge_rows(rows);
+        Some(if rows.len() == 1 {
+            rows.remove(0)
+        } else {
+            Type::And(rows)
+        })
+    }
+
     /// Unifies two types, solving metas by equality — Fig. 13. Fails
     /// silently; callers decide whether a failure warrants a warning.
     ///
@@ -255,6 +702,16 @@ impl<S: Clone> Infer<S> {
             (Type::Meta(x), Type::Meta(y)) if x == y => Ok(()),
             // Predicative (§2.4): a meta never holds a quantified type.
             (Type::Meta(_), Type::Forall(_, _)) | (Type::Forall(_, _), Type::Meta(_)) => Err(()),
+            // A meta meeting a numeric solves to a fresh refinement
+            // variable, so a `∀a` instantiation becomes refinement-joining
+            // at its first numeric binding (numerics never hard-fail
+            // against each other afterwards).
+            (Type::Meta(id), Type::Numeric(rep)) | (Type::Numeric(rep), Type::Meta(id)) => {
+                let fresh = self.fresh_refinement();
+                self.solve(*id, Type::Numeric(fresh.clone()));
+                self.numeric_unify(&fresh, rep);
+                Ok(())
+            }
             // AU-Var1/AU-Var2: solve an unsolved meta, under the occurs
             // check (`α̂ ∉ ftv(S τ)`). AU-BVar1/AU-BVar2 (already-solved
             // metas) are handled by `resolve` above.
@@ -264,7 +721,12 @@ impl<S: Clone> Infer<S> {
                 if metas.contains(id) {
                     return Err(());
                 }
-                self.subst.insert(*id, other.clone());
+                self.solve(*id, other.clone());
+                Ok(())
+            }
+            // Numerics merge their bounds and never fail structurally.
+            (Type::Numeric(x), Type::Numeric(y)) => {
+                self.numeric_unify(x, y);
                 Ok(())
             }
             (Type::Var(x), Type::Var(y)) => {
@@ -275,11 +737,7 @@ impl<S: Clone> Infer<S> {
                 }
             }
             // AU-Refl, extended to tuun's base types.
-            (Type::Float, Type::Float)
-            | (Type::Bool, Type::Bool)
-            | (Type::String, Type::String)
-            | (Type::Waveform, Type::Waveform)
-            | (Type::Seq, Type::Seq) => Ok(()),
+            (Type::Bool, Type::Bool) | (Type::String, Type::String) => Ok(()),
             // AU-Fun, n-ary: parameters (including named, matched by name)
             // and result unify pointwise.
             (
@@ -368,10 +826,67 @@ impl<S: Clone> Infer<S> {
                 let instance = self.instantiate(vars, (**body).clone());
                 self.subtype(&instance, &b)
             }
-            // Tuun's base coercions (not in the paper): the evaluator
-            // promotes floats to constant waveforms, and a seq is usable as
-            // the waveform it wraps.
-            (Type::Float, Type::Waveform) | (Type::Seq, Type::Waveform) => Ok(()),
+            // The definite-violation rule: warn only when the found
+            // sort is disjoint from the expected contract, recording
+            // guarantee and contract flows otherwise.
+            (Type::Numeric(found), Type::Numeric(expected)) => {
+                self.numeric_subtype(found, expected)
+            }
+            // A meta meeting a numeric in a subtype position becomes a
+            // refinement variable with the flow direction preserved: an
+            // expected numeric imposes its contract, a found numeric
+            // records its guarantee. (Falling through to `unify` would
+            // erase the direction.)
+            (Type::Meta(id), Type::Numeric(expected)) => {
+                let fresh = self.fresh_refinement();
+                self.solve(*id, Type::Numeric(fresh.clone()));
+                self.numeric_subtype(&fresh, expected)
+            }
+            (Type::Numeric(found), Type::Meta(id)) => {
+                let fresh = self.fresh_refinement();
+                self.solve(*id, Type::Numeric(fresh.clone()));
+                self.numeric_subtype(found, &fresh)
+            }
+            // An intersection against an expected arrow selects with the
+            // arrow's parameters as a pseudo-frame — the same applicative
+            // subtyping as at applications, so committing to one conjunct
+            // cannot poison a sibling argument: with no definite row, the
+            // possible-rows join plays the summary role
+            // (⋀(Aᵢ→Bᵢ) <: (⋃Aᵢ)→(⋁Bᵢ), sound by atom disjointness).
+            (
+                Type::And(conjuncts),
+                Type::Function {
+                    positional,
+                    named,
+                    result,
+                },
+            ) if named.is_empty() => {
+                let pseudo = Frame {
+                    positional: positional
+                        .iter()
+                        .map(|parameter| (parameter.clone(), None))
+                        .collect(),
+                    named: Vec::new(),
+                    span: None,
+                };
+                match self.select_core(conjuncts, &pseudo) {
+                    Selection::Selected(row_result) => self.subtype(&row_result, result),
+                    Selection::NoApplicableRow => Err(()),
+                    Selection::NoMatchingRows => self.subtype_any_conjunct(conjuncts.clone(), &b),
+                }
+            }
+            // An intersection is usable where any of its conjuncts is
+            // (rules Sub-And-L/Sub-And-R); failed attempts roll back their
+            // partial solving.
+            (Type::And(conjuncts), _) => self.subtype_any_conjunct(conjuncts.clone(), &b),
+            // Meeting an intersection requires meeting every conjunct
+            // (rule Sub-And).
+            (_, Type::And(conjuncts)) => {
+                for conjunct in conjuncts.clone() {
+                    self.subtype(&a, &conjunct)?;
+                }
+                Ok(())
+            }
             // AS-FunR/AS-FunL collapse into one n-ary case: parameters are
             // contravariant, the result covariant. Every named parameter the
             // supertype promises must be offered by the subtype; extra named
@@ -417,12 +932,26 @@ impl<S: Clone> Infer<S> {
         }
     }
 
+    /// Tries `<:` against each conjunct in order, keeping the first
+    /// success and rolling back failed attempts (rules
+    /// Sub-And-L/Sub-And-R).
+    fn subtype_any_conjunct(&mut self, conjuncts: Vec<Type>, b: &Type) -> Result<(), ()> {
+        for conjunct in conjuncts {
+            let mark = self.mark();
+            if self.subtype(&conjunct, b).is_ok() {
+                return Ok(());
+            }
+            self.rollback(mark);
+        }
+        Err(())
+    }
+
     /// Checks `found <: expected` and reports a warning at `span` on
     /// failure, rolling back any partial solving from the failed attempt.
     fn subtype_check(&mut self, found: &Type, expected: &Type, span: &Option<Span<S>>) {
-        let snapshot = self.subst.clone();
+        let mark = self.mark();
         if self.subtype(found, expected).is_err() {
-            self.subst = snapshot;
+            self.rollback(mark);
             let message = format!(
                 "expected {}, found {}",
                 self.display(expected),
@@ -451,12 +980,10 @@ impl<S: Clone> Infer<S> {
         }
         match (&a, &b) {
             (Type::Dynamic, _) | (_, Type::Dynamic) => Type::Dynamic,
-            (Type::Float, Type::Waveform)
-            | (Type::Waveform, Type::Float)
-            | (Type::Seq, Type::Waveform)
-            | (Type::Waveform, Type::Seq)
-            | (Type::Float, Type::Seq)
-            | (Type::Seq, Type::Float) => Type::Waveform,
+            // Numerics join by sort union.
+            (Type::Numeric(x), Type::Numeric(y)) => {
+                Type::ground(self.may_of(x).union(self.may_of(y)))
+            }
             (Type::List(x), Type::List(y)) => {
                 let joined = self.join((**x).clone(), (**y).clone(), span);
                 Type::List(Box::new(joined))
@@ -470,11 +997,11 @@ impl<S: Clone> Infer<S> {
                 Type::Tuple(items)
             }
             _ => {
-                let snapshot = self.subst.clone();
+                let mark = self.mark();
                 if self.unify(&a, &b).is_ok() {
                     self.resolve(&a)
                 } else {
-                    self.subst = snapshot;
+                    self.rollback(mark);
                     let message = format!(
                         "incompatible types {} and {}",
                         self.display(&a),
@@ -490,7 +1017,7 @@ impl<S: Clone> Infer<S> {
     /// Applies `ty` to the pending applications in `psi`, returning the
     /// residual result type — the application subtyping judgment
     /// `(S, N) ∣ Ψ ⊢ A <: B` of Fig. 15 (bottom), with one frame per call.
-    fn app_subtype(&mut self, psi: &mut Psi<S>, ty: Type) -> Type {
+    fn app_subtype(&mut self, psi: &mut Psi<S>, ty: Type, head: Option<&str>) -> Type {
         // AS-Empty: not applied to anything, so the type stands as is.
         let Some(frame) = psi.pop() else { return ty };
         match self.resolve(&ty) {
@@ -498,7 +1025,7 @@ impl<S: Clone> Infer<S> {
             Type::Forall(vars, body) => {
                 let instance = self.instantiate(&vars, *body);
                 psi.push(frame);
-                self.app_subtype(psi, instance)
+                self.app_subtype(psi, instance, head)
             }
             // AS-Fun2, n-ary: the frame's arguments feed one call; continue
             // with the rest of Ψ against the result type.
@@ -508,8 +1035,18 @@ impl<S: Clone> Infer<S> {
                 result,
             } => {
                 self.check_frame(&frame, &positional, &named);
-                self.app_subtype(psi, *result)
+                self.app_subtype(psi, *result, head)
             }
+            // Applicative selection from an intersection (Xue et al.):
+            // conjuncts are tried in table order against the frame's
+            // argument sorts; see `select_conjunct`.
+            Type::And(conjuncts) => match self.select_conjunct(&conjuncts, &frame, head) {
+                Some(result) => self.app_subtype(psi, result, head),
+                None => {
+                    psi.clear();
+                    Type::Dynamic
+                }
+            },
             // AS-Mono2, via arrow unification (Fig. 14, AF-Mono): a meta
             // being applied must be a function; solve it to a function
             // shaped by the frame, then retry.
@@ -527,7 +1064,7 @@ impl<S: Clone> Infer<S> {
                 };
                 let _ = self.unify(&meta, &function);
                 psi.push(frame);
-                self.app_subtype(psi, function)
+                self.app_subtype(psi, function, head)
             }
             Type::Dynamic => {
                 psi.clear();
@@ -540,6 +1077,296 @@ impl<S: Clone> Infer<S> {
                 self.warn(message, &frame.span);
                 psi.clear();
                 Type::Dynamic
+            }
+        }
+    }
+
+    /// Selects from an intersection of arrows against one frame —
+    /// Freeman's `apptype`, Xue et al.'s applicative subtyping `A ≪ S`
+    /// with the frame as the selector:
+    ///
+    /// - the first *definitely* applicable conjunct supplies the result:
+    ///   each numeric argument's sort contained in the domain, each
+    ///   structural argument a subtype of it (table order is
+    ///   most-specific-first, mirroring the runtime match arms);
+    /// - otherwise the *possibly* applicable conjuncts (sorts intersect)
+    ///   contribute the join of their results, silently;
+    /// - no conjunct at all is a definite violation: the runtime has no
+    ///   matching arm.
+    ///
+    /// Serves elimination and checking alike: `app_subtype` selects with a
+    /// real Ψ frame, and `subtype` selects with a pseudo-frame built from
+    /// an expected arrow's parameters.
+    fn select_core(&mut self, conjuncts: &[Type], frame: &Frame<S>) -> Selection {
+        // The argument sorts. Dynamic and unsolved metas may be any
+        // numeric; a structural argument (list, function, ...) has no sort
+        // and is checked against each row's domain by subtyping.
+        let sorts: Vec<Option<Sort>> = frame
+            .positional
+            .iter()
+            .map(|(argument, _)| match self.resolve(argument) {
+                Type::Numeric(rep) => Some(self.may_of(&rep)),
+                Type::Dynamic | Type::Meta(_) => Some(Sort::TOP),
+                _ => None,
+            })
+            .collect();
+        let rows: Vec<Type> = conjuncts
+            .iter()
+            .filter(|conjunct| {
+                matches!(conjunct, Type::Function { positional, .. }
+                    if positional.len() == frame.positional.len())
+            })
+            .cloned()
+            .collect();
+        if rows.is_empty() {
+            return Selection::NoMatchingRows;
+        }
+        // First definitely-applicable row wins; its structural subtyping
+        // commits (and is rolled back when a later position rejects it).
+        for row in &rows {
+            let mark = self.mark();
+            if let Some(domains) = self.row_applies(row, &sorts, frame, true) {
+                self.record_selection_contracts(frame, &domains);
+                let Type::Function { result, .. } = row else {
+                    unreachable!("rows are arrows");
+                };
+                return Selection::Selected((**result).clone());
+            }
+            self.rollback(mark);
+        }
+        // Otherwise every possibly-applicable row contributes. Structural
+        // solving rolls back — no single row was chosen to commit to — so
+        // each row's result is resolved before the rollback discards it.
+        let mut result: Option<Type> = None;
+        let mut allowed: Vec<Sort> = vec![Sort::NONE; frame.positional.len()];
+        for row in &rows {
+            let mark = self.mark();
+            let applies = self.row_applies(row, &sorts, frame, false);
+            let row_result = applies.as_ref().map(|_| {
+                let Type::Function { result, .. } = row else {
+                    unreachable!("rows are arrows");
+                };
+                result.apply(&self.subst)
+            });
+            self.rollback(mark);
+            let (Some(domains), Some(row_result)) = (applies, row_result) else {
+                continue;
+            };
+            result = Some(match result {
+                None => row_result,
+                Some(previous) => self.join(previous, row_result, &frame.span),
+            });
+            for (allowed, domain) in allowed.iter_mut().zip(&domains) {
+                *allowed = allowed.union(*domain);
+            }
+        }
+        match result {
+            Some(result) => {
+                self.record_selection_contracts(frame, &allowed);
+                Selection::Selected(result)
+            }
+            None => Selection::NoApplicableRow,
+        }
+    }
+
+    /// Returns the row's domains as contract sorts when every argument
+    /// fits the row (definitely or possibly), `None` otherwise. Numeric
+    /// positions check by sort arithmetic and report their domain sort;
+    /// unknown and structural domains accept by subtyping and report ⊤
+    /// (no sort contract). A named argument checks against the row's
+    /// named domain; an omitted one takes the default, whose sort the
+    /// rows do not record, so no row is definite for it and every row
+    /// stays possible (the possible-rows join covers the default).
+    /// Structural subtyping solves state, so callers snapshot around the
+    /// call.
+    fn row_applies(
+        &mut self,
+        row: &Type,
+        sorts: &[Option<Sort>],
+        frame: &Frame<S>,
+        definite: bool,
+    ) -> Option<Vec<Sort>> {
+        let Type::Function {
+            positional, named, ..
+        } = row
+        else {
+            unreachable!("rows are arrows");
+        };
+        let mut domains = Vec::with_capacity(positional.len());
+        for ((sort, domain), (argument, _)) in sorts.iter().zip(positional).zip(&frame.positional) {
+            let (fits, domain) = self.position_fits(argument, *sort, domain, definite);
+            domains.push(domain);
+            if !fits {
+                return None;
+            }
+        }
+        for (name, domain) in named {
+            match frame.named.iter().find(|(n, _, _)| n == name) {
+                Some((_, argument, _)) => {
+                    let sort = match self.resolve(argument) {
+                        Type::Numeric(rep) => Some(self.may_of(&rep)),
+                        Type::Dynamic | Type::Meta(_) => Some(Sort::TOP),
+                        _ => None,
+                    };
+                    // TODO record named-argument contracts the way
+                    // `record_selection_contracts` does for positional ones.
+                    let (fits, _) = self.position_fits(argument, sort, domain, definite);
+                    if !fits {
+                        return None;
+                    }
+                }
+                None if definite => return None,
+                None => {}
+            }
+        }
+        Some(domains)
+    }
+
+    /// Whether one argument fits one domain, definitely or possibly, and
+    /// the contract sort the domain imposes (⊤ for unknown and structural
+    /// domains). Structural subtyping solves state; callers snapshot.
+    fn position_fits(
+        &mut self,
+        argument: &Type,
+        sort: Option<Sort>,
+        domain: &Type,
+        definite: bool,
+    ) -> (bool, Sort) {
+        let resolved = self.resolve(domain);
+        match (sort, &resolved) {
+            (Some(sort), Type::Numeric(rep)) => {
+                let domain = self.may_of(rep);
+                let fits = if definite {
+                    sort.is_subset(domain)
+                } else {
+                    !sort.intersect(domain).is_empty()
+                };
+                (fits, domain)
+            }
+            // A structural argument never fits a numeric domain.
+            (None, Type::Numeric(_)) => (false, Sort::TOP),
+            // An unconstrained domain accepts any argument without
+            // imposing a sort contract.
+            (_, Type::Meta(_) | Type::Var(_) | Type::Dynamic) => (true, Sort::TOP),
+            // A numeric argument has no arm at a structural domain.
+            (Some(_), _) => (false, Sort::TOP),
+            (None, _) => (self.subtype(argument, &resolved).is_ok(), Sort::TOP),
+        }
+    }
+
+    /// Selects with `select_core` and reports a warning when nothing
+    /// applies; returns `None` after warning.
+    fn select_conjunct(
+        &mut self,
+        conjuncts: &[Type],
+        frame: &Frame<S>,
+        head: Option<&str>,
+    ) -> Option<Type> {
+        // A named argument that no conjunct declares can never select
+        // anything.
+        for (name, _, _) in &frame.named {
+            let declared = conjuncts.iter().any(|conjunct| {
+                matches!(conjunct, Type::Function { named, .. }
+                    if named.iter().any(|(n, _)| n == name))
+            });
+            if !declared {
+                self.warn(format!("no named parameter \"{}\"", name), &frame.span);
+            }
+        }
+        match self.select_core(conjuncts, frame) {
+            Selection::Selected(result) => Some(result),
+            // Nothing has the call's shape: when the table is unambiguous
+            // about its arity, report the arity mismatch the way
+            // `check_frame` would.
+            Selection::NoMatchingRows => {
+                let mut arities: Vec<&Vec<Type>> = Vec::new();
+                for conjunct in conjuncts {
+                    if let Type::Function { positional, .. } = conjunct
+                        && !arities.iter().any(|known| known.len() == positional.len())
+                    {
+                        arities.push(positional);
+                    }
+                }
+                let message = match &arities[..] {
+                    [parameters] if frame.positional.len() > parameters.len() => {
+                        "extra positional parameter".to_string()
+                    }
+                    [parameters] if frame.positional.len() < parameters.len() => {
+                        format!(
+                            "missing parameter of type {}",
+                            self.display(&parameters[frame.positional.len()])
+                        )
+                    }
+                    _ => self.no_use_message(frame, head),
+                };
+                self.warn(message, &frame.span);
+                None
+            }
+            Selection::NoApplicableRow => {
+                let mut seqs = 0;
+                for (argument, _) in &frame.positional {
+                    if let Type::Numeric(rep) = self.resolve(argument)
+                        && self.may_of(&rep) == Sort::SEQ
+                    {
+                        seqs += 1;
+                    }
+                }
+                let both_seqs = frame.positional.len() == 2 && seqs == 2;
+                let message = match (both_seqs, head) {
+                    (true, Some(name)) => format!("cannot combine two seqs with {}", name),
+                    (true, None) => "cannot combine two seqs".to_string(),
+                    (false, name) => self.no_use_message(frame, name),
+                };
+                self.warn(message, &frame.span);
+                None
+            }
+        }
+    }
+
+    /// The "no use of f accepts (...)" message, listing the call's
+    /// positional and named arguments.
+    fn no_use_message(&self, frame: &Frame<S>, head: Option<&str>) -> String {
+        let arguments = frame
+            .positional
+            .iter()
+            .map(|(ty, _)| self.display(ty))
+            .chain(
+                frame
+                    .named
+                    .iter()
+                    .map(|(name, ty, _)| format!("{} = {}", name, self.display(ty))),
+            )
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "no use of {} accepts ({})",
+            head.unwrap_or("this function"),
+            arguments
+        )
+    }
+
+    /// Bounds the frame's variable arguments by the domains that admitted
+    /// them, so a parameter used with an operator inherits the operator's
+    /// requirements.
+    fn record_selection_contracts(&mut self, frame: &Frame<S>, domains: &[Sort]) {
+        for ((argument, _), domain) in frame.positional.iter().zip(domains) {
+            match self.resolve(argument) {
+                Type::Numeric(Refinement::Var(id)) => {
+                    let _ = self.meet_upper(id, *domain);
+                }
+                // An unconstrained argument commits to numeric here — the
+                // table's rows are all the runtime arms there are — so it
+                // becomes a refinement variable under the same contract
+                // (mirroring `subtype`'s meta-meets-numeric arms).
+                Type::Meta(meta) => {
+                    let fresh = self.fresh_refinement();
+                    let Refinement::Var(id) = fresh else {
+                        unreachable!("fresh refinements are variables");
+                    };
+                    self.solve(meta, Type::Numeric(fresh));
+                    let _ = self.meet_upper(id, *domain);
+                }
+                _ => {}
             }
         }
     }
@@ -558,8 +1385,24 @@ impl<S: Clone> Infer<S> {
                 &frame.span,
             );
         }
+        // Arguments carrying tabulated tables (intersections) check after
+        // the rest, so row selection sees the sibling arguments' flows
+        // first — e.g. a fold's seed constrains the accumulator before
+        // the fold function's row is chosen.
+        let table = |infer: &Self, ty: &Type| match infer.resolve(ty) {
+            Type::And(_) => true,
+            Type::Forall(_, body) => matches!(*body, Type::And(_)),
+            _ => false,
+        };
         for ((argument, span), parameter) in frame.positional.iter().zip(positional) {
-            self.subtype_check(argument, parameter, span);
+            if !table(self, argument) {
+                self.subtype_check(argument, parameter, span);
+            }
+        }
+        for ((argument, span), parameter) in frame.positional.iter().zip(positional) {
+            if table(self, argument) {
+                self.subtype_check(argument, parameter, span);
+            }
         }
         for (name, argument, span) in &frame.named {
             match named.iter().find(|(n, _)| n == name) {
@@ -585,35 +1428,41 @@ impl<S: Clone> Infer<S> {
         match &expr.expr {
             // AT-Int, extended to tuun's literal forms. A literal under a
             // non-empty Ψ falls into `app_subtype`'s cannot-apply case.
-            Expr::Bool(_) => self.app_subtype(psi, Type::Bool),
-            Expr::String(_) => self.app_subtype(psi, Type::String),
-            // A constant waveform is a number literal: it types as `float`,
-            // the refinement of waveforms the scalar-consuming built-ins
-            // require. Anything else waveform-valued types as `waveform`.
+            Expr::Bool(_) => self.app_subtype(psi, Type::Bool, None),
+            Expr::String(_) => self.app_subtype(psi, Type::String, None),
+            // A constant waveform is a number literal, refined by its
+            // integrality; anything else waveform-valued is definitely a
+            // (plain) waveform.
             Expr::Waveform(waveform) => {
                 let ty = match waveform {
-                    waveform::Waveform::Const(_) => Type::Float,
-                    _ => Type::Waveform,
+                    waveform::Waveform::Const(value) => {
+                        if value.fract() == 0.0 {
+                            Type::int()
+                        } else {
+                            Type::ground(Sort::NON_INT_ONLY)
+                        }
+                    }
+                    _ => Type::waveform(),
                 };
-                self.app_subtype(psi, ty)
+                self.app_subtype(psi, ty, None)
             }
             Expr::Seq { offset, waveform } => {
                 let offset_ty = self.infer(context, &mut Vec::new(), offset);
-                self.subtype_check(&offset_ty, &Type::Waveform, &offset.span);
+                self.subtype_check(&offset_ty, &Type::float_or_waveform(), &offset.span);
                 let waveform_ty = self.infer(context, &mut Vec::new(), waveform);
-                self.subtype_check(&waveform_ty, &Type::Waveform, &waveform.span);
-                self.app_subtype(psi, Type::Seq)
+                self.subtype_check(&waveform_ty, &Type::float_or_waveform(), &waveform.span);
+                self.app_subtype(psi, Type::seq(), None)
             }
             // AT-Var: look the variable up and apply its type to Ψ.
             Expr::Variable(name) => match context.iter().rev().find(|(n, _)| n == name) {
                 Some((_, ContextEntry::Ty(ty))) => {
                     let ty = ty.clone();
-                    self.app_subtype(psi, ty)
+                    self.app_subtype(psi, ty, Some(name))
                 }
                 Some((_, ContextEntry::Builtin(builtin))) => {
-                    let arity = psi.last().map(|frame| frame.positional.len());
-                    let ty = signatures::signature(builtin, arity).unwrap_or(Type::Dynamic);
-                    self.app_subtype(psi, ty)
+                    let builtin = builtin.clone();
+                    let ty = signatures::signature(&builtin).unwrap_or(Type::Dynamic);
+                    self.app_subtype(psi, ty, Some(&builtin))
                 }
                 None => {
                     self.warn(format!("unbound variable '{}'", name), &expr.span);
@@ -624,23 +1473,28 @@ impl<S: Clone> Infer<S> {
             // AT-Var for built-ins: the signature table stands in for the
             // typing-context entry.
             Expr::BuiltIn { name, .. } => {
-                let arity = psi.last().map(|frame| frame.positional.len());
-                let ty = signatures::signature(name, arity).unwrap_or(Type::Dynamic);
-                self.app_subtype(psi, ty)
+                let ty = signatures::signature(name).unwrap_or(Type::Dynamic);
+                self.app_subtype(psi, ty, Some(name))
             }
             Expr::Function {
                 positional,
                 named,
                 body,
             } => {
-                // Named parameters take the types of their defaults, which
-                // are inferred in the enclosing scope (mirroring their
-                // once-at-definition evaluation). Not in the paper, which
+                // A named parameter's type comes from the body's use of
+                // it, not from its default: the default is only the value
+                // the parameter takes when a call omits the argument, so
+                // its type (inferred in the enclosing scope, mirroring
+                // once-at-definition evaluation) flows in as a guarantee
+                // against the parameter's unknown. Not in the paper, which
                 // has no named parameters.
                 let named_types: Vec<(String, Type)> = named
                     .iter()
                     .map(|(name, default)| {
-                        (name.clone(), self.infer(context, &mut Vec::new(), default))
+                        let default_ty = self.infer(context, &mut Vec::new(), default);
+                        let parameter = self.fresh_meta();
+                        self.subtype_check(&default_ty, &parameter, &default.span);
+                        (name.clone(), parameter)
                     })
                     .collect();
                 let depth = context.len();
@@ -718,14 +1572,14 @@ impl<S: Clone> Infer<S> {
                 let positional_types = positional
                     .iter()
                     .map(|argument| {
-                        let ty = self.infer(context, &mut Vec::new(), argument);
+                        let ty = self.infer_definition(context, argument);
                         (self.generalize(context, ty), argument.span.clone())
                     })
                     .collect();
                 let named_types = named
                     .iter()
                     .map(|(name, argument)| {
-                        let ty = self.infer(context, &mut Vec::new(), argument);
+                        let ty = self.infer_definition(context, argument);
                         (
                             name.clone(),
                             self.generalize(context, ty),
@@ -754,7 +1608,7 @@ impl<S: Clone> Infer<S> {
                 let then_ty = self.infer(context, &mut Vec::new(), then);
                 let else_ty = self.infer(context, &mut Vec::new(), else_);
                 let joined = self.join(then_ty, else_ty, &expr.span);
-                self.app_subtype(psi, joined)
+                self.app_subtype(psi, joined, None)
             }
             // Pairs take the inference-mode rule (the paper's Pair-I, §2.1):
             // tuples cannot be applied, so components are inferred with an
@@ -764,7 +1618,7 @@ impl<S: Clone> Infer<S> {
                     .iter()
                     .map(|item| self.infer(context, &mut Vec::new(), item))
                     .collect();
-                self.app_subtype(psi, Type::Tuple(types))
+                self.app_subtype(psi, Type::Tuple(types), None)
             }
             Expr::List(items) => {
                 let mut element: Option<Type> = None;
@@ -776,7 +1630,7 @@ impl<S: Clone> Infer<S> {
                     });
                 }
                 let element = element.unwrap_or_else(|| self.fresh_meta());
-                self.app_subtype(psi, Type::List(Box::new(element)))
+                self.app_subtype(psi, Type::List(Box::new(element)), None)
             }
             Expr::Project { module, name } => {
                 let module_ty = self.infer(context, &mut Vec::new(), module);
@@ -801,7 +1655,7 @@ impl<S: Clone> Infer<S> {
                         Type::Dynamic
                     }
                 };
-                self.app_subtype(psi, ty)
+                self.app_subtype(psi, ty, None)
             }
             Expr::BoundModule(entries) => {
                 let types = entries
@@ -810,7 +1664,7 @@ impl<S: Clone> Infer<S> {
                         (name.clone(), self.infer(context, &mut Vec::new(), entry))
                     })
                     .collect();
-                self.app_subtype(psi, Type::Module(types))
+                self.app_subtype(psi, Type::Module(types), None)
             }
             // The parser already reported the error.
             Expr::Error(_) => {
@@ -852,9 +1706,9 @@ impl<S: Clone> Infer<S> {
                     }
                 }
                 meta @ Type::Meta(_) => {
-                    let shape = Type::Tuple(patterns.iter().map(|_| self.fresh_meta()).collect());
-                    let _ = self.unify(&meta, &shape);
-                    self.bind_pattern(context, pattern, shape, span, generalize_leaves);
+                    let tuple = Type::Tuple(patterns.iter().map(|_| self.fresh_meta()).collect());
+                    let _ = self.unify(&meta, &tuple);
+                    self.bind_pattern(context, pattern, tuple, span, generalize_leaves);
                 }
                 Type::Forall(vars, body) => {
                     let instance = self.instantiate(&vars, *body);
@@ -957,7 +1811,7 @@ impl<S: Clone> Infer<S> {
                             let ty = match entry {
                                 ContextEntry::Ty(ty) => ty,
                                 ContextEntry::Builtin(builtin) => {
-                                    signatures::signature(&builtin, None).unwrap_or(Type::Dynamic)
+                                    signatures::signature(&builtin).unwrap_or(Type::Dynamic)
                                 }
                             };
                             (member, ty)
@@ -975,7 +1829,7 @@ impl<S: Clone> Infer<S> {
                     {
                         context.push((name.clone(), ContextEntry::Builtin(builtin.clone())));
                     } else {
-                        let ty = self.infer(context, &mut Vec::new(), expr);
+                        let ty = self.infer_definition(context, expr);
                         self.bind_pattern(context, pattern, ty, &expr.span, true);
                     }
                     own.extend_from_slice(&context[before..]);
@@ -1009,6 +1863,92 @@ impl<S: Clone> Infer<S> {
         memo.insert(key, exports.clone());
         exports
     }
+}
+
+/// Coalesces tabulated rows: two rows that differ at just one numeric domain
+/// position and agree on the result merge into one row with the union domain
+/// there — e.g. `({I}) -> float ∧ ({NonInt}) -> float` becomes `(float) ->
+/// float`. Purely a simplification: selection reads the merged table the same
+/// way, and displays stay legible.
+fn merge_rows(mut rows: Vec<Type>) -> Vec<Type> {
+    'restart: loop {
+        for i in 0..rows.len() {
+            for j in (i + 1)..rows.len() {
+                if let Some(merged) = merge_pair(&rows[i], &rows[j]) {
+                    rows[i] = merged;
+                    rows.remove(j);
+                    continue 'restart;
+                }
+            }
+        }
+        return rows;
+    }
+}
+
+/// Returns the union of rows `a` and `b` when they agree everywhere except at
+/// most one numeric ground domain position (positional or named).
+fn merge_pair(a: &Type, b: &Type) -> Option<Type> {
+    let (
+        Type::Function {
+            positional: positional_a,
+            named: named_a,
+            result: result_a,
+        },
+        Type::Function {
+            positional: positional_b,
+            named: named_b,
+            result: result_b,
+        },
+    ) = (a, b)
+    else {
+        return None;
+    };
+    if positional_a.len() != positional_b.len()
+        || named_a.len() != named_b.len()
+        || result_a != result_b
+    {
+        return None;
+    }
+    if named_a
+        .iter()
+        .zip(named_b)
+        .any(|((name_a, _), (name_b, _))| name_a != name_b)
+    {
+        return None;
+    }
+    let mut merged = positional_a.clone();
+    let mut merged_named = named_a.clone();
+    let mut differences = 0;
+    let union = |x: &Type, y: &Type, differences: &mut i32| -> Option<Option<Type>> {
+        if x == y {
+            return Some(None);
+        }
+        let (Type::Numeric(Refinement::Ground(sort_x)), Type::Numeric(Refinement::Ground(sort_y))) =
+            (x, y)
+        else {
+            return None;
+        };
+        *differences += 1;
+        if *differences > 1 {
+            return None;
+        }
+        Some(Some(Type::ground(sort_x.union(*sort_y))))
+    };
+    for (position, (x, y)) in positional_a.iter().zip(positional_b).enumerate() {
+        if let Some(unioned) = union(x, y, &mut differences)? {
+            merged[position] = unioned;
+        }
+    }
+    for (position, ((_, x), (_, y))) in named_a.iter().zip(named_b).enumerate() {
+        if let Some(unioned) = union(x, y, &mut differences)? {
+            merged_named[position].1 = unioned;
+        }
+    }
+    Some(Type::Function {
+        positional: merged,
+        named: merged_named,
+        result: result_a.clone(),
+    })
 }
 
 /// Returns `entries` with duplicate names collapsed so each name appears
@@ -1136,7 +2076,7 @@ mod tests {
     fn inference_mode_lambda_is_monomorphic() {
         assert_warns(
             "map(fn(g) => (g(1), g(\"s\")), [fn(x) => x])",
-            &["expected float, found string"],
+            &["expected int, found string"],
         );
     }
 
@@ -1170,7 +2110,10 @@ mod tests {
     fn argument_mismatch_points_at_argument() {
         let input = "sine(\"a\", 0)";
         let warnings = check(input);
-        assert_eq!(messages(&warnings), ["expected waveform, found string"]);
+        assert_eq!(
+            messages(&warnings),
+            ["expected float or waveform, found string"]
+        );
         let start = input.find("\"a\"").unwrap();
         assert_eq!(warnings[0].range(), Some(start..start + 3));
     }
@@ -1198,7 +2141,7 @@ mod tests {
         assert_warns(
             "sine(440, y = 1)",
             &[
-                "missing parameter of type waveform",
+                "missing parameter of type float or waveform",
                 "no named parameter \"y\"",
             ],
         );
@@ -1211,35 +2154,167 @@ mod tests {
 
     #[test]
     fn conditionals() {
-        assert_warns("if 1 then 2 else 3", &["expected bool, found float"]);
+        assert_warns("if 1 then 2 else 3", &["expected bool, found int"]);
         // Branches join over the coercion lattice: float and waveform meet
         // at waveform.
         assert_clean("if true then 1 else sine(440, 0)");
     }
 
-    // KNOWN SPURIOUS WARNING, pinned deliberately: `+` has the single
-    // signature (waveform, waveform) -> waveform, so `1 + 2` types as
-    // waveform even though it evaluates to a float, and `nth` then rejects
-    // it. Iterating the signature design (e.g. refinement types) should
-    // eventually turn this test green-with-no-warnings.
     #[test]
-    fn known_spurious_arithmetic_widens_to_waveform() {
-        assert_warns("nth(1 + 2, [1, 2, 3])", &["expected float, found waveform"]);
+    fn constant_arithmetic_stays_integral() {
+        assert_clean("nth(1 + 2, [1, 2, 3])");
     }
 
     #[test]
     fn seq_typing() {
         // seq(0)(w) builds a seq; `\` wants a seq on the left.
         assert_clean("seq(0)(sine(440, 0)) \\ 1");
-        // A bare waveform on the left of `\` is a genuine runtime error.
-        assert_warns("sine(440, 0) \\ 1", &["expected seq, found waveform"]);
-        // KNOWN SPURIOUS WARNING, pinned deliberately: arithmetic on a seq
-        // types as waveform (the single binary-op signature erases
-        // seq-ness), so the following `\` warns even though evaluation
-        // keeps the seq.
+        // A non-seq on the left of `\` is a genuine runtime error (sine
+        // may fold to a constant, hence the union in the message).
         assert_warns(
-            "(seq(0)(sine(440, 0)) * 0.5) \\ 1",
-            &["expected seq, found waveform"],
+            "sine(440, 0) \\ 1",
+            &["expected seq, found float or waveform"],
+        );
+        // Arithmetic threads a seq operand through (`binary_op`'s seq
+        // rows), so seq-ness survives to the following `\`.
+        assert_clean("(seq(0)(sine(440, 0)) * 0.5) \\ 1");
+    }
+
+    // Runtime errors the refinement lattice makes visible: arms the
+    // operator tables deliberately omit, and refined contracts.
+    #[test]
+    fn refinement_true_positives() {
+        // `binary_op` has no (Seq, Seq) arm.
+        assert_warns("seq(0)(1) + seq(0)(2)", &["cannot combine two seqs with +"]);
+        // `unary_op` has no Seq arm.
+        assert_warns("-seq(0)(1)", &["no use of - accepts (seq)"]);
+        // `reset`'s trigger accepts constants and waveforms, not seqs.
+        assert_warns(
+            "reset(seq(0)(1), 1)",
+            &["expected float or waveform, found seq"],
+        );
+        // `unfold`'s count is hard-checked integral at runtime.
+        assert_warns("unfold(fn(x) => x, 0, 2.5)", &["expected int, found float"]);
+        // `nth`'s index is hard-checked integral at runtime.
+        assert_warns("nth(2.5, [1, 2, 3])", &["expected int, found float"]);
+        // Contravariant contract flow: `exp` requires constants, and the
+        // list supplies a definite waveform. (`sine(440, 0)` would be
+        // silent here: its type is float-or-waveform because the
+        // zero-frequency fold exists, and value tracking is a later phase.)
+        assert_warns("map(exp, [time])", &["expected [float], found [waveform]"]);
+        // Comparisons are scalar-only at runtime.
+        assert_warns("time < 1", &["expected float, found waveform"]);
+        // `<>` requires seq elements; a definitely-unseq list warns.
+        assert_warns("<[1, 2]>", &["expected [seq], found [int]"]);
+        assert_clean("<[seq(0)(1), seq(0)(2)]>");
+        // The fold of seqs is itself a seq, usable on `\`'s left — the
+        // empty fold included.
+        assert_clean("<[seq(0)(1), seq(0)(2)]> \\ 1");
+        assert_clean("<[]> \\ 1");
+    }
+
+    // Freeman §4: definition-bound numeric functions tabulate into
+    // intersections of arrows, one row per applicable atom vector.
+    #[test]
+    fn tabulated_definitions() {
+        // Result precision at a direct call: double(2) is an int, and an
+        // int is definitely not a seq.
+        assert_warns(
+            "let double = fn(x) => x + x in double(2) \\ 1",
+            &["expected seq, found int"],
+        );
+        // The missing (seq, seq) arm of + is relational and survives the
+        // definition boundary: double has no seq row at all. (R1's
+        // per-position freeze accepted this call.)
+        assert_warns(
+            "let double = fn(x) => x + x in double(seq(0)(1))",
+            &["no use of double accepts (seq)"],
+        );
+        // Two definite seqs get the dedicated diagnosis, same as the
+        // operator itself would.
+        assert_warns(
+            "let add = fn(a, b) => a + b in add(seq(0)(1), seq(0)(2))",
+            &["cannot combine two seqs with add"],
+        );
+        // Integrality flows through the definition into an int contract.
+        assert_clean("let inc = fn(x) => x + 1 in nth(inc(1), [1, 2, 3])");
+    }
+
+    #[test]
+    fn tabulated_argument_lambdas() {
+        // In argument position the table is read distributively (the
+        // union of its rows), so a mixed list stays silent...
+        assert_clean("map(fn(x) => x * 0.5, [time, 2])");
+        // ...and a seq element is fine where the body threads seqs...
+        assert_clean("map(fn(x) => x * 2, [seq(0)(1)])");
+        // ...but warns where no row accepts one: x + x has no seq row.
+        // The list is checked before the table (see `check_frame`), so
+        // the message shows the seq flowing into the expected arrow
+        // against the rows the function actually has.
+        assert_warns(
+            "map(fn(x) => x + x, [seq(0)(1)])",
+            &[
+                "expected (seq) -> ?a, found (int) -> int ∧ (float) -> float ∧ (waveform) -> waveform",
+            ],
+        );
+    }
+
+    // Mixed parameter lists: numeric parameters tabulate while structural ones
+    // ride along as quantified unknowns.
+    #[test]
+    fn tabulated_mixed_parameters() {
+        // The fold's accumulator row is precise: an int seed selects the
+        // int row, so the result is definitely not a seq.
+        assert_warns(
+            "reduce(fn(acc, x) => acc + 1, 0, [1, 2]) \\ 1",
+            &["expected seq, found int"],
+        );
+        // The seed is checked before the table, so a float seed selects
+        // the float row rather than warning against the int row.
+        assert_clean("reduce(fn(acc, x) => acc + 1, 0.5, [1, 2])");
+        // A structural domain solved by the body (xs used as a list)
+        // participates in selection at direct calls.
+        assert_clean("let pick = fn(n, xs) => nth(n, xs) in pick(1, [1, 2])");
+        assert_warns(
+            "let pick = fn(n, xs) => nth(n, xs) in pick(0.5, [1, 2])",
+            &["expected int, found float"],
+        );
+    }
+
+    // A parameter's contract comes from the body, not the default, and named
+    // numeric parameters tabulate like positional ones.
+    #[test]
+    fn named_parameters_type_from_the_body() {
+        let f = "let f = fn(x = 100) => x + x in ";
+        // An int default still admits float and waveform arguments...
+        assert_clean(&format!("{}f(x = time)", f));
+        assert_clean(&format!("{}f(x = 0.5)", f));
+        // ...while the body's missing seq row still rejects a seq.
+        assert_warns(
+            &format!("{}f(x = seq(0)(1))", f),
+            &["no use of f accepts (x = seq)"],
+        );
+        // An omitted argument takes the default; the join of the table
+        // covers it, so no single row's result is claimed.
+        assert_clean(&format!("{}f()", f));
+        // Result precision flows through a supplied named argument.
+        assert_warns(&format!("{}f(x = 2) \\ 1", f), &["expected seq, found int"]);
+        // A default the body cannot accept warns at the definition.
+        assert_warns("fn(x = 100) => x \\ 1", &["expected seq, found int"]);
+    }
+
+    // Beyond 4^k the two-point unseq/seq split still tabulates, keeping
+    // seq relationality for wide parameter lists like the synths'.
+    #[test]
+    fn coarse_tabulation_beyond_the_cap() {
+        let f = "let f = fn(a, b, c, d, e) => a + b + c + d + e in ";
+        // A single seq threads through the fold of + rows...
+        assert_clean(&format!("{}f(1, 2, 3, seq(0)(4), 5) \\ 1", f));
+        // ...but two seqs have no row, even though each position alone
+        // admits one.
+        assert_warns(
+            &format!("{}f(1, 2, 3, seq(0)(4), seq(0)(5))", f),
+            &["no use of f accepts (int, int, int, seq, seq)"],
         );
     }
 
@@ -1288,7 +2363,7 @@ mod tests {
     #[test]
     fn program_expectations() {
         let warnings = check_with_expectation("\"hello\"", Some(Expectation::Waveform));
-        assert_eq!(messages(&warnings), ["expected waveform, found string"]);
+        assert_eq!(messages(&warnings), ["expected number, found string"]);
         let warnings = check_with_expectation("sine(440, 0)", Some(Expectation::Waveform));
         assert!(warnings.is_empty(), "got {:?}", messages(&warnings));
         // A seq qualifies as a waveform program.
@@ -1319,7 +2394,7 @@ mod tests {
         );
         assert_eq!(
             messages(&warnings),
-            ["expected (waveform, waveform), found (waveform, string)"]
+            ["expected (float or waveform, float or waveform), found (float or waveform, string)"]
         );
     }
 
@@ -1388,13 +2463,13 @@ mod tests {
         let warnings = check_program(resolve, &bindings, &expr, None);
         assert_eq!(
             messages(&warnings),
-            ["cannot project 'y' from a value of type float"]
+            ["cannot project 'y' from a value of type int"]
         );
     }
 
     #[test]
     fn cannot_apply_non_function() {
-        assert_warns("1(2)", &["cannot apply a value of type float"]);
+        assert_warns("1(2)", &["cannot apply a value of type int"]);
     }
 
     // Direct unit tests for the subtyping corners that full programs
@@ -1408,7 +2483,7 @@ mod tests {
             vec![0],
             Box::new(Type::function(vec![Type::Var(0)], Type::Var(0))),
         );
-        let mono = Type::function(vec![Type::Float], Type::Float);
+        let mono = Type::function(vec![Type::float()], Type::float());
         assert!(checker.subtype(&id, &mono).is_ok());
 
         // (float) -> float <: ∀a.(a) -> a: skolemize right (AS-ForallR)
@@ -1470,24 +2545,9 @@ mod tests {
                 }
             }
         }
-        // Every pinned warning is a KNOWN SPURIOUS one of two documented
-        // classes, verified against the library source:
-        // - Arithmetic widening: the single binary-op signatures type any
-        //   arithmetic as waveform, so float-only consumers (`exp`,
-        //   `unfold`'s count) warn on computed floats like `-x` or `n+1`.
-        // - Equality solving: metas solve by unification, not lattice join,
-        //   so `ws` pinned at [seq] rejects a later [waveform] use.
-        // Signature/inference improvements should shrink this list; anything
-        // NEW appearing here needs the same source-level verification.
-        assert_eq!(
-            report,
-            [
-                "std: 13:31: expected float, found waveform",
-                "std: 55:41: expected float, found waveform",
-                "std: 58:19: expected [float], found [waveform]",
-                "std: 143:18: expected [seq], found [waveform]",
-                "filters.basic: 5:44: expected float, found waveform",
-            ]
-        );
+        // The refinement lattice checks the entire embedded library without a
+        // single warning. Anything appearing here needs source-level
+        // verification before being accepted as a new pin.
+        assert_eq!(report, Vec::<String>::new());
     }
 }

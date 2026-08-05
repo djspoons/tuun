@@ -761,7 +761,7 @@ mod tests {
         assert_eq!(diagnostics[0].severity, Severity::Warning);
         assert_eq!(
             diagnostics[0].to_string(),
-            "1:6: expected waveform, found string"
+            "1:6: expected float or waveform, found string"
         );
         assert_eq!(diagnostics[0].program_range, Some(5..8));
 
@@ -776,12 +776,10 @@ mod tests {
         assert_eq!(diagnostics[1].severity, Severity::Warning);
         assert_eq!(
             diagnostics[1].to_string(),
-            "1:6: expected waveform, found string"
+            "1:6: expected float or waveform, found string"
         );
 
-        // A clean program returns no warnings; one with a static-only issue
-        // (1 + 2 is a float at runtime but types as waveform) returns the
-        // warning on the Ok path while still evaluating successfully.
+        // Clean programs return no warnings, including computed indexes.
         set.program_mut(0)
             .unwrap()
             .set_text("sine(440, 0)".to_string());
@@ -789,16 +787,32 @@ mod tests {
         set.program_mut(0)
             .unwrap()
             .set_text("fin(nth(1 + 2, [1, 2, 4, 8]))(sine(440, 0))".to_string());
+        assert_eq!(set.evaluate_and_record(&evaluator, 0), Ok(Vec::new()));
+        // A fractional index fails evaluation and the checker reports the same
+        // mistake alongside.
+        set.program_mut(0)
+            .unwrap()
+            .set_text("fin(nth(2.5, [1, 2, 4, 8]))(sine(440, 0))".to_string());
+        let diagnostics = set
+            .evaluate_and_record(&evaluator, 0)
+            .expect_err("nth(2.5, ...) fails at evaluation");
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(diagnostics[0].severity, Severity::Error);
+        assert_eq!(diagnostics[1].severity, Severity::Warning);
+        // Column 9 points at `2.5` — the mismatched argument itself.
+        assert_eq!(diagnostics[1].to_string(), "1:9: expected int, found float");
+
+        // A warning can still ride the Ok path when the mistake hides where
+        // evaluation doesn't look: inside a function that is never called.
+        set.program_mut(0)
+            .unwrap()
+            .set_text("let f = fn(x) => nth(2.5, [1, 2]) in sine(440, 0)".to_string());
         let warnings = set
             .evaluate_and_record(&evaluator, 0)
-            .expect("program evaluates despite the warning");
+            .expect("the unused function body never evaluates");
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].severity, Severity::Warning);
-        // Column 9 points at `1 + 2` — the mismatched argument itself.
-        assert_eq!(
-            warnings[0].to_string(),
-            "1:9: expected float, found waveform"
-        );
+        assert_eq!(warnings[0].to_string(), "1:22: expected int, found float");
     }
 
     #[test]

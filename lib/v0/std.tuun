@@ -131,13 +131,13 @@ i = fn(key) => fn(inst) => fn(dur) => {map(amp(0.4), minor_triad(key)(fn(freq) =
 // should be non-decreasing and `w` should *not* be a sequence-able waveform.
 // For example: on_beats(bass(Q) | unseq(), [1, 2, 3, 4])
 on_beats = fn(w, bs) => let
-    f = fn((current_beat, prev, ws), play_at_beat) =>
+    f = fn((current_beat, prev, acc), play_at_beat) =>
         if
           play_at_beat < current_beat
         then
-          (play_at_beat, w, append(ws, [prev | seq(0)]))
+          (play_at_beat, w, acc \ (prev | seq(0)))
         else
-          (play_at_beat, w, append(ws,
-            [prev | seq(time - (duration_from_beats(play_at_beat - current_beat)))])),
-    (current_beat, prev, ws) = reduce(f, (1, 0 | fin(0), []), bs),
-  in <append(ws, [prev])>;
+          (play_at_beat, w,
+            acc \ (prev | seq(time - (duration_from_beats(play_at_beat - current_beat))))),
+    (current_beat, prev, acc) = reduce(f, (1, 0 | fin(0), 0 | fin(0) | seq(0)), bs),
+  in acc \ prev;

@@ -583,6 +583,33 @@ mod tests {
     }
 
     #[test]
+    fn test_sequence_requires_seqs() {
+        let seq = "sine(2, 0) | fin(time - 1) | seq(time - 1)";
+        // A fold of seqs is a seq; a singleton returns its element.
+        assert!(matches!(
+            eval_with_builtins(&format!("<[{seq}, {seq}]>"))
+                .unwrap()
+                .expr,
+            Expr::Seq { .. }
+        ));
+        assert!(matches!(
+            eval_with_builtins(&format!("<[{seq}]>")).unwrap().expr,
+            Expr::Seq { .. }
+        ));
+        // A non-seq element is an error.
+        assert!(eval_with_builtins(&format!("<[{seq}, sine(3, 0)]>")).is_err());
+        // The empty sequence is the empty seq — usable on `\`'s left.
+        assert!(matches!(
+            eval_with_builtins("<[]>").unwrap().expr,
+            Expr::Seq { .. }
+        ));
+        assert!(matches!(
+            eval_with_builtins("<[]> \\ sine(3, 0)").unwrap().expr,
+            Expr::Waveform(_)
+        ));
+    }
+
+    #[test]
     fn test_merge_of_constants_folds() {
         // `&` on two constants is their sum: both are endless, so the merge
         // is pointwise addition everywhere and the shorter-operand extension

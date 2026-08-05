@@ -562,7 +562,7 @@ where
     S: Clone,
 {
     match &arguments[..] {
-        [Expr::Waveform(Waveform::Const(a)), List(b)] => {
+        [Expr::Waveform(Waveform::Const(a)), List(b)] if *a >= 0.0 && a.fract() == 0.0 => {
             if let Some(element) = b.get(*a as usize) {
                 element.expr.clone()
             } else {
@@ -911,13 +911,19 @@ where
     }
     match &mut arguments[0] {
         List(exprs) => {
+            // The empty sequence is the identity of `\`: no sound, no
+            // time advance.
             if exprs.is_empty() {
-                return Expr::Waveform(Waveform::Fixed(vec![], ()));
-            } else if exprs.len() == 1 {
-                return match &exprs[0].expr {
-                    Expr::Waveform(waveform) => Expr::Waveform(waveform.clone()),
-                    _ => return Error("Invalid argument for sequence".to_string()),
+                return Seq {
+                    offset: boxed(Expr::Waveform(Waveform::Const(0.0))),
+                    waveform: boxed(Expr::Waveform(Waveform::Fixed(vec![], ()))),
                 };
+            }
+            if let Some(element) = exprs
+                .iter()
+                .find(|element| !matches!(element.expr, Expr::Seq { .. }))
+            {
+                return Error(format!("Expected a seq in sequence, got {}", element.expr));
             }
             let mut result = exprs.remove(exprs.len() - 1).expr;
             while !exprs.is_empty() {
@@ -1053,6 +1059,17 @@ mod tests {
         let result = function.0(vec![]);
         assert_eq!(format!("{}", result), "[]");
         assert_eq!(printed.borrow().last().unwrap(), "debug: []");
+    }
+
+    #[test]
+    fn test_nth_requires_a_non_negative_integer_index() {
+        let list = || List(vec![SourceExpr::<u32>::float(1.0), SourceExpr::float(2.0)]);
+        let result = nth(vec![Expr::float(1.0), list()]);
+        assert_eq!(format!("{}", result), "2");
+        let result = nth(vec![Expr::float(0.5), list()]);
+        assert_eq!(format!("{}", result), "Invalid arguments for nth");
+        let result = nth(vec![Expr::float(-1.0), list()]);
+        assert_eq!(format!("{}", result), "Invalid arguments for nth");
     }
 
     #[test]

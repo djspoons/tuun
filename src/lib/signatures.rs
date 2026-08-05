@@ -1,51 +1,109 @@
 //! Type signatures for the built-in bindings.
 //!
-//! Built-ins are opaque Rust closures, so the checker cannot infer their
-//! types; this table declares one signature per built-in name. It must be
-//! kept in sync with [`crate::builtins::add_bindings`] (a test below checks
-//! that every registered built-in has an entry).
+//! Built-ins are opaque Rust closures, so the checker cannot infer their types;
+//! this table declares one signature per built-in name. It must be kept in sync
+//! with [`crate::builtins::add_bindings`] (a test below checks that every
+//! registered built-in has an entry).
 //!
-//! Signatures are prenex schemes in the sense of "Let Arguments Go First"
-//! §3.1 (polytypes quantify only at the top), playing the role that typing
-//! context entries `x : A` play in the paper's rule AT-Var (Fig. 16).
+//! Signatures are prenex schemes in the sense of "Let Arguments Go First" §3.1
+//! (polytypes quantify only at the top), playing the role that typing context
+//! entries `x : A` play in the paper's rule AT-Var (Fig. 16). Overloaded
+//! built-ins carry intersections of arrows ([`Type::And`]) whose conjuncts
+//! mirror the runtime's match arms in order — a declarative table in the style
+//! of Freeman and Pfenning's principal types for constructors; selection
+//! against the application context happens in [`crate::infer`].
 //!
-//! Signatures deliberately simplify: each built-in gets a single type, with the
-//! subtypings `float <: waveform` and `seq <: waveform`. Where the run-time
-//! behavior is wider than the signature (e.g. `append` on waveforms), the
-//! checker reports a spurious warning; where it is narrower (e.g. `1 + 2`
-//! producing a float), the checker reports the wider type. Both are accepted
-//! costs of the single-signature design.
+//! Domains are sorts — unions of the numeric atoms — and admit exactly the
+//! values the runtime arm accepts; contracts that require true scalars
+//! (`unfold`'s count, `nth`'s index, the comparisons) say so with `float`/`int`
+//! refinements.
 
 use crate::types::Type;
 
-/// Returns the signature of the built-in named `name`.
-///
-/// `arity` is the number of positional arguments at the call site, when
-/// known; it selects between forms for arity-overloaded built-ins (unary
-/// versus binary `-`). Returns `None` for names without a declared
-/// signature; callers should treat those as [`Type::Dynamic`].
-pub fn signature(name: &str, arity: Option<usize>) -> Option<Type> {
+/// Builds the intersection table shared by the binary arithmetic operators,
+/// mirroring `binary_op`'s runtime arms: constants fold (preserving
+/// integrality when `int_row`), any waveform involvement builds a waveform,
+/// one seq threads its offset, and two seqs match no conjunct (a runtime
+/// error).
+fn binary_arithmetic(int_row: bool) -> Type {
+    let mut rows = Vec::new();
+    if int_row {
+        rows.push(Type::function(vec![Type::int(), Type::int()], Type::int()));
+    }
+    rows.push(Type::function(
+        vec![Type::float(), Type::float()],
+        Type::float(),
+    ));
+    rows.push(Type::function(
+        vec![Type::float_or_waveform(), Type::float_or_waveform()],
+        Type::waveform(),
+    ));
+    rows.push(Type::function(
+        vec![Type::seq(), Type::float_or_waveform()],
+        Type::seq(),
+    ));
+    rows.push(Type::function(
+        vec![Type::float_or_waveform(), Type::seq()],
+        Type::seq(),
+    ));
+    Type::And(rows)
+}
+
+/// The result type of curried waveform filters (`fin(len)`, `filter(...)`,
+/// `capture(name)`, `mark(id)`): applied to a waveform they produce a
+/// waveform, and a seq threads through (`builtins::curry`).
+fn waveform_filter() -> Type {
+    Type::And(vec![
+        Type::function(vec![Type::float_or_waveform()], Type::waveform()),
+        Type::function(vec![Type::seq()], Type::seq()),
+    ])
+}
+
+/// Returns the signature of the built-in named `name`, or `None` for names
+/// without a declared signature; callers should treat those as
+/// [`Type::Dynamic`].
+pub fn signature(name: &str) -> Option<Type> {
     // Var ids are local to each signature; instantiation freshens them.
     let a = || Type::Var(0);
     let b = || Type::Var(1);
-    let binary_wave = || Type::function(vec![Type::Waveform, Type::Waveform], Type::Waveform);
-    let comparison = || Type::function(vec![Type::Float, Type::Float], Type::Bool);
     let ty = match name {
-        "+" | "*" | "/" | "&" | "pow" => binary_wave(),
-        "-" => match arity {
-            Some(1) => Type::function(vec![Type::Waveform], Type::Waveform),
-            _ => binary_wave(),
-        },
-        "\\" => Type::function(vec![Type::Seq, Type::Waveform], Type::Seq),
+        "+" | "*" | "&" => binary_arithmetic(true),
+        "/" | "pow" => binary_arithmetic(false),
+        // Unary and binary rows in one intersection; selection matches the
+        // call's arity. Unary minus preserves integrality; there is no
+        // unary seq row (`unary_op` has no `Seq` arm).
+        "-" => {
+            let unary = vec![
+                Type::function(vec![Type::int()], Type::int()),
+                Type::function(vec![Type::float()], Type::float()),
+                Type::function(vec![Type::float_or_waveform()], Type::waveform()),
+            ];
+            let Type::And(binary) = binary_arithmetic(true) else {
+                unreachable!("binary_arithmetic returns an intersection");
+            };
+            Type::And(unary.into_iter().chain(binary).collect())
+        }
+        // The left operand must be an actual seq; the right may be any
+        // numeric. The result is a waveform (float/waveform right) or a seq
+        // (seq right) — the union keeps both chains and waveform uses silent.
+        "\\" => Type::function(
+            vec![Type::seq(), Type::number()],
+            Type::ground(crate::types::Sort::WAVE_OR_SEQ),
+        ),
         "==" | "!=" => Type::Forall(
             vec![0],
             Box::new(Type::function(vec![a(), a()], Type::Bool)),
         ),
-        "<" | "<=" | ">" | ">=" => comparison(),
-        "log" => Type::function(vec![Type::Float, Type::Float], Type::Float),
-        "sqrt" | "exp" => Type::function(vec![Type::Float], Type::Float),
-        "sine" => binary_wave(),
-        "cos" => Type::function(vec![Type::Waveform], Type::Waveform),
+        "<" | "<=" | ">" | ">=" => Type::function(vec![Type::float(), Type::float()], Type::Bool),
+        "log" => Type::function(vec![Type::float(), Type::float()], Type::float()),
+        "sqrt" | "exp" => Type::function(vec![Type::float()], Type::float()),
+        // Zero frequency with a constant phase folds to a constant, so the
+        // result may be a float or a waveform.
+        "sine" => Type::function(
+            vec![Type::float_or_waveform(), Type::float_or_waveform()],
+            Type::float_or_waveform(),
+        ),
+        "cos" => Type::function(vec![Type::float_or_waveform()], Type::float_or_waveform()),
         "map" => Type::Forall(
             vec![0, 1],
             Box::new(Type::function(
@@ -64,10 +122,11 @@ pub fn signature(name: &str, arity: Option<usize>) -> Option<Type> {
                 b(),
             )),
         ),
+        // The count is hard-checked integral (and non-negative) at runtime.
         "unfold" => Type::Forall(
             vec![0],
             Box::new(Type::function(
-                vec![Type::function(vec![a()], a()), a(), Type::Float],
+                vec![Type::function(vec![a()], a()), a(), Type::int()],
                 Type::List(Box::new(a())),
             )),
         ),
@@ -80,51 +139,56 @@ pub fn signature(name: &str, arity: Option<usize>) -> Option<Type> {
                 Type::List(Box::new(a())),
             )),
         ),
+        // The index is hard-checked integral (and non-negative) at runtime.
         "nth" => Type::Forall(
             vec![0],
             Box::new(Type::function(
-                vec![Type::Float, Type::List(Box::new(a()))],
+                vec![Type::int(), Type::List(Box::new(a()))],
                 a(),
             )),
         ),
-        "fixed" => Type::function(vec![Type::List(Box::new(Type::Float))], Type::Waveform),
-        // Curried built-ins: applying the first argument list returns another
-        // built-in expecting the waveform.
-        "fin" => Type::function(
-            vec![Type::Waveform],
-            Type::function(vec![Type::Waveform], Type::Waveform),
-        ),
+        "fixed" => Type::function(vec![Type::List(Box::new(Type::float()))], Type::waveform()),
+        // Curried built-ins: applying the first argument list returns the
+        // filter, which threads seqs through.
+        "fin" => Type::function(vec![Type::float_or_waveform()], waveform_filter()),
         "seq" => Type::function(
-            vec![Type::Waveform],
-            Type::function(vec![Type::Waveform], Type::Seq),
+            vec![Type::float_or_waveform()],
+            Type::function(vec![Type::float_or_waveform()], Type::seq()),
         ),
-        "unseq" => Type::function(vec![], Type::function(vec![Type::Seq], Type::Waveform)),
+        "unseq" => Type::function(
+            vec![],
+            Type::function(vec![Type::seq()], Type::float_or_waveform()),
+        ),
         "filter" => Type::function(
             vec![
-                Type::List(Box::new(Type::Waveform)),
-                Type::List(Box::new(Type::Waveform)),
+                Type::List(Box::new(Type::float_or_waveform())),
+                Type::List(Box::new(Type::float_or_waveform())),
             ],
-            Type::function(vec![Type::Waveform], Type::Waveform),
+            waveform_filter(),
         ),
-        "reset" => binary_wave(),
+        "reset" => Type::function(
+            vec![Type::float_or_waveform(), Type::float_or_waveform()],
+            Type::waveform(),
+        ),
         "alt" => Type::function(
-            vec![Type::Waveform, Type::Waveform, Type::Waveform],
-            Type::Waveform,
+            vec![
+                Type::float_or_waveform(),
+                Type::float_or_waveform(),
+                Type::float_or_waveform(),
+            ],
+            Type::waveform(),
         ),
-        "capture" => Type::function(
-            vec![Type::String],
-            Type::function(vec![Type::Waveform], Type::Waveform),
+        "capture" => Type::function(vec![Type::String], waveform_filter()),
+        "__chord" => Type::function(
+            vec![Type::List(Box::new(Type::float_or_waveform()))],
+            Type::waveform(),
         ),
-        "__chord" => Type::function(vec![Type::List(Box::new(Type::Waveform))], Type::Waveform),
-        // The run-time contract (all elements but the last must be seqs) is
-        // not expressible as a single signature; `[waveform]` accepts the
-        // mixed lists that real programs build.
-        "__sequence" => Type::function(vec![Type::List(Box::new(Type::Waveform))], Type::Seq),
-        // Added by the native prelude rather than `add_bindings`.
-        "mark" => Type::function(
-            vec![Type::Float],
-            Type::function(vec![Type::Waveform], Type::Waveform),
-        ),
+        // Every element must be a seq, and a fold of seqs is itself a seq — the
+        // empty fold being the empty seq, `\`'s identity.
+        "__sequence" => Type::function(vec![Type::List(Box::new(Type::seq()))], Type::seq()),
+        // Added by the native prelude rather than `add_bindings`. The mark
+        // id is hard-checked integral (and >= 1) at runtime.
+        "mark" => Type::function(vec![Type::int()], waveform_filter()),
         // Variadic and heterogeneous; returns its last argument.
         "debug" => Type::Dynamic,
         _ => return None,
@@ -137,6 +201,7 @@ mod tests {
     use super::*;
     use crate::builtins;
     use crate::expr::{Binding, Expr, SourceBinding};
+    use crate::types::Sort;
 
     /// Every built-in registered by `add_bindings` must have a signature, so
     /// new built-ins fail this test until the table above learns about them.
@@ -148,7 +213,7 @@ mod tests {
             if let Binding::Definition(_, expr) = &binding.binding {
                 if let Expr::BuiltIn { name, .. } = &expr.expr {
                     assert!(
-                        signature(name, None).is_some(),
+                        signature(name).is_some(),
                         "built-in \"{}\" has no signature",
                         name
                     );
@@ -160,28 +225,59 @@ mod tests {
     #[test]
     fn prelude_only_builtins_have_signatures() {
         // These are bound by the native prelude, not `add_bindings`.
-        assert!(signature("mark", None).is_some());
-        assert!(signature("debug", None).is_some());
+        assert!(signature("mark").is_some());
+        assert!(signature("debug").is_some());
     }
 
+    /// The intersection rows must mirror `binary_op`'s runtime arms: no
+    /// conjunct accepts two seqs, exactly one seq threads through, and
+    /// constants fold (preserving integrality for `+`).
     #[test]
-    fn arity_selects_unary_minus() {
+    fn arithmetic_tables_mirror_the_runtime() {
+        let Some(Type::And(rows)) = signature("+") else {
+            panic!("+ should be an intersection");
+        };
         assert_eq!(
-            signature("-", Some(1)),
-            Some(Type::function(vec![Type::Waveform], Type::Waveform))
+            rows[0],
+            Type::function(vec![Type::int(), Type::int()], Type::int())
         );
+        for row in &rows {
+            let Type::Function { positional, .. } = row else {
+                panic!("conjuncts are arrows");
+            };
+            let both_admit_seq = positional.iter().all(|domain| {
+                matches!(domain, Type::Numeric(crate::types::Refinement::Ground(sort))
+                    if !sort.intersect(Sort::SEQ).is_empty())
+            });
+            assert!(!both_admit_seq, "no row may accept two seqs");
+        }
+        // `-` carries unary and binary rows in one intersection.
+        let Some(Type::And(rows)) = signature("-") else {
+            panic!("- should be an intersection");
+        };
+        assert!(
+            rows.iter().any(
+                |row| matches!(row, Type::Function { positional, .. } if positional.len() == 1)
+            )
+        );
+        assert!(
+            rows.iter().any(
+                |row| matches!(row, Type::Function { positional, .. } if positional.len() == 2)
+            )
+        );
+        // `/` has no int row: integers divide to floats.
+        let Some(Type::And(rows)) = signature("/") else {
+            panic!("/ should be an intersection");
+        };
         assert_eq!(
-            signature("-", Some(2)),
-            Some(Type::function(
-                vec![Type::Waveform, Type::Waveform],
-                Type::Waveform
-            ))
+            rows[0],
+            Type::function(vec![Type::float(), Type::float()], Type::float())
         );
     }
 
     #[test]
     fn append_is_binary_on_lists() {
-        let Some(Type::Forall(_, body)) = signature("append", None) else {
+        let Some(Type::Forall(_, body)) = signature("append") else {
             panic!("append should be polymorphic");
         };
         let Type::Function { positional, .. } = *body else {
@@ -192,6 +288,6 @@ mod tests {
 
     #[test]
     fn unknown_names_have_no_signature() {
-        assert_eq!(signature("no_such_builtin", None), None);
+        assert_eq!(signature("no_such_builtin"), None);
     }
 }
