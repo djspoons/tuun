@@ -74,7 +74,40 @@ where
     F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
     S: Clone,
 {
+    check_program_impl(false, resolve, bindings, expr, expectation)
+}
+
+/// Checks `expr` under the strict policy — the gate's preview: ground
+/// sorts judged by containment, selection by atom coverage, flows into
+/// unsolved refinement variables still recorded rather than judged (their
+/// final judgment is deferred). Used to measure the strict residue; not
+/// yet wired to evaluation.
+pub fn check_program_strict<'a, M, S, F>(
+    resolve: F,
+    bindings: &'a [SourceBinding<M, S>],
+    expr: &SourceExpr<M, S>,
+    expectation: Option<Expectation>,
+) -> Vec<Error<S>>
+where
+    F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
+    S: Clone,
+{
+    check_program_impl(true, resolve, bindings, expr, expectation)
+}
+
+fn check_program_impl<'a, M, S, F>(
+    strict: bool,
+    resolve: F,
+    bindings: &'a [SourceBinding<M, S>],
+    expr: &SourceExpr<M, S>,
+    expectation: Option<Expectation>,
+) -> Vec<Error<S>>
+where
+    F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
+    S: Clone,
+{
     let mut checker = Infer::new();
+    checker.strict = strict;
     let mut context = Vec::new();
     let mut memo = HashMap::new();
     checker.build_context(&resolve, bindings, &mut context, &mut memo);
@@ -173,6 +206,11 @@ struct Infer<S> {
     /// The undo journal: every solver step since the start of the check,
     /// so failed attempts roll back by popping (see `mark`/`rollback`).
     journal: Vec<Undo>,
+    /// Strict mode: judge ground sorts by containment and selection by
+    /// atom coverage, the gate's policy; lenient mode warns only on
+    /// definite violations. See "Toward a sound configuration" in
+    /// `docs/types-design.md`.
+    strict: bool,
     warnings: Vec<Error<S>>,
 }
 
@@ -208,6 +246,7 @@ impl<S: Clone> Infer<S> {
             supply: 0,
             refs: Vec::new(),
             journal: Vec::new(),
+            strict: false,
             warnings: Vec::new(),
         }
     }
@@ -304,6 +343,11 @@ impl<S: Clone> Infer<S> {
         if met.is_empty() {
             return Err(());
         }
+        // Guarantees only grow and contracts only shrink, so a lower bound
+        // escaping the met contract is a final violation under strict.
+        if self.strict && !var.lower.is_subset(met) {
+            return Err(());
+        }
         if var.upper != Some(met) {
             self.journal.push(Undo::Bounds(id, var));
             self.refs[id as usize].upper = Some(met);
@@ -318,8 +362,28 @@ impl<S: Clone> Infer<S> {
     fn numeric_subtype(&mut self, found: &Refinement, expected: &Refinement) -> Result<(), ()> {
         let may = self.may_of(found);
         let contract = self.contract_of(expected);
-        if may.intersect(contract).is_empty() {
-            return Err(());
+        match (self.strict, found) {
+            // Lenient: warn only on definite violations.
+            (false, _) => {
+                if may.intersect(contract).is_empty() {
+                    return Err(());
+                }
+            }
+            // Strict, ground: containment, the gate's policy.
+            (true, Refinement::Ground(_)) => {
+                if !may.is_subset(contract) {
+                    return Err(());
+                }
+            }
+            // Strict, unsolved: record rather than judge — the guarantees
+            // seen so far under-approximate the final ones, so only a
+            // violation by the current lower bound is final (lower bounds
+            // only grow). The full judgment is deferred.
+            (true, Refinement::Var(id)) => {
+                if !self.refs[*id as usize].lower.is_subset(contract) {
+                    return Err(());
+                }
+            }
         }
         if let Refinement::Var(id) = expected {
             self.join_lower(*id, may);
@@ -1134,6 +1198,11 @@ impl<S: Clone> Infer<S> {
             }
             self.rollback(mark);
         }
+        // Strict: atom-decomposition coverage instead of the possible
+        // phase.
+        if self.strict {
+            return self.select_by_atoms(&rows, &sorts, frame);
+        }
         // Otherwise every possibly-applicable row contributes. Structural
         // solving rolls back — no single row was chosen to commit to — so
         // each row's result is resolved before the rollback discards it.
@@ -1222,6 +1291,181 @@ impl<S: Clone> Infer<S> {
         Some(domains)
     }
 
+    /// Strict selection by atom coverage: a runtime value inhabits exactly
+    /// one atom, so a call is definitely covered when every combination of
+    /// its arguments' atoms has a row that accepts it; the result is the
+    /// join of the covering rows' results, and each argument's contract is
+    /// the union of the domains that admitted it. A combination no row
+    /// covers is a definite rejection.
+    ///
+    /// Ground numeric arguments decompose into their atoms. Unsolved
+    /// refinement variables and metas defer — they pass here and their
+    /// judgment happens where their bounds are final — as does `Dynamic`
+    /// (the recovery type passes everything, imposing nothing; under the
+    /// lenient flip it amplified every upstream failure into a cascade).
+    /// Structural arguments constrain per row by subtyping.
+    fn select_by_atoms(
+        &mut self,
+        rows: &[Type],
+        sorts: &[Option<Sort>],
+        frame: &Frame<S>,
+    ) -> Selection {
+        // Per-position atom choices; `None` is a wildcard (deferred or
+        // structural, constrained elsewhere). An unsolved variable's known
+        // guarantees are judged now — lower bounds only grow, so an
+        // uncovered lower atom is a final violation — while its future
+        // atoms stay deferred to its recorded contracts.
+        let choices: Vec<Option<Vec<Sort>>> = sorts
+            .iter()
+            .zip(&frame.positional)
+            .map(
+                |(sort, (argument, _))| match (sort, self.resolve(argument)) {
+                    (Some(sort), Type::Numeric(Refinement::Ground(_))) => {
+                        Some(sort.atoms().collect())
+                    }
+                    (_, Type::Numeric(Refinement::Var(id))) => {
+                        let lower = self.refs[id as usize].lower;
+                        if lower.is_empty() {
+                            None
+                        } else {
+                            Some(lower.atoms().collect())
+                        }
+                    }
+                    _ => None,
+                },
+            )
+            .collect();
+        // Per row: domain sorts (⊤ for unknown/structural domains), the
+        // structural and named constraints, and the result resolved before
+        // the probe's rollback.
+        struct Candidate {
+            domains: Vec<Sort>,
+            result: Type,
+        }
+        let mut candidates: Vec<Candidate> = Vec::new();
+        for row in rows {
+            let mark = self.mark();
+            let applies = self.row_applies_strict(row, sorts, frame);
+            let candidate = applies.map(|domains| {
+                let Type::Function { result, .. } = row else {
+                    unreachable!("rows are arrows");
+                };
+                Candidate {
+                    domains,
+                    result: result.apply(&self.subst),
+                }
+            });
+            self.rollback(mark);
+            if let Some(candidate) = candidate {
+                candidates.push(candidate);
+            }
+        }
+        if candidates.is_empty() {
+            return Selection::NoApplicableRow;
+        }
+        // Enumerate the atom combinations (the empty product is one empty
+        // combination); each must be covered by some candidate.
+        let mut result: Option<Type> = None;
+        let mut allowed: Vec<Sort> = vec![Sort::NONE; frame.positional.len()];
+        let mut odometer: Vec<usize> = choices.iter().map(|_| 0).collect();
+        loop {
+            let covering = candidates.iter().find(|candidate| {
+                choices.iter().zip(&odometer).zip(&candidate.domains).all(
+                    |((choice, digit), domain)| match choice {
+                        Some(atoms) => atoms[*digit].is_subset(*domain),
+                        None => true,
+                    },
+                )
+            });
+            let Some(covering) = covering else {
+                return Selection::NoApplicableRow;
+            };
+            result = Some(match result {
+                None => covering.result.clone(),
+                Some(previous) => self.join(previous, covering.result.clone(), &frame.span),
+            });
+            for (allowed, domain) in allowed.iter_mut().zip(&covering.domains) {
+                *allowed = allowed.union(*domain);
+            }
+            // Advance the odometer; done when it wraps.
+            let mut position = 0;
+            loop {
+                if position == odometer.len() {
+                    let result = result.expect("at least one combination");
+                    self.record_selection_contracts(frame, &allowed);
+                    return Selection::Selected(result);
+                }
+                match &choices[position] {
+                    Some(atoms) if odometer[position] + 1 < atoms.len() => {
+                        odometer[position] += 1;
+                        break;
+                    }
+                    _ => {
+                        odometer[position] = 0;
+                        position += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether a row can participate in strict coverage at all: structural
+    /// arguments must subtype their domains, supplied named arguments must
+    /// definitely fit theirs (omitted ones defer), and each position's
+    /// contract sort is reported as in `row_applies`. Numeric positions are
+    /// not judged here — coverage judges them atom by atom.
+    fn row_applies_strict(
+        &mut self,
+        row: &Type,
+        sorts: &[Option<Sort>],
+        frame: &Frame<S>,
+    ) -> Option<Vec<Sort>> {
+        let Type::Function {
+            positional, named, ..
+        } = row
+        else {
+            unreachable!("rows are arrows");
+        };
+        let mut domains = Vec::with_capacity(positional.len());
+        for ((sort, domain), (argument, _)) in sorts.iter().zip(positional).zip(&frame.positional) {
+            let resolved = self.resolve(domain);
+            let fits = match (sort, &resolved) {
+                // Numeric against numeric is coverage's job.
+                (Some(_), Type::Numeric(rep)) => {
+                    domains.push(self.may_of(rep));
+                    true
+                }
+                (None, Type::Numeric(_)) => false,
+                (_, Type::Meta(_) | Type::Var(_) | Type::Dynamic) => {
+                    domains.push(Sort::TOP);
+                    true
+                }
+                (Some(_), _) => false,
+                (None, _) => {
+                    domains.push(Sort::TOP);
+                    self.subtype(argument, &resolved).is_ok()
+                }
+            };
+            if !fits {
+                return None;
+            }
+        }
+        for (name, domain) in named {
+            if let Some((_, argument, _)) = frame.named.iter().find(|(n, _, _)| n == name) {
+                let sort = match self.resolve(argument) {
+                    Type::Numeric(rep) => Some(self.may_of(&rep)),
+                    Type::Dynamic | Type::Meta(_) => Some(Sort::TOP),
+                    _ => None,
+                };
+                let (fits, _) = self.position_fits(argument, sort, domain, true);
+                if !fits {
+                    return None;
+                }
+            }
+        }
+        Some(domains)
+    }
+
     /// Whether one argument fits one domain, definitely or possibly, and
     /// the contract sort the domain imposes (⊤ for unknown and structural
     /// domains). Structural subtyping solves state; callers snapshot.
@@ -1303,6 +1547,42 @@ impl<S: Clone> Infer<S> {
                 None
             }
             Selection::NoApplicableRow => {
+                // When one argument alone rules out every row, pinpoint it
+                // the way `check_frame` would: warn at that argument with
+                // the union of the domains it failed.
+                let rows: Vec<&Type> = conjuncts
+                    .iter()
+                    .filter(|conjunct| {
+                        matches!(conjunct, Type::Function { positional, .. }
+                            if positional.len() == frame.positional.len())
+                    })
+                    .collect();
+                for (position, (argument, span)) in frame.positional.iter().enumerate() {
+                    let Type::Numeric(rep) = self.resolve(argument) else {
+                        continue;
+                    };
+                    let may = self.may_of(&rep);
+                    let mut union = Sort::NONE;
+                    let mut sorted = true;
+                    for row in &rows {
+                        let Type::Function { positional, .. } = row else {
+                            unreachable!("rows are arrows");
+                        };
+                        match self.resolve(&positional[position]) {
+                            Type::Numeric(rep) => union = union.union(self.may_of(&rep)),
+                            _ => sorted = false,
+                        }
+                    }
+                    if sorted && !rows.is_empty() && may.intersect(union).is_empty() {
+                        let message = format!(
+                            "expected {}, found {}",
+                            Type::ground(union),
+                            self.display(argument)
+                        );
+                        self.warn(message, span);
+                        return None;
+                    }
+                }
                 let mut seqs = 0;
                 for (argument, _) in &frame.positional {
                     if let Type::Numeric(rep) = self.resolve(argument)
@@ -2008,6 +2288,38 @@ mod tests {
         check_with_expectation(input, None)
     }
 
+    /// Like `check`, under the strict policy.
+    fn check_strict(input: &str) -> Vec<Error<()>> {
+        let bindings = test_prelude();
+        let expr = parse_program::<u32, _>(input, ()).unwrap();
+        check_program_strict(
+            |_: &[String]| Err(Error::new("no modules".to_string())),
+            &bindings,
+            &expr,
+            None,
+        )
+    }
+
+    fn assert_strict_clean(input: &str) {
+        let warnings = check_strict(input);
+        assert_eq!(
+            messages(&warnings),
+            Vec::<String>::new(),
+            "strict warnings for {:?}",
+            input
+        );
+    }
+
+    fn assert_strict_warns(input: &str, expected: &[&str]) {
+        let warnings = check_strict(input);
+        assert_eq!(
+            messages(&warnings),
+            expected,
+            "for strict input {:?}",
+            input
+        );
+    }
+
     fn check_with_expectation(input: &str, expectation: Option<Expectation>) -> Vec<Error<()>> {
         let bindings = test_prelude();
         let expr = parse_program::<u32, _>(input, ()).unwrap();
@@ -2186,8 +2498,9 @@ mod tests {
     fn refinement_true_positives() {
         // `binary_op` has no (Seq, Seq) arm.
         assert_warns("seq(0)(1) + seq(0)(2)", &["cannot combine two seqs with +"]);
-        // `unary_op` has no Seq arm.
-        assert_warns("-seq(0)(1)", &["no use of - accepts (seq)"]);
+        // `unary_op` has no Seq arm; the warning pinpoints the argument
+        // with the union of the domains the table does accept.
+        assert_warns("-seq(0)(1)", &["expected float or waveform, found seq"]);
         // `reset`'s trigger accepts constants and waveforms, not seqs.
         assert_warns(
             "reset(seq(0)(1), 1)",
@@ -2228,7 +2541,7 @@ mod tests {
         // per-position freeze accepted this call.)
         assert_warns(
             "let double = fn(x) => x + x in double(seq(0)(1))",
-            &["no use of double accepts (seq)"],
+            &["expected float or waveform, found seq"],
         );
         // Two definite seqs get the dedicated diagnosis, same as the
         // operator itself would.
@@ -2316,6 +2629,33 @@ mod tests {
             &format!("{}f(1, 2, 3, seq(0)(4), seq(0)(5))", f),
             &["no use of f accepts (int, int, int, seq, seq)"],
         );
+    }
+
+    // The strict policy: ground sorts judged by containment, selection by
+    // atom coverage, unsolved-variable flows recorded and deferred.
+    #[test]
+    fn strict_mode_judgments() {
+        // Possibly-wrong becomes an error: sine may fold to a float, and
+        // exp requires one — lenient stays silent here.
+        assert_strict_warns(
+            "map(exp, [sine(440, 0)])",
+            &["expected [float], found [float or waveform]"],
+        );
+        // Ground containment still passes what it should.
+        assert_strict_clean("exp(2) + sine(440, 0)");
+        // Atom coverage: no single row contains waveform-or-seq, but the
+        // waveform and seq atoms are covered by different rows.
+        assert_strict_clean("(if true then time else seq(0)(1)) * 1");
+        // A definitely-uncovered atom still rejects.
+        assert_strict_warns("seq(0)(1) + seq(0)(2)", &["cannot combine two seqs with +"]);
+        // Unconstrained parameters defer: the base pass records contracts
+        // instead of judging ⊤, and the tabulated rows judge per atom.
+        assert_strict_clean("let f = fn(x) => x + 1 in f(time)");
+        // Dynamic passes without imposing or cascading.
+        assert_strict_clean("debug(1) + 1");
+        // A guarantee already seen is judged, deferred or not: the default
+        // flows into x before the body's seq contract.
+        assert_strict_warns("fn(x = 100) => x \\ 1", &["expected seq, found int"]);
     }
 
     #[test]
@@ -2510,6 +2850,45 @@ mod tests {
     // way report under their own entry). Positions come from
     // `display_with_source` so every pinned warning can be read against the
     // .tuun source.
+    /// Prints the strict-policy residue over the embedded library — the
+    /// measurement instrument for the gate (run with `--ignored
+    /// --nocapture`).
+    #[test]
+    #[ignore]
+    fn strict_report() {
+        let prelude = test_prelude::<u32>();
+        let mut parsed: Vec<(String, &str, Vec<SourceBinding<u32, u32>>)> = Vec::new();
+        for (index, (path, content)) in modules::EMBEDDED_MODULES.iter().enumerate() {
+            let (mut bindings, _) = parse_module::<u32, _>(content, index as u32).unwrap();
+            bindings.insert(0, Binding::Open(vec!["__prelude".to_string()]).into());
+            parsed.push((path.to_string(), content, bindings));
+        }
+        let resolve = |path: &[String]| {
+            let key = path.join(".");
+            if key == "__prelude" {
+                return Ok(&prelude[..]);
+            }
+            parsed
+                .iter()
+                .find(|(name, _, _)| *name == key)
+                .map(|(_, _, bindings)| &bindings[..])
+                .ok_or_else(|| Error::new(format!("no module {}", key)))
+        };
+        let expr = parse_program::<u32, _>("0", 9999).unwrap();
+        for (index, (path, content, bindings)) in parsed.iter().enumerate() {
+            let warnings = check_program_strict(&resolve, bindings, &expr, None);
+            let own: Vec<String> = warnings
+                .iter()
+                .filter(|warning| warning.source() == Some(index as u32))
+                .map(|warning| warning.display_with_source(content))
+                .collect();
+            println!("=== {} ({} warnings)", path, own.len());
+            for warning in own {
+                println!("  {}", warning);
+            }
+        }
+    }
+
     #[test]
     fn embedded_modules_pinned_warnings() {
         let prelude = test_prelude::<u32>();

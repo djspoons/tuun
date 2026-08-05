@@ -84,12 +84,16 @@ pub fn signature(name: &str) -> Option<Type> {
             Type::And(unary.into_iter().chain(binary).collect())
         }
         // The left operand must be an actual seq; the right may be any
-        // numeric. The result is a waveform (float/waveform right) or a seq
-        // (seq right) — the union keeps both chains and waveform uses silent.
-        "\\" => Type::function(
-            vec![Type::seq(), Type::number()],
-            Type::ground(crate::types::Sort::WAVE_OR_SEQ),
-        ),
+        // numeric. A seq right threads the combined offset (`followed_by`'s
+        // `Seq` arm), so the result is again a seq and `\` chains type
+        // precisely; anything else ends the chain with a waveform.
+        "\\" => Type::And(vec![
+            Type::function(vec![Type::seq(), Type::seq()], Type::seq()),
+            Type::function(
+                vec![Type::seq(), Type::float_or_waveform()],
+                Type::waveform(),
+            ),
+        ]),
         "==" | "!=" => Type::Forall(
             vec![0],
             Box::new(Type::function(vec![a(), a()], Type::Bool)),

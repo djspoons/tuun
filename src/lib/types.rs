@@ -87,6 +87,13 @@ impl Sort {
     pub fn is_subset(self, other: Sort) -> bool {
         self.0 & !other.0 == 0
     }
+
+    /// Returns the atoms of this sort, each as a singleton.
+    pub fn atoms(self) -> impl Iterator<Item = Sort> {
+        [Sort::INT, Sort::NON_INT_ONLY, Sort::WAVE, Sort::SEQ]
+            .into_iter()
+            .filter(move |atom| !self.intersect(*atom).is_empty())
+    }
 }
 
 impl Display for Sort {
