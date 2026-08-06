@@ -202,10 +202,13 @@ pub fn signature(name: &str) -> Option<Type> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
     use crate::builtins;
-    use crate::expr::{Binding, Expr, SourceBinding};
-    use crate::types::Sort;
+    use crate::expr::{Binding, BuiltInFn, Expr, Pattern, SourceBinding, boxed};
+    use crate::types::{Refinement, Sort};
+    use crate::waveform::{Operator, Waveform};
 
     /// Every built-in registered by `add_bindings` must have a signature, so
     /// new built-ins fail this test until the table above learns about them.
@@ -293,5 +296,206 @@ mod tests {
     #[test]
     fn unknown_names_have_no_signature() {
         assert_eq!(signature("no_such_builtin"), None);
+    }
+
+    /// One runtime value inhabiting each atom, for driving the built-ins.
+    fn representative(atom: Sort) -> Expr<u32, ()> {
+        if atom == Sort::INT {
+            Expr::float(2.0)
+        } else if atom == Sort::NON_INT_ONLY {
+            Expr::float(0.5)
+        } else if atom == Sort::WAVE {
+            Expr::Waveform(Waveform::Time(()))
+        } else if atom == Sort::SEQ {
+            // A realistic seq: offset linear in time (`time - 1`), so
+            // offset-threading arms (`\`'s, `add_offsets`) work.
+            Expr::Seq {
+                offset: boxed(Expr::Waveform(Waveform::BinaryPointOp(
+                    Operator::Subtract,
+                    Box::new(Waveform::Time(())),
+                    Box::new(Waveform::Const(1.0)),
+                ))),
+                waveform: boxed(Expr::Waveform(Waveform::Time(()))),
+            }
+        } else {
+            panic!("not an atom: {}", atom)
+        }
+    }
+
+    /// The runtime sort of a result; `None` for non-numeric values.
+    fn sort_of(expr: &Expr<u32, ()>) -> Option<Sort> {
+        match expr {
+            Expr::Waveform(Waveform::Const(value)) => Some(if value.fract() == 0.0 {
+                Sort::INT
+            } else {
+                Sort::NON_INT_ONLY
+            }),
+            Expr::Waveform(_) => Some(Sort::WAVE),
+            Expr::Seq { .. } => Some(Sort::SEQ),
+            _ => None,
+        }
+    }
+
+    /// The rows of `ty` at `arity` whose domains are all numeric grounds.
+    fn numeric_rows(ty: &Type, arity: usize) -> Vec<(Vec<Sort>, Type)> {
+        let conjuncts: Vec<&Type> = match ty {
+            Type::And(rows) => rows.iter().collect(),
+            other => vec![other],
+        };
+        let mut rows = Vec::new();
+        for conjunct in conjuncts {
+            let Type::Function {
+                positional,
+                named,
+                result,
+            } = conjunct
+            else {
+                continue;
+            };
+            if positional.len() != arity || !named.is_empty() {
+                continue;
+            }
+            let domains: Option<Vec<Sort>> = positional
+                .iter()
+                .map(|domain| match domain {
+                    Type::Numeric(Refinement::Ground(sort)) => Some(*sort),
+                    _ => None,
+                })
+                .collect();
+            if let Some(domains) = domains {
+                rows.push((domains, (**result).clone()));
+            }
+        }
+        rows
+    }
+
+    /// The distinct arities of `ty`'s arrow conjuncts.
+    fn arities(ty: &Type) -> Vec<usize> {
+        let conjuncts: Vec<&Type> = match ty {
+            Type::And(rows) => rows.iter().collect(),
+            other => vec![other],
+        };
+        let mut arities = Vec::new();
+        for conjunct in conjuncts {
+            if let Type::Function { positional, .. } = conjunct
+                && !arities.contains(&positional.len())
+            {
+                arities.push(positional.len());
+            }
+        }
+        arities
+    }
+
+    /// Conformance of one callable to its table at one arity, mirroring
+    /// selection semantics: every atom vector covered by some row must
+    /// evaluate without error to a value within the *first* covering
+    /// row's result (table order is most-specific-first, as selection
+    /// reads it), and every uncovered vector must error. Curried results
+    /// recurse on the returned callable.
+    fn conform(name: &str, function: &BuiltInFn<u32, ()>, ty: &Type, arity: usize) {
+        let rows = numeric_rows(ty, arity);
+        if rows.is_empty() {
+            return;
+        }
+        let atoms = [Sort::INT, Sort::NON_INT_ONLY, Sort::WAVE, Sort::SEQ];
+        for index in 0..atoms.len().pow(arity as u32) {
+            let vector: Vec<Sort> = (0..arity)
+                .map(|position| atoms[(index / atoms.len().pow(position as u32)) % atoms.len()])
+                .collect();
+            let shown: Vec<String> = vector.iter().map(Sort::to_string).collect();
+            let governing = rows.iter().find(|(domains, _)| {
+                vector
+                    .iter()
+                    .zip(domains)
+                    .all(|(atom, domain)| atom.is_subset(*domain))
+            });
+            let arguments: Vec<Expr<u32, ()>> =
+                vector.iter().map(|atom| representative(*atom)).collect();
+            let result = function.0(arguments);
+            let Some((_, declared)) = governing else {
+                assert!(
+                    matches!(result, Expr::Error(_)),
+                    "{} accepted uncovered ({}): {}",
+                    name,
+                    shown.join(", "),
+                    result
+                );
+                continue;
+            };
+            assert!(
+                !matches!(result, Expr::Error(_)),
+                "{} errored on covered ({}): {}",
+                name,
+                shown.join(", "),
+                result
+            );
+            match declared {
+                Type::Numeric(Refinement::Ground(sort)) => {
+                    let actual = sort_of(&result).unwrap_or_else(|| {
+                        panic!(
+                            "{} on ({}) returned a non-numeric {}",
+                            name,
+                            shown.join(", "),
+                            result
+                        )
+                    });
+                    assert!(
+                        actual.is_subset(*sort),
+                        "{} on ({}): result sort {} outside declared {}",
+                        name,
+                        shown.join(", "),
+                        actual,
+                        sort
+                    );
+                }
+                declared @ (Type::Function { .. } | Type::And(_)) => {
+                    let Expr::BuiltIn { function, .. } = &result else {
+                        panic!(
+                            "{} on ({}) should curry, returned {}",
+                            name,
+                            shown.join(", "),
+                            result
+                        )
+                    };
+                    for arity in arities(declared) {
+                        conform(&format!("{}(...)", name), function, declared, arity);
+                    }
+                }
+                // Bool and friends: evaluating without error suffices.
+                _ => {}
+            }
+        }
+    }
+
+    /// Every built-in with numeric-ground rows conforms to them — the
+    /// signature-faithfulness obligation of the sound configuration. Rows
+    /// over structural domains (lists, functions, ∀-polymorphic) are out
+    /// of scope here; `mark` is prelude-native and `debug` is Dynamic.
+    #[test]
+    fn signatures_conform_to_the_runtime() {
+        let mut bindings: Vec<SourceBinding<u32, ()>> = Vec::new();
+        builtins::add_bindings(&mut bindings);
+        let mut functions: HashMap<String, BuiltInFn<u32, ()>> = HashMap::new();
+        for binding in bindings {
+            if let Binding::Definition(Pattern::Identifier(name), expr) = binding.binding
+                && let Expr::BuiltIn { function, .. } = expr.expr
+            {
+                functions.insert(name, function);
+            }
+        }
+        let mut conformed = 0;
+        for (name, function) in &functions {
+            let Some(ty) = signature(name) else {
+                continue;
+            };
+            for arity in arities(&ty) {
+                if !numeric_rows(&ty, arity).is_empty() {
+                    conformed += 1;
+                    conform(name, function, &ty, arity);
+                }
+            }
+        }
+        // The harness must actually be exercising the operator tables.
+        assert!(conformed >= 15, "only {} tables conformed", conformed);
     }
 }
