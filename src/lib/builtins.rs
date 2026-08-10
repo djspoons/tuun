@@ -556,6 +556,28 @@ where
     }
 }
 
+fn concat<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
+where
+    M: Debug + Clone,
+    S: Clone + Debug,
+{
+    match &arguments[..] {
+        [List(elmts)] => {
+            let mut results = Vec::new();
+            for elmt in elmts {
+                if let List(exprs) = &elmt.expr {
+                    results.extend(exprs.clone());
+                } else {
+                    return Error("Expected list of lists as argument for concat".to_string());
+                }
+            }
+            Expr::List(results)
+        }
+        [_] => Error("Invalid argument for concat".to_string()),
+        _ => Error("Invalid arguments for concat".to_string()),
+    }
+}
+
 pub fn nth<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Clone,
@@ -1011,6 +1033,7 @@ where
         ("reduce", reduce),
         ("unfold", unfold),
         ("append", append),
+        ("concat", concat),
         ("nth", nth),
         ("fixed", fixed),
         ("fin", fin),

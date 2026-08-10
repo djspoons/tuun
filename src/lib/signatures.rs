@@ -143,6 +143,13 @@ pub fn signature(name: &str) -> Option<Type> {
                 Type::List(Box::new(a())),
             )),
         ),
+        "concat" => Type::Forall(
+            vec![0],
+            Box::new(Type::function(
+                vec![Type::List(Box::new(Type::List(Box::new(a()))))],
+                Type::List(Box::new(a())),
+            )),
+        ),
         // The index is hard-checked integral (and non-negative) at runtime.
         "nth" => Type::Forall(
             vec![0],
