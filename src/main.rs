@@ -60,6 +60,9 @@ struct Args {
     /// resolves to `<library_root>/foo/bar.tuun`.
     #[arg(long, default_value = "./lib/v0")]
     library_root: path::PathBuf,
+    /// What type-checker findings become: errors or warnings.
+    #[arg(long, default_value_t = evaluator::CheckMode::Errors)]
+    check: evaluator::CheckMode,
     input_file: String,
     #[arg(short = 'O', long, default_value = ".")]
     output_dir: String, // Captures waveforms to the specified directory
@@ -112,8 +115,9 @@ pub fn main() {
         // Parse and send commands to play all of the waveforms. There is
         // no precompute thread in batch mode, so both Player routes go
         // straight to the tracker.
-        let evaluator =
+        let mut evaluator =
             evaluator::Evaluator::new(args.sample_rate, args.tempo, args.library_root.clone());
+        evaluator.set_check_mode(args.check);
         let player = player::Player::new(
             args.tempo,
             args.beats_per_measure,
@@ -254,8 +258,9 @@ pub fn main() {
 
     // One evaluation environment and one tracker-facing player for the
     // whole UI session; both end up owned by the effect runner.
-    let evaluator =
+    let mut evaluator =
         evaluator::Evaluator::new(args.sample_rate, args.tempo, args.library_root.clone());
+    evaluator.set_check_mode(args.check);
     let player = player::Player::new(
         args.tempo,
         args.beats_per_measure,

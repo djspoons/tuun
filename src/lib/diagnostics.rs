@@ -30,9 +30,8 @@ pub enum Source {
 
 /// How serious a diagnostic is.
 ///
-/// Errors block the action that produced them (a program that fails to
-/// evaluate is not played); warnings are informational only — in
-/// particular, the type checker's findings never block evaluation.
+/// Errors block the action that produced them; warnings are informational
+/// only.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Severity {
     Error,

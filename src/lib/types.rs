@@ -99,7 +99,7 @@ impl Sort {
 impl Display for Sort {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if *self == Sort::TOP {
-            return write!(f, "number");
+            return write!(f, "numeric");
         }
         // Compose atom names, collapsing the two constant atoms to "float"
         // when both are present; `NonInt` alone also renders as "float" (the
@@ -678,7 +678,7 @@ mod tests {
         assert_eq!(Sort::SEQ.to_string(), "seq");
         assert_eq!(Sort::FLOAT_OR_WAVE.to_string(), "float or waveform");
         assert_eq!(Sort::WAVE_OR_SEQ.to_string(), "waveform or seq");
-        assert_eq!(Sort::TOP.to_string(), "number");
+        assert_eq!(Sort::TOP.to_string(), "numeric");
         assert_eq!(Sort::INT.union(Sort::WAVE).to_string(), "int or waveform");
     }
 

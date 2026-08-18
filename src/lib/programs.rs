@@ -7,7 +7,7 @@ use std::ops::Range;
 use std::path;
 use std::time;
 
-use crate::diagnostics::{Diagnostic, Source};
+use crate::diagnostics::{Diagnostic, Severity, Source};
 use crate::evaluator::Evaluator;
 use crate::expr;
 use crate::ids::MarkId;
@@ -793,15 +793,27 @@ impl ProgramSet {
             self.programs[index].evaluated = None;
             return Ok(Vec::new());
         }
+        // The checker runs first, and error-severity findings gate: evaluation
+        // is not attempted. Warning-severity findings report and evaluation
+        // proceeds leading any evaluation errors.
+        let findings = evaluator.check_program(self, index);
+        if findings
+            .iter()
+            .any(|finding| finding.severity == Severity::Error)
+        {
+            self.programs[index].evaluated = None;
+            return Err(findings);
+        }
         match evaluator.evaluate_program(self, index) {
             Ok(evaluated) => {
                 self.programs[index].evaluated = Some(evaluated);
-                Ok(evaluator.check_program(self, index))
+                Ok(findings)
             }
-            Err(mut diagnostics) => {
+            Err(diagnostics) => {
                 self.programs[index].evaluated = None;
-                diagnostics.extend(evaluator.check_program(self, index));
-                Err(diagnostics)
+                let mut all = findings;
+                all.extend(diagnostics);
+                Err(all)
             }
         }
     }

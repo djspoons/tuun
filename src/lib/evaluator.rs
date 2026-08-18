@@ -88,7 +88,40 @@ struct ModuleInfo {
     source: String,
 }
 
+/// What `check_program`'s findings become: errors or warnings.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum CheckMode {
+    Errors,
+    Warnings,
+}
+
+impl std::str::FromStr for CheckMode {
+    type Err = String;
+
+    fn from_str(mode: &str) -> Result<CheckMode, String> {
+        match mode {
+            "errors" => Ok(CheckMode::Errors),
+            "warnings" => Ok(CheckMode::Warnings),
+            other => Err(format!(
+                "expected \"errors\" or \"warnings\", got \"{}\"",
+                other
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for CheckMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            CheckMode::Errors => "errors",
+            CheckMode::Warnings => "warnings",
+        })
+    }
+}
+
 pub struct Evaluator {
+    /// What checker findings become
+    check_mode: CheckMode,
     /// Built-ins + environment-derived definitions; implicitly opened at
     /// the top of every other loaded module — see [`Evaluator::resolve`].
     prelude: Vec<expr::SourceBinding<MarkId, Source>>,
@@ -142,6 +175,7 @@ impl Evaluator {
         ));
 
         Evaluator {
+            check_mode: CheckMode::Errors,
             prelude,
             library_root,
             modules: RefCell::new(HashMap::new()),
@@ -313,17 +347,20 @@ impl Evaluator {
         }
     }
 
+    /// Sets what checker findings become (see [`CheckMode`]).
+    pub fn set_check_mode(&mut self, mode: CheckMode) {
+        self.check_mode = mode;
+    }
+
     /// Type-checks the program at `index` and returns the findings as
-    /// `Severity::Warning` diagnostics.
+    /// diagnostics.
     ///
     /// Mirrors [`Evaluator::evaluate_program`]'s setup — same bindings,
-    /// implicit prelude open, and module resolver — but never blocks
-    /// anything: the checker is warnings-only. Findings are filtered to
-    /// those located in the program's own text or its source file; warnings
+    /// implicit prelude open, and module resolver. Findings are filtered to
+    /// those located in the program's own text or its source file; findings
     /// inside `open`ed modules would repeat on every evaluation of every
     /// dependent program without being actionable from the editor. Parse
-    /// failures return no warnings — they are `evaluate_program`'s to
-    /// report.
+    /// failures return no findings.
     pub fn check_program(&self, set: &ProgramSet, index: usize) -> Vec<Diagnostic> {
         let mut bindings = set.evaluation_bindings(index);
         bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
@@ -332,18 +369,24 @@ impl Evaluator {
             return Vec::new();
         };
         let expectation = match set.programs()[index].kind() {
-            ProgramKind::Waveform => infer::Expectation::Waveform,
+            ProgramKind::Waveform => infer::Expectation::Playable,
             ProgramKind::Keys => infer::Expectation::NoteFunction,
         };
-        infer::check_program(
+        infer::check_program_strict(
             |path| self.resolve(path),
             &bindings,
             &expr,
             Some(expectation),
         )
         .iter()
-        .filter(|warning| matches!(warning.source(), Some(Source::Program) | Some(Source::File)))
-        .map(|warning| self.diagnose(warning, set, index).as_warning())
+        .filter(|finding| matches!(finding.source(), Some(Source::Program) | Some(Source::File)))
+        .map(|finding| {
+            let diagnostic = self.diagnose(finding, set, index);
+            match self.check_mode {
+                CheckMode::Errors => diagnostic,
+                CheckMode::Warnings => diagnostic.as_warning(),
+            }
+        })
         .collect()
     }
 
@@ -745,41 +788,53 @@ mod tests {
     }
 
     #[test]
-    fn check_program_reports_warnings_with_positions() {
+    fn check_program_findings_gate_or_warn() {
         let (mut set, warning) = ProgramSet::from_source(
             "#{level_db=0}\nw = sine(\"a\", 0);\n".to_string(),
             PathBuf::from("song.tuun"),
         )
         .expect("test source should parse");
         assert_eq!(warning, "");
-        let evaluator = Evaluator::new(44100, 90, PathBuf::from("./lib/v0"));
+        let mut evaluator = Evaluator::new(44100, 90, PathBuf::from("./lib/v0"));
 
-        // The type warning is a Severity::Warning diagnostic positioned in
-        // the program's own text: `"a"` starts at column 6 of `sine("a", 0)`.
+        // Default mode: findings are errors, positioned in the program's
+        // own text (`"a"` starts at column 6), and they gate — evaluation
+        // is never attempted, so the checker's finding stands alone.
         let diagnostics = evaluator.check_program(&set, 0);
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].severity, Severity::Warning);
+        assert_eq!(diagnostics[0].severity, Severity::Error);
         assert_eq!(
             diagnostics[0].to_string(),
             "1:6: expected float or waveform, found string"
         );
         assert_eq!(diagnostics[0].program_range, Some(5..8));
+        let diagnostics = set
+            .evaluate_and_record(&evaluator, 0)
+            .expect_err("error findings gate evaluation");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].severity, Severity::Error);
+        assert_eq!(
+            diagnostics[0].to_string(),
+            "1:6: expected float or waveform, found string"
+        );
 
-        // The checker runs even when evaluation fails: the eval error and
-        // the type warning for the same mistake report side by side, eval
-        // error first.
+        // Warnings mode: the same finding reports as a warning, first, and
+        // evaluation proceeds to its own error — side by side.
+        evaluator.set_check_mode(CheckMode::Warnings);
         let diagnostics = set
             .evaluate_and_record(&evaluator, 0)
             .expect_err("sine(\"a\", 0) fails at evaluation");
         assert_eq!(diagnostics.len(), 2);
-        assert_eq!(diagnostics[0].severity, Severity::Error);
-        assert_eq!(diagnostics[1].severity, Severity::Warning);
+        assert_eq!(diagnostics[0].severity, Severity::Warning);
         assert_eq!(
-            diagnostics[1].to_string(),
+            diagnostics[0].to_string(),
             "1:6: expected float or waveform, found string"
         );
+        assert_eq!(diagnostics[1].severity, Severity::Error);
 
-        // Clean programs return no warnings, including computed indexes.
+        // Clean programs evaluate with no findings in either mode,
+        // including computed indexes.
+        evaluator.set_check_mode(CheckMode::Errors);
         set.program_mut(0)
             .unwrap()
             .set_text("sine(440, 0)".to_string());
@@ -788,25 +843,34 @@ mod tests {
             .unwrap()
             .set_text("fin(nth(1 + 2, [1, 2, 4, 8]))(sine(440, 0))".to_string());
         assert_eq!(set.evaluate_and_record(&evaluator, 0), Ok(Vec::new()));
-        // A fractional index fails evaluation and the checker reports the same
-        // mistake alongside.
+
+        // A fractional index gates before evaluation can fail; column 9
+        // points at `2.5` — the mismatched argument itself.
         set.program_mut(0)
             .unwrap()
             .set_text("fin(nth(2.5, [1, 2, 4, 8]))(sine(440, 0))".to_string());
         let diagnostics = set
             .evaluate_and_record(&evaluator, 0)
-            .expect_err("nth(2.5, ...) fails at evaluation");
-        assert_eq!(diagnostics.len(), 2);
+            .expect_err("the fractional index gates");
+        assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].severity, Severity::Error);
-        assert_eq!(diagnostics[1].severity, Severity::Warning);
-        // Column 9 points at `2.5` — the mismatched argument itself.
-        assert_eq!(diagnostics[1].to_string(), "1:9: expected int, found float");
+        assert_eq!(diagnostics[0].to_string(), "1:9: expected int, found float");
 
-        // A warning can still ride the Ok path when the mistake hides where
-        // evaluation doesn't look: inside a function that is never called.
+        // The gate is conservative where evaluation is lazy: a mistake
+        // inside a never-called function still gates (evaluation would
+        // have succeeded); warnings mode lets it through, reported.
         set.program_mut(0)
             .unwrap()
             .set_text("let f = fn(x) => nth(2.5, [1, 2]) in sine(440, 0)".to_string());
+        let diagnostics = set
+            .evaluate_and_record(&evaluator, 0)
+            .expect_err("the unused function's finding gates");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].to_string(),
+            "1:22: expected int, found float"
+        );
+        evaluator.set_check_mode(CheckMode::Warnings);
         let warnings = set
             .evaluate_and_record(&evaluator, 0)
             .expect("the unused function body never evaluates");
