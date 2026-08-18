@@ -40,7 +40,7 @@ use crate::waveform;
 /// What a program's evaluated result is expected to be.
 ///
 /// Mirrors the run-time kind check that evaluation performs on program
-/// results, so the checker can warn about a mismatch before evaluation.
+/// results, so the checker can reject a mismatch before evaluation.
 pub enum Expectation {
     /// The program must produce a waveform or a seq.
     Playable,
@@ -91,7 +91,7 @@ where
             checker.subtype_check(&ty, &expected, &expr.span);
         }
     }
-    checker.warnings
+    checker.errors
 }
 
 /// One application's worth of argument types, awaiting the function they
@@ -147,7 +147,7 @@ enum Selection {
 
 /// The algorithmic state threaded through every judgment: the Xie and
 /// Oliveria's substitution `S` and name supply `N` (Appendix E.1), plus the
-/// warnings accumulated so far.
+/// errors accumulated so far.
 struct Infer<S> {
     /// Solutions for meta variables — the paper's `S`. Kept acyclic by the
     /// occurs check; solutions may mention other solved metas, so readers
@@ -161,7 +161,7 @@ struct Infer<S> {
     /// The undo journal: every solver step since the start of the check,
     /// so failed attempts roll back by popping (see `mark`/`rollback`).
     journal: Vec<Undo>,
-    warnings: Vec<Error<S>>,
+    errors: Vec<Error<S>>,
 }
 
 /// The bounds of one refinement variable: the join of the guarantees that
@@ -196,12 +196,12 @@ impl<S: Clone> Infer<S> {
             supply: 0,
             refs: Vec::new(),
             journal: Vec::new(),
-            warnings: Vec::new(),
+            errors: Vec::new(),
         }
     }
 
-    fn warn(&mut self, message: String, span: &Option<Span<S>>) {
-        self.warnings.push(Error::with_span(message, span.clone()));
+    fn error(&mut self, message: String, span: &Option<Span<S>>) {
+        self.errors.push(Error::with_span(message, span.clone()));
     }
 
     fn fresh_id(&mut self) -> u32 {
@@ -435,7 +435,7 @@ impl<S: Clone> Infer<S> {
         ty
     }
 
-    /// Renders `ty` for a warning message, with meta solutions applied and
+    /// Renders `ty` for an error message, with meta solutions applied and
     /// refinement variables resolved to the sorts they may inhabit.
     fn display(&self, ty: &Type) -> String {
         self.resolve_refinements(&ty.apply(&self.subst)).to_string()
@@ -580,9 +580,9 @@ impl<S: Clone> Infer<S> {
     /// alike). Structural parameters ride along as fresh unknowns (solved
     /// per row by the body, quantified by the caller's generalization),
     /// and a structural named parameter's default flows in as a guarantee,
-    /// as in the base pass. A vector whose body check warns contributes no
+    /// as in the base pass. A vector whose body check errors contributes no
     /// row (the function is not applicable there), and the exploratory
-    /// warnings are discarded — the base pass has already reported
+    /// errors are discarded — the base pass has already reported
     /// anything unconditional.
     ///
     /// Beyond `MAX_TABULATION_VECTORS`, enumeration retries on the
@@ -594,7 +594,7 @@ impl<S: Clone> Infer<S> {
     ///
     /// This is what makes parameter contracts *relational* rather than
     /// per-position: `fn(a, b) => a + b` gets no `(seq, seq)` row, so a
-    /// two-seq call warns even though each position separately admits a
+    /// two-seq call errors even though each position separately admits a
     /// seq.
     fn tabulate<M>(
         &mut self,
@@ -670,7 +670,7 @@ impl<S: Clone> Infer<S> {
         }
         let mut rows = Vec::new();
         for index in 0..vectors {
-            let warnings = self.warnings.len();
+            let errors = self.errors.len();
             let mark = self.mark();
             let depth = context.len();
             let mut cursor = 0u32;
@@ -702,7 +702,7 @@ impl<S: Clone> Infer<S> {
             }
             let result = self.infer(context, &mut Vec::new(), body);
             context.truncate(depth);
-            if self.warnings.len() == warnings {
+            if self.errors.len() == errors {
                 // Resolve the row fully before rolling back the state it
                 // was solved in.
                 let row = Type::Function {
@@ -713,7 +713,7 @@ impl<S: Clone> Infer<S> {
                 .apply(&self.subst);
                 rows.push(self.freeze_refinements(&row, true, &keep));
             }
-            self.warnings.truncate(warnings);
+            self.errors.truncate(errors);
             self.rollback(mark);
         }
         if rows.is_empty() {
@@ -728,7 +728,7 @@ impl<S: Clone> Infer<S> {
     }
 
     /// Unifies two types, solving metas by equality — Fig. 13. Fails
-    /// silently; callers decide whether a failure warrants a warning.
+    /// silently; callers decide whether a failure warrants an error.
     ///
     /// Structural cases generalize the paper's AU-Fun to tuun's n-ary
     /// functions, tuples, lists, and modules. `Dynamic` unifies with
@@ -1042,7 +1042,7 @@ impl<S: Clone> Infer<S> {
         Err(())
     }
 
-    /// Checks `found <: expected` and reports a warning at `span` on
+    /// Checks `found <: expected` and reports an error at `span` on
     /// failure, rolling back any partial solving from the failed attempt.
     fn subtype_check(&mut self, found: &Type, expected: &Type, span: &Option<Span<S>>) {
         let mark = self.mark();
@@ -1053,7 +1053,7 @@ impl<S: Clone> Infer<S> {
                 self.display(expected),
                 self.display(found)
             );
-            self.warn(message, span);
+            self.error(message, span);
         }
     }
 
@@ -1061,7 +1061,7 @@ impl<S: Clone> Infer<S> {
     /// has no join because it has no subtyping between base types): unification
     /// if the types agree, the waveform top of the coercion lattice for base
     /// mixes (mixed float/waveform/seq lists and branches are common),
-    /// pointwise for lists and tuples, and `Dynamic` with a warning otherwise.
+    /// pointwise for lists and tuples, and `Dynamic` with an error otherwise.
     /// Quantified types join at an instance.
     fn join(&mut self, a: Type, b: Type, span: &Option<Span<S>>) -> Type {
         let a = self.resolve(&a);
@@ -1103,7 +1103,7 @@ impl<S: Clone> Infer<S> {
                         self.display(&a),
                         self.display(&b)
                     );
-                    self.warn(message, span);
+                    self.error(message, span);
                     Type::Dynamic
                 }
             }
@@ -1172,7 +1172,7 @@ impl<S: Clone> Infer<S> {
             // "Invalid application" error.
             other => {
                 let message = format!("cannot apply a value of type {}", self.display(&other));
-                self.warn(message, &frame.span);
+                self.error(message, &frame.span);
                 psi.clear();
                 Type::Dynamic
             }
@@ -1513,8 +1513,8 @@ impl<S: Clone> Infer<S> {
         }
     }
 
-    /// Selects with `select_core` and reports a warning when nothing
-    /// applies; returns `None` after warning.
+    /// Selects with `select_core` and reports an error when nothing
+    /// applies; returns `None` after reporting.
     fn select_conjunct(
         &mut self,
         conjuncts: &[Type],
@@ -1529,7 +1529,7 @@ impl<S: Clone> Infer<S> {
                     if named.iter().any(|(n, _)| n == name))
             });
             if !declared {
-                self.warn(format!("no named parameter \"{}\"", name), &frame.span);
+                self.error(format!("no named parameter \"{}\"", name), &frame.span);
             }
         }
         match self.select_core(conjuncts, frame) {
@@ -1558,12 +1558,12 @@ impl<S: Clone> Infer<S> {
                     }
                     _ => self.no_use_message(frame, head),
                 };
-                self.warn(message, &frame.span);
+                self.error(message, &frame.span);
                 None
             }
             Selection::NoApplicableRow => {
                 // When one argument alone rules out every row, pinpoint it
-                // the way `check_frame` would: warn at that argument with
+                // the way `check_frame` would: report at that argument with
                 // the union of the domains it failed.
                 let rows: Vec<&Type> = conjuncts
                     .iter()
@@ -1594,7 +1594,7 @@ impl<S: Clone> Infer<S> {
                             Type::ground(union),
                             self.display(argument)
                         );
-                        self.warn(message, span);
+                        self.error(message, span);
                         return None;
                     }
                 }
@@ -1612,7 +1612,7 @@ impl<S: Clone> Infer<S> {
                     (true, None) => "cannot combine two seqs".to_string(),
                     (false, name) => self.no_use_message(frame, name),
                 };
-                self.warn(message, &frame.span);
+                self.error(message, &frame.span);
                 None
             }
         }
@@ -1659,7 +1659,7 @@ impl<S: Clone> Infer<S> {
                 _ => continue,
             };
             // A contract contradicting the argument's bounds — one the
-            // applicability sorts could not see — warns at that argument.
+            // applicability sorts could not see — errors at that argument.
             if self
                 .numeric_subtype(&found, &Refinement::Ground(*domain))
                 .is_err()
@@ -1669,7 +1669,7 @@ impl<S: Clone> Infer<S> {
                     Type::ground(*domain),
                     self.display(argument)
                 );
-                self.warn(message, span);
+                self.error(message, span);
             }
         }
     }
@@ -1680,10 +1680,10 @@ impl<S: Clone> Infer<S> {
     /// which evaluation performs at application time).
     fn check_frame(&mut self, frame: &Frame<S>, positional: &[Type], named: &[(String, Type)]) {
         if frame.positional.len() > positional.len() {
-            self.warn("extra positional parameter".to_string(), &frame.span);
+            self.error("extra positional parameter".to_string(), &frame.span);
         } else if frame.positional.len() < positional.len() {
             let missing = self.display(&positional[frame.positional.len()]);
-            self.warn(
+            self.error(
                 format!("missing parameter of type {}", missing),
                 &frame.span,
             );
@@ -1713,7 +1713,7 @@ impl<S: Clone> Infer<S> {
                     let parameter = parameter.clone();
                     self.subtype_check(argument, &parameter, span);
                 }
-                None => self.warn(format!("no named parameter \"{}\"", name), &frame.span),
+                None => self.error(format!("no named parameter \"{}\"", name), &frame.span),
             }
         }
     }
@@ -1768,7 +1768,7 @@ impl<S: Clone> Infer<S> {
                     self.app_subtype(psi, ty, Some(&builtin))
                 }
                 None => {
-                    self.warn(format!("unbound variable '{}'", name), &expr.span);
+                    self.error(format!("unbound variable '{}'", name), &expr.span);
                     psi.clear();
                     Type::Dynamic
                 }
@@ -1808,17 +1808,17 @@ impl<S: Clone> Infer<S> {
                     Some(frame) => {
                         let arity_matches = frame.positional.len() == positional.len();
                         if frame.positional.len() > positional.len() {
-                            self.warn("extra positional parameter".to_string(), &frame.span);
+                            self.error("extra positional parameter".to_string(), &frame.span);
                         } else if frame.positional.len() < positional.len() {
                             let missing = &positional[frame.positional.len()];
-                            self.warn(format!("missing parameter \"{}\"", missing), &frame.span);
+                            self.error(format!("missing parameter \"{}\"", missing), &frame.span);
                         }
                         for (index, pattern) in positional.iter().enumerate() {
                             let (ty, span) = if arity_matches {
                                 frame.positional[index].clone()
                             } else {
                                 // Don't let an arity mismatch cascade into
-                                // per-argument mismatch warnings.
+                                // per-argument mismatch errors.
                                 (Type::Dynamic, frame.span.clone())
                             };
                             self.bind_pattern(context, pattern, ty, &span, false);
@@ -1830,7 +1830,7 @@ impl<S: Clone> Infer<S> {
                                     self.subtype_check(argument, &parameter, span);
                                 }
                                 None => {
-                                    self.warn(
+                                    self.error(
                                         format!("no named parameter \"{}\"", name),
                                         &frame.span,
                                     );
@@ -1941,7 +1941,7 @@ impl<S: Clone> Infer<S> {
                     Type::Module(entries) => match entries.iter().find(|(n, _)| n == name) {
                         Some((_, ty)) => ty.clone(),
                         None => {
-                            self.warn(format!("Module has no binding '{}'", name), &expr.span);
+                            self.error(format!("Module has no binding '{}'", name), &expr.span);
                             Type::Dynamic
                         }
                     },
@@ -1954,7 +1954,7 @@ impl<S: Clone> Infer<S> {
                             name,
                             self.display(&other)
                         );
-                        self.warn(message, &expr.span);
+                        self.error(message, &expr.span);
                         Type::Dynamic
                     }
                 };
@@ -2030,7 +2030,7 @@ impl<S: Clone> Infer<S> {
                         pattern,
                         self.display(&other)
                     );
-                    self.warn(message, span);
+                    self.error(message, span);
                     for pattern in patterns {
                         self.bind_pattern(context, pattern, Type::Dynamic, span, generalize_leaves);
                     }
@@ -2064,8 +2064,8 @@ impl<S: Clone> Infer<S> {
     /// the top level of a `let`), and bound. Returns the walked bindings' own
     /// exports (excluding opened ones).
     ///
-    /// An unresolvable module produces a warning at its binding; its names
-    /// then warn as unbound wherever they are used.
+    /// An unresolvable module produces an error at its binding; its names
+    /// then error as unbound wherever they are used.
     fn build_context<'a, M, F>(
         &mut self,
         resolve: &F,
@@ -2090,7 +2090,7 @@ impl<S: Clone> Infer<S> {
                             path.join("."),
                             error.message()
                         );
-                        self.warn(message, &source_binding.span);
+                        self.error(message, &source_binding.span);
                     }
                 },
                 Binding::Use(path) => {
@@ -2103,7 +2103,7 @@ impl<S: Clone> Infer<S> {
                                 path.join("."),
                                 error.message()
                             );
-                            self.warn(message, &source_binding.span);
+                            self.error(message, &source_binding.span);
                             continue;
                         }
                     };
@@ -2325,26 +2325,26 @@ mod tests {
         )
     }
 
-    fn messages(warnings: &[Error<()>]) -> Vec<String> {
-        warnings.iter().map(|w| w.message().to_string()).collect()
+    fn messages(errors: &[Error<()>]) -> Vec<String> {
+        errors.iter().map(|w| w.message().to_string()).collect()
     }
 
     #[track_caller]
     fn assert_clean(input: &str) {
-        let warnings = check(input);
+        let errors = check(input);
         assert!(
-            warnings.is_empty(),
-            "expected no warnings for {:?}, got {:?}",
+            errors.is_empty(),
+            "expected no errors for {:?}, got {:?}",
             input,
-            messages(&warnings)
+            messages(&errors)
         );
     }
 
     #[track_caller]
-    fn assert_warns(input: &str, expected: &[&str]) {
-        let warnings = check(input);
+    fn assert_errors(input: &str, expected: &[&str]) {
+        let errors = check(input);
         assert_eq!(
-            messages(&warnings),
+            messages(&errors),
             expected.to_vec(),
             "for input {:?}",
             input
@@ -2377,10 +2377,10 @@ mod tests {
 
     // Contrast: a lambda inferred in inference mode (as `map`'s argument,
     // rule AT-Lam1) gets a monotype parameter, so using it at two types
-    // warns.
+    // errors.
     #[test]
     fn inference_mode_lambda_is_monomorphic() {
-        assert_warns(
+        assert_errors(
             "map(fn(g) => (g(1), g(\"s\")), [fn(x) => x])",
             &["expected int, found string"],
         );
@@ -2410,23 +2410,23 @@ mod tests {
         assert_clean("map(sqrt, [1, 2])");
     }
 
-    // A mismatched argument warns and the warning's span points at the
+    // A mismatched argument errors and the error's span points at the
     // offending argument, not the whole call.
     #[test]
     fn argument_mismatch_points_at_argument() {
         let input = "sine(\"a\", 0)";
-        let warnings = check(input);
-        assert_eq!(messages(&warnings), ["expected waveform, found string"]);
+        let errors = check(input);
+        assert_eq!(messages(&errors), ["expected waveform, found string"]);
         let start = input.find("\"a\"").unwrap();
-        assert_eq!(warnings[0].range(), Some(start..start + 3));
+        assert_eq!(errors[0].range(), Some(start..start + 3));
     }
 
     #[test]
     fn tuple_patterns() {
         assert_clean("let (a, b) = (1, \"x\") in a");
         // Two separate arguments do not destructure into a tuple pattern;
-        // the arity warning alone reports it (no per-argument cascade).
-        assert_warns("(fn((y, z)) => y)(4, 5)", &["extra positional parameter"]);
+        // the arity error alone reports it (no per-argument cascade).
+        assert_errors("(fn((y, z)) => y)(4, 5)", &["extra positional parameter"]);
     }
 
     // Named parameters take their types from their defaults; call-site
@@ -2436,12 +2436,12 @@ mod tests {
         let f = "let f = fn(x, y = 10) => x * y in ";
         assert_clean(&format!("{}f(2)", f));
         assert_clean(&format!("{}f(2, y = 5)", f));
-        assert_warns(&format!("{}f(2, z = 3)", f), &["no named parameter \"z\""]);
-        assert_warns(&format!("{}f(2, 3)", f), &["extra positional parameter"]);
-        // A named argument to a builtin without named parameters warns for
+        assert_errors(&format!("{}f(2, z = 3)", f), &["no named parameter \"z\""]);
+        assert_errors(&format!("{}f(2, 3)", f), &["extra positional parameter"]);
+        // A named argument to a builtin without named parameters errors for
         // the bogus name, and — since only one of sine's two positional
         // parameters is supplied — for the missing argument too.
-        assert_warns(
+        assert_errors(
             "sine(440, y = 1)",
             &[
                 "missing parameter of type waveform",
@@ -2452,12 +2452,12 @@ mod tests {
 
     #[test]
     fn missing_argument() {
-        assert_warns("(fn(x, y) => x)(2)", &["missing parameter \"y\""]);
+        assert_errors("(fn(x, y) => x)(2)", &["missing parameter \"y\""]);
     }
 
     #[test]
     fn conditionals() {
-        assert_warns("if 1 then 2 else 3", &["expected bool, found int"]);
+        assert_errors("if 1 then 2 else 3", &["expected bool, found int"]);
         // Branches join over the coercion lattice: float and waveform meet
         // at waveform.
         assert_clean("if true then 1 else sine(440, 0)");
@@ -2474,7 +2474,7 @@ mod tests {
         assert_clean("seq(0)(sine(440, 0)) \\ 1");
         // A non-seq on the left of `\` is a genuine runtime error (sine
         // may fold to a constant, hence the union in the message).
-        assert_warns("sine(440, 0) \\ 1", &["expected seq, found waveform"]);
+        assert_errors("sine(440, 0) \\ 1", &["expected seq, found waveform"]);
         // Arithmetic threads a seq operand through (`binary_op`'s seq
         // rows), so seq-ness survives to the following `\`.
         assert_clean("(seq(0)(sine(440, 0)) * 0.5) \\ 1");
@@ -2485,25 +2485,25 @@ mod tests {
     #[test]
     fn refinement_true_positives() {
         // `binary_op` has no (Seq, Seq) arm.
-        assert_warns("seq(0)(1) + seq(0)(2)", &["cannot combine two seqs with +"]);
-        // `unary_op` has no Seq arm; the warning pinpoints the argument
+        assert_errors("seq(0)(1) + seq(0)(2)", &["cannot combine two seqs with +"]);
+        // `unary_op` has no Seq arm; the error pinpoints the argument
         // with the union of the domains the table does accept.
-        assert_warns("-seq(0)(1)", &["expected waveform, found seq"]);
+        assert_errors("-seq(0)(1)", &["expected waveform, found seq"]);
         // `reset`'s trigger accepts constants and waveforms, not seqs.
-        assert_warns("reset(seq(0)(1), 1)", &["expected waveform, found seq"]);
+        assert_errors("reset(seq(0)(1), 1)", &["expected waveform, found seq"]);
         // `unfold`'s count is hard-checked integral at runtime.
-        assert_warns("unfold(fn(x) => x, 0, 2.5)", &["expected int, found float"]);
+        assert_errors("unfold(fn(x) => x, 0, 2.5)", &["expected int, found float"]);
         // `nth`'s index is hard-checked integral at runtime.
-        assert_warns("nth(2.5, [1, 2, 3])", &["expected int, found float"]);
+        assert_errors("nth(2.5, [1, 2, 3])", &["expected int, found float"]);
         // Contravariant contract flow: `exp` requires constants, and the
         // list supplies a definite waveform. (`sine(440, 0)` would be
         // silent here: its type is float-or-waveform because the
         // zero-frequency fold exists, and value tracking is a later phase.)
-        assert_warns("map(exp, [time])", &["expected [float], found [waveform]"]);
+        assert_errors("map(exp, [time])", &["expected [float], found [waveform]"]);
         // Comparisons are scalar-only at runtime.
-        assert_warns("time < 1", &["expected float, found waveform"]);
-        // `<>` requires seq elements; a definitely-unseq list warns.
-        assert_warns("<[1, 2]>", &["expected [seq], found [int]"]);
+        assert_errors("time < 1", &["expected float, found waveform"]);
+        // `<>` requires seq elements; a definitely-unseq list errors.
+        assert_errors("<[1, 2]>", &["expected [seq], found [int]"]);
         assert_clean("<[seq(0)(1), seq(0)(2)]>");
         // The fold of seqs is itself a seq, usable on `\`'s left — the
         // empty fold included.
@@ -2517,20 +2517,20 @@ mod tests {
     fn tabulated_definitions() {
         // Result precision at a direct call: double(2) is an int, and an
         // int is definitely not a seq.
-        assert_warns(
+        assert_errors(
             "let double = fn(x) => x + x in double(2) \\ 1",
             &["expected seq, found int"],
         );
         // The missing (seq, seq) arm of + is relational and survives the
         // definition boundary: double has no seq row at all. (R1's
         // per-position freeze accepted this call.)
-        assert_warns(
+        assert_errors(
             "let double = fn(x) => x + x in double(seq(0)(1))",
             &["expected waveform, found seq"],
         );
         // Two definite seqs get the dedicated diagnosis, same as the
         // operator itself would.
-        assert_warns(
+        assert_errors(
             "let add = fn(a, b) => a + b in add(seq(0)(1), seq(0)(2))",
             &["cannot combine two seqs with add"],
         );
@@ -2545,11 +2545,11 @@ mod tests {
         assert_clean("map(fn(x) => x * 0.5, [time, 2])");
         // ...and a seq element is fine where the body threads seqs...
         assert_clean("map(fn(x) => x * 2, [seq(0)(1)])");
-        // ...but warns where no row accepts one: x + x has no seq row.
+        // ...but errors where no row accepts one: x + x has no seq row.
         // The list is checked before the table (see `check_frame`), so
         // the message shows the seq flowing into the expected arrow
         // against the rows the function actually has.
-        assert_warns(
+        assert_errors(
             "map(fn(x) => x + x, [seq(0)(1)])",
             &[
                 "expected (seq) -> ?a, found (int) -> int ∧ (float) -> float ∧ (waveform) -> waveform",
@@ -2563,17 +2563,17 @@ mod tests {
     fn tabulated_mixed_parameters() {
         // The fold's accumulator row is precise: an int seed selects the
         // int row, so the result is definitely not a seq.
-        assert_warns(
+        assert_errors(
             "reduce(fn(acc, x) => acc + 1, 0, [1, 2]) \\ 1",
             &["expected seq, found int"],
         );
         // The seed is checked before the table, so a float seed selects
-        // the float row rather than warning against the int row.
+        // the float row rather than erroring against the int row.
         assert_clean("reduce(fn(acc, x) => acc + 1, 0.5, [1, 2])");
         // A structural domain solved by the body (xs used as a list)
         // participates in selection at direct calls.
         assert_clean("let pick = fn(n, xs) => nth(n, xs) in pick(1, [1, 2])");
-        assert_warns(
+        assert_errors(
             "let pick = fn(n, xs) => nth(n, xs) in pick(0.5, [1, 2])",
             &["expected int, found float"],
         );
@@ -2588,7 +2588,7 @@ mod tests {
         assert_clean(&format!("{}f(x = time)", f));
         assert_clean(&format!("{}f(x = 0.5)", f));
         // ...while the body's missing seq row still rejects a seq.
-        assert_warns(
+        assert_errors(
             &format!("{}f(x = seq(0)(1))", f),
             &["no use of f accepts (x = seq)"],
         );
@@ -2596,9 +2596,9 @@ mod tests {
         // covers it, so no single row's result is claimed.
         assert_clean(&format!("{}f()", f));
         // Result precision flows through a supplied named argument.
-        assert_warns(&format!("{}f(x = 2) \\ 1", f), &["expected seq, found int"]);
-        // A default the body cannot accept warns at the definition.
-        assert_warns("fn(x = 100) => x \\ 1", &["expected seq, found int"]);
+        assert_errors(&format!("{}f(x = 2) \\ 1", f), &["expected seq, found int"]);
+        // A default the body cannot accept errors at the definition.
+        assert_errors("fn(x = 100) => x \\ 1", &["expected seq, found int"]);
     }
 
     // Beyond 4^k the two-point unseq/seq split still tabulates, keeping
@@ -2610,7 +2610,7 @@ mod tests {
         assert_clean(&format!("{}f(1, 2, 3, seq(0)(4), 5) \\ 1", f));
         // ...but two seqs have no row, even though each position alone
         // admits one.
-        assert_warns(
+        assert_errors(
             &format!("{}f(1, 2, 3, seq(0)(4), seq(0)(5))", f),
             &["no use of f accepts (int, int, int, seq, seq)"],
         );
@@ -2622,7 +2622,7 @@ mod tests {
     fn containment_judgments() {
         // A possibly-wrong value is an error: sine may fold to a float,
         // and exp requires one.
-        assert_warns(
+        assert_errors(
             "map(exp, [sine(440, 0)])",
             &["expected [float], found [waveform]"],
         );
@@ -2632,7 +2632,7 @@ mod tests {
         // waveform and seq atoms are covered by different rows.
         assert_clean("(if true then time else seq(0)(1)) * 1");
         // A definitely-uncovered atom still rejects.
-        assert_warns("seq(0)(1) + seq(0)(2)", &["cannot combine two seqs with +"]);
+        assert_errors("seq(0)(1) + seq(0)(2)", &["cannot combine two seqs with +"]);
         // Unconstrained parameters defer: the base pass records contracts
         // instead of judging ⊤, and the tabulated rows judge per atom.
         assert_clean("let f = fn(x) => x + 1 in f(time)");
@@ -2640,7 +2640,7 @@ mod tests {
         assert_clean("debug(1) + 1");
         // A guarantee already seen is judged, deferred or not: the default
         // flows into x before the body's seq contract.
-        assert_warns("fn(x = 100) => x \\ 1", &["expected seq, found int"]);
+        assert_errors("fn(x = 100) => x \\ 1", &["expected seq, found int"]);
     }
 
     // Bound consistency is checked where guarantees and contracts meet a
@@ -2674,46 +2674,46 @@ mod tests {
         // doubling (`*` threads offsets), and a float seed's elements are
         // definitely not seqs.
         assert_clean("nth(0, unfold(fn(n) => n * 2, seq(0)(1), 9)) \\ 1");
-        assert_warns(
+        assert_errors(
             "nth(0, unfold(fn(n) => n * 2, 65.41, 9)) \\ 1",
             &["expected seq, found float"],
         );
     }
 
     #[test]
-    fn unbound_variable_warns() {
+    fn unbound_variable_errors() {
         let input = "nope + 1";
-        let warnings = check(input);
-        assert_eq!(messages(&warnings), ["unbound variable 'nope'"]);
+        let errors = check(input);
+        assert_eq!(messages(&errors), ["unbound variable 'nope'"]);
         let start = input.find("nope").unwrap();
-        assert_eq!(warnings[0].range(), Some(start..start + 4));
+        assert_eq!(errors[0].range(), Some(start..start + 4));
 
-        assert_warns("nope(1) * 2", &["unbound variable 'nope'"]);
+        assert_errors("nope(1) * 2", &["unbound variable 'nope'"]);
         // An unbound name recovers as Dynamic, so it produces exactly one
-        // warning even when applied and used in arithmetic.
-        assert_warns(
+        // error even when applied and used in arithmetic.
+        assert_errors(
             "sine(missing, wrong)",
             &["unbound variable 'missing'", "unbound variable 'wrong'"],
         );
     }
 
-    // Unresolvable open/use bindings warn at the binding; the module's
-    // names then warn as unbound at their use sites.
+    // Unresolvable open/use bindings error at the binding; the module's
+    // names then error as unbound at their use sites.
     #[test]
-    fn unresolvable_modules_warn() {
+    fn unresolvable_modules_error() {
         let mut bindings = test_prelude();
         let (opens, errors) = parse_module::<u32, _>("open nope;\nuse also.missing;", ()).unwrap();
         assert!(errors.is_empty());
         bindings.extend(opens);
         let expr = parse_program::<u32, _>("something_from_nope + 1", ()).unwrap();
-        let warnings = check_program(
+        let errors = check_program(
             |_: &[String]| Err(Error::new("no modules".to_string())),
             &bindings,
             &expr,
             None,
         );
         assert_eq!(
-            messages(&warnings),
+            messages(&errors),
             [
                 "cannot load module 'nope': no modules",
                 "cannot load module 'also.missing': no modules",
@@ -2724,13 +2724,13 @@ mod tests {
 
     #[test]
     fn program_expectations() {
-        let warnings = check_with_expectation("\"hello\"", Some(Expectation::Playable));
-        assert_eq!(messages(&warnings), ["expected numeric, found string"]);
-        let warnings = check_with_expectation("sine(440, 0)", Some(Expectation::Playable));
-        assert!(warnings.is_empty(), "got {:?}", messages(&warnings));
+        let errors = check_with_expectation("\"hello\"", Some(Expectation::Playable));
+        assert_eq!(messages(&errors), ["expected numeric, found string"]);
+        let errors = check_with_expectation("sine(440, 0)", Some(Expectation::Playable));
+        assert!(errors.is_empty(), "got {:?}", messages(&errors));
         // A seq qualifies as a waveform program.
-        let warnings = check_with_expectation("seq(0)(sine(440, 0))", Some(Expectation::Playable));
-        assert!(warnings.is_empty(), "got {:?}", messages(&warnings));
+        let errors = check_with_expectation("seq(0)(sine(440, 0))", Some(Expectation::Playable));
+        assert!(errors.is_empty(), "got {:?}", messages(&errors));
     }
 
     // A keys program is checked by seeding Ψ with (float, float) — the
@@ -2738,24 +2738,24 @@ mod tests {
     // requiring a pair of waveforms back.
     #[test]
     fn note_function_expectation() {
-        let warnings = check_with_expectation(
+        let errors = check_with_expectation(
             "fn(note, vel) => (sine(note*100, 0), fin(1)(sine(440, 0)))",
             Some(Expectation::NoteFunction),
         );
-        assert!(warnings.is_empty(), "got {:?}", messages(&warnings));
+        assert!(errors.is_empty(), "got {:?}", messages(&errors));
 
-        let warnings = check_with_expectation(
+        let errors = check_with_expectation(
             "fn(note) => (sine(note*100, 0), sine(note, 0))",
             Some(Expectation::NoteFunction),
         );
-        assert_eq!(messages(&warnings), ["extra positional parameter"]);
+        assert_eq!(messages(&errors), ["extra positional parameter"]);
 
-        let warnings = check_with_expectation(
+        let errors = check_with_expectation(
             "fn(note, vel) => (sine(note*100, 0), \"x\")",
             Some(Expectation::NoteFunction),
         );
         assert_eq!(
-            messages(&warnings),
+            messages(&errors),
             ["expected (waveform, waveform), found (waveform, string)"]
         );
     }
@@ -2785,17 +2785,17 @@ mod tests {
         // `alias` is exported by `a` (bound there through `a`'s own open of
         // `b`); using it as a float checks.
         let expr = parse_program::<u32, _>("alias * 2", ()).unwrap();
-        let warnings = check_program(resolve, &bindings, &expr, None);
-        assert!(warnings.is_empty(), "got {:?}", messages(&warnings));
+        let errors = check_program(resolve, &bindings, &expr, None);
+        assert!(errors.is_empty(), "got {:?}", messages(&errors));
 
-        // `two` is not re-exported through `a`, so it warns as unbound.
+        // `two` is not re-exported through `a`, so it errors as unbound.
         let expr = parse_program::<u32, _>("two", ()).unwrap();
-        let warnings = check_program(resolve, &bindings, &expr, None);
-        assert_eq!(messages(&warnings), ["unbound variable 'two'"]);
+        let errors = check_program(resolve, &bindings, &expr, None);
+        assert_eq!(messages(&errors), ["unbound variable 'two'"]);
     }
 
     // Mirrors eval's use/projection tests: `use` binds a module type,
-    // projections type-check against it, and a missing member warns.
+    // projections type-check against it, and a missing member errors.
     #[test]
     fn use_and_projection() {
         let (b, errors) = parse_module::<u32, _>("two = 2;", ()).unwrap();
@@ -2813,25 +2813,25 @@ mod tests {
         bindings.extend(uses);
 
         let expr = parse_program::<u32, _>("b.two + 1", ()).unwrap();
-        let warnings = check_program(resolve, &bindings, &expr, None);
-        assert!(warnings.is_empty(), "got {:?}", messages(&warnings));
+        let errors = check_program(resolve, &bindings, &expr, None);
+        assert!(errors.is_empty(), "got {:?}", messages(&errors));
 
         let expr = parse_program::<u32, _>("b.three", ()).unwrap();
-        let warnings = check_program(resolve, &bindings, &expr, None);
-        assert_eq!(messages(&warnings), ["Module has no binding 'three'"]);
+        let errors = check_program(resolve, &bindings, &expr, None);
+        assert_eq!(messages(&errors), ["Module has no binding 'three'"]);
 
-        // Projecting from a non-module warns statically too.
+        // Projecting from a non-module errors statically too.
         let expr = parse_program::<u32, _>("let x = 1 in x.y", ()).unwrap();
-        let warnings = check_program(resolve, &bindings, &expr, None);
+        let errors = check_program(resolve, &bindings, &expr, None);
         assert_eq!(
-            messages(&warnings),
+            messages(&errors),
             ["cannot project 'y' from a value of type int"]
         );
     }
 
     #[test]
     fn cannot_apply_non_function() {
-        assert_warns("1(2)", &["cannot apply a value of type int"]);
+        assert_errors("1(2)", &["cannot apply a value of type int"]);
     }
 
     // Direct unit tests for the subtyping corners that full programs
@@ -2868,9 +2868,9 @@ mod tests {
     // or inference changes that affect the library surface here.
     //
     // Each module is parsed with its index as span source; a module's report
-    // keeps only warnings from its own text (dependencies re-typed along the
+    // keeps only errors from its own text (dependencies re-typed along the
     // way report under their own entry). Positions come from
-    // `display_with_source` so every pinned warning can be read against the
+    // `display_with_source` so every pinned error can be read against the
     // .tuun source.
     /// The declared residue: value-level runtime errors the sort lattice
     /// cannot see (see "Toward a sound configuration" in the design doc).
@@ -3049,16 +3049,13 @@ mod tests {
             }
             calls += applied.len();
             let expr = parse_program::<u32, _>("0", 9999).unwrap();
-            let warnings = check_program(
+            let errors = check_program(
                 |p: &[String]| diff_resolve(&prelude, &parsed, p),
                 &extended,
                 &expr,
                 None,
             );
-            let flagged: Vec<u32> = warnings
-                .iter()
-                .filter_map(|warning| warning.source())
-                .collect();
+            let flagged: Vec<u32> = errors.iter().filter_map(|error| error.source()).collect();
             // Classifies one call by evaluating it alone against the
             // module. An eval error's span points into the failing body,
             // not the call, so per-call evaluation is the only reliable
@@ -3183,21 +3180,21 @@ mod tests {
         };
         let expr = parse_program::<u32, _>("0", 9999).unwrap();
         for (index, (path, content, bindings)) in parsed.iter().enumerate() {
-            let warnings = check_program(&resolve, bindings, &expr, None);
-            let own: Vec<String> = warnings
+            let errors = check_program(&resolve, bindings, &expr, None);
+            let own: Vec<String> = errors
                 .iter()
-                .filter(|warning| warning.source() == Some(index as u32))
-                .map(|warning| warning.display_with_source(content))
+                .filter(|error| error.source() == Some(index as u32))
+                .map(|error| error.display_with_source(content))
                 .collect();
-            println!("=== {} ({} warnings)", path, own.len());
-            for warning in own {
-                println!("  {}", warning);
+            println!("=== {} ({} errors)", path, own.len());
+            for error in own {
+                println!("  {}", error);
             }
         }
     }
 
     #[test]
-    fn embedded_modules_pinned_warnings() {
+    fn embedded_modules_pinned_errors() {
         let prelude = test_prelude::<u32>();
         let mut parsed: Vec<(String, &str, Vec<SourceBinding<u32, u32>>)> = Vec::new();
         for (index, (path, content)) in modules::EMBEDDED_MODULES.iter().enumerate() {
@@ -3220,19 +3217,15 @@ mod tests {
         let expr = parse_program::<u32, _>("0", 9999).unwrap();
         let mut report: Vec<String> = Vec::new();
         for (index, (path, content, bindings)) in parsed.iter().enumerate() {
-            let warnings = check_program(&resolve, bindings, &expr, None);
-            for warning in &warnings {
-                if warning.source() == Some(index as u32) {
-                    report.push(format!(
-                        "{}: {}",
-                        path,
-                        warning.display_with_source(content)
-                    ));
+            let errors = check_program(&resolve, bindings, &expr, None);
+            for error in &errors {
+                if error.source() == Some(index as u32) {
+                    report.push(format!("{}: {}", path, error.display_with_source(content)));
                 }
             }
         }
         // The refinement lattice checks the entire embedded library without a
-        // single warning. Anything appearing here needs source-level
+        // single error. Anything appearing here needs source-level
         // verification before being accepted as a new pin.
         assert_eq!(report, Vec::<String>::new());
     }

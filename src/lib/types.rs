@@ -1,7 +1,7 @@
 //! The tuun type language used by the static checker.
 //!
 //! Types never appear in tuun's concrete syntax; they exist only inside the
-//! checker (see [`crate::infer`]) and in the text of its warnings.
+//! checker (see [`crate::infer`]) and in the text of its errors.
 //!
 //! The structure follows Xie and Oliveira, "Let Arguments Go First" (ESOP
 //! 2018), §3.1: types `A, B ::= a | A -> B | ∀a.A | Int`, extended with tuun's
@@ -185,7 +185,7 @@ pub enum Type {
     /// The escape hatch: compatible with every type in every position.
     ///
     /// Used for built-ins without a precise signature and to recover after a
-    /// reported warning without cascading follow-on warnings.
+    /// reported error without cascading follow-on errors.
     Dynamic,
 }
 

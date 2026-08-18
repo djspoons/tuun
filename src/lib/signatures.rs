@@ -129,7 +129,7 @@ pub fn signature(name: &str) -> Option<Type> {
             )),
         ),
         // Variadic at run time (one or more lists, or waveforms), but every
-        // known call site is binary on lists; other forms warn spuriously.
+        // known call site is binary on lists; other forms error spuriously.
         "append" => Type::Forall(
             vec![0],
             Box::new(Type::function(
