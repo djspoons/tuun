@@ -61,13 +61,11 @@ impl Sort {
     /// All constants: `Int ∨ NonInt`.
     pub const FLOAT: Sort = Sort(Sort::I | Sort::NON_INT);
     /// Non-constant unseq waveforms.
-    pub const WAVE: Sort = Sort(Sort::W);
+    pub const NON_CONST_WAVE: Sort = Sort(Sort::W);
     /// Sequence-able waveforms.
     pub const SEQ: Sort = Sort(Sort::S);
-    /// Everything a waveform position accepts: constants and unseq waveforms.
-    pub const FLOAT_OR_WAVE: Sort = Sort(Sort::I | Sort::NON_INT | Sort::W);
-    /// Waveform or seq.
-    pub const WAVE_OR_SEQ: Sort = Sort(Sort::W | Sort::S);
+    /// The waveforms: everything usable as one, constants included.
+    pub const WAVE: Sort = Sort(Sort::I | Sort::NON_INT | Sort::W);
     /// The top: any stream of numeric values.
     pub const TOP: Sort = Sort(Sort::I | Sort::NON_INT | Sort::W | Sort::S);
 
@@ -90,9 +88,14 @@ impl Sort {
 
     /// Returns the atoms of this sort, each as a singleton.
     pub fn atoms(self) -> impl Iterator<Item = Sort> {
-        [Sort::INT, Sort::NON_INT_ONLY, Sort::WAVE, Sort::SEQ]
-            .into_iter()
-            .filter(move |atom| !self.intersect(*atom).is_empty())
+        [
+            Sort::INT,
+            Sort::NON_INT_ONLY,
+            Sort::NON_CONST_WAVE,
+            Sort::SEQ,
+        ]
+        .into_iter()
+        .filter(move |atom| !self.intersect(*atom).is_empty())
     }
 }
 
@@ -101,20 +104,27 @@ impl Display for Sort {
         if *self == Sort::TOP {
             return write!(f, "numeric");
         }
-        // Compose atom names, collapsing the two constant atoms to "float"
-        // when both are present; `NonInt` alone also renders as "float" (the
-        // int/non-int distinction only matters against an int contract,
-        // where the caret shows the offending literal).
+        // Compose atom names, collapsing unions to the name of the class
+        // they fill: the whole waveform class (constants included) is just
+        // "waveform", and both constant atoms together are "float".
+        // Partial atoms render as their class too — `NonInt` alone as
+        // "float", `NON_CONST_WAVE` alone as "waveform" — because the
+        // finer split only matters against a narrower contract, where the
+        // caret shows the offending expression.
         let mut parts: Vec<&str> = Vec::new();
-        if Sort::FLOAT.is_subset(*self) {
-            parts.push("float");
-        } else if !self.intersect(Sort::INT).is_empty() {
-            parts.push("int");
-        } else if !self.intersect(Sort::NON_INT_ONLY).is_empty() {
-            parts.push("float");
-        }
-        if !self.intersect(Sort::WAVE).is_empty() {
+        if Sort::WAVE.is_subset(*self) {
             parts.push("waveform");
+        } else {
+            if Sort::FLOAT.is_subset(*self) {
+                parts.push("float");
+            } else if !self.intersect(Sort::INT).is_empty() {
+                parts.push("int");
+            } else if !self.intersect(Sort::NON_INT_ONLY).is_empty() {
+                parts.push("float");
+            }
+            if !self.intersect(Sort::NON_CONST_WAVE).is_empty() {
+                parts.push("waveform");
+            }
         }
         if !self.intersect(Sort::SEQ).is_empty() {
             parts.push("seq");
@@ -205,8 +215,8 @@ impl Type {
     }
 
     /// The non-constant unseq waveforms.
-    pub fn waveform() -> Type {
-        Type::ground(Sort::WAVE)
+    pub fn non_const_wave() -> Type {
+        Type::ground(Sort::NON_CONST_WAVE)
     }
 
     /// The seqs.
@@ -214,10 +224,9 @@ impl Type {
         Type::ground(Sort::SEQ)
     }
 
-    /// Anything a waveform position accepts: a constant or an unseq
-    /// waveform.
-    pub fn float_or_waveform() -> Type {
-        Type::ground(Sort::FLOAT_OR_WAVE)
+    /// The waveforms: everything usable as one, constants included.
+    pub fn waveform() -> Type {
+        Type::ground(Sort::WAVE)
     }
 
     /// Any numeric value.
@@ -663,10 +672,10 @@ mod tests {
     #[test]
     fn sorts_order_by_inclusion() {
         assert!(Sort::INT.is_subset(Sort::FLOAT));
-        assert!(Sort::FLOAT.is_subset(Sort::FLOAT_OR_WAVE));
-        assert!(!Sort::SEQ.is_subset(Sort::FLOAT_OR_WAVE));
-        assert!(Sort::SEQ.intersect(Sort::WAVE).is_empty());
-        assert_eq!(Sort::FLOAT.union(Sort::WAVE), Sort::FLOAT_OR_WAVE);
+        assert!(Sort::FLOAT.is_subset(Sort::WAVE));
+        assert!(!Sort::SEQ.is_subset(Sort::WAVE));
+        assert!(Sort::SEQ.intersect(Sort::NON_CONST_WAVE).is_empty());
+        assert_eq!(Sort::FLOAT.union(Sort::NON_CONST_WAVE), Sort::WAVE);
     }
 
     #[test]
@@ -674,19 +683,25 @@ mod tests {
         assert_eq!(Sort::INT.to_string(), "int");
         assert_eq!(Sort::NON_INT_ONLY.to_string(), "float");
         assert_eq!(Sort::FLOAT.to_string(), "float");
-        assert_eq!(Sort::WAVE.to_string(), "waveform");
+        assert_eq!(Sort::NON_CONST_WAVE.to_string(), "waveform");
         assert_eq!(Sort::SEQ.to_string(), "seq");
-        assert_eq!(Sort::FLOAT_OR_WAVE.to_string(), "float or waveform");
-        assert_eq!(Sort::WAVE_OR_SEQ.to_string(), "waveform or seq");
+        assert_eq!(Sort::WAVE.to_string(), "waveform");
         assert_eq!(Sort::TOP.to_string(), "numeric");
-        assert_eq!(Sort::INT.union(Sort::WAVE).to_string(), "int or waveform");
+        assert_eq!(
+            Sort::INT.union(Sort::NON_CONST_WAVE).to_string(),
+            "int or waveform"
+        );
     }
 
     #[test]
     fn display_base_and_compound_types() {
         assert_eq!(Type::float().to_string(), "float");
         assert_eq!(
-            Type::function(vec![Type::waveform(), Type::waveform()], Type::waveform()).to_string(),
+            Type::function(
+                vec![Type::non_const_wave(), Type::non_const_wave()],
+                Type::non_const_wave()
+            )
+            .to_string(),
             "(waveform, waveform) -> waveform"
         );
         assert_eq!(

@@ -35,15 +35,15 @@ fn binary_arithmetic(int_row: bool) -> Type {
         Type::float(),
     ));
     rows.push(Type::function(
-        vec![Type::float_or_waveform(), Type::float_or_waveform()],
-        Type::waveform(),
+        vec![Type::waveform(), Type::waveform()],
+        Type::non_const_wave(),
     ));
     rows.push(Type::function(
-        vec![Type::seq(), Type::float_or_waveform()],
+        vec![Type::seq(), Type::waveform()],
         Type::seq(),
     ));
     rows.push(Type::function(
-        vec![Type::float_or_waveform(), Type::seq()],
+        vec![Type::waveform(), Type::seq()],
         Type::seq(),
     ));
     Type::And(rows)
@@ -54,7 +54,7 @@ fn binary_arithmetic(int_row: bool) -> Type {
 /// waveform, and a seq threads through (`builtins::curry`).
 fn waveform_filter() -> Type {
     Type::And(vec![
-        Type::function(vec![Type::float_or_waveform()], Type::waveform()),
+        Type::function(vec![Type::waveform()], Type::non_const_wave()),
         Type::function(vec![Type::seq()], Type::seq()),
     ])
 }
@@ -76,7 +76,7 @@ pub fn signature(name: &str) -> Option<Type> {
             let unary = vec![
                 Type::function(vec![Type::int()], Type::int()),
                 Type::function(vec![Type::float()], Type::float()),
-                Type::function(vec![Type::float_or_waveform()], Type::waveform()),
+                Type::function(vec![Type::waveform()], Type::non_const_wave()),
             ];
             let Type::And(binary) = binary_arithmetic(true) else {
                 unreachable!("binary_arithmetic returns an intersection");
@@ -89,10 +89,7 @@ pub fn signature(name: &str) -> Option<Type> {
         // precisely; anything else ends the chain with a waveform.
         "\\" => Type::And(vec![
             Type::function(vec![Type::seq(), Type::seq()], Type::seq()),
-            Type::function(
-                vec![Type::seq(), Type::float_or_waveform()],
-                Type::waveform(),
-            ),
+            Type::function(vec![Type::seq(), Type::waveform()], Type::non_const_wave()),
         ]),
         "==" | "!=" => Type::Forall(
             vec![0],
@@ -103,11 +100,8 @@ pub fn signature(name: &str) -> Option<Type> {
         "sqrt" | "exp" => Type::function(vec![Type::float()], Type::float()),
         // Zero frequency with a constant phase folds to a constant, so the
         // result may be a float or a waveform.
-        "sine" => Type::function(
-            vec![Type::float_or_waveform(), Type::float_or_waveform()],
-            Type::float_or_waveform(),
-        ),
-        "cos" => Type::function(vec![Type::float_or_waveform()], Type::float_or_waveform()),
+        "sine" => Type::function(vec![Type::waveform(), Type::waveform()], Type::waveform()),
+        "cos" => Type::function(vec![Type::waveform()], Type::waveform()),
         "map" => Type::Forall(
             vec![0, 1],
             Box::new(Type::function(
@@ -158,41 +152,37 @@ pub fn signature(name: &str) -> Option<Type> {
                 a(),
             )),
         ),
-        "fixed" => Type::function(vec![Type::List(Box::new(Type::float()))], Type::waveform()),
+        "fixed" => Type::function(
+            vec![Type::List(Box::new(Type::float()))],
+            Type::non_const_wave(),
+        ),
         // Curried built-ins: applying the first argument list returns the
         // filter, which threads seqs through.
-        "fin" => Type::function(vec![Type::float_or_waveform()], waveform_filter()),
+        "fin" => Type::function(vec![Type::waveform()], waveform_filter()),
         "seq" => Type::function(
-            vec![Type::float_or_waveform()],
-            Type::function(vec![Type::float_or_waveform()], Type::seq()),
+            vec![Type::waveform()],
+            Type::function(vec![Type::waveform()], Type::seq()),
         ),
-        "unseq" => Type::function(
-            vec![],
-            Type::function(vec![Type::seq()], Type::float_or_waveform()),
-        ),
+        "unseq" => Type::function(vec![], Type::function(vec![Type::seq()], Type::waveform())),
         "filter" => Type::function(
             vec![
-                Type::List(Box::new(Type::float_or_waveform())),
-                Type::List(Box::new(Type::float_or_waveform())),
+                Type::List(Box::new(Type::waveform())),
+                Type::List(Box::new(Type::waveform())),
             ],
             waveform_filter(),
         ),
         "reset" => Type::function(
-            vec![Type::float_or_waveform(), Type::float_or_waveform()],
-            Type::waveform(),
+            vec![Type::waveform(), Type::waveform()],
+            Type::non_const_wave(),
         ),
         "alt" => Type::function(
-            vec![
-                Type::float_or_waveform(),
-                Type::float_or_waveform(),
-                Type::float_or_waveform(),
-            ],
-            Type::waveform(),
+            vec![Type::waveform(), Type::waveform(), Type::waveform()],
+            Type::non_const_wave(),
         ),
         "capture" => Type::function(vec![Type::String], waveform_filter()),
         "__chord" => Type::function(
-            vec![Type::List(Box::new(Type::float_or_waveform()))],
-            Type::waveform(),
+            vec![Type::List(Box::new(Type::waveform()))],
+            Type::non_const_wave(),
         ),
         // Every element must be a seq, and a fold of seqs is itself a seq — the
         // empty fold being the empty seq, `\`'s identity.
@@ -311,7 +301,7 @@ mod tests {
             Expr::float(2.0)
         } else if atom == Sort::NON_INT_ONLY {
             Expr::float(0.5)
-        } else if atom == Sort::WAVE {
+        } else if atom == Sort::NON_CONST_WAVE {
             Expr::Waveform(Waveform::Time(()))
         } else if atom == Sort::SEQ {
             // A realistic seq: offset linear in time (`time - 1`), so
@@ -337,7 +327,7 @@ mod tests {
             } else {
                 Sort::NON_INT_ONLY
             }),
-            Expr::Waveform(_) => Some(Sort::WAVE),
+            Expr::Waveform(_) => Some(Sort::NON_CONST_WAVE),
             Expr::Seq { .. } => Some(Sort::SEQ),
             _ => None,
         }
@@ -404,7 +394,12 @@ mod tests {
         if rows.is_empty() {
             return;
         }
-        let atoms = [Sort::INT, Sort::NON_INT_ONLY, Sort::WAVE, Sort::SEQ];
+        let atoms = [
+            Sort::INT,
+            Sort::NON_INT_ONLY,
+            Sort::NON_CONST_WAVE,
+            Sort::SEQ,
+        ];
         for index in 0..atoms.len().pow(arity as u32) {
             let vector: Vec<Sort> = (0..arity)
                 .map(|position| atoms[(index / atoms.len().pow(position as u32)) % atoms.len()])

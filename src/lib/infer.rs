@@ -87,7 +87,7 @@ where
             }];
             let ty = checker.infer(&mut context, &mut psi, expr);
             // The runtime requires a pair whose elements are waveform values.
-            let expected = Type::Tuple(vec![Type::float_or_waveform(), Type::float_or_waveform()]);
+            let expected = Type::Tuple(vec![Type::waveform(), Type::waveform()]);
             checker.subtype_check(&ty, &expected, &expr.span);
         }
     }
@@ -640,8 +640,13 @@ impl<S: Clone> Infer<S> {
         if tabulated == 0 {
             return None;
         }
-        let full: &[Sort] = &[Sort::INT, Sort::NON_INT_ONLY, Sort::WAVE, Sort::SEQ];
-        let coarse: &[Sort] = &[Sort::FLOAT_OR_WAVE, Sort::SEQ];
+        let full: &[Sort] = &[
+            Sort::INT,
+            Sort::NON_INT_ONLY,
+            Sort::NON_CONST_WAVE,
+            Sort::SEQ,
+        ];
+        let coarse: &[Sort] = &[Sort::WAVE, Sort::SEQ];
         let fits = |set: &[Sort]| {
             set.len()
                 .checked_pow(u32::try_from(tabulated).ok()?)
@@ -1740,15 +1745,15 @@ impl<S: Clone> Infer<S> {
                             Type::ground(Sort::NON_INT_ONLY)
                         }
                     }
-                    _ => Type::waveform(),
+                    _ => Type::non_const_wave(),
                 };
                 self.app_subtype(psi, ty, None)
             }
             Expr::Seq { offset, waveform } => {
                 let offset_ty = self.infer(context, &mut Vec::new(), offset);
-                self.subtype_check(&offset_ty, &Type::float_or_waveform(), &offset.span);
+                self.subtype_check(&offset_ty, &Type::waveform(), &offset.span);
                 let waveform_ty = self.infer(context, &mut Vec::new(), waveform);
-                self.subtype_check(&waveform_ty, &Type::float_or_waveform(), &waveform.span);
+                self.subtype_check(&waveform_ty, &Type::waveform(), &waveform.span);
                 self.app_subtype(psi, Type::seq(), None)
             }
             // AT-Var: look the variable up and apply its type to Ψ.
@@ -2411,10 +2416,7 @@ mod tests {
     fn argument_mismatch_points_at_argument() {
         let input = "sine(\"a\", 0)";
         let warnings = check(input);
-        assert_eq!(
-            messages(&warnings),
-            ["expected float or waveform, found string"]
-        );
+        assert_eq!(messages(&warnings), ["expected waveform, found string"]);
         let start = input.find("\"a\"").unwrap();
         assert_eq!(warnings[0].range(), Some(start..start + 3));
     }
@@ -2442,7 +2444,7 @@ mod tests {
         assert_warns(
             "sine(440, y = 1)",
             &[
-                "missing parameter of type float or waveform",
+                "missing parameter of type waveform",
                 "no named parameter \"y\"",
             ],
         );
@@ -2472,10 +2474,7 @@ mod tests {
         assert_clean("seq(0)(sine(440, 0)) \\ 1");
         // A non-seq on the left of `\` is a genuine runtime error (sine
         // may fold to a constant, hence the union in the message).
-        assert_warns(
-            "sine(440, 0) \\ 1",
-            &["expected seq, found float or waveform"],
-        );
+        assert_warns("sine(440, 0) \\ 1", &["expected seq, found waveform"]);
         // Arithmetic threads a seq operand through (`binary_op`'s seq
         // rows), so seq-ness survives to the following `\`.
         assert_clean("(seq(0)(sine(440, 0)) * 0.5) \\ 1");
@@ -2489,12 +2488,9 @@ mod tests {
         assert_warns("seq(0)(1) + seq(0)(2)", &["cannot combine two seqs with +"]);
         // `unary_op` has no Seq arm; the warning pinpoints the argument
         // with the union of the domains the table does accept.
-        assert_warns("-seq(0)(1)", &["expected float or waveform, found seq"]);
+        assert_warns("-seq(0)(1)", &["expected waveform, found seq"]);
         // `reset`'s trigger accepts constants and waveforms, not seqs.
-        assert_warns(
-            "reset(seq(0)(1), 1)",
-            &["expected float or waveform, found seq"],
-        );
+        assert_warns("reset(seq(0)(1), 1)", &["expected waveform, found seq"]);
         // `unfold`'s count is hard-checked integral at runtime.
         assert_warns("unfold(fn(x) => x, 0, 2.5)", &["expected int, found float"]);
         // `nth`'s index is hard-checked integral at runtime.
@@ -2530,7 +2526,7 @@ mod tests {
         // per-position freeze accepted this call.)
         assert_warns(
             "let double = fn(x) => x + x in double(seq(0)(1))",
-            &["expected float or waveform, found seq"],
+            &["expected waveform, found seq"],
         );
         // Two definite seqs get the dedicated diagnosis, same as the
         // operator itself would.
@@ -2628,7 +2624,7 @@ mod tests {
         // and exp requires one.
         assert_warns(
             "map(exp, [sine(440, 0)])",
-            &["expected [float], found [float or waveform]"],
+            &["expected [float], found [waveform]"],
         );
         // Ground containment still passes what it should.
         assert_clean("exp(2) + sine(440, 0)");
@@ -2663,8 +2659,7 @@ mod tests {
         // as is a contract the guarantees escape.
         assert!(infer.join_lower(id, Sort::SEQ).is_ok());
         assert!(infer.join_lower(id, Sort::SEQ.union(Sort::INT)).is_err());
-        assert!(infer.meet_upper(id, Sort::WAVE_OR_SEQ).is_ok());
-        assert!(infer.meet_upper(id, Sort::WAVE).is_err());
+        assert!(infer.meet_upper(id, Sort::NON_CONST_WAVE).is_err());
     }
 
     // Selection against a variable that receives the arrow's own result
@@ -2761,7 +2756,7 @@ mod tests {
         );
         assert_eq!(
             messages(&warnings),
-            ["expected (float or waveform, float or waveform), found (float or waveform, string)"]
+            ["expected (waveform, waveform), found (waveform, string)"]
         );
     }
 
@@ -2899,7 +2894,7 @@ mod tests {
             "0.5"
         } else if !sort.intersect(Sort::INT).is_empty() {
             "2"
-        } else if !sort.intersect(Sort::WAVE).is_empty() {
+        } else if !sort.intersect(Sort::NON_CONST_WAVE).is_empty() {
             "time"
         } else {
             "(time | seq(time - 1))"
@@ -2914,7 +2909,7 @@ mod tests {
             } else {
                 Sort::NON_INT_ONLY
             }),
-            Expr::Waveform(_) => Some(Sort::WAVE),
+            Expr::Waveform(_) => Some(Sort::NON_CONST_WAVE),
             Expr::Seq { .. } => Some(Sort::SEQ),
             _ => None,
         }

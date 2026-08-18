@@ -805,7 +805,7 @@ mod tests {
         assert_eq!(diagnostics[0].severity, Severity::Error);
         assert_eq!(
             diagnostics[0].to_string(),
-            "1:6: expected float or waveform, found string"
+            "1:6: expected waveform, found string"
         );
         assert_eq!(diagnostics[0].program_range, Some(5..8));
         let diagnostics = set
@@ -815,7 +815,7 @@ mod tests {
         assert_eq!(diagnostics[0].severity, Severity::Error);
         assert_eq!(
             diagnostics[0].to_string(),
-            "1:6: expected float or waveform, found string"
+            "1:6: expected waveform, found string"
         );
 
         // Warnings mode: the same finding reports as a warning, first, and
@@ -828,7 +828,7 @@ mod tests {
         assert_eq!(diagnostics[0].severity, Severity::Warning);
         assert_eq!(
             diagnostics[0].to_string(),
-            "1:6: expected float or waveform, found string"
+            "1:6: expected waveform, found string"
         );
         assert_eq!(diagnostics[1].severity, Severity::Error);
 
