@@ -221,7 +221,7 @@ impl Type {
     }
 
     /// Any numeric value.
-    pub fn number() -> Type {
+    pub fn numeric() -> Type {
         Type::ground(Sort::TOP)
     }
 

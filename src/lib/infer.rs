@@ -50,7 +50,7 @@ pub enum Expectation {
 }
 
 /// Checks `expr` under `bindings`, resolving `open`/`use` through `resolve`,
-/// and returns the warnings found.
+/// and returns the errors found.
 ///
 /// The signature mirrors [`crate::eval::evaluate`]; `resolve` should behave
 /// identically to the resolver evaluation uses.
@@ -64,40 +64,7 @@ where
     F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
     S: Clone,
 {
-    check_program_impl(false, resolve, bindings, expr, expectation)
-}
-
-/// Checks `expr` under the strict policy — the gate's preview: ground
-/// sorts judged by containment, selection by atom coverage, flows into
-/// unsolved refinement variables still recorded rather than judged (their
-/// final judgment is deferred). Used to measure the strict residue; not
-/// yet wired to evaluation.
-pub fn check_program_strict<'a, M, S, F>(
-    resolve: F,
-    bindings: &'a [SourceBinding<M, S>],
-    expr: &SourceExpr<M, S>,
-    expectation: Option<Expectation>,
-) -> Vec<Error<S>>
-where
-    F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
-    S: Clone,
-{
-    check_program_impl(true, resolve, bindings, expr, expectation)
-}
-
-fn check_program_impl<'a, M, S, F>(
-    strict: bool,
-    resolve: F,
-    bindings: &'a [SourceBinding<M, S>],
-    expr: &SourceExpr<M, S>,
-    expectation: Option<Expectation>,
-) -> Vec<Error<S>>
-where
-    F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
-    S: Clone,
-{
     let mut checker = Infer::new();
-    checker.strict = strict;
     let mut context = Vec::new();
     let mut memo = HashMap::new();
     checker.build_context(&resolve, bindings, &mut context, &mut memo);
@@ -173,8 +140,8 @@ enum Selection {
     /// No conjunct has the frame's shape; selection does not apply, and callers
     /// fall back to plain conjunct subtyping.
     NoMatchingRows,
-    /// Conjuncts match the frame's shape but none accepts the arguments — a
-    /// definite violation (the runtime has no matching arm).
+    /// Conjuncts match the frame's shape but none accepts the arguments —
+    /// the runtime has no matching arm.
     NoApplicableRow,
 }
 
@@ -194,11 +161,6 @@ struct Infer<S> {
     /// The undo journal: every solver step since the start of the check,
     /// so failed attempts roll back by popping (see `mark`/`rollback`).
     journal: Vec<Undo>,
-    /// Strict mode: judge ground sorts by containment and selection by
-    /// atom coverage, the gate's policy; lenient mode warns only on
-    /// definite violations. See "Toward a sound configuration" in
-    /// `docs/types-design.md`.
-    strict: bool,
     warnings: Vec<Error<S>>,
 }
 
@@ -234,7 +196,6 @@ impl<S: Clone> Infer<S> {
             supply: 0,
             refs: Vec::new(),
             journal: Vec::new(),
-            strict: false,
             warnings: Vec::new(),
         }
     }
@@ -312,27 +273,21 @@ impl<S: Clone> Infer<S> {
         }
     }
 
-    /// Records a guarantee flowing into a refinement variable; fails when
-    /// the grown guarantees conflict with the contracts already imposed
-    /// (definitely under lenient, by escaping them under strict). Bounds
-    /// only tighten, so the conflict is final — checking at both mutation
-    /// sites keeps every variable's bounds consistent continuously, with
-    /// no deferred re-validation pass.
+    /// Records a guarantee flowing into a refinement variable; fails when the
+    /// grown guarantees escape the contracts already imposed. Bounds only
+    /// tighten, so the conflict is final — checking at both mutation sites
+    /// keeps every variable's bounds consistent continuously, with no deferred
+    /// re-validation pass.
     fn join_lower(&mut self, id: u32, sort: Sort) -> Result<(), ()> {
         let var = self.refs[id as usize];
         let joined = var.lower.union(sort);
         if joined == var.lower {
             return Ok(());
         }
-        if let Some(upper) = var.upper {
-            let consistent = if self.strict {
-                joined.is_subset(upper)
-            } else {
-                !joined.intersect(upper).is_empty()
-            };
-            if !consistent {
-                return Err(());
-            }
+        if let Some(upper) = var.upper
+            && !joined.is_subset(upper)
+        {
+            return Err(());
         }
         self.journal.push(Undo::Bounds(id, var));
         self.refs[id as usize].lower = joined;
@@ -348,14 +303,8 @@ impl<S: Clone> Infer<S> {
             return Err(());
         }
         // Guarantees only grow and contracts only shrink, so a lower bound
-        // conflicting with the met contract is a final violation: escape
-        // under strict, disjointness under lenient.
-        let consistent = if self.strict {
-            var.lower.is_subset(met)
-        } else {
-            var.lower.is_empty() || !var.lower.intersect(met).is_empty()
-        };
-        if !consistent {
+        // escaping the met contract is a final violation.
+        if !var.lower.is_subset(met) {
             return Err(());
         }
         if var.upper != Some(met) {
@@ -365,31 +314,28 @@ impl<S: Clone> Infer<S> {
         Ok(())
     }
 
-    /// Checks that a found numeric may satisfy an expected numeric — the
-    /// definite-violation rule, warn iff may(found) ∩ contract(expected) = ∅ —
-    /// then records the flows: the found sort joins the expected side's
-    /// guarantees, and the expected side's contract bounds the found side.
+    /// Checks that a found numeric satisfies an expected numeric — a ground
+    /// sort by containment, may(found) ⊆ contract(expected); an unsolved
+    /// variable by its guarantees so far, with the full judgment deferred to
+    /// its recorded contracts — then records the flows: the found side's
+    /// definite sort joins the expected side's guarantees, and the expected
+    /// side's contract bounds the found side.
     fn numeric_subtype(&mut self, found: &Refinement, expected: &Refinement) -> Result<(), ()> {
         let may = self.may_of(found);
         let contract = self.contract_of(expected);
-        match (self.strict, found) {
-            // Lenient: warn only on definite violations.
-            (false, _) => {
-                if may.intersect(contract).is_empty() {
-                    return Err(());
-                }
-            }
-            // Strict, ground: containment, the gate's policy.
-            (true, Refinement::Ground(_)) => {
+        match found {
+            // A ground sort is judged by containment.
+            Refinement::Ground(_) => {
                 if !may.is_subset(contract) {
                     return Err(());
                 }
             }
-            // Strict, unsolved: record rather than judge — the guarantees
-            // seen so far under-approximate the final ones, so only a
-            // violation by the current lower bound is final (lower bounds
-            // only grow). The full judgment is deferred.
-            (true, Refinement::Var(id)) => {
+            // An unsolved variable is recorded rather than judged — the
+            // guarantees seen so far under-approximate the final ones, so only
+            // a violation by the current lower bound is final (lower bounds
+            // only grow). The full judgment is deferred to the recorded
+            // contracts.
+            Refinement::Var(id) => {
                 if !self.refs[*id as usize].lower.is_subset(contract) {
                     return Err(());
                 }
@@ -911,9 +857,8 @@ impl<S: Clone> Infer<S> {
                 let instance = self.instantiate(vars, (**body).clone());
                 self.subtype(&instance, &b)
             }
-            // The definite-violation rule: warn only when the found
-            // sort is disjoint from the expected contract, recording
-            // guarantee and contract flows otherwise.
+            // Containment judgment plus guarantee and contract flows;
+            // see `numeric_subtype`.
             (Type::Numeric(found), Type::Numeric(expected)) => {
                 self.numeric_subtype(found, expected)
             }
@@ -1229,22 +1174,22 @@ impl<S: Clone> Infer<S> {
         }
     }
 
-    /// Selects from an intersection of arrows against one frame —
-    /// Freeman's `apptype`, Xue et al.'s applicative subtyping `A ≪ S`
-    /// with the frame as the selector:
+    /// Selects from an intersection of arrows against one frame — Freeman's
+    /// `apptype`, Xue et al.'s applicative subtyping `A ≪ S` with the frame as
+    /// the selector:
     ///
-    /// - the first *definitely* applicable conjunct supplies the result:
-    ///   each numeric argument's sort contained in the domain, each
-    ///   structural argument a subtype of it (table order is
-    ///   most-specific-first, mirroring the runtime match arms);
-    /// - otherwise the *possibly* applicable conjuncts (sorts intersect)
-    ///   contribute the join of their results, silently;
-    /// - no conjunct at all is a definite violation: the runtime has no
-    ///   matching arm.
+    /// - the first conjunct that applies outright supplies the result: each
+    ///   numeric argument's sort contained in the domain, each structural
+    ///   argument a subtype of it (table order is most-specific-first,
+    ///   mirroring the runtime match arms);
+    /// - otherwise coverage decides (`select_by_atoms`): every atom combination
+    ///   of the arguments must have an accepting row, and the covering rows'
+    ///   results join;
+    /// - no coverage means the runtime has no matching arm: a rejection.
     ///
-    /// Serves elimination and checking alike: `app_subtype` selects with a
-    /// real Ψ frame, and `subtype` selects with a pseudo-frame built from
-    /// an expected arrow's parameters.
+    /// Serves elimination and checking alike: `app_subtype` selects with a real
+    /// Ψ frame, and `subtype` selects with a pseudo-frame built from an
+    /// expected arrow's parameters.
     fn select_core(&mut self, conjuncts: &[Type], frame: &Frame<S>) -> Selection {
         // The argument sorts. Dynamic and unsolved metas may be any
         // numeric; a structural argument (list, function, ...) has no sort
@@ -1279,7 +1224,7 @@ impl<S: Clone> Infer<S> {
         // commits (and is rolled back when a later position rejects it).
         for row in &rows {
             let mark = self.mark();
-            if self.row_applies(row, &sorts, frame, true).is_some() {
+            if self.row_applies(row, &sorts, frame).is_some() {
                 self.record_selection_contracts(frame, &broad);
                 let Type::Function { result, .. } = row else {
                     unreachable!("rows are arrows");
@@ -1288,40 +1233,8 @@ impl<S: Clone> Infer<S> {
             }
             self.rollback(mark);
         }
-        // Strict: atom-decomposition coverage instead of the possible
-        // phase.
-        if self.strict {
-            return self.select_by_atoms(&rows, &sorts, frame);
-        }
-        // Otherwise every possibly-applicable row contributes. Structural
-        // solving rolls back — no single row was chosen to commit to — so
-        // each row's result is resolved before the rollback discards it.
-        let mut result: Option<Type> = None;
-        for row in &rows {
-            let mark = self.mark();
-            let applies = self.row_applies(row, &sorts, frame, false);
-            let row_result = applies.as_ref().map(|_| {
-                let Type::Function { result, .. } = row else {
-                    unreachable!("rows are arrows");
-                };
-                result.apply(&self.subst)
-            });
-            self.rollback(mark);
-            let (Some(_), Some(row_result)) = (applies, row_result) else {
-                continue;
-            };
-            result = Some(match result {
-                None => row_result,
-                Some(previous) => self.join(previous, row_result, &frame.span),
-            });
-        }
-        match result {
-            Some(result) => {
-                self.record_selection_contracts(frame, &broad);
-                Selection::Selected(result)
-            }
-            None => Selection::NoApplicableRow,
-        }
+        // Otherwise, atom-decomposition coverage.
+        self.select_by_atoms(&rows, &sorts, frame)
     }
 
     /// The per-position union of every row's domain sort (⊤ where a row's
@@ -1359,7 +1272,6 @@ impl<S: Clone> Infer<S> {
         row: &Type,
         sorts: &[Option<Sort>],
         frame: &Frame<S>,
-        definite: bool,
     ) -> Option<Vec<Sort>> {
         let Type::Function {
             positional, named, ..
@@ -1369,7 +1281,7 @@ impl<S: Clone> Infer<S> {
         };
         let mut domains = Vec::with_capacity(positional.len());
         for ((sort, domain), (argument, _)) in sorts.iter().zip(positional).zip(&frame.positional) {
-            let (fits, domain) = self.position_fits(argument, *sort, domain, definite);
+            let (fits, domain) = self.position_fits(argument, *sort, domain);
             domains.push(domain);
             if !fits {
                 return None;
@@ -1385,19 +1297,21 @@ impl<S: Clone> Infer<S> {
                     };
                     // TODO record named-argument contracts the way
                     // `record_selection_contracts` does for positional ones.
-                    let (fits, _) = self.position_fits(argument, sort, domain, definite);
+                    let (fits, _) = self.position_fits(argument, sort, domain);
                     if !fits {
                         return None;
                     }
                 }
-                None if definite => return None,
-                None => {}
+                // An omitted argument takes the default, whose sort the
+                // rows do not record; coverage (`select_by_atoms`) is the
+                // path that can accept it.
+                None => return None,
             }
         }
         Some(domains)
     }
 
-    /// Strict selection by atom coverage: a runtime value inhabits exactly
+    /// Selection by atom coverage: a runtime value inhabits exactly
     /// one atom, so a call is definitely covered when every combination of
     /// its arguments' atoms has a row that accepts it; the result is the
     /// join of the covering rows' results, and each argument's contract is
@@ -1407,8 +1321,7 @@ impl<S: Clone> Infer<S> {
     /// Ground numeric arguments decompose into their atoms. Unsolved
     /// refinement variables and metas defer — they pass here and their
     /// judgment happens where their bounds are final — as does `Dynamic`
-    /// (the recovery type passes everything, imposing nothing; under the
-    /// lenient flip it amplified every upstream failure into a cascade).
+    /// (the recovery type passes everything, imposing nothing).
     /// Structural arguments constrain per row by subtyping.
     fn select_by_atoms(
         &mut self,
@@ -1451,7 +1364,7 @@ impl<S: Clone> Infer<S> {
         let mut candidates: Vec<Candidate> = Vec::new();
         for row in rows {
             let mark = self.mark();
-            let applies = self.row_applies_strict(row, sorts, frame);
+            let applies = self.row_admits(row, sorts, frame);
             let candidate = applies.map(|domains| {
                 let Type::Function { result, .. } = row else {
                     unreachable!("rows are arrows");
@@ -1512,12 +1425,12 @@ impl<S: Clone> Infer<S> {
         }
     }
 
-    /// Whether a row can participate in strict coverage at all: structural
-    /// arguments must subtype their domains, supplied named arguments must
-    /// definitely fit theirs (omitted ones defer), and each position's
-    /// contract sort is reported as in `row_applies`. Numeric positions are
-    /// not judged here — coverage judges them atom by atom.
-    fn row_applies_strict(
+    /// Whether a row can participate in coverage at all: structural arguments
+    /// must subtype their domains, supplied named arguments must fit theirs
+    /// (omitted ones defer), and each position's contract sort is reported as
+    /// in `row_applies`. Numeric positions are not judged here — coverage
+    /// judges them atom by atom.
+    fn row_admits(
         &mut self,
         row: &Type,
         sorts: &[Option<Sort>],
@@ -1560,7 +1473,7 @@ impl<S: Clone> Infer<S> {
                     Type::Dynamic | Type::Meta(_) => Some(Sort::TOP),
                     _ => None,
                 };
-                let (fits, _) = self.position_fits(argument, sort, domain, true);
+                let (fits, _) = self.position_fits(argument, sort, domain);
                 if !fits {
                     return None;
                 }
@@ -1577,18 +1490,12 @@ impl<S: Clone> Infer<S> {
         argument: &Type,
         sort: Option<Sort>,
         domain: &Type,
-        definite: bool,
     ) -> (bool, Sort) {
         let resolved = self.resolve(domain);
         match (sort, &resolved) {
             (Some(sort), Type::Numeric(rep)) => {
                 let domain = self.may_of(rep);
-                let fits = if definite {
-                    sort.is_subset(domain)
-                } else {
-                    !sort.intersect(domain).is_empty()
-                };
-                (fits, domain)
+                (sort.is_subset(domain), domain)
             }
             // A structural argument never fits a numeric domain.
             (None, Type::Numeric(_)) => (false, Sort::TOP),
@@ -2402,38 +2309,6 @@ mod tests {
         check_with_expectation(input, None)
     }
 
-    /// Like `check`, under the strict policy.
-    fn check_strict(input: &str) -> Vec<Error<()>> {
-        let bindings = test_prelude();
-        let expr = parse_program::<u32, _>(input, ()).unwrap();
-        check_program_strict(
-            |_: &[String]| Err(Error::new("no modules".to_string())),
-            &bindings,
-            &expr,
-            None,
-        )
-    }
-
-    fn assert_strict_clean(input: &str) {
-        let warnings = check_strict(input);
-        assert_eq!(
-            messages(&warnings),
-            Vec::<String>::new(),
-            "strict warnings for {:?}",
-            input
-        );
-    }
-
-    fn assert_strict_warns(input: &str, expected: &[&str]) {
-        let warnings = check_strict(input);
-        assert_eq!(
-            messages(&warnings),
-            expected,
-            "for strict input {:?}",
-            input
-        );
-    }
-
     fn check_with_expectation(input: &str, expectation: Option<Expectation>) -> Vec<Error<()>> {
         let bindings = test_prelude();
         let expr = parse_program::<u32, _>(input, ()).unwrap();
@@ -2745,31 +2620,31 @@ mod tests {
         );
     }
 
-    // The strict policy: ground sorts judged by containment, selection by
-    // atom coverage, unsolved-variable flows recorded and deferred.
+    // The checking policy: ground sorts judged by containment, selection
+    // by atom coverage, unsolved-variable flows recorded and deferred.
     #[test]
-    fn strict_mode_judgments() {
-        // Possibly-wrong becomes an error: sine may fold to a float, and
-        // exp requires one — lenient stays silent here.
-        assert_strict_warns(
+    fn containment_judgments() {
+        // A possibly-wrong value is an error: sine may fold to a float,
+        // and exp requires one.
+        assert_warns(
             "map(exp, [sine(440, 0)])",
             &["expected [float], found [float or waveform]"],
         );
         // Ground containment still passes what it should.
-        assert_strict_clean("exp(2) + sine(440, 0)");
+        assert_clean("exp(2) + sine(440, 0)");
         // Atom coverage: no single row contains waveform-or-seq, but the
         // waveform and seq atoms are covered by different rows.
-        assert_strict_clean("(if true then time else seq(0)(1)) * 1");
+        assert_clean("(if true then time else seq(0)(1)) * 1");
         // A definitely-uncovered atom still rejects.
-        assert_strict_warns("seq(0)(1) + seq(0)(2)", &["cannot combine two seqs with +"]);
+        assert_warns("seq(0)(1) + seq(0)(2)", &["cannot combine two seqs with +"]);
         // Unconstrained parameters defer: the base pass records contracts
         // instead of judging ⊤, and the tabulated rows judge per atom.
-        assert_strict_clean("let f = fn(x) => x + 1 in f(time)");
+        assert_clean("let f = fn(x) => x + 1 in f(time)");
         // Dynamic passes without imposing or cascading.
-        assert_strict_clean("debug(1) + 1");
+        assert_clean("debug(1) + 1");
         // A guarantee already seen is judged, deferred or not: the default
         // flows into x before the body's seq contract.
-        assert_strict_warns("fn(x = 100) => x \\ 1", &["expected seq, found int"]);
+        assert_warns("fn(x = 100) => x \\ 1", &["expected seq, found int"]);
     }
 
     // Bound consistency is checked where guarantees and contracts meet a
@@ -2779,30 +2654,17 @@ mod tests {
     // conflict final when first seen.
     #[test]
     fn bound_consistency_at_flow_sites() {
-        let mut lenient: Infer<()> = Infer::new();
-        let Refinement::Var(id) = lenient.fresh_refinement() else {
+        let mut infer: Infer<()> = Infer::new();
+        let Refinement::Var(id) = infer.fresh_refinement() else {
             unreachable!("fresh refinements are variables");
         };
-        assert!(lenient.meet_upper(id, Sort::SEQ).is_ok());
-        // A disjoint guarantee is a definite conflict; a partial overlap
-        // joins (the value may still be the seq).
-        assert!(lenient.join_lower(id, Sort::FLOAT).is_err());
-        assert!(lenient.join_lower(id, Sort::SEQ.union(Sort::INT)).is_ok());
-        // A contract shrinking away from every guarantee is definite too.
-        assert!(lenient.meet_upper(id, Sort::INT).is_err());
-
-        let mut strict: Infer<()> = Infer::new();
-        strict.strict = true;
-        let Refinement::Var(id) = strict.fresh_refinement() else {
-            unreachable!("fresh refinements are variables");
-        };
-        assert!(strict.meet_upper(id, Sort::SEQ).is_ok());
-        // Strict rejects any guarantee escaping the contract, overlap or
-        // not, and any contract the guarantees escape.
-        assert!(strict.join_lower(id, Sort::SEQ).is_ok());
-        assert!(strict.join_lower(id, Sort::SEQ.union(Sort::INT)).is_err());
-        assert!(strict.meet_upper(id, Sort::WAVE_OR_SEQ).is_ok());
-        assert!(strict.meet_upper(id, Sort::WAVE).is_err());
+        assert!(infer.meet_upper(id, Sort::SEQ).is_ok());
+        // A guarantee escaping the contract is rejected, overlap or not,
+        // as is a contract the guarantees escape.
+        assert!(infer.join_lower(id, Sort::SEQ).is_ok());
+        assert!(infer.join_lower(id, Sort::SEQ.union(Sort::INT)).is_err());
+        assert!(infer.meet_upper(id, Sort::WAVE_OR_SEQ).is_ok());
+        assert!(infer.meet_upper(id, Sort::WAVE).is_err());
     }
 
     // Selection against a variable that receives the arrow's own result
@@ -2810,14 +2672,14 @@ mod tests {
     // row — the float seed's doubled results stay floats, not rejections.
     #[test]
     fn fixed_point_selection() {
-        assert_strict_clean("unfold(fn(n) => n * 2, 65.41, 9)");
         assert_clean("unfold(fn(n) => n * 2, 65.41, 9)");
-        assert_strict_clean("reduce(fn(acc, x) => acc * 0.5, 2, [1, 2])");
+        assert_clean("unfold(fn(n) => n * 2, 65.41, 9)");
+        assert_clean("reduce(fn(acc, x) => acc * 0.5, 2, [1, 2])");
         // The fixed point keeps genuine sorts: a seq seed stays a seq through
         // doubling (`*` threads offsets), and a float seed's elements are
         // definitely not seqs.
-        assert_strict_clean("nth(0, unfold(fn(n) => n * 2, seq(0)(1), 9)) \\ 1");
-        assert_strict_warns(
+        assert_clean("nth(0, unfold(fn(n) => n * 2, seq(0)(1), 9)) \\ 1");
+        assert_warns(
             "nth(0, unfold(fn(n) => n * 2, 65.41, 9)) \\ 1",
             &["expected seq, found float"],
         );
@@ -3017,7 +2879,7 @@ mod tests {
     // .tuun source.
     /// The declared residue: value-level runtime errors the sort lattice
     /// cannot see (see "Toward a sound configuration" in the design doc).
-    /// On a strict-clean program, an eval error matching none of these
+    /// On a clean program, an eval error matching none of these
     /// classes is a soundness bug.
     fn declared_residue(message: &str) -> bool {
         [
@@ -3059,7 +2921,7 @@ mod tests {
     }
 
     /// The soundness theorem as a regression test, over the library corpus: no
-    /// strict-clean program may evaluate to an error outside the declared
+    /// clean program may evaluate to an error outside the declared
     /// residue. Covers every module as a program root, and every exported
     /// function applied once per table row at representative arguments — the
     /// tabulated analog of the builtin conformance test, checking result sorts
@@ -3096,10 +2958,10 @@ mod tests {
         let mut true_positives = 0;
         let mut residue = 0;
         // Every module as a program root: its bindings must evaluate, and
-        // strict checking must agree.
+        // checking must agree.
         for (path, bindings) in &parsed {
             let expr = parse_program::<u32, _>("0", 9999).unwrap();
-            let strict_clean = check_program_strict(
+            let clean = check_program(
                 |p: &[String]| diff_resolve(&prelude, &parsed, p),
                 bindings,
                 &expr,
@@ -3111,10 +2973,10 @@ mod tests {
                 bindings,
                 expr,
             );
-            if let (true, Err(error)) = (strict_clean, &evaluated) {
+            if let (true, Err(error)) = (clean, &evaluated) {
                 assert!(
                     declared_residue(error.message()),
-                    "soundness: module {} is strict-clean but evaluates to: {}",
+                    "soundness: module {} is clean but evaluates to: {}",
                     path,
                     error.message()
                 );
@@ -3123,7 +2985,7 @@ mod tests {
         }
         // Every exported function applied once per all-numeric table row.
         // The calls batch into one synthesized module per library module —
-        // one strict check and one evaluation for all of them — with a
+        // one check and one evaluation for all of them — with a
         // distinct source id per call for attribution.
         for (_, bindings) in &parsed {
             let mut checker: Infer<u32> = Infer::new();
@@ -3192,7 +3054,7 @@ mod tests {
             }
             calls += applied.len();
             let expr = parse_program::<u32, _>("0", 9999).unwrap();
-            let warnings = check_program_strict(
+            let warnings = check_program(
                 |p: &[String]| diff_resolve(&prelude, &parsed, p),
                 &extended,
                 &expr,
@@ -3219,7 +3081,7 @@ mod tests {
                     Err(error) => {
                         assert!(
                             flagged.contains(&id),
-                            "soundness: {:?} is strict-clean but evaluates to: {}",
+                            "soundness: {:?} is clean but evaluates to: {}",
                             text,
                             error.message()
                         );
@@ -3301,12 +3163,11 @@ mod tests {
         assert!(calls >= 40, "only {} programs checked", calls);
     }
 
-    /// Prints the strict-policy residue over the embedded library — the
-    /// measurement instrument for the gate (run with `--ignored
-    /// --nocapture`).
+    /// Prints the checker's findings over the embedded library (run with
+    /// `--ignored --nocapture`).
     #[test]
     #[ignore]
-    fn strict_report() {
+    fn library_report() {
         let prelude = test_prelude::<u32>();
         let mut parsed: Vec<(String, &str, Vec<SourceBinding<u32, u32>>)> = Vec::new();
         for (index, (path, content)) in modules::EMBEDDED_MODULES.iter().enumerate() {
@@ -3327,7 +3188,7 @@ mod tests {
         };
         let expr = parse_program::<u32, _>("0", 9999).unwrap();
         for (index, (path, content, bindings)) in parsed.iter().enumerate() {
-            let warnings = check_program_strict(&resolve, bindings, &expr, None);
+            let warnings = check_program(&resolve, bindings, &expr, None);
             let own: Vec<String> = warnings
                 .iter()
                 .filter(|warning| warning.source() == Some(index as u32))

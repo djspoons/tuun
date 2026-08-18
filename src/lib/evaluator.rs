@@ -372,7 +372,7 @@ impl Evaluator {
             ProgramKind::Waveform => infer::Expectation::Playable,
             ProgramKind::Keys => infer::Expectation::NoteFunction,
         };
-        infer::check_program_strict(
+        infer::check_program(
             |path| self.resolve(path),
             &bindings,
             &expr,
