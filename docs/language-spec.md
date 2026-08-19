@@ -4,22 +4,43 @@ Tuun expressions are a way of specifying Tuun waveforms. The [overview](overview
 
 Tuun expressions are a call-by-value functional programming language with a simple file-based module system.
 
-## Types and Patterns
+## Types and Sorts
 
 **Types** are not present in the concrete syntax, but if they were, we could imagine something like this:
 
 ```
-type ::= "float"
+type ::= "numeric(" sort ")"
        | "string"
        | "bool"
-       | type "->" type
+       | (type, ..., id = type, ...) "->" type
        | "(" type "," ... ")"
        | "[" type "]"
-       | "waveform"
-       | "seq"
+       | type_id
+       | "forall" type_id "." type
+       | type "and" type
+
 ```
 
-That is, Tuun includes a few of the usual base types along with function, tuple, and list types. It also includes two types specific to audio generation.
+That is, Tuun includes a few of the usual base types along with function, tuple, and list types. Functions take multiple positional and named arguments (distinct from tuples). Tuun includes polymorphic (or "generic") types as well as intersection types. Two things of note:
+
+ * Tuun uses intersection types to describe the behavior of overloaded functions, including  primitive arithmetic functions like `+`. An intersections is always formed from a set of function types that share the same "shape."
+ * Tuun uses refinements of the numeric type (that is, "sorts") to distinguish scalars (integers and floats) from waveforms (sequences of floats) and from sequenced waveforms.
+
+Sorts are fixed to the points on the following lattice:
+
+```text
+             ⊤  "some numeric"
+            /  \
+     Waveform   Seq
+         |
+       Float
+        /  \
+      Int   NonInt
+```
+
+See [Type Inference](#type-inference) below.
+
+## Patterns, Bindings and Modules
 
 A Tuun **identifier** (or `id`) is an alphanumeric sequence that may also contain `_` and `#`. Identifiers start with an alphabetic character or `_`. An identifier consisting of only a single `_` may be bound but not referenced. Identifiers starting with two `_` are reserved for internal use.
 
@@ -29,27 +50,22 @@ pattern ::= id
           | "(" pattern "," ... ")"
 ```
 
-## Bindings and Modules
-
 A **binding** modifies the evaluation context by introducing one or more new identifiers into that context. A module is a set of bindings, usually contained in a single file.
 
 ```
 binding ::= pattern "=" expr
           | "open" id "." ... id
+          | "use" id "." ... id
 
 module  ::= binding ";" ...
 ```
-
 Bindings are evaluated in order, and subsequent bindings may refer to and shadow previous bindings.
 
-An `open` binding refers to another module. The bindings of that module are introduced in the current context but _not_ into modules that `open` the current module.
+An `open` binding refers to another module. The bindings of that module are introduced in the current context but _not_ into modules that `open` the current module. A `use` binding also refers to another modules
 
 
 <!--
 binding ::= ... "use" var "." ... var
-
-expr ::= ...
-     | var "." ... var
 -->
 
 <!--
@@ -70,6 +86,7 @@ expr ::= float
        | bool
        | "fn" "(" pattern "," ... "," id "=" expr "," ... ")" "=>" expr
        | id
+       | id "." ... id
        | expr "(" expr ")"
        | "(" expr "," ... ")"
        | "[" expr "," ... "]"
@@ -155,6 +172,13 @@ Many Tuun operators are overloaded to operate on floats, waveforms, and (where i
 
 
 
+## Type Inference
+
+<!--
+
+overloaded argument types must be disjoint?
+
+-->
 
 
 

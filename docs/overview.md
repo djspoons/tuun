@@ -286,16 +286,16 @@ Finally, we now can revisit our envelope example from above. It uses `seq` and `
       Aw = fn(dur) => linear(0.0, 1.0 / dur) | fin(time - dur) | seq(time - dur),
       Dw = fn(dur, level) => linear(1.0, (level - 1.0) / dur) | fin(time - dur) | seq(time - dur),
       Sw = fn(dur, level) => level | fin(time - dur) | seq(time - dur),
-      // N.B. that R is not seq, since it is assumed to be the last part of the envelope.
+      // N.B. that Rw is not seq, since it is assumed to be the last part of the envelope.
       Rw = fn(dur, level) => linear(level, -level / dur) | fin(time - dur),
       // Combine them to create a new filter:
       ADSR = fn(attack_dur, decay_dur, sustain_level, sustain_dur, release_dur) =>
-        fn(w) => w * <[Aw(attack_dur),
-                       Dw(decay_dur, sustain_level),
-                       Sw(sustain_dur, sustain_level),
-                       Rw(release_dur, sustain_level)]>,
+        fn(w) => w * (Aw(attack_dur)
+                      \ Dw(decay_dur, sustain_level)
+                      \ Sw(sustain_dur, sustain_level)
+                      \ Rw(release_dur, sustain_level)),
     in
-      $220 | ADSR(0.1, 0.5, 0.6, 2, 1)
+      square(220) | ADSR(0.1, 0.8, 0.6, 2, 1)
   </tuun-synth>
 </div>
 (If you want to use quartic instead of linear ramps, you'll just need to replace `linear` with a different waveform!)

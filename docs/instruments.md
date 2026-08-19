@@ -4,17 +4,20 @@ An instrument is a Tuun expression that produces a waveform. A common type of in
 
 <div class="container">
   <tuun-synth description="A very simple instrument" open='["std"]' expanded>
-    let
-      inst = fn(dur, freq_hz) => 
-        $freq_hz
-        | fin(time - dur)
-    in
-      // 1.75 seconds, middle C
-      inst(1.75, 261.63)
+    <script type="text/tuun">
+      let
+        inst = fn(dur, freq_hz) =>
+          $freq_hz
+          | fin(time - dur)
+      in
+        // 1.75 seconds, middle C
+        // equivalent to $261.63 | fin(time - 1.75)
+        inst(1.75, 261.63)
+    </script>
   </tuun-synth>
 </div>
 
-This is obviously one of the most primitive instruments possible, having only a single frequency and no variation to speak of. This document walks through a number of methods for developing instruments that build from this minimal example. For the instruments below, we'll often use the sounds of real, physical instruments as guides, but you can also use these techniques to experiment with novel sounds.
+This is obviously one of the most primitive instruments possible, having only a single frequency (and no variation to speak of). This document walks through a number of methods for developing instruments that build from this minimal example. For the instruments below, we'll often use the sounds of real, physical instruments as guides, but you can also use these techniques to experiment with novel sounds.
 
 There are also other ways of defining what it means to be an "instrument." See [MIDI instruments](#midi-instruments) below for another example.
 
@@ -46,7 +49,7 @@ It can also be useful to hear the same note repeated, while one or more paramete
       sliders='["vibrato_rate:6:2:10"]' open='["std"]' expanded>
     <script type="text/tuun">
       let
-        inst = fn(dur, freq_hz) => 
+        inst = fn(dur, freq_hz) =>
           sine(2 * pi * freq_hz, pow(2, 1/24) * $vibrato_rate)
           | fin(time - dur)
           | seq(time - dur)
@@ -74,7 +77,7 @@ One of the most common envelope shapes is called "ADSR" which is defined by the 
 <!-- cSpell:disable -->
 * **A**ttack (duration) - the length of time it takes the waveform to reach its initial peak in amplitude
 * **D**ecay (duration) - the length of time it takes a waveform to fall from that peak to its sustain level
-* **S**ustain (level) - the level of the sustain period, in relation to the initial peak
+* **S**ustain (level) - the level of the sustain period, as a fraction of its initial peak
 * **R**elease (duration) - the length of time it takes a waveform to fall from its sustain level to (near) silence
 <!-- cSpell:enable -->
 
@@ -88,11 +91,10 @@ Below are two samples from live instruments, along with plots of their amplitude
 | -- | ---------------            | ------  |
 | sample | <audio controls><source src="flute.wav" type="audio/wav">Your browser does not support the audio element.</audio> | <audio controls><source src="ukulele.wav" type="audio/wav">Your browser does not support the audio element.</audio> |
 | waveform | <img src="flute_envelope.png" style="width: 40vw;" /> | <img src="ukulele_envelope.png" style="width: 40vw;" />
-| attack   | 0.32 s | 0.01 s         | 
-| decay    | n/a    | 0.41 s         | 
-| sustain  | 0.0 db | ~15 db         |
-|  
-| release  | 0.18 s | ~2 s           |
+| attack         | 0.32 s | 0.01 s         |
+| decay          | n/a    | 0.41 s         |
+| sustain level  | 0.0 db | -15 db         |
+| release        | 0.18 s | ~2 s           |
 
 In this sample, the flute has relatively long attack but no decay: it's sustain level is the same as its initial peak. The ukulele, on the other hand, has a sharp attack and a moderately long decay followed by a very long release.
 
@@ -103,7 +105,11 @@ Since we're trying to match the sound of these particular samples, we'll use the
 The example below is configured with an envelope that matches the flute sample. See if you can adjust the sliders to get the instrument to more closely resemble the ukulele sample above. (This example uses `reset` to repeat a note every three seconds so you can easily hear the changes to the envelope.)
 
 <div class="container">
-  <tuun-synth open='["std"]' sliders='["attack_dur:0.32:0.0:1.0","decay_dur:0.0:0.0:1.0","sustain_level_db:0.0:-36.0:2.0","release_dur:0.18:0.0:2.0"]'>
+  <tuun-synth
+    description="Envelope example"
+    expanded
+    open='["std", "env.finseq"]'
+    sliders='["attack_dur:0.32:0.0:1.0","decay_dur:0.0:0.0:1.0","sustain_level_db:0.0:-36.0:2.0","release_dur:0.18:0.0:2.0"]'>
     <script type="text/tuun">
       let
         inst = fn(dur, freq_hz) => let
@@ -125,16 +131,19 @@ Besides for the amplitude envelope, the overtones are one of the more important 
 | -- | ---------------            | ------  |
 | spectrum | <img src="flute_spectrum.png" style="width: 40vw;" /> | <img src="ukulele_spectrum.png" style="width: 40vw;" />
 
+There are several different methods for adding overtones; we'll explore several below.
 
 ### Additive synthesis
 
+Additive synthesis is the creation of complex tones by combining simple oscillators, usually sine waves. Since [flutes are open at both ends](https://newt.phys.unsw.edu.au/jw/fluteacoustics.html), they produce all of the harmonics of a fundamental tone (not just the odd ones as in some other instruments). In this sample, the fundamental and the next five harmonics are most clearly audible.
 
-Since [flutes are open at both ends](https://newt.phys.unsw.edu.au/jw/fluteacoustics.html), they produce all of the harmonics (not just the odd ones). In this sample, the fundamental and the next five harmonics are most clearly audible.
-
-The example below using the amplitude envelope from above but adds in these harmonics, whose levels can be controlled by the sliders.
+The example below uses the amplitude envelope from above and adds in harmonics whose levels can be controlled by the sliders.
 
 <div class="container">
-  <tuun-synth description="Flute using additive synthesis" open='["std"]' sliders='["fundamental_db:-8.1:-60:6","second_harmonic_db:-11.6:-60:6","third_harmonic_db:-22.9:-60:6","fourth_harmonic_db:-31.7:-60:6","fifth_harmonic_db:-44.1:-60:6","sixth_harmonic_db:-47.8:-60:6"]'>
+  <tuun-synth
+    description="Flute using additive synthesis"
+    open='["std", "env.finseq"]'
+    sliders='["fundamental_db:-8.1:-60:6","second_harmonic_db:-11.6:-60:6","third_harmonic_db:-22.9:-60:6","fourth_harmonic_db:-31.7:-60:6","fifth_harmonic_db:-44.1:-60:6","sixth_harmonic_db:-47.8:-60:6"]'>
     <script type="text/tuun">
       let
         flute = fn(dur, freq_hz) => let
@@ -168,34 +177,84 @@ The example below using the amplitude envelope from above but adds in these harm
 
 ### Subtractive synthesis
 
-Subtractive synthesis was a popular technique used in many analog synthesizers in the 1970s and 1980s. Instead of _building up_ a complex sound by adding additional frequencies (as in additive synthesis), subtractive synthesis starts with a waveform rich in overtones and then _removes_ some of them using one or more filters.
+Subtractive synthesis became a popular technique in many analog synthesizers in the 1970s and 1980s. Instead of _building up_ a complex sound by adding additional frequencies (as in additive synthesis), subtractive synthesis starts with a waveform rich in overtones and then _removes_ some of them using one or more filters. Since oscillators were relatively expensive and filters can be implemented relatively cheaply both in analog and digital form, subtractive synthesis was a efficient way to produce a wide range of sounds.
 
+#### Oscillator types
+
+As noted above, flutes produce all of the harmonics, so we need to start with a waveform such as a **sawtooth** which also includes all of these harmonics. The following example builds up a sawtooth one harmonic at a time to show the transition from a single sine wave to a larger set of harmonics. Move the "harmonics" slider to the right to add those harmonics, one by one. 
+
+<div class="container">
+  <tuun-synth
+    description="Synthesized sawtooth oscillator"
+    expanded
+    open='["std"]'
+    sliders='["harmonics:1:1:20"]'>
+    <script type="text/tuun">
+      let
+        over = fn(freq_hz) => fn(n) => clamp01(harmonics - abs(n) + 1) * $(freq_hz * abs(n)) / n,
+        // Creates a "synthetic" sawtooth from its Fourier series
+        sawtooth = fn(freq_hz) => (2 / pi) * {map(over(freq_hz), [-1, 2, -3, 4, -5, 6, -7, 8, -9, 10, -11, 12, -13, 14, -15, 16, -17, 18, -19, 20])}
+      in
+        sawtooth(546)
+    </script>
+  </tuun-synth>
+</div>
+
+We can then use to to generate a flute instrument by applying an amplitude envelope and attenuating some of the low and high frequencies. The slider in this case still controls the number of harmonics, just as in the previous example. (Below we'll use an actual sawtooth waveform and control the filter parameters instead.)
+
+<div class="container">
+  <tuun-synth
+    description="Flute using &quot;subtractive&quot; synthesis; harmonics control"
+    open='["std", "env.finseq"]'
+    use='["filters.rbj"]'
+    sliders='["harmonics:10:1:20"]'>
+    <script type="text/tuun">
+      let
+        over = fn(freq_hz) => fn(n) => clamp01(harmonics - abs(n) + 1) * $(freq_hz * abs(n)) / n,
+        // Creates a "synthetic" sawtooth from its Fourier series
+        sawtooth = fn(freq_hz) => (2 / pi) * {map(over(freq_hz), [-1, 2, -3, 4, -5, 6, -7, 8, -9, 10, -11, 12, -13, 14, -15, 16, -17, 18, -19, 20])},
+        flute = fn(dur, freq_hz) =>
+          let
+            attack_dur = 0.27,
+            release_dur = 0.17,
+            sustain_dur = dur - attack_dur - release_dur,
+          in
+            sawtooth(freq_hz)
+            | rbj.lpf2(0.75, 1500)
+            | rbj.hpf(0.7, 650)
+            | ADSR(attack_dur, 0.0, 1.0, sustain_dur, release_dur)
+        in
+          reset($(1/3), flute(1.75, 546))
+    </script>
+  </tuun-synth>
+</div>
 
 <!-- Welsh's Synthesizer Cookbook -->
 
-The ukulele sample has a rich set of overtones.
-
-
-<!-- 
-#### Oscillator types
--->
+<!-- The ukulele sample has a rich set of overtones. -->
 
 #### Filters
 
-The flute sample can also be synthesized using subtractive synthesis. 
+Above, the example of a flute synthesized using a sawtooth oscillator "cheats" by decomposing that sawtooth into its components. This example uses a true sawtooth oscillator, which though defined in Tuun's standard library, is reproduced here. Note how there is only a single use of the `$` waveform combinator. (You can hear the full sawtooth again by turning the low-pass filter cutoff all the way up and high-pass filter cutoff all the way down.)
 
 <div class="container">
-  <tuun-synth open='["std"]' use='["filters.rbj"]'
-    sliders='["lpf_cutoff:1500:200:10000"]'>
+  <tuun-synth
+    description="Flute using subtractive synthesis; filter controls"
+    expanded
+    open='["std", "env.finseq"]'
+    use='["filters.rbj"]'
+    sliders='["low_pass_filter_Q:0.75293773:0.1:1.1","low_pass_filter_cutoff:0.43753:fn(x)=> 200 * pow(100, x)","high_pass_filter_Q:0.69140625:0.1:1.1","high_pass_filter_cutoff:0.41015625:fn(x)=> 100 * pow(100, x)"]'>
     <script type="text/tuun">
       let
+        sawtooth = fn(freq_hz) => (reset($freq_hz, -freq_hz * time) + 0.5) * 2,
         flute = fn(dur, freq_hz) => let
           attack_dur = 0.27,
           release_dur = 0.17,
           sustain_dur = dur - attack_dur - release_dur,
         in
           sawtooth(freq_hz)
-          | rbj.lpf(0.5, lpf_cutoff)
+          | rbj.lpf2(low_pass_filter_Q, low_pass_filter_cutoff)
+          | rbj.hpf(high_pass_filter_Q, high_pass_filter_cutoff)
           | ADSR(attack_dur, 0.0, 1.0, sustain_dur, release_dur)
       in
         reset($(1/3), flute(1.75, 546))
@@ -213,6 +272,7 @@ Frequency modulation (FM) and phase modulation (PM) are two related techniques f
 
 As noted above, the ukulele sample has a rich set of harmonic overtones, especially for the first part of the sample.
 
+<!--
 <div class="container">
   <tuun-synth description="PM-based ukulele" open='["std"]' >
     <script type="text/tuun">
@@ -223,7 +283,7 @@ As noted above, the ukulele sample has a rich set of harmonic overtones, especia
             D = 1,
             fc = freq_hz,
             fm = D/2 * freq_hz
-            //env = 
+            //env =
           in
             sine(2*pi * fc, I * sine(2*pi * fc, 0))
       in
@@ -231,11 +291,12 @@ As noted above, the ukulele sample has a rich set of harmonic overtones, especia
     </script>
   </tuun-synth>
 </div>
-
+-->
 
 
 Another example of a instrument that uses PM is a 1980s-style electric piano. Popularized by synthesizers such as the Yamaha DX7, this electric piano uses a combination of multiple phase modulated sine waves: the first to create the sustained vibrations of the strings, while the second is used to create the sharp, tinny sound of the hammer striking the string.
 
+<!--
 <div class="container">
   <tuun-synth description="Electric piano" open='["std"]' >
     <script type="text/tuun">
@@ -252,11 +313,11 @@ Another example of a instrument that uses PM is a 1980s-style electric piano. Po
     </script>
   </tuun-synth>
 </div>
+-->
 
 
 
-
-<!-- 
+<!--
 
 ## Low-frequency modulation
 
@@ -264,7 +325,7 @@ Another example of a instrument that uses PM is a 1980s-style electric piano. Po
 
 ### Filter envelopes
 
-## Secondary oscillators  
+## Secondary oscillators
 
 ### Octaves and de-tuning
 
