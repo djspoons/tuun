@@ -17,8 +17,8 @@ lpf = fn(Q, fc) =>
 
 // 24 db low-pass filter, aka 4-pole biquad filter
 lpf2 = fn(Q, fc) => fn(w) => w
-  | lpf(Q * 0.7654, fc) // Q = sqrt(2) * 0.5412
-  | lpf(Q * 1.8478, fc); // Q = sqrt(2) * 1.3065;
+  | lpf(Q * 0.7654, fc) // sqrt(2) * 0.5412
+  | lpf(Q * 1.8478, fc); // sqrt(2) * 1.3065
 
 
 hpf = fn(Q, fc) =>

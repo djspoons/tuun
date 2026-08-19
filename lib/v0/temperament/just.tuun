@@ -1,0 +1,25 @@
+open std;
+
+pythag = 
+  let
+    ratios = [1,
+                256/243,
+              9/8,
+                32/27,
+              81/64,
+              4/3,
+                729/512,
+              3/2,
+                6561/4096, //128/81,
+              27/16,
+                16/9,
+              243/128],
+    c_freq_hzs = unfold(fn(n) => n*2, 8.1758/1, 10),
+    //_ = debug("c_freq_hzs", c_freq_hzs),
+    lists = map(fn(c_freq_hz) => map(fn(ratio) => ratio * c_freq_hz, ratios), c_freq_hzs),
+    //_ = debug("lists", lists),
+    notes = concat(lists),
+    //_ = debug("notes", notes),
+    //_ = debug("len", len(notes)),
+  in
+    fn(k) => nth(k, notes);
