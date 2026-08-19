@@ -2693,6 +2693,28 @@ mod tests {
         );
     }
 
+    // Coverage (`select_by_atoms`): when no single row contains an
+    // argument's sort, its atoms decompose and every combination must
+    // find its own row.
+    #[test]
+    fn coverage_selection() {
+        // {W,S} spans the waveform and seq rows of `*`: accepted, and the
+        // covering rows' results join — the result is waveform-or-seq,
+        // not one row's claim, as `\`'s rejection then shows. (It may
+        // still be a seq, so no single argument is pinpointed.)
+        assert_clean("(if true then time else seq(0)(1)) * 2");
+        assert_errors(
+            "((if true then time else seq(0)(1)) * 2) \\ 1",
+            &["no use of \\ accepts (waveform or seq, int)"],
+        );
+        // Each argument alone is covered, but the (seq, seq) combination
+        // has no row: coverage judges combinations, not positions.
+        assert_errors(
+            "(if true then 1 else seq(0)(1)) + (if true then 2 else seq(0)(2))",
+            &["no use of + accepts (int or seq, int or seq)"],
+        );
+    }
+
     #[test]
     fn unbound_variable_errors() {
         let input = "nope + 1";
