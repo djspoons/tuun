@@ -2614,6 +2614,21 @@ mod tests {
         assert_errors("fn(x = 100) => x \\ 1", &["expected seq, found int"]);
     }
 
+    // append is exactly the waveform primitive — two waveforms, end to
+    // end — and lists join with concat.
+    #[test]
+    fn append_takes_waveforms_and_concat_takes_lists() {
+        assert_clean("append(time * 0.5 | fin(1), time | fin(1))");
+        // Floats promote to waveforms, as everywhere else.
+        assert_clean("append(time, 1) * 2");
+        assert_clean("concat([[1, 2], [3, 4]])");
+        // The fold idiom in std's zip.
+        assert_clean("reduce(fn(acc, i) => concat([acc, [i]]), [], [1, 2])");
+        // Seqs and lists have no arm.
+        assert_errors("append(seq(0)(1), time)", &["expected waveform, found seq"]);
+        assert_errors("append([1], time)", &["expected waveform, found [int]"]);
+    }
+
     // Beyond 4^k the two-point unseq/seq split still tabulates, keeping
     // seq relationality for wide parameter lists like the synths'.
     #[test]

@@ -522,37 +522,19 @@ where
     }
 }
 
-// Appends two or more lists or waveforms together
-// TODO consider moving lists to `concat` and keeping `append` just for waveforms.
+// Appends exactly two waveforms end to end. Lists join with `concat`.
 pub fn append<M, S>(arguments: Vec<Expr<M, S>>) -> Expr<M, S>
 where
     M: Debug + Clone,
     S: Clone + Debug,
 {
     match &arguments[..] {
-        [List(a), rest @ ..] => {
-            let mut result = a.clone();
-            for b in rest {
-                if let List(exprs) = b {
-                    result.extend(exprs.clone());
-                } else {
-                    return Error("Expected more lists as arguments for append".to_string());
-                }
-            }
-            Expr::List(result)
-        }
-        [Expr::Waveform(a), rest @ ..] => {
-            let mut result = a.clone();
-            for b in rest {
-                if let Expr::Waveform(b) = b {
-                    result = Waveform::Append(Box::new(result), Box::new(b.clone()), ());
-                } else {
-                    return Error("Expected more waveforms as arguments for append".to_string());
-                }
-            }
-            Expr::Waveform(result)
-        }
-        _ => Error("Invalid arguments for append".to_string()),
+        [Expr::Waveform(a), Expr::Waveform(b)] => Expr::Waveform(Waveform::Append(
+            Box::new(a.clone()),
+            Box::new(b.clone()),
+            (),
+        )),
+        _ => Error("Expected two waveforms for append".to_string()),
     }
 }
 

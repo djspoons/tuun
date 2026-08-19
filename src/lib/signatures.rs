@@ -128,14 +128,11 @@ pub fn signature(name: &str) -> Option<Type> {
                 Type::List(Box::new(a())),
             )),
         ),
-        // Variadic at run time (one or more lists, or waveforms), but every
-        // known call site is binary on lists; other forms error spuriously.
-        "append" => Type::Forall(
-            vec![0],
-            Box::new(Type::function(
-                vec![Type::List(Box::new(a())), Type::List(Box::new(a()))],
-                Type::List(Box::new(a())),
-            )),
+        // Exactly the runtime's `Waveform::Append`: two waveforms, end
+        // to end. Lists join with `concat`.
+        "append" => Type::function(
+            vec![Type::waveform(), Type::waveform()],
+            Type::non_const_wave(),
         ),
         "concat" => Type::Forall(
             vec![0],
@@ -280,14 +277,14 @@ mod tests {
     }
 
     #[test]
-    fn append_is_binary_on_lists() {
-        let Some(Type::Forall(_, body)) = signature("append") else {
-            panic!("append should be polymorphic");
-        };
-        let Type::Function { positional, .. } = *body else {
-            panic!("append should be a function");
-        };
-        assert_eq!(positional.len(), 2);
+    fn append_takes_two_waveforms() {
+        assert_eq!(
+            signature("append"),
+            Some(Type::function(
+                vec![Type::waveform(), Type::waveform()],
+                Type::non_const_wave(),
+            ))
+        );
     }
 
     #[test]
