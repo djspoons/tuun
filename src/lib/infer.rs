@@ -1257,21 +1257,25 @@ impl<S: Clone> Infer<S> {
         self.select_by_atoms(&rows, &sorts, frame)
     }
 
-    /// The per-position union of every row's domain sort (⊤ where a row's
-    /// domain is unknown or structural) — the loosest honest contract for
-    /// an argument that may still grow.
-    fn broad_domains(&self, rows: &[Type], arity: usize) -> Vec<Sort> {
-        let mut broad = vec![Sort::NONE; arity];
+    /// The per-position union of every row's domain sort — the loosest
+    /// honest contract for an argument that may still grow — or `None`
+    /// where any row's domain is unknown or structural: such a row may
+    /// accept non-numeric values, so the table imposes no numeric
+    /// contract at that position.
+    fn broad_domains(&self, rows: &[Type], arity: usize) -> Vec<Option<Sort>> {
+        let mut broad = vec![Some(Sort::NONE); arity];
         for row in rows {
             let Type::Function { positional, .. } = row else {
                 unreachable!("rows are arrows");
             };
             for (broad, domain) in broad.iter_mut().zip(positional) {
-                let sort = match self.resolve(domain) {
-                    Type::Numeric(rep) => self.may_of(&rep),
-                    _ => Sort::TOP,
-                };
-                *broad = broad.union(sort);
+                match self.resolve(domain) {
+                    Type::Numeric(rep) => {
+                        let sort = self.may_of(&rep);
+                        *broad = broad.map(|union| union.union(sort));
+                    }
+                    _ => *broad = None,
+                }
             }
         }
         broad
@@ -1660,14 +1664,19 @@ impl<S: Clone> Infer<S> {
     /// Bounds the frame's variable arguments by the domains that admitted
     /// them, so a parameter used with an operator inherits the operator's
     /// requirements.
-    fn record_selection_contracts(&mut self, frame: &Frame<S>, domains: &[Sort]) {
+    fn record_selection_contracts(&mut self, frame: &Frame<S>, domains: &[Option<Sort>]) {
         for ((argument, span), domain) in frame.positional.iter().zip(domains) {
+            // No contract where some row's domain is structural or
+            // unknown: that row may accept non-numeric values, so the
+            // table demands nothing of the argument.
+            let Some(domain) = domain else { continue };
             let found = match self.resolve(argument) {
                 Type::Numeric(rep) => rep,
-                // An unconstrained argument commits to numeric here — the
-                // table's rows are all the runtime arms there are — so it
-                // becomes a refinement variable under the same contract
-                // (mirroring `subtype`'s meta-meets-numeric arms).
+                // An unconstrained argument commits to numeric here — every
+                // row's domain at this position is numeric, and the table's
+                // rows are all the runtime arms there are — so it becomes a
+                // refinement variable under the same contract (mirroring
+                // `subtype`'s meta-meets-numeric arms).
                 Type::Meta(meta) => {
                     let fresh = self.fresh_refinement();
                     self.solve(meta, Type::Numeric(fresh.clone()));
@@ -2669,6 +2678,19 @@ mod tests {
         // A guarantee already seen is judged, deferred or not: the default
         // flows into x before the body's seq contract.
         assert_errors("fn(x = 100) => x \\ 1", &["expected seq, found int"]);
+    }
+
+    // A position where some row's domain is structural or unknown imposes
+    // no numeric contract: a fold whose combiner ignores its element
+    // parameter leaves the list's element type polymorphic (std's len),
+    // so the same list's elements can still be used as waveforms.
+    #[test]
+    fn structural_domains_impose_no_numeric_contract() {
+        assert_clean(
+            "let count = fn(xs) => reduce(fn(acc, x) => acc + 1, 0, xs) in \
+             let f = fn(xs) => (count(xs), map(fn(x) => sine(x, 0), xs)) in \
+             f([440])",
+        );
     }
 
     // Bound consistency is checked where guarantees and contracts meet a
