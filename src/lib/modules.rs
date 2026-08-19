@@ -19,7 +19,10 @@ pub const EMBEDDED_MODULES: &[(&str, &str)] = &[
     ("filters.rbj", include_str!("../../lib/v0/filters/rbj.tuun")),
     ("synth.pm", include_str!("../../lib/v0/synth/pm.tuun")),
     ("synth.sub", include_str!("../../lib/v0/synth/sub.tuun")),
-    ("temperament.just", include_str!("../../lib/v0/temperament/just.tuun")),
+    (
+        "temperament.just",
+        include_str!("../../lib/v0/temperament/just.tuun"),
+    ),
 ];
 
 /// Parses a JSON array of dotted module paths like `["std", "foo.bar"]`
