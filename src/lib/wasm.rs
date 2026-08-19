@@ -11,7 +11,7 @@ use std::time::Duration;
 use wasm_bindgen::prelude::*;
 use web_sys::console;
 
-use crate::{builtins, eval, expr, generator, modules, optimizer, parser, slider, waveform};
+use crate::{builtins, eval, expr, generator, infer, modules, optimizer, parser, slider, waveform};
 
 #[derive(Clone, Debug, PartialEq)]
 enum MarkId {
@@ -249,6 +249,24 @@ impl Wasm {
                 .ok_or_else(|| expr::Error::new(format!("Module not found: {}", key)))
         };
 
+        // The checker runs first and error findings gate the install,
+        // mirroring the native `evaluate_and_record`. The expression must
+        // be playable — produce a waveform or a seq — matching the
+        // waveform check below.
+        let findings = infer::check_program(
+            &resolve,
+            &bindings,
+            &parsed_expr,
+            Some(infer::Expectation::Playable),
+        );
+        if !findings.is_empty() {
+            let rendered: Vec<String> = findings
+                .iter()
+                .map(|finding| display_error(finding, expression))
+                .collect();
+            return Err(format!("Type errors: {}", rendered.join("; ")));
+        }
+
         let expr = eval::evaluate(resolve, &bindings, parsed_expr)
             .map_err(|e| format!("Evaluate error: {}", display_error(&e, expression)))?;
 
@@ -480,6 +498,43 @@ mod tests {
             tuun.stop();
             println!("  ✓ Parsed and generated successfully");
         }
+    }
+
+    /// Type errors gate the install, before evaluation, with rendered
+    /// positions; sliders type as waveforms; clean expressions with
+    /// sliders, opens, and uses still install.
+    #[test]
+    fn test_type_errors_gate_install() {
+        let mut tuun = Wasm::new(44100, 120.0).expect("Failed to create Tuun instance");
+
+        let error = tuun
+            .install("sine(\"a\", 0)", "{}", "[]", "[]")
+            .expect_err("a string frequency should gate the install");
+        assert!(
+            error.starts_with("Type errors: 1:6: expected waveform, found string"),
+            "unexpected message: {}",
+            error
+        );
+        let error = tuun
+            .install("seq(0)(1) + seq(0)(2)", "{}", "[]", "[]")
+            .expect_err("two seqs should gate the install");
+        assert!(
+            error.contains("cannot combine two seqs with +"),
+            "unexpected message: {}",
+            error
+        );
+        // A slider is a marked waveform: usable anywhere a waveform is,
+        // gated where a waveform is not.
+        tuun.install("$220 * volume", r#"{"volume": 0.5}"#, "[\"std\"]", "[]")
+            .expect("a slider-scaled tone should install");
+        let error = tuun
+            .install("nth(volume, [1, 2, 3])", r#"{"volume": 0.5}"#, "[]", "[]")
+            .expect_err("a slider index should gate the install");
+        assert!(
+            error.contains("expected int, found waveform"),
+            "unexpected message: {}",
+            error
+        );
     }
 
     /// Test that invalid expressions produce appropriate errors

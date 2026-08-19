@@ -3,7 +3,7 @@ use std::fs;
 
 use clap::Parser as ClapParser;
 
-use tuun::{builtins, diagnostics, eval, expr, ids, modules, parser, slider};
+use tuun::{builtins, diagnostics, eval, expr, ids, infer, modules, parser, slider};
 
 #[derive(ClapParser, Debug)]
 #[command(version, about = "Check tuun-synth expressions in .md and .html files")]
@@ -336,6 +336,27 @@ fn check_block(
             .map(|v| v.as_slice())
             .ok_or_else(|| expr::Error::new(format!("Module not found: {}", key)))
     };
+
+    // The checker runs first and findings fail the block, mirroring the
+    // native and wasm gates; the expression must be playable, as the
+    // browser player requires.
+    let findings = infer::check_program(
+        resolve,
+        &bindings,
+        &expr,
+        Some(infer::Expectation::Playable),
+    );
+    if !findings.is_empty() {
+        let rendered: Vec<String> = findings
+            .iter()
+            .map(|finding| display_error(finding, &expression))
+            .collect();
+        return CheckResult::Fail(format!(
+            "[FAIL] \"{}\" type error: {}",
+            label,
+            rendered.join("\n")
+        ));
+    }
 
     match eval::evaluate(resolve, &bindings, expr) {
         Ok(_) => CheckResult::Ok,
