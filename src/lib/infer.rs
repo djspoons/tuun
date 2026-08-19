@@ -23,10 +23,13 @@
 //!   parameters already consumed — the style of the paper's §4.2 (rule
 //!   T-Lam-Alt), which Lemma 1 (Ψ coincides with typing results) justifies
 //!   against the §3 presentation.
-//! - Base subtypings `float <: waveform` and `seq <: waveform`. A float *is* a
-//!   constant waveform (`Waveform::Const` — see [`Expr::as_const_float`]), so
-//!   the first is genuine subset inclusion; the second compensates for the
-//!   single operator signatures (seq-accepting arms thread offsets).
+//! - Numerics are refined by [`crate::types::Sort`]s — unions of four
+//!   disjoint atoms — judged by containment, with overloaded functions
+//!   typed as intersections of arrows selected per call (Freeman &
+//!   Pfenning, "Refinement Types for ML", PLDI 1991; Xue, Oliveira & Xie,
+//!   "Applicative Intersection Types"). A float *is* a constant waveform
+//!   (`Waveform::Const` — see [`Expr::as_const_float`]), so `Float ⊆
+//!   waveform` is genuine subset inclusion.
 //! - Each failed check produces an [`Error`] and inference recovers with
 //!   [`Type::Dynamic`] so one mistake does not cascade.
 
@@ -145,8 +148,8 @@ enum Selection {
     NoApplicableRow,
 }
 
-/// The algorithmic state threaded through every judgment: the Xie and
-/// Oliveria's substitution `S` and name supply `N` (Appendix E.1), plus the
+/// The algorithmic state threaded through every judgment: Xie and
+/// Oliveira's substitution `S` and name supply `N` (Appendix E.1), plus the
 /// errors accumulated so far.
 struct Infer<S> {
     /// Solutions for meta variables — the paper's `S`. Kept acyclic by the
@@ -168,6 +171,12 @@ struct Infer<S> {
 /// flowed into it (lower) and the meet of the contracts imposed on it (upper).
 /// `may` reads the lower when any guarantee arrived, else the upper, else ⊤ —
 /// the atoms the value may turn out to inhabit.
+///
+/// The discipline is the constraint range `S <: X <: T` of Pierce and
+/// Turner's "Local Type Inference" (POPL 1998) — combining constraints
+/// joins lower bounds and meets upper bounds — over the finite sort
+/// lattice; MLsub's polar bounds (Dolan & Mycroft, POPL 2017) are the
+/// full-strength form.
 #[derive(Clone, Copy)]
 struct RefVar {
     lower: Sort,
@@ -367,7 +376,9 @@ impl<S: Clone> Infer<S> {
     /// with recorded contracts.
     // TODO two unsolved variables are not linked: guarantees or contracts
     // arriving at one after this merge do not reach the other. A union-find
-    // over refinement variables would close this.
+    // over refinement variables would close this — MLsub's biunification
+    // handles a variable-variable constraint exactly so (merge the bounds,
+    // alias the variables).
     fn numeric_unify(&mut self, x: &Refinement, y: &Refinement) -> Result<(), ()> {
         let definite_x = self.definite_of(x);
         let definite_y = self.definite_of(y);
@@ -464,10 +475,12 @@ impl<S: Clone> Infer<S> {
         let applied = ty.apply(&self.subst);
         // Refinement variables local to the type freeze with variance:
         // covariant positions to the join of their guarantees, contravariant
-        // (parameter) positions to the meet of their contracts; no information
-        // means "any numeric". Variables still reachable from the context (an
-        // outer parameter's) stay live, mirroring the meta exclusion below.
-        // There is no bounded quantification.
+        // (parameter) positions to the meet of their contracts (the
+        // variance-directed endpoint choice of Pierce and Turner's local
+        // type inference); no information means "any numeric". Variables
+        // still reachable from the context (an outer parameter's) stay
+        // live, mirroring the meta exclusion below. There is no bounded
+        // quantification.
         let mut context_refinements = Vec::new();
         for (_, entry) in context.iter() {
             if let ContextEntry::Ty(ty) = entry {
@@ -588,7 +601,7 @@ impl<S: Clone> Infer<S> {
     /// Beyond `MAX_TABULATION_VECTORS`, enumeration retries on the
     /// two-point unseq/seq split — keeping the relational seq holes, the
     /// soundness-critical part, at the cost of the int/float distinctions
-    /// — and returns `None` (keep the base type, R1's freeze-at-generalize
+    /// — and returns `None` (keep the base type, the freeze-at-generalize
     /// summary) only past that, or for functions with no numeric
     /// parameters.
     ///
@@ -829,7 +842,8 @@ impl<S: Clone> Infer<S> {
     }
 
     /// Checks `a <: b` ("`a` is at least as polymorphic as `b`") — the
-    /// subtyping judgment of Fig. 15, extended with tuun's base coercions.
+    /// subtyping judgment of Fig. 15, extended with tuun's numeric sorts,
+    /// intersections of arrows, and `Dynamic`.
     fn subtype(&mut self, a: &Type, b: &Type) -> Result<(), ()> {
         let a = self.resolve(a);
         let b = self.resolve(b);
@@ -885,8 +899,8 @@ impl<S: Clone> Infer<S> {
             // An intersection against an expected arrow selects with the
             // arrow's parameters as a pseudo-frame — the same applicative
             // subtyping as at applications, so committing to one conjunct
-            // cannot poison a sibling argument: with no definite row, the
-            // possible-rows join plays the summary role
+            // cannot poison a sibling argument: when no single row applies
+            // outright, the coverage join plays the summary role
             // (⋀(Aᵢ→Bᵢ) <: (⋃Aᵢ)→(⋁Bᵢ), sound by atom disjointness).
             (
                 Type::And(conjuncts),
@@ -969,8 +983,8 @@ impl<S: Clone> Infer<S> {
             // an "omitted argument" it would skip its contravariant check,
             // and a row lacking the name would wrongly stay eligible. The
             // per-conjunct path does the full named discipline per row,
-            // at pre-tabulation precision: first fitting row commits, no
-            // distributive reading, no fixed point iteration.
+            // with the first fitting row committing — no distributive
+            // reading, no fixed-point iteration.
             // TODO extend the pseudo-frame with promised named parameters
             // (and filter rows to those offering them) so named-having
             // arrows join the selection path.
@@ -1057,12 +1071,12 @@ impl<S: Clone> Infer<S> {
         }
     }
 
-    /// Returns the least type both sides coerce to (a tuun extension; the paper
-    /// has no join because it has no subtyping between base types): unification
-    /// if the types agree, the waveform top of the coercion lattice for base
-    /// mixes (mixed float/waveform/seq lists and branches are common),
-    /// pointwise for lists and tuples, and `Dynamic` with an error otherwise.
-    /// Quantified types join at an instance.
+    /// Returns the join of the two types (a tuun extension; the paper has no
+    /// join because it has no subtyping between base types): unification if the
+    /// types agree structurally, sort union for numerics (mixed
+    /// float/waveform/seq lists and branches are common), pointwise for lists
+    /// and tuples, and `Dynamic` with an error otherwise. Quantified types join
+    /// at an instance.
     fn join(&mut self, a: Type, b: Type, span: &Option<Span<S>>) -> Type {
         let a = self.resolve(&a);
         let b = self.resolve(&b);
@@ -1220,10 +1234,11 @@ impl<S: Clone> Infer<S> {
             return Selection::NoMatchingRows;
         }
         // Contracts for unsolved arguments use the union of every row's domain
-        // at the position: the variable may still grow, so any narrower
-        // contract (a chosen row's own domain) over-commits and rejects the
-        // growth later — the fixed point bug. Ground arguments are already
-        // judged by applicability.
+        // at the position: the variable may still grow (an arrow's result can
+        // feed back into it — see the fixed-point iteration in `subtype`), and
+        // any narrower contract, such as a chosen row's own domain, would
+        // reject that growth. Ground arguments are already judged by
+        // applicability.
         let broad = self.broad_domains(&rows, frame.positional.len());
         // First definitely-applicable row wins; its structural subtyping
         // commits (and is rolled back when a later position rejects it).
@@ -1262,16 +1277,16 @@ impl<S: Clone> Infer<S> {
         broad
     }
 
-    /// Returns the row's domains as contract sorts when every argument
-    /// fits the row (definitely or possibly), `None` otherwise. Numeric
-    /// positions check by sort arithmetic and report their domain sort;
-    /// unknown and structural domains accept by subtyping and report ⊤
-    /// (no sort contract). A named argument checks against the row's
-    /// named domain; an omitted one takes the default, whose sort the
-    /// rows do not record, so no row is definite for it and every row
-    /// stays possible (the possible-rows join covers the default).
-    /// Structural subtyping solves state, so callers snapshot around the
-    /// call.
+    /// Returns the row's domains as contract sorts when the row applies
+    /// outright — every argument's sort contained in its domain — and
+    /// `None` otherwise. Numeric positions check by sort containment and
+    /// report their domain sort; unknown and structural domains accept by
+    /// subtyping and report ⊤ (no sort contract). A supplied named
+    /// argument checks against the row's named domain; an omitted one
+    /// takes the default, whose sort the rows do not record, so the row
+    /// does not apply outright — coverage (`select_by_atoms`) is the path
+    /// that accepts it. Structural subtyping solves state, so callers
+    /// snapshot around the call.
     fn row_applies(
         &mut self,
         row: &Type,
@@ -1316,12 +1331,13 @@ impl<S: Clone> Infer<S> {
         Some(domains)
     }
 
-    /// Selection by atom coverage: a runtime value inhabits exactly
-    /// one atom, so a call is definitely covered when every combination of
+    /// Selection by atom coverage (sorts are unions over a disjoint atom
+    /// basis — Freeman's union normal form): a runtime value inhabits
+    /// exactly one atom, so a call is covered when every combination of
     /// its arguments' atoms has a row that accepts it; the result is the
     /// join of the covering rows' results, and each argument's contract is
     /// the union of the domains that admitted it. A combination no row
-    /// covers is a definite rejection.
+    /// covers means the runtime has no matching arm: a rejection.
     ///
     /// Ground numeric arguments decompose into their atoms. Unsolved
     /// refinement variables and metas defer — they pass here and their
@@ -1487,9 +1503,10 @@ impl<S: Clone> Infer<S> {
         Some(domains)
     }
 
-    /// Whether one argument fits one domain, definitely or possibly, and
-    /// the contract sort the domain imposes (⊤ for unknown and structural
-    /// domains). Structural subtyping solves state; callers snapshot.
+    /// Whether one argument fits one domain — sort containment for
+    /// numerics, subtyping for structural arguments — and the contract
+    /// sort the domain imposes (⊤ for unknown and structural domains).
+    /// Structural subtyping solves state; callers snapshot.
     fn position_fits(
         &mut self,
         argument: &Type,
@@ -2386,15 +2403,12 @@ mod tests {
         );
     }
 
-    // List covariance plus the float <: waveform coercion, at the end of a
-    // chain that starts inside the lambda: `+`'s single signature solves
-    // `x`'s meta to waveform, so the lambda is (waveform) -> waveform;
-    // checking it against map's ∀a instantiation (frame arguments go left
-    // to right) pins `a` at waveform; only then is `[1, 2] : [float]`
-    // compared against `[a]` = [waveform], which needs both List
-    // covariance and the element coercion to pass.
+    // A lambda argument's table meets map's ∀ instantiation: the list
+    // checks first (`check_frame` defers table-typed arguments), so the
+    // element variable already holds {I} when the table is selected
+    // against `(a) -> b`, and the int row covers it.
     #[test]
-    fn map_with_coercions() {
+    fn map_over_a_lambda_argument() {
         assert_clean("map(fn(x) => x + 1, [1, 2])");
     }
 
@@ -2458,8 +2472,8 @@ mod tests {
     #[test]
     fn conditionals() {
         assert_errors("if 1 then 2 else 3", &["expected bool, found int"]);
-        // Branches join over the coercion lattice: float and waveform meet
-        // at waveform.
+        // Branches join by sort union: float and waveform join into the
+        // waveform class.
         assert_clean("if true then 1 else sine(440, 0)");
     }
 
@@ -2496,9 +2510,9 @@ mod tests {
         // `nth`'s index is hard-checked integral at runtime.
         assert_errors("nth(2.5, [1, 2, 3])", &["expected int, found float"]);
         // Contravariant contract flow: `exp` requires constants, and the
-        // list supplies a definite waveform. (`sine(440, 0)` would be
-        // silent here: its type is float-or-waveform because the
-        // zero-frequency fold exists, and value tracking is a later phase.)
+        // list supplies a definite waveform. (`sine(440, 0)` would pass
+        // here: its type is the whole waveform class, because the
+        // zero-frequency fold can produce a constant.)
         assert_errors("map(exp, [time])", &["expected [float], found [waveform]"]);
         // Comparisons are scalar-only at runtime.
         assert_errors("time < 1", &["expected float, found waveform"]);
@@ -2522,8 +2536,7 @@ mod tests {
             &["expected seq, found int"],
         );
         // The missing (seq, seq) arm of + is relational and survives the
-        // definition boundary: double has no seq row at all. (R1's
-        // per-position freeze accepted this call.)
+        // definition boundary: double has no seq row at all.
         assert_errors(
             "let double = fn(x) => x + x in double(seq(0)(1))",
             &["expected waveform, found seq"],
