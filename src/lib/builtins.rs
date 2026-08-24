@@ -399,6 +399,19 @@ where
     })
 }
 
+pub fn round<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
+where
+    M: Debug,
+    S: Debug,
+{
+    Ok({
+        match arguments[..] {
+            [Expr::Waveform(Waveform::Const(value))] => Expr::float(value.round()),
+            _ => return Err(Error::internal_here("Invalid argument for round")),
+        }
+    })
+}
+
 pub fn equals<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
     M: Debug,
@@ -1159,6 +1172,7 @@ where
         ("exp", exp),
         ("sine", sine),
         ("cos", cos),
+        ("round", round),
         ("map", map),
         ("reduce", reduce),
         ("unfold", unfold),

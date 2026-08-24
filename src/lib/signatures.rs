@@ -110,6 +110,7 @@ pub fn signature(name: &str) -> Option<Type> {
         // result may be a float or a waveform.
         "sine" => Type::function(vec![Type::waveform(), Type::waveform()], Type::waveform()),
         "cos" => Type::function(vec![Type::waveform()], Type::waveform()),
+        "round" => Type::function(vec![Type::float()], Type::int()),
         "map" => Type::Forall(
             vec![0, 1],
             Box::new(Type::function(
