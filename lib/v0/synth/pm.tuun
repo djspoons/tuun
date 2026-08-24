@@ -2,8 +2,9 @@ open std;
 use env.minmax;
 use env.finseq;
 
-// A pure PM waveform. Note that any of I, D, or fc can control the length of the output.
-pure = fn(I, D) => fn(freq_hz) =>
+// A pure PM waveform. Note that any of I, D, or freq_hz can control the length
+// of the output.
+pure = fn(I, D, freq_hz) =>
   let
     fm = D/2 * freq_hz
   in
@@ -15,12 +16,25 @@ synth = fn(I_max, D, a, d, s_level, r) => fn(dur, freq_hz) =>
     s = max(dur - (a + d + r), 0),
     envelope = minmax.ADSR(a, d, s_level, s, r),
     I = I_max | envelope,
-    fm = D/2 * freq_hz
   in
-    sine(2*pi * freq_hz, sine(2*pi * fm, 0) * I) | envelope;
+    pure(I, D, freq_hz) | envelope | seq(time - dur);
+
+// Given I_max, D, and envelope, returns part of a keys instrument
+synth_keys_helper = fn(I_max, D, a, d, s_level) =>
+  let
+    envelope = minmax.ADS(a, d, s_level),
+    I = I_max | envelope,
+  in
+    fn(freq_hz) => pure(I, D, freq_hz) | envelope;
 
 // Roughly from Chowning (1977)
 brass = synth(5, 1, 0.1, 0.1, 0.75, 0.1);
+brass_keys =
+  let
+    synth = synth_keys_helper(5, 1, 0.1, 0.1, 0.75),
+    note_off = finseq.Rw(0.1, 1.0),
+  in
+    fn(k, v) => (v * synth(@k), note_off);
 
 piano_keys = fn(k, v) =>
   let

@@ -1,0 +1,42 @@
+open std;
+
+// Given a `tonic` MIDI note number, a mode, duration, and instrument, take a
+// list of scale degree numbers and use the instrument to generate a sequence
+// of waveforms. Modes are named by their degree, so 1 = Ionian, 2 = Dorian,
+// etc. For example,
+//    [1, 3, 5] | on_diatonic_scale(60, 2, Q, inst)
+
+// will generate quarter notes for the D minor triad (the triad starting at root
+// of the Dorian mode of the C major scale and continuing to the third and fifth
+// notes of that scale). Half degrees will generate notes half a step from the 
+// adjacent note (or no)
+on_diatonic_scale = fn(tonic, mode, dur, inst) =>
+  let
+    // Given scale degree d, offset[(d-1) * 2] is the number of half steps above
+    // the tonic. Notes on a C major scale are shown as an example.
+    // degree  1  1.5 2  2.5 3     4  4.5 5  5.5 6  6.5 7
+    //         C  C#  D  D#  E     F  F#  G  G#  A  A#  B
+    offsets = [0, 1,  2, 3,  4, 0, 5, 6,  7, 8,  9, 10, 11, 0],
+    offsets = concat([offsets, map(fn(offset) => offset + 12, offsets)]),
+    mode_degree = nth((mode-1) * 2, offsets),
+    // Determine the MIDI note number given the degree
+    note = fn(degree) => tonic + nth(round((degree-1) * 2 + mode_degree), offsets),
+  in
+    fn(degrees) => let
+      notes = map(note, degrees),
+    in
+      <map(fn(note) => inst(dur, @note), notes)>;
+
+use synth.pm;
+
+#{level_db=0,keys}
+_ = pm.brass_keys;
+
+// Fux's dorian first species cantus firmus
+#{level_db=-9}
+fux_dorian_c_f = [1, 3, 2, 1, 4, 3, 5, 4, 3, 2, 1] | on_diatonic_scale(60, 2, Q, pm.brass);
+
+// Jacob Gran's first species counter point example
+// https://www.youtube.com/watch?v=hT38OD87uYg&list=PL6Towqbh0pdqwwHt3sWYwTj98qIqcqCrn&index=3&t=822s
+#{level_db=-9}
+gran_dorian_c_p = [5, 5, 4, 5, 6, 7, 7, 6, 8, 7.5, 8] | on_diatonic_scale(60, 2, Q, pm.brass);
