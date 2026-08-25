@@ -18,6 +18,15 @@ pub enum Operator {
     Power,
 }
 
+impl Operator {
+    /// Returns true if the operator's result extends to the longer of its two
+    /// inputs, with the finished input's samples taken as zero; otherwise the
+    /// result is truncated to the shorter input.
+    pub fn extends_to_longer(&self) -> bool {
+        matches!(self, Operator::Merge)
+    }
+}
+
 /// Waveform is a compact representation of a sequence of samples.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Waveform<MarkId, State = ()> {

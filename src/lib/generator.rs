@@ -268,7 +268,7 @@ impl<'a> Generator<'a> {
                     },
                     Operator::Power => f32::powf,
                 };
-                self.generate_binary_op(op_fn, a, b, *op == Operator::Merge, out)
+                self.generate_binary_op(op_fn, a, b, op.extends_to_longer(), out)
             }
             Reset {
                 state: state @ Initial,
@@ -619,7 +619,6 @@ impl<'a> Generator<'a> {
     /// See the note at the call site in `generate` for more information.
     pub fn length<M: Debug + Display>(&mut self, waveform: &mut Waveform<M>, max: usize) -> usize {
         use State::*;
-        use waveform::Operator;
         use waveform::Waveform::*;
         match waveform {
             Const { .. } => max,
@@ -750,13 +749,10 @@ impl<'a> Generator<'a> {
             BinaryPointOp(op, a, b) => {
                 let a_len = self.length(a, max);
                 let b_len = self.length(b, max);
-                match op {
-                    Operator::Add
-                    | Operator::Subtract
-                    | Operator::Multiply
-                    | Operator::Divide
-                    | Operator::Power => a_len.min(b_len),
-                    Operator::Merge => a_len.max(b_len),
+                if op.extends_to_longer() {
+                    a_len.max(b_len)
+                } else {
+                    a_len.min(b_len)
                 }
             }
             Reset { trigger, .. } => {
@@ -936,7 +932,6 @@ impl<'a> Generator<'a> {
         {
             use Reason::*;
             use Result::*;
-            use waveform::Operator;
             use waveform::Waveform::*;
 
             // do_one_dynamic takes a waveform and determines if it can be pre-computed. If so, it applies `wf` and
@@ -1095,8 +1090,9 @@ impl<'a> Generator<'a> {
                 BinaryPointOp(op, a, b) => {
                     match (op, precompute_internal(g, *a), precompute_internal(g, *b)) {
                         (op, Pc(a), Pc(b)) => Pc(BinaryPointOp(op, Box::new(a), Box::new(b))),
-                        (op @ (Operator::Multiply | Operator::Divide), Npc(Infinite, a), Pc(b))
-                        | (op @ (Operator::Multiply | Operator::Divide), Pc(a), Npc(Infinite, b)) => {
+                        (op, Npc(Infinite, a), Pc(b)) | (op, Pc(a), Npc(Infinite, b))
+                            if !op.extends_to_longer() =>
+                        {
                             Pc(BinaryPointOp(op, Box::new(a), Box::new(b)))
                         }
                         (op, Pc(a), Npc(why, b)) => Npc(
@@ -1672,6 +1668,23 @@ mod tests {
             Box::new(Const(5.0)),
         );
         run_tests(&w, &[]);
+
+        // Precompute: finite + infinite should precompute to Fixed — the
+        // finite side bounds the result for a truncating operator.
+        let mut g = new_test_generator(1);
+        let w = BinaryPointOp(
+            Operator::Add,
+            Box::new(Fixed(vec![3.0, 4.0, 5.0], ())),
+            Box::new(Time(())),
+        );
+        run_tests(&w, &[3.0, 5.0, 7.0]);
+        match g.precompute(w) {
+            Fixed(_, _) => (),
+            w => panic!(
+                "Expected the result to be precomputed to a Fixed, but got {:?}",
+                w
+            ),
+        }
     }
 
     #[test]
@@ -1774,6 +1787,19 @@ mod tests {
             Box::new(Fixed(vec![10.0, 20.0], ())),
         );
         run_tests(&w5, &[10.0, 20.0]);
+
+        // Precompute must NOT promote finite & infinite to Fixed — the
+        // infinite side outlives the finite one.
+        let mut g = new_test_generator(1);
+        let w: Waveform = BinaryPointOp(
+            Operator::Merge,
+            Box::new(Fixed(vec![1.0, 2.0], ())),
+            Box::new(Const(10.0)),
+        );
+        match g.precompute(w) {
+            Fixed(_, _) => panic!("merge with an infinite side must not precompute to Fixed"),
+            _ => (),
+        }
     }
 
     #[test]
