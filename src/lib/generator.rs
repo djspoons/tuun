@@ -892,7 +892,7 @@ impl<'a> Generator<'a> {
         // that are pre-computable.
         fn generate_fixed<M>(g: &mut Generator, mut waveform: Waveform<M>) -> Waveform<M>
         where
-            M: Debug + Display,
+            M: Clone + Debug + Display,
         {
             if let Waveform::Fixed(_, _) = waveform {
                 println!(
@@ -910,14 +910,20 @@ impl<'a> Generator<'a> {
             }
 
             println!("Precomputing output for {}", &waveform);
-            // Choose a `desired` which is long enough to generate any reasonable waveform, but give some room
-            // for cases like `Filter` that may need to make it longer.
-            // XXX max precompute length?
-            let max_len = (g.sample_rate * 10) as usize;
-            let mut out = vec![0.0; max_len];
+            // Choose a `max` which is long enough to generate any reasonable
+            // waveform.
+            let max_len = 2_usize.pow(28);
+            let computed_len = g.length(&mut waveform.clone(), max_len);
+            if computed_len == max_len {
+                println!("Warning: finite waveform length returned maximum number of samples");
+            }
+            let mut out = vec![0.0; computed_len];
             let len = g.generate(&mut waveform, &mut out);
-            if len == max_len {
-                println!("Warning: precompute generated max samples (maybe not finite?)");
+            if len != computed_len {
+                println!(
+                    "Warning: precompute generated unexpected number of samples: {} != {}",
+                    len, computed_len
+                );
             }
             out.truncate(len);
 
@@ -928,7 +934,7 @@ impl<'a> Generator<'a> {
 
         fn precompute_internal<M>(g: &mut Generator, waveform: Waveform<M>) -> Result<M>
         where
-            M: Debug + Display,
+            M: Clone + Debug + Display,
         {
             use Reason::*;
             use Result::*;
@@ -942,7 +948,7 @@ impl<'a> Generator<'a> {
                 wf: F,
             ) -> Result<M>
             where
-                M: Debug + Display,
+                M: Clone + Debug + Display,
             {
                 match precompute_internal(g, a) {
                     Pc(a) => Npc(Dynamic, wf(generate_fixed(g, a))),
@@ -950,26 +956,58 @@ impl<'a> Generator<'a> {
                 }
             }
 
-            // do_two attempts to pre-compute two waveforms, then applies `wf` to the results. If both waveforms are
-            // pre-computable, then the result is wrapped in Pc. If at least one is not pre-computable, then the result
-            // is wrapped in Npc, with the reason determined by the reason(s) for the two waveforms.
+            // Which sub-waveforms bound the length of a combining waveform.
+            // When a bounding sub-waveform is finite, the combination is finite
+            // too, so a combination whose bounding sub-waveform is
+            // pre-computable, and whose others are at worst infinite (not
+            // dynamic), can be pre-computed as a whole.
+            #[derive(Clone, Copy)]
+            enum BoundedBy {
+                // Finite only when every sub-waveform is finite (Append,
+                // Merge).
+                All,
+                // Ends when any sub-waveform ends (truncating point ops, Sine).
+                Any,
+                // Ends when the first sub-waveform (a trigger) ends (Reset,
+                // Alt).
+                First,
+            }
+
+            // do_two attempts to pre-compute two waveforms, then applies `wf`
+            // to the results. The result is wrapped in Pc when the combination
+            // is pre-computable as a whole: both sub-waveforms pre-computable,
+            // or `bounded_by` satisfied by a pre-computable sub-waveform with
+            // neither dynamic. Otherwise the result is wrapped in Npc and any
+            // pre-computable sub-waveform is generated on its own.
             fn do_two<M, F: FnOnce(Waveform<M>, Waveform<M>) -> Waveform<M>>(
                 g: &mut Generator,
+                bounded_by: BoundedBy,
                 a: Waveform<M>,
                 b: Waveform<M>,
                 wf: F,
             ) -> Result<M>
             where
-                M: Debug + Display,
+                M: Clone + Debug + Display,
             {
-                match (precompute_internal(g, a), precompute_internal(g, b)) {
-                    (Pc(a), Pc(b)) => Pc(wf(a, b)),
-                    (Pc(a), Npc(why, b)) => Npc(why, wf(generate_fixed(g, a), b)),
-                    (Npc(why, a), Pc(b)) => Npc(why, wf(a, generate_fixed(g, b))),
-                    (Npc(Infinite, a), Npc(Infinite, b)) => Npc(Infinite, wf(a, b)),
-                    // At least one is Dynamic and neither is pre-computable
-                    (a, b) => Npc(Dynamic, wf(a.into(), b.into())),
+                let a = precompute_internal(g, a);
+                let b = precompute_internal(g, b);
+                let dynamic = matches!(a, Npc(Dynamic, _)) || matches!(b, Npc(Dynamic, _));
+                let bounded = match bounded_by {
+                    BoundedBy::All => matches!(a, Pc(_)) && matches!(b, Pc(_)),
+                    BoundedBy::Any => matches!(a, Pc(_)) || matches!(b, Pc(_)),
+                    BoundedBy::First => matches!(a, Pc(_)),
+                };
+                if bounded && !dynamic {
+                    return Pc(wf(a.into(), b.into()));
                 }
+                let why = if dynamic { Dynamic } else { Infinite };
+                let mut finish = |r: Result<M>| match r {
+                    Pc(w) => generate_fixed(g, w),
+                    Npc(_, w) => w,
+                };
+                let a = finish(a);
+                let b = finish(b);
+                Npc(why, wf(a, b))
             }
 
             fn resolve_reason(why1: Reason, why2: Reason) -> Reason {
@@ -980,55 +1018,45 @@ impl<'a> Generator<'a> {
                 }
             }
 
-            // Like do_two, do_three, attempts to pre-compute the three waveforms, then applies `wf` to the results.
-            // The result is wrapped in Pc if all three are pre-computable, and Npc otherwise, with the reason
-            // determined by the reason(s) for the three waveforms.
+            // Like do_two, but for three sub-waveforms.
             fn do_three<M, F: FnOnce(Waveform<M>, Waveform<M>, Waveform<M>) -> Waveform<M>>(
                 g: &mut Generator,
+                bounded_by: BoundedBy,
                 a: Waveform<M>,
                 b: Waveform<M>,
                 c: Waveform<M>,
                 wf: F,
             ) -> Result<M>
             where
-                M: Debug + Display,
+                M: Clone + Debug + Display,
             {
-                match (
-                    precompute_internal(g, a),
-                    precompute_internal(g, b),
-                    precompute_internal(g, c),
-                ) {
-                    // All pre-computable
-                    (Pc(a), Pc(b), Pc(c)) => Pc(wf(a, b, c)),
-
-                    // One is not pre-computable, two are pre-computable, so pre-compute those two now
-                    (Pc(a), Pc(b), Npc(why, c)) => {
-                        Npc(why, wf(generate_fixed(g, a), generate_fixed(g, b), c))
+                let a = precompute_internal(g, a);
+                let b = precompute_internal(g, b);
+                let c = precompute_internal(g, c);
+                let dynamic = matches!(a, Npc(Dynamic, _))
+                    || matches!(b, Npc(Dynamic, _))
+                    || matches!(c, Npc(Dynamic, _));
+                let bounded = match bounded_by {
+                    BoundedBy::All => {
+                        matches!(a, Pc(_)) && matches!(b, Pc(_)) && matches!(c, Pc(_))
                     }
-                    (Pc(a), Npc(why, b), Pc(c)) => {
-                        Npc(why, wf(generate_fixed(g, a), b, generate_fixed(g, c)))
+                    BoundedBy::Any => {
+                        matches!(a, Pc(_)) || matches!(b, Pc(_)) || matches!(c, Pc(_))
                     }
-                    (Npc(why, a), Pc(b), Pc(c)) => {
-                        Npc(why, wf(a, generate_fixed(g, b), generate_fixed(g, c)))
-                    }
-
-                    // Two are not pre-computable, one is pre-computable, so pre-compute that one now
-                    (Npc(why1, a), Npc(why2, b), Pc(c)) => {
-                        Npc(resolve_reason(why1, why2), wf(a, b, generate_fixed(g, c)))
-                    }
-                    (Npc(why1, a), Pc(b), Npc(why2, c)) => {
-                        Npc(resolve_reason(why1, why2), wf(a, generate_fixed(g, b), c))
-                    }
-                    (Pc(a), Npc(why1, b), Npc(why2, c)) => {
-                        Npc(resolve_reason(why1, why2), wf(generate_fixed(g, a), b, c))
-                    }
-
-                    // All three are not pre-computable
-                    (Npc(why1, a), Npc(why2, b), Npc(why3, c)) => Npc(
-                        resolve_reason(resolve_reason(why1, why2), why3),
-                        wf(a, b, c),
-                    ),
+                    BoundedBy::First => matches!(a, Pc(_)),
+                };
+                if bounded && !dynamic {
+                    return Pc(wf(a.into(), b.into(), c.into()));
                 }
+                let why = if dynamic { Dynamic } else { Infinite };
+                let mut finish = |r: Result<M>| match r {
+                    Pc(w) => generate_fixed(g, w),
+                    Npc(_, w) => w,
+                };
+                let a = finish(a);
+                let b = finish(b);
+                let c = finish(c);
+                Npc(why, wf(a, b, c))
             }
 
             match waveform {
@@ -1037,8 +1065,6 @@ impl<'a> Generator<'a> {
                 // Fixed is the quintessential pre-computable waveform.
                 Fixed(_, _) => Pc(waveform),
                 Fin { length, waveform } => match (
-                    // XXX we could check to see that `length` crosses zero at some point for the cases where we
-                    // call generate_fixed
                     precompute_internal(g, *length),
                     precompute_internal(g, *waveform),
                 ) {
@@ -1075,43 +1101,31 @@ impl<'a> Generator<'a> {
                         waveform: Box::new(waveform.into()),
                     }),
                 },
-                Append(a, b, state) => do_two(g, *a, *b, move |a, b| {
+                Append(a, b, state) => do_two(g, BoundedBy::All, *a, *b, move |a, b| {
                     Append(Box::new(a), Box::new(b), state)
                 }),
                 Sine {
                     frequency,
                     phase,
                     state,
-                } => do_two(g, *frequency, *phase, |frequency, phase| Sine {
-                    frequency: Box::new(frequency),
-                    phase: Box::new(phase),
-                    state,
+                } => do_two(g, BoundedBy::Any, *frequency, *phase, |frequency, phase| {
+                    Sine {
+                        frequency: Box::new(frequency),
+                        phase: Box::new(phase),
+                        state,
+                    }
                 }),
                 BinaryPointOp(op, a, b) => {
-                    match (op, precompute_internal(g, *a), precompute_internal(g, *b)) {
-                        (op, Pc(a), Pc(b)) => Pc(BinaryPointOp(op, Box::new(a), Box::new(b))),
-                        (op, Npc(Infinite, a), Pc(b)) | (op, Pc(a), Npc(Infinite, b))
-                            if !op.extends_to_longer() =>
-                        {
-                            Pc(BinaryPointOp(op, Box::new(a), Box::new(b)))
-                        }
-                        (op, Pc(a), Npc(why, b)) => Npc(
-                            why,
-                            BinaryPointOp(op, Box::new(generate_fixed(g, a)), Box::new(b)),
-                        ),
-                        (op, Npc(why, a), Pc(b)) => Npc(
-                            why,
-                            BinaryPointOp(op, Box::new(a), Box::new(generate_fixed(g, b))),
-                        ),
-                        (op, Npc(Infinite, a), Npc(Infinite, b)) => {
-                            Npc(Infinite, BinaryPointOp(op, Box::new(a), Box::new(b)))
-                        }
-                        // At least one is Dynamic and neither is pre-computable
-                        (op, a, b) => Npc(
-                            Dynamic,
-                            BinaryPointOp(op, Box::new(a.into()), Box::new(b.into())),
-                        ),
-                    }
+                    // A truncating operator is bounded by either side; Merge
+                    // extends past a finite side, so it needs both.
+                    let bounded_by = if op.extends_to_longer() {
+                        BoundedBy::All
+                    } else {
+                        BoundedBy::Any
+                    };
+                    do_two(g, bounded_by, *a, *b, move |a, b| {
+                        BinaryPointOp(op, Box::new(a), Box::new(b))
+                    })
                 }
                 Filter {
                     waveform,
@@ -1176,17 +1190,24 @@ impl<'a> Generator<'a> {
                     trigger,
                     waveform,
                     state,
-                } => do_two(g, *trigger, *waveform, |trigger, waveform| Reset {
-                    trigger: Box::new(trigger),
-                    waveform: Box::new(waveform),
-                    state,
-                }),
+                } => do_two(
+                    g,
+                    BoundedBy::First,
+                    *trigger,
+                    *waveform,
+                    |trigger, waveform| Reset {
+                        trigger: Box::new(trigger),
+                        waveform: Box::new(waveform),
+                        state,
+                    },
+                ),
                 Alt {
                     trigger,
                     positive_waveform,
                     negative_waveform,
                 } => do_three(
                     g,
+                    BoundedBy::First,
                     *trigger,
                     *positive_waveform,
                     *negative_waveform,
@@ -1533,6 +1554,56 @@ mod tests {
             })
             .collect();
         run_sin_test(&mut g, &mut w, expected);
+
+        // A finite frequency bounds the sine (even with an infinite phase),
+        // so the whole waveform precomputes to Fixed.
+        let w: Waveform = Sine {
+            frequency: Box::new(Fixed(vec![0.0, 0.0, 0.0], ())),
+            phase: Box::new(Const(0.0)),
+            state: (),
+        };
+        match g.precompute(w) {
+            Fixed(_, _) => (),
+            w => panic!(
+                "Expected the sine to be precomputed to a Fixed, but got {:?}",
+                w
+            ),
+        }
+    }
+
+    #[test]
+    fn test_alt_precompute() {
+        use waveform::Waveform::{Alt, Marked};
+
+        // A finite trigger bounds the alt (even with infinite branches), so the
+        // whole waveform pre-computes to Fixed.
+        let mut g = new_test_generator(1);
+        let w: Waveform = Alt {
+            trigger: Box::new(Fixed(vec![1.0, -1.0], ())),
+            positive_waveform: Box::new(Const(1.0)),
+            negative_waveform: Box::new(Const(-1.0)),
+        };
+        match g.precompute(w) {
+            Fixed(_, _) => (),
+            w => panic!(
+                "Expected the alt to be precomputed to a Fixed, but got {:?}",
+                w
+            ),
+        }
+
+        // ...but a dynamic sub-waveform still blocks pre-computation.
+        let w: Waveform = Alt {
+            trigger: Box::new(Fixed(vec![1.0, -1.0], ())),
+            positive_waveform: Box::new(Marked {
+                id: 1,
+                waveform: Box::new(Const(1.0)),
+            }),
+            negative_waveform: Box::new(Const(-1.0)),
+        };
+        match g.precompute(w) {
+            Fixed(_, _) => panic!("an alt with a dynamic branch must not precompute to Fixed"),
+            _ => (),
+        }
     }
 
     #[test]
@@ -1543,6 +1614,22 @@ mod tests {
             state: (),
         };
         run_tests(&w, &[0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0, 3.0]);
+
+        // A finite trigger bounds the reset (even with an infinite inner
+        // waveform), so the whole waveform pre-computes to Fixed.
+        let mut g = new_test_generator(1);
+        let w: Waveform = Reset {
+            trigger: Box::new(Fixed(vec![1.0, -1.0, 1.0], ())),
+            waveform: Box::new(Time(())),
+            state: (),
+        };
+        match g.precompute(w) {
+            Fixed(_, _) => (),
+            w => panic!(
+                "Expected the reset to be precomputed to a Fixed, but got {:?}",
+                w
+            ),
+        }
 
         let w = Reset {
             trigger: Box::new(Fin {
@@ -1613,6 +1700,18 @@ mod tests {
                 "Expected the Append to be precomputed to a Fixed, but got {:?}",
                 w
             ),
+        }
+
+        // A finite first part does NOT bound the append: the infinite tail
+        // keeps the whole waveform infinite, so it must not become Fixed.
+        let w: Waveform = Append(
+            Box::new(Fixed(vec![1.0, 2.0], ())),
+            Box::new(Const(3.0)),
+            (),
+        );
+        match g.precompute(w) {
+            Fixed(_, _) => panic!("append with an infinite tail must not precompute to Fixed"),
+            _ => (),
         }
     }
 
