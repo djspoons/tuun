@@ -208,7 +208,10 @@ impl<'a> Generator<'a> {
                 let mut ph_out = vec![0.0; f_len];
                 self.allocations += f_len;
                 let ph_len = self.generate(phase, &mut ph_out);
-                for (i, &phase_offset) in ph_out.iter().enumerate() {
+                // Produce only the samples both sub-waveforms cover (the
+                // shorter one may be the phase), so the accumulator advances
+                // exactly over the reported samples.
+                for (i, &phase_offset) in ph_out[..ph_len].iter().enumerate() {
                     let sample = (*accumulator + phase_offset as f64).sin() as f32;
                     let f = out[i] as f64;
                     let phase_inc = f / self.sample_rate as f64;
@@ -1554,6 +1557,15 @@ mod tests {
             })
             .collect();
         run_sin_test(&mut g, &mut w, expected);
+
+        // A finite phase bounds the sine too: two samples, no more, and the
+        // samples reflect the phase offsets.
+        let w: Waveform = Sine {
+            frequency: Box::new(Const(0.0)),
+            phase: Box::new(Fixed(vec![0.0, f32::consts::FRAC_PI_2], ())),
+            state: (),
+        };
+        run_tests(&w, &[0.0, 1.0]);
 
         // A finite frequency bounds the sine (even with an infinite phase),
         // so the whole waveform precomputes to Fixed.
