@@ -674,6 +674,7 @@ impl<S: Clone> Infer<S> {
         if tabulated == 0 {
             return None;
         }
+        let positional_atoms = numeric.iter().filter(|numeric| **numeric).count();
         let full: &[Sort] = &[
             Sort::INT,
             Sort::NON_INT_ONLY,
@@ -681,10 +682,18 @@ impl<S: Clone> Infer<S> {
             Sort::SEQ,
         ];
         let coarse: &[Sort] = &[Sort::WAVE, Sort::SEQ];
+        // Every named parameter carries one choice more than the atoms a
+        // caller may pass: it may be *omitted*, and the row for that binds
+        // it to its default. A positional parameter has no such choice.
         let fits = |set: &[Sort]| {
-            set.len()
-                .checked_pow(u32::try_from(tabulated).ok()?)
-                .filter(|vectors| *vectors <= MAX_TABULATION_VECTORS)
+            let mut vectors = set
+                .len()
+                .checked_pow(u32::try_from(positional_atoms).ok()?)?;
+            for numeric in &named_numeric {
+                let radix = if *numeric { set.len() + 1 } else { 2 };
+                vectors = vectors.checked_mul(radix)?;
+            }
+            Some(vectors).filter(|vectors| *vectors <= MAX_TABULATION_VECTORS)
         };
         let (atoms, vectors) = if let Some(vectors) = fits(full) {
             (full, vectors)
@@ -707,12 +716,12 @@ impl<S: Clone> Infer<S> {
             let errors = self.errors.len();
             let mark = self.mark();
             let depth = context.len();
-            let mut cursor = 0u32;
+            let mut stride = 1usize;
             let mut domains = Vec::with_capacity(positional.len());
             for (pattern, numeric) in positional.iter().zip(&numeric) {
                 if *numeric {
-                    let atom = atoms[(index / atoms.len().pow(cursor)) % atoms.len()];
-                    cursor += 1;
+                    let atom = atoms[(index / stride) % atoms.len()];
+                    stride *= atoms.len();
                     self.bind_pattern(context, pattern, Type::ground(atom), &expr.span, false);
                     domains.push(Type::ground(atom));
                 } else {
@@ -721,10 +730,19 @@ impl<S: Clone> Infer<S> {
             }
             let mut named_domains = Vec::with_capacity(named.len());
             for ((name, default), numeric) in named.iter().zip(&named_numeric) {
-                let parameter = if *numeric {
-                    let atom = atoms[(index / atoms.len().pow(cursor)) % atoms.len()];
-                    cursor += 1;
-                    Type::ground(atom)
+                let radix = if *numeric { atoms.len() + 1 } else { 2 };
+                let choice = (index / stride) % radix;
+                stride *= radix;
+                // The last choice is the omitted one: the parameter takes
+                // the value a call that leaves it out would get, so the body
+                // is checked at the default's own type. Leaving the name off
+                // the row is what tells selection the row is for such a
+                // call — see `named_matches`.
+                let omitted = choice == radix - 1;
+                let parameter = if omitted {
+                    self.infer(context, &mut Vec::new(), default)
+                } else if *numeric {
+                    Type::ground(atoms[choice])
                 } else {
                     let default_ty = self.infer(context, &mut Vec::new(), default);
                     let parameter = self.fresh_meta();
@@ -732,7 +750,9 @@ impl<S: Clone> Infer<S> {
                     parameter
                 };
                 context.push((name.clone(), ContextEntry::Ty(parameter.clone())));
-                named_domains.push((name.clone(), parameter));
+                if !omitted {
+                    named_domains.push((name.clone(), parameter));
+                }
             }
             let result = self.infer(context, &mut Vec::new(), body);
             context.truncate(depth);
@@ -1302,16 +1322,49 @@ impl<S: Clone> Infer<S> {
         broad
     }
 
+    /// Whether the row's named parameters line up with the call's named
+    /// arguments, each supplied argument fitting its domain.
+    ///
+    /// A row declares exactly the names its call must supply. Tabulation
+    /// emits one row per omission pattern — declaring a named parameter for
+    /// calls that pass it, and leaving the name off for calls that take the
+    /// default — so matching the two sets is what keeps those apart. Both
+    /// directions matter: a row that ignored an argument the call supplies
+    /// would select on the strength of a default the call overrode, and a
+    /// row that declared a parameter the call omits would answer for a
+    /// value the call never passes.
+    fn named_matches(&mut self, named: &[(String, Type)], frame: &Frame<S>) -> bool {
+        for (name, _, _) in &frame.named {
+            if !named.iter().any(|(declared, _)| declared == name) {
+                return false;
+            }
+        }
+        for (name, domain) in named {
+            let Some((_, argument, _)) = frame.named.iter().find(|(n, _, _)| n == name) else {
+                return false;
+            };
+            let sort = match self.resolve(argument) {
+                Type::Numeric(rep) => Some(self.may_of(&rep)),
+                Type::Dynamic | Type::Meta(_) => Some(Sort::TOP),
+                _ => None,
+            };
+            // TODO record named-argument contracts the way
+            // `record_selection_contracts` does for positional ones.
+            let (fits, _) = self.position_fits(argument, sort, domain);
+            if !fits {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Returns the row's domains as contract sorts when the row applies
     /// outright — every argument's sort contained in its domain — and
     /// `None` otherwise. Numeric positions check by sort containment and
     /// report their domain sort; unknown and structural domains accept by
-    /// subtyping and report ⊤ (no sort contract). A supplied named
-    /// argument checks against the row's named domain; an omitted one
-    /// takes the default, whose sort the rows do not record, so the row
-    /// does not apply outright — coverage (`select_by_atoms`) is the path
-    /// that accepts it. Structural subtyping solves state, so callers
-    /// snapshot around the call.
+    /// subtyping and report ⊤ (no sort contract). Named parameters are
+    /// judged by `named_matches`. Structural subtyping solves state, so
+    /// callers snapshot around the call.
     fn row_applies(
         &mut self,
         row: &Type,
@@ -1332,26 +1385,8 @@ impl<S: Clone> Infer<S> {
                 return None;
             }
         }
-        for (name, domain) in named {
-            match frame.named.iter().find(|(n, _, _)| n == name) {
-                Some((_, argument, _)) => {
-                    let sort = match self.resolve(argument) {
-                        Type::Numeric(rep) => Some(self.may_of(&rep)),
-                        Type::Dynamic | Type::Meta(_) => Some(Sort::TOP),
-                        _ => None,
-                    };
-                    // TODO record named-argument contracts the way
-                    // `record_selection_contracts` does for positional ones.
-                    let (fits, _) = self.position_fits(argument, sort, domain);
-                    if !fits {
-                        return None;
-                    }
-                }
-                // An omitted argument takes the default, whose sort the
-                // rows do not record; coverage (`select_by_atoms`) is the
-                // path that can accept it.
-                None => return None,
-            }
+        if !self.named_matches(named, frame) {
+            return None;
         }
         Some(domains)
     }
@@ -1477,10 +1512,10 @@ impl<S: Clone> Infer<S> {
     }
 
     /// Whether a row can participate in coverage at all: structural arguments
-    /// must subtype their domains, supplied named arguments must fit theirs
-    /// (omitted ones defer), and each position's contract sort is reported as
-    /// in `row_applies`. Numeric positions are not judged here — coverage
-    /// judges them atom by atom.
+    /// must subtype their domains, named parameters must line up as in
+    /// `row_applies`, and each position's contract sort is reported the same
+    /// way. Numeric positions are not judged here — coverage judges them atom
+    /// by atom.
     fn row_admits(
         &mut self,
         row: &Type,
@@ -1512,18 +1547,8 @@ impl<S: Clone> Infer<S> {
                 return None;
             }
         }
-        for (name, domain) in named {
-            if let Some((_, argument, _)) = frame.named.iter().find(|(n, _, _)| n == name) {
-                let sort = match self.resolve(argument) {
-                    Type::Numeric(rep) => Some(self.may_of(&rep)),
-                    Type::Dynamic | Type::Meta(_) => Some(Sort::TOP),
-                    _ => None,
-                };
-                let (fits, _) = self.position_fits(argument, sort, domain);
-                if !fits {
-                    return None;
-                }
-            }
+        if !self.named_matches(named, frame) {
+            return None;
         }
         Some(domains)
     }
@@ -1572,7 +1597,9 @@ impl<S: Clone> Infer<S> {
         head: Option<&str>,
     ) -> Option<Type> {
         // A named argument that no conjunct declares can never select
-        // anything.
+        // anything, so report it and stop: selection would only add a
+        // second error saying no use of the function accepts the call.
+        let mut undeclared = false;
         for (name, _, _) in &frame.named {
             let declared = conjuncts.iter().any(|conjunct| {
                 matches!(conjunct, Type::Function { named, .. }
@@ -1580,7 +1607,11 @@ impl<S: Clone> Infer<S> {
             });
             if !declared {
                 self.error(format!("no named parameter \"{}\"", name), &frame.span);
+                undeclared = true;
             }
+        }
+        if undeclared {
+            return None;
         }
         match self.select_core(conjuncts, frame) {
             Selection::Selected(result) => Some(result),
@@ -1622,6 +1653,38 @@ impl<S: Clone> Infer<S> {
                             if positional.len() == frame.positional.len())
                     })
                     .collect();
+                // A table with exactly one row of the call's shape is a
+                // plain arrow as far as the call is concerned, so let
+                // `check_frame` say precisely which argument is wrong. Its
+                // judgment is finer than applicability's sort containment
+                // and may find nothing to report, in which case the
+                // heuristics below still run.
+                let shaped: Vec<&&Type> = rows
+                    .iter()
+                    .filter(|row| {
+                        let Type::Function { named, .. } = row else {
+                            unreachable!("rows are arrows");
+                        };
+                        named.len() == frame.named.len()
+                            && named
+                                .iter()
+                                .all(|(name, _)| frame.named.iter().any(|(n, _, _)| n == name))
+                    })
+                    .collect();
+                if let [row] = &shaped[..] {
+                    let Type::Function {
+                        positional, named, ..
+                    } = **row
+                    else {
+                        unreachable!("rows are arrows");
+                    };
+                    let (positional, named) = (positional.clone(), named.clone());
+                    let errors = self.errors.len();
+                    self.check_frame(frame, &positional, &named);
+                    if self.errors.len() > errors {
+                        return None;
+                    }
+                }
                 for (position, (argument, span)) in frame.positional.iter().enumerate() {
                     let Type::Numeric(rep) = self.resolve(argument) else {
                         continue;
@@ -2683,6 +2746,48 @@ mod tests {
         assert_errors(&format!("{}f(x = 2) \\ 1", f), &["expected seq, found int"]);
         // A default the body cannot accept errors at the definition.
         assert_errors("fn(x = 100) => x \\ 1", &["expected seq, found int"]);
+    }
+
+    // A call that omits a named argument gets the value the default
+    // supplies, so tabulation gives every named parameter an "omitted"
+    // choice: a row that leaves the name off and checks the body at the
+    // default's own type. Selection matches the row's names against the
+    // call's, so the omitted row answers only for calls that omit.
+    #[test]
+    fn omitted_named_arguments_take_their_default() {
+        // The default's sort decides the result, not the first row's.
+        assert_errors(
+            "let f = fn(k = time) => k in nth(f(), [1, 2, 3])",
+            &["expected int, found waveform"],
+        );
+        assert_errors(
+            "let f = fn(k = 0.5) => k in nth(f(), [1, 2, 3])",
+            &["expected int, found float"],
+        );
+        // An int default still gets the precise int result.
+        assert_clean("let f = fn(k = 2) => k in nth(f(), [1, 2, 3])");
+        assert_clean("let f = fn(x, k = 2) => x * k in nth(f(3), [1, 2, 3])");
+        // Each named parameter takes its own default, so a waveform in any
+        // of them carries through.
+        assert_errors(
+            "let f = fn(a, b = 1, c = time) => a + b + c in nth(f(1), [1, 2, 3])",
+            &["expected int, found waveform"],
+        );
+        // A supplied argument overrides the default and selects the row
+        // that declares the name — the omitted row must not answer for it.
+        assert_clean("let f = fn(k = 2) => k in nth(f(k = 1), [1, 2, 3])");
+        assert_errors(
+            "let f = fn(k = 2) => k in nth(f(k = time), [1, 2, 3])",
+            &["expected int, found waveform"],
+        );
+        // A structural named parameter keeps `check_frame`'s precision:
+        // one row has the call's shape, so the mismatch points at the
+        // argument rather than at the call.
+        assert_errors(
+            "let f = fn(x, k = [1, 2]) => nth(x, k) in f(1, k = [true])",
+            &["expected [int], found [bool]"],
+        );
+        assert_clean("let f = fn(x, k = [1, 2]) => nth(x, k) in f(1)");
     }
 
     // append is exactly the waveform primitive — two waveforms, end to
