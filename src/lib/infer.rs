@@ -32,6 +32,14 @@
 //!   waveform` is genuine subset inclusion.
 //! - Each failed check produces an [`Error`] and inference recovers with
 //!   [`Type::Dynamic`] so one mistake does not cascade.
+//! - A projection is resolved against the module's own bindings, so it
+//!   requires the checker to know *which* module: an expression whose type
+//!   is still unknown is rejected rather than trusted. The type is tracked
+//!   wherever it flows — a `let`, a directly applied lambda, a list or tuple
+//!   element — so what this rules out is a module arriving as an unannotated
+//!   parameter, and with it functions over modules. In exchange, every
+//!   projection that survives checking is one whose name was looked up, and
+//!   a misspelled one is a static error wherever it appears.
 
 use std::collections::HashMap;
 
@@ -2157,9 +2165,25 @@ impl<S: Clone> Infer<S> {
                             Type::Dynamic
                         }
                     },
-                    // A module of unknown type (e.g. an unannotated
-                    // parameter): projection could be fine at run time.
-                    Type::Dynamic | Type::Meta(_) => Type::Dynamic,
+                    // The recovery type projects to itself, so one
+                    // reported error does not cascade into more.
+                    Type::Dynamic => Type::Dynamic,
+                    // An unknown does not: a projection has to name a module
+                    // the checker can look the name up in, and the type here
+                    // says nothing about which module — or whether it is one.
+                    // Rejecting is what makes every surviving projection
+                    // statically checked, at the cost of functions taking
+                    // modules as parameters. The type reaches the projection
+                    // wherever it is tracked at all (a `let`, a directly
+                    // applied lambda, a list, a tuple element), so what this
+                    // rules out is the unannotated parameter, where it
+                    // genuinely is not known.
+                    Type::Meta(_) => {
+                        let message =
+                            format!("cannot project '{}' from a value of unknown type", name);
+                        self.error(message, &expr.span);
+                        Type::Dynamic
+                    }
                     other => {
                         let message = format!(
                             "cannot project '{}' from a value of type {}",
@@ -3161,6 +3185,41 @@ mod tests {
             messages(&errors),
             ["cannot project 'y' from a value of type int"]
         );
+
+        // A projection needs the checker to know which module, so an
+        // unknown is rejected rather than trusted. This is the one shape
+        // the rule costs: a function over modules.
+        let expr = parse_program::<u32, _>("let f = fn(q) => q.two in f(b)", ()).unwrap();
+        let errors = check_program(resolve, &bindings, &expr, None);
+        assert_eq!(
+            messages(&errors),
+            ["cannot project 'two' from a value of unknown type"]
+        );
+
+        // Everywhere the type is tracked, the name is looked up — so a
+        // misspelling is a static error there too, which is the point of the
+        // rule.
+        for (text, expected) in [
+            ("let n = b in n.two", None),
+            (
+                "let n = b in n.three",
+                Some("Module has no binding 'three'"),
+            ),
+            ("(fn(q) => q.two)(b)", None),
+            (
+                "(fn(q) => q.three)(b)",
+                Some("Module has no binding 'three'"),
+            ),
+            ("nth(0, [b]).two", None),
+            ("let (u, v) = (b, b) in u.two", None),
+        ] {
+            let expr = parse_program::<u32, _>(text, ()).unwrap();
+            let errors = check_program(resolve, &bindings, &expr, None);
+            match expected {
+                None => assert!(errors.is_empty(), "{}: got {:?}", text, messages(&errors)),
+                Some(message) => assert_eq!(messages(&errors), [message], "for {}", text),
+            }
+        }
     }
 
     #[test]
