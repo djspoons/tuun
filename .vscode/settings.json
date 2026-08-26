@@ -89,6 +89,7 @@
         "xrel",
         "yrel"
     ],
+    "rust-analyzer.server.path": "/Users/spoons/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rust-analyzer",
     "rust-analyzer.runnables.extraEnv": {
         "LIBRARY_PATH": "/opt/homebrew/lib",
     },
