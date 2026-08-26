@@ -242,6 +242,8 @@ impl InputHandler {
             }
             // Completion on Cmd-/.
             (Mode::Edit { .. }, Some(Scancode::Slash)) if gui_mod => Some(vec![Action::Complete]),
+            // Type of the identifier under the cursor on Ctrl-H.
+            (Mode::Edit { .. }, Some(Scancode::H)) if ctrl => Some(vec![Action::ShowType]),
             // Undo / redo on Ctrl+Z or Cmd+Z; Shift reverses. The redo arm
             // comes first so the shifted chord isn't captured by the undo
             // arm.
@@ -481,6 +483,11 @@ mod tests {
         assert!(matches!(
             classify(Scancode::Slash, Mod::LGUIMOD),
             Action::Complete
+        ));
+        // Type of the identifier under the cursor on Ctrl-H.
+        assert!(matches!(
+            classify(Scancode::H, Mod::LCTRLMOD),
+            Action::ShowType
         ));
         // Forward delete works unmodified.
         assert!(matches!(

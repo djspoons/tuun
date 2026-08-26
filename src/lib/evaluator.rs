@@ -390,6 +390,31 @@ impl Evaluator {
         .collect()
     }
 
+    /// Returns the type of the identifier covering `offset` in the program at
+    /// `index`, rendered as diagnostics render types, or `None` when no
+    /// identifier covers it or the program does not parse.
+    ///
+    /// Mirrors [`Evaluator::check_program`]'s setup — same bindings, implicit
+    /// prelude open, module resolver, and expectation — so the answer is the
+    /// one the checker is working with.
+    pub fn type_at(&self, set: &ProgramSet, index: usize, offset: usize) -> Option<String> {
+        let mut bindings = set.evaluation_bindings(index);
+        bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
+        let text = set.programs()[index].text();
+        let expr = parser::parse_program(text, Source::Program).ok()?;
+        let expectation = match set.programs()[index].kind() {
+            ProgramKind::Waveform => infer::Expectation::Playable,
+            ProgramKind::Keys => infer::Expectation::NoteFunction,
+        };
+        infer::type_at(
+            |path| self.resolve(path),
+            &bindings,
+            &expr,
+            Some(expectation),
+            offset,
+        )
+    }
+
     /// Parses and evaluates `text` under `bindings`, resolving `open`
     /// directives through the module cache. Returns the evaluated expression
     /// or a user-visible message.

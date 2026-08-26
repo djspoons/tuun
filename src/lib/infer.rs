@@ -97,6 +97,56 @@ where
     checker.errors
 }
 
+/// Returns the type of the identifier covering `offset` in `expr`, rendered
+/// as diagnostics render types, or `None` when no identifier covers it.
+///
+/// Checks under the same bindings and expectation as [`check_program`], so
+/// the answer is the one the checker itself is working with, and reports it
+/// only once inference has finished: a parameter whose type the body settles
+/// reads as what it was solved to rather than as an unknown. Errors elsewhere
+/// in the program do not prevent an answer — inference recovers and carries
+/// on — and the errors themselves are discarded, since `check_program` is
+/// what reports them.
+///
+/// `offset` is a byte offset into the text `expr` was parsed from. Only
+/// identifiers answer: a name's type is what the context holds for it,
+/// which is well defined in a way an arbitrary sub-expression's is not (a
+/// function's node under an application judges to the call's result).
+pub fn type_at<'a, M, S, F>(
+    resolve: F,
+    bindings: &'a [SourceBinding<M, S>],
+    expr: &SourceExpr<M, S>,
+    expectation: Option<Expectation>,
+    offset: usize,
+) -> Option<String>
+where
+    F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
+    S: Clone,
+{
+    let mut checker = Infer::new();
+    let mut context = Vec::new();
+    let mut memo = HashMap::new();
+    // The probe is armed only after the context is built: the modules typed
+    // there carry offsets into their own sources, which the probe cannot
+    // tell from this one's.
+    checker.build_context(&resolve, bindings, &mut context, &mut memo);
+    checker.probe = Some(offset);
+    let mut psi = match expectation {
+        Some(Expectation::NoteFunction) => vec![Frame {
+            positional: vec![
+                (Type::int(), expr.span.clone()),
+                (Type::float(), expr.span.clone()),
+            ],
+            named: Vec::new(),
+            span: expr.span.clone(),
+        }],
+        _ => Vec::new(),
+    };
+    checker.infer(&mut context, &mut psi, expr);
+    let (_, ty) = checker.probed.take()?;
+    Some(checker.display(&ty))
+}
+
 /// One application's worth of argument types, awaiting the function they
 /// apply to.
 ///
@@ -165,6 +215,15 @@ struct Infer<S> {
     /// so failed attempts roll back by popping (see `mark`/`rollback`).
     journal: Vec<Undo>,
     errors: Vec<Error<S>>,
+    /// The offset a [`type_at`] query is asking about, once inference has
+    /// reached the text the offset indexes into. `None` for a plain check,
+    /// and while building the context — the modules typed there carry
+    /// offsets into their own sources, which this cannot tell apart.
+    probe: Option<usize>,
+    /// The narrowest identifier found covering `probe`, with the width of
+    /// its span. Held unrendered: a parameter's type is a meta until the
+    /// body settles it, so only the finished substitution reads right.
+    probed: Option<(usize, Type)>,
 }
 
 /// The bounds of one refinement variable: the join of the guarantees that
@@ -206,11 +265,35 @@ impl<S: Clone> Infer<S> {
             refs: Vec::new(),
             journal: Vec::new(),
             errors: Vec::new(),
+            probe: None,
+            probed: None,
         }
     }
 
     fn error(&mut self, message: String, span: &Option<Span<S>>) {
         self.errors.push(Error::with_span(message, span.clone()));
+    }
+
+    /// Records `ty` as the answer to a pending type query when `span` covers
+    /// the offset the query asks about.
+    ///
+    /// The narrowest span wins, so the name in `synth.piano` answers for
+    /// itself rather than for the projection that encloses it.
+    fn probe_type(&mut self, span: &Option<Span<S>>, ty: &Type) {
+        let (Some(offset), Some(span)) = (self.probe, span) else {
+            return;
+        };
+        if !span.range.contains(&offset) {
+            return;
+        }
+        let width = span.range.len();
+        let narrower = match &self.probed {
+            Some((best, _)) => width <= *best,
+            None => true,
+        };
+        if narrower {
+            self.probed = Some((width, ty.clone()));
+        }
     }
 
     fn fresh_id(&mut self) -> u32 {
@@ -711,6 +794,11 @@ impl<S: Clone> Infer<S> {
                 ty.free_refinements(&self.subst, &mut keep);
             }
         }
+        // A type query is not answered from here. Each vector re-checks the
+        // body with the parameters pinned to one hypothetical atom, so an
+        // identifier would report whichever row happened to run last, and the
+        // row's refinement variables are popped by its rollback anyway.
+        let probe = self.probe.take();
         let mut rows = Vec::new();
         for index in 0..vectors {
             let errors = self.errors.len();
@@ -770,6 +858,7 @@ impl<S: Clone> Infer<S> {
             self.errors.truncate(errors);
             self.rollback(mark);
         }
+        self.probe = probe;
         if rows.is_empty() {
             return None;
         }
@@ -1878,11 +1967,16 @@ impl<S: Clone> Infer<S> {
             Expr::Variable(name) => match context.iter().rev().find(|(n, _)| n == name) {
                 Some((_, ContextEntry::Ty(ty))) => {
                     let ty = ty.clone();
+                    // A type query about this name wants what the context
+                    // holds, not the residual after Ψ: on the `f` of
+                    // `f(1)` the residual is the call's result.
+                    self.probe_type(&expr.span, &ty);
                     self.app_subtype(psi, ty, Some(name))
                 }
                 Some((_, ContextEntry::Builtin(builtin))) => {
                     let builtin = builtin.clone();
                     let ty = signatures::signature(&builtin).unwrap_or(Type::Dynamic);
+                    self.probe_type(&expr.span, &ty);
                     self.app_subtype(psi, ty, Some(&builtin))
                 }
                 None => {
@@ -2076,6 +2170,7 @@ impl<S: Clone> Infer<S> {
                         Type::Dynamic
                     }
                 };
+                self.probe_type(&expr.span, &ty);
                 self.app_subtype(psi, ty, None)
             }
             Expr::BoundModule(entries) => {

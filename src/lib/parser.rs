@@ -825,19 +825,26 @@ fn parse_expr<M>(input: Input) -> IResult<SourceExpr<M>> {
     let start = input.location_offset();
     let (mut rest, mut expr) = parse_reverse_application(input)?;
     loop {
-        let attempt = preceded(
-            ws(char('\\')),
+        // The operator is matched by `tag` rather than `char` so its own
+        // position is available: like every other operator, `\` becomes a
+        // variable, and a variable that spans its source text can be
+        // reported on (an unbound-name error, a type query).
+        let attempt = (
+            ws(tag("\\")),
             expect(
                 parse_reverse_application,
                 "expected expression after \\ operator",
             ),
         )
-        .parse(rest);
+            .parse(rest);
         match attempt {
-            Ok((new_rest, rhs)) => {
+            Ok((new_rest, (op, rhs))) => {
                 let end = new_rest.location_offset();
                 let rhs = rhs.unwrap_or_else(error_placeholder);
-                let op_var = SourceExpr::variable("\\".to_string());
+                let op_var = SourceExpr::with_span(
+                    Expr::Variable("\\".to_string()),
+                    op.location_offset()..op.location_offset() + op.fragment().len(),
+                );
                 let app = Expr::application(op_var, vec![expr, rhs]);
                 expr = SourceExpr::with_span(app, start..end);
                 rest = new_rest;

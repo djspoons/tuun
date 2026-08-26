@@ -5,6 +5,7 @@
 //! the runner in `effects.rs` executes against the outside world.
 
 use std::collections::HashSet;
+use std::ops::Range;
 use std::time::Instant;
 
 use crate::diagnostics::{self, Diagnostic, Source};
@@ -262,6 +263,13 @@ pub enum Action {
     /// a parameter hint for the function being called instead, leaving the
     /// cursor on the first parameter.
     Complete,
+    /// Report the type of the identifier under the cursor.
+    ///
+    /// A diagnostic aid: shows what the checker makes of a name where it
+    /// stands, so a parameter's sort or an overloaded function's table can be
+    /// read without provoking an error. The cursor may sit anywhere in the
+    /// identifier, including just past its last character.
+    ShowType,
     /// Restore the active program's text and cursor from before the most recent
     /// edit unit, remembering the current state for `Redo`.
     Undo,
@@ -662,6 +670,7 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             cursor + next_word_end(&current[cursor..])
         }),
         Action::Complete => apply_complete(state, ctx),
+        Action::ShowType => apply_show_type(state, ctx),
         Action::Undo => apply_history_restore(state, Program::undo, "Nothing to undo"),
         Action::Redo => apply_history_restore(state, Program::redo, "Nothing to redo"),
 
@@ -1074,6 +1083,56 @@ fn apply_complete(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
     vec![]
 }
 
+/// The range of the token around `cursor`: the run of like characters the
+/// cursor sits in or just past, or `None` where it touches neither kind.
+///
+/// Names and operators are separate runs, so a cursor between the two names
+/// whichever it just left — `x*|y` is the operator, `x|*y` the name. Both
+/// are variables to the checker, so both have a type worth reporting.
+fn token_at(text: &str, cursor: usize) -> Option<Range<usize>> {
+    let before = text[..cursor].chars().next_back();
+    let at = text[cursor..].chars().next();
+    let class: fn(char) -> bool = match (before, at) {
+        (Some(c), _) if is_word_char(c) => is_word_char,
+        (Some(c), _) if is_operator_char(c) => is_operator_char,
+        (_, Some(c)) if is_word_char(c) => is_word_char,
+        (_, Some(c)) if is_operator_char(c) => is_operator_char,
+        _ => return None,
+    };
+    let start = text[..cursor].trim_end_matches(class).len();
+    let after = &text[cursor..];
+    let end = cursor + after.len() - after.trim_start_matches(class).len();
+    (start < end).then_some(start..end)
+}
+
+/// Applies `Action::ShowType` in Edit mode; does nothing in other modes.
+///
+/// Reports the type of the name or operator the cursor is in, or just past.
+/// See [`Action::ShowType`] for the user-facing behavior.
+fn apply_show_type(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
+    let Mode::Edit {
+        cursor_position, ..
+    } = &state.mode
+    else {
+        return vec![];
+    };
+    let cursor = *cursor_position;
+    let text = state.active_program().text();
+    let Some(token) = token_at(text, cursor) else {
+        return vec![Effect::ShowMessage(
+            "No name or operator under the cursor".to_string(),
+        )];
+    };
+    let name = text[token.clone()].to_string();
+    match ctx
+        .evaluator
+        .type_at(&state.programs, state.active_program_index, token.start)
+    {
+        Some(ty) => vec![Effect::ShowMessage(format!("{} : {}", name, ty))],
+        None => vec![Effect::ShowMessage(format!("No type for \"{}\"", name))],
+    }
+}
+
 /// Inserts a parameter hint for the call being typed: with the Edit-mode
 /// `cursor` just after `(` and the identifier before it (possibly a module
 /// projection) bound to a function, inserts that function's positional
@@ -1345,6 +1404,18 @@ fn next_char_boundary(text: &str, cursor: usize) -> usize {
 /// else (whitespace, operators, punctuation) separates words.
 fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '#'
+}
+
+/// Whether `c` can appear in an operator.
+///
+/// The union of the characters the parser's binary and unary operator tags
+/// are spelled from, so a run of them covers the longest operator the cursor
+/// could be sitting in (`<=`, `~*`, `!=`).
+fn is_operator_char(c: char) -> bool {
+    matches!(
+        c,
+        '*' | '/' | '~' | '+' | '-' | '&' | '=' | '!' | '<' | '>' | '|' | '\\' | '@' | '$' | '%'
+    ) || c == '?'
 }
 
 /// Returns the dotted path qualifying the word starting at `start` in `text`
@@ -1972,6 +2043,96 @@ mod tests {
         let mut state = edit_state("#{level_db=0}\n_ = test;", "sin", 3);
         apply_with_empty_status(&mut state, Action::Complete);
         assert_eq!(edit_text_and_cursor(&state), ("sine".to_string(), 4));
+    }
+
+    /// The message a `ShowType` produced; panics if it produced none.
+    #[track_caller]
+    fn show_type_message(source: &str, text: &str, cursor: usize) -> String {
+        let mut state = edit_state(source, text, cursor);
+        let effects = apply_with_empty_status(&mut state, Action::ShowType);
+        effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::ShowMessage(message) => Some(message),
+                _ => None,
+            })
+            .expect("ShowType should report something")
+    }
+
+    #[test]
+    fn show_type_reports_the_identifier_under_the_cursor() {
+        let source = "#{level_db=0}\n_ = test;";
+        // A prelude name, with the cursor inside it and just past it.
+        assert_eq!(
+            show_type_message(source, "sine(2, 0)", 2),
+            "sine : (waveform, waveform) -> waveform"
+        );
+        assert_eq!(
+            show_type_message(source, "sine(2, 0)", 4),
+            "sine : (waveform, waveform) -> waveform"
+        );
+        // A parameter reads as what the body settled it to, not as an
+        // unknown — the point of reporting after inference finishes.
+        assert_eq!(
+            show_type_message(source, "fn(dur) => sine(2, 0) | fin(dur)", 29),
+            "dur : waveform"
+        );
+        // A let-bound name, and an overloaded one, both from inside the
+        // expression rather than from the program's bindings.
+        assert_eq!(
+            show_type_message(source, "let n = 1 in n + 2", 13),
+            "n : int"
+        );
+    }
+
+    #[test]
+    fn show_type_reports_operators_too() {
+        let source = "#{level_db=0}\n_ = test;";
+        // An operator is a variable to the checker, so it has a type worth
+        // reporting — the table its overloads make.
+        assert_eq!(
+            show_type_message(source, "1 <= 2", 2),
+            "<= : (float, float) -> bool"
+        );
+        // A run of operator characters is one token, so the cursor inside
+        // `<=` names the whole operator rather than `<`.
+        assert_eq!(
+            show_type_message(source, "1 <= 2", 3),
+            "<= : (float, float) -> bool"
+        );
+        // Unary and binary uses share one name and one table.
+        assert!(show_type_message(source, "-time", 0).starts_with("- : (int) -> int"));
+        // Names and operators are separate tokens, so a cursor between them
+        // names whichever it just left.
+        assert_eq!(show_type_message(source, "time+1", 4), "time : waveform");
+        assert!(show_type_message(source, "time+1", 5).starts_with("+ : "));
+        // `\\` is a variable like the rest, which needs its span from the
+        // parser.
+        assert_eq!(
+            show_type_message(source, "seq(0)(1) \\ 1", 10),
+            "\\ : (seq, seq) -> seq ∧ (seq, waveform) -> waveform"
+        );
+    }
+
+    #[test]
+    fn show_type_reports_when_there_is_nothing_to_report() {
+        let source = "#{level_db=0}\n_ = test;";
+        // Touching neither a name nor an operator.
+        assert_eq!(
+            show_type_message(source, "1  + 2", 2),
+            "No name or operator under the cursor"
+        );
+        // A name the checker has no type for.
+        assert_eq!(
+            show_type_message(source, "nope + 1", 2),
+            "No type for \"nope\""
+        );
+        // `|` is reverse application, not a function: the parser applies the
+        // right-hand side directly, so there is no variable to report on.
+        assert_eq!(
+            show_type_message(source, "time | fin(1)", 5),
+            "No type for \"|\""
+        );
     }
 
     #[test]
