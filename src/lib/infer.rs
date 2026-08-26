@@ -374,12 +374,19 @@ impl<S: Clone> Infer<S> {
     /// Merges two numerics met in an invariant position: each side's
     /// definite guarantees flow into the other, failing when they conflict
     /// with recorded contracts.
+    ///
+    /// Two ground sorts have no bounds to merge, so they are judged
+    /// directly, and an invariant position judges them by equality: `int`
+    /// and `seq` are different types there, not merely overlapping ones.
     // TODO two unsolved variables are not linked: guarantees or contracts
     // arriving at one after this merge do not reach the other. A union-find
     // over refinement variables would close this — MLsub's biunification
     // handles a variable-variable constraint exactly so (merge the bounds,
     // alias the variables).
     fn numeric_unify(&mut self, x: &Refinement, y: &Refinement) -> Result<(), ()> {
+        if let (Refinement::Ground(x), Refinement::Ground(y)) = (x, y) {
+            return if x == y { Ok(()) } else { Err(()) };
+        }
         let definite_x = self.definite_of(x);
         let definite_y = self.definite_of(y);
         if let Refinement::Var(id) = y {
@@ -390,7 +397,6 @@ impl<S: Clone> Infer<S> {
         }
         Ok(())
     }
-
 
     /// Returns `ty` with the refinement variables at or above `floor`
     /// replaced by the sorts they may currently inhabit.
@@ -2960,6 +2966,32 @@ mod tests {
     #[test]
     fn cannot_apply_non_function() {
         assert_errors("1(2)", &["cannot apply a value of type int"]);
+    }
+
+    // Branches join by `join`, which falls back to unification for the
+    // types it has no join for — functions among them. Unification is
+    // invariant, so two numeric domains that merely overlap do not merge:
+    // taking the then-branch's type wholesale would hand the else-branch's
+    // value a domain it does not accept.
+    #[test]
+    fn branches_do_not_merge_distinct_numeric_domains() {
+        // sine takes waveforms and log takes floats; neither type covers
+        // the other, so there is no single arrow to give the branch.
+        assert_errors(
+            "(if false then sine else log)(time, 0)",
+            &["incompatible types (waveform, waveform) -> waveform and (float, float) -> float"],
+        );
+        // The same in the result position: log's float result would be
+        // claimed for a value that returns waveforms.
+        assert_errors(
+            "if false then log else sine",
+            &["incompatible types (float, float) -> float and (waveform, waveform) -> waveform"],
+        );
+        // Lists join their elements, so they are unaffected...
+        assert_clean("nth(0, [1, time])");
+        // ...as are branches whose types agree.
+        assert_clean("(if false then sqrt else exp)(4)");
+        assert_clean("(if false then append else reset)(time, time)");
     }
 
     // Direct unit tests for the subtyping corners that full programs
