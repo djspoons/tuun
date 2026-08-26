@@ -391,11 +391,21 @@ impl<S: Clone> Infer<S> {
         Ok(())
     }
 
-    /// Returns `ty` with refinement variables replaced by the sorts they may
-    /// currently inhabit, for rendering.
-    fn resolve_refinements(&self, ty: &Type) -> Type {
+
+    /// Returns `ty` with the refinement variables at or above `floor`
+    /// replaced by the sorts they may currently inhabit.
+    ///
+    /// A `floor` of 0 resolves every variable, which is what rendering
+    /// wants. A higher floor grounds only the variables allocated since
+    /// that point, leaving older ones live: a type carried out of a
+    /// speculative attempt must not mention variables the attempt's
+    /// rollback is about to pop, but variables that predate the attempt
+    /// outlive it and stay linked.
+    fn resolve_refinements(&self, ty: &Type, floor: u32) -> Type {
         match ty {
-            Type::Numeric(rep @ Refinement::Var(_)) => Type::ground(self.may_of(rep)),
+            Type::Numeric(rep @ Refinement::Var(id)) if *id >= floor => {
+                Type::ground(self.may_of(rep))
+            }
             Type::Function {
                 positional,
                 named,
@@ -403,33 +413,37 @@ impl<S: Clone> Infer<S> {
             } => Type::Function {
                 positional: positional
                     .iter()
-                    .map(|t| self.resolve_refinements(t))
+                    .map(|t| self.resolve_refinements(t, floor))
                     .collect(),
                 named: named
                     .iter()
-                    .map(|(n, t)| (n.clone(), self.resolve_refinements(t)))
+                    .map(|(n, t)| (n.clone(), self.resolve_refinements(t, floor)))
                     .collect(),
-                result: Box::new(self.resolve_refinements(result)),
+                result: Box::new(self.resolve_refinements(result, floor)),
             },
             Type::And(conjuncts) => Type::And(
                 conjuncts
                     .iter()
-                    .map(|t| self.resolve_refinements(t))
+                    .map(|t| self.resolve_refinements(t, floor))
                     .collect(),
             ),
-            Type::Tuple(items) => {
-                Type::Tuple(items.iter().map(|t| self.resolve_refinements(t)).collect())
-            }
-            Type::List(item) => Type::List(Box::new(self.resolve_refinements(item))),
+            Type::Tuple(items) => Type::Tuple(
+                items
+                    .iter()
+                    .map(|t| self.resolve_refinements(t, floor))
+                    .collect(),
+            ),
+            Type::List(item) => Type::List(Box::new(self.resolve_refinements(item, floor))),
             Type::Module(entries) => Type::Module(
                 entries
                     .iter()
-                    .map(|(n, t)| (n.clone(), self.resolve_refinements(t)))
+                    .map(|(n, t)| (n.clone(), self.resolve_refinements(t, floor)))
                     .collect(),
             ),
-            Type::Forall(vars, body) => {
-                Type::Forall(vars.clone(), Box::new(self.resolve_refinements(body)))
-            }
+            Type::Forall(vars, body) => Type::Forall(
+                vars.clone(),
+                Box::new(self.resolve_refinements(body, floor)),
+            ),
             _ => ty.clone(),
         }
     }
@@ -449,7 +463,8 @@ impl<S: Clone> Infer<S> {
     /// Renders `ty` for an error message, with meta solutions applied and
     /// refinement variables resolved to the sorts they may inhabit.
     fn display(&self, ty: &Type) -> String {
-        self.resolve_refinements(&ty.apply(&self.subst)).to_string()
+        self.resolve_refinements(&ty.apply(&self.subst), 0)
+            .to_string()
     }
 
     /// Replaces the quantified `vars` in `body` with fresh metas — the
@@ -1388,6 +1403,11 @@ impl<S: Clone> Infer<S> {
         }
         let mut candidates: Vec<Candidate> = Vec::new();
         for row in rows {
+            // The probe's own refinement variables are popped by its
+            // rollback, so the result it carries out is grounded at them
+            // (`resolve_refinements`); variables that predate the probe
+            // survive it and stay live.
+            let floor = self.refs.len() as u32;
             let mark = self.mark();
             let applies = self.row_admits(row, sorts, frame);
             let candidate = applies.map(|domains| {
@@ -1396,7 +1416,7 @@ impl<S: Clone> Infer<S> {
                 };
                 Candidate {
                     domains,
-                    result: result.apply(&self.subst),
+                    result: self.resolve_refinements(&result.apply(&self.subst), floor),
                 }
             });
             self.rollback(mark);
@@ -1469,22 +1489,17 @@ impl<S: Clone> Infer<S> {
         };
         let mut domains = Vec::with_capacity(positional.len());
         for ((sort, domain), (argument, _)) in sorts.iter().zip(positional).zip(&frame.positional) {
-            let resolved = self.resolve(domain);
-            let fits = match (sort, &resolved) {
-                // Numeric against numeric is coverage's job.
+            // Numeric against numeric is coverage's job; every other pairing
+            // is judged exactly as `row_applies` judges it.
+            let fits = match (sort, self.resolve(domain)) {
                 (Some(_), Type::Numeric(rep)) => {
-                    domains.push(self.may_of(rep));
+                    domains.push(self.may_of(&rep));
                     true
                 }
-                (None, Type::Numeric(_)) => false,
-                (_, Type::Meta(_) | Type::Var(_) | Type::Dynamic) => {
-                    domains.push(Sort::TOP);
-                    true
-                }
-                (Some(_), _) => false,
-                (None, _) => {
-                    domains.push(Sort::TOP);
-                    self.subtype(argument, &resolved).is_ok()
+                _ => {
+                    let (fits, contract) = self.position_fits(argument, *sort, domain);
+                    domains.push(contract);
+                    fits
                 }
             };
             if !fits {
@@ -1508,9 +1523,9 @@ impl<S: Clone> Infer<S> {
     }
 
     /// Whether one argument fits one domain — sort containment for
-    /// numerics, subtyping for structural arguments — and the contract
-    /// sort the domain imposes (⊤ for unknown and structural domains).
-    /// Structural subtyping solves state; callers snapshot.
+    /// numeric domains, subtyping for the rest — and the contract sort the
+    /// domain imposes (⊤ for variable and structural domains). Subtyping
+    /// solves state; callers snapshot.
     fn position_fits(
         &mut self,
         argument: &Type,
@@ -1525,9 +1540,17 @@ impl<S: Clone> Infer<S> {
             }
             // A structural argument never fits a numeric domain.
             (None, Type::Numeric(_)) => (false, Sort::TOP),
-            // An unconstrained domain accepts any argument without
-            // imposing a sort contract.
-            (_, Type::Meta(_) | Type::Var(_) | Type::Dynamic) => (true, Sort::TOP),
+            // The recovery type accepts anything and imposes nothing.
+            (_, Type::Dynamic) => (true, Sort::TOP),
+            // A variable domain is the row's own parameter, and the row's
+            // result may be that same variable, so the argument has to
+            // flow into it — the AS-Fun2 premise `check_frame` applies at
+            // ordinary calls. Accepting without binding would leave the
+            // result variable free for the caller to solve at will. The
+            // domain still imposes no sort contract of its own.
+            (_, Type::Meta(_) | Type::Var(_)) => {
+                (self.subtype(argument, &resolved).is_ok(), Sort::TOP)
+            }
             // A numeric argument has no arm at a structural domain.
             (Some(_), _) => (false, Sort::TOP),
             (None, _) => (self.subtype(argument, &resolved).is_ok(), Sort::TOP),
@@ -2598,6 +2621,39 @@ mod tests {
         assert_errors(
             "let pick = fn(n, xs) => nth(n, xs) in pick(0.5, [1, 2])",
             &["expected int, found float"],
+        );
+    }
+
+    // A structural domain the body leaves *unsolved* stays a bare variable
+    // in every row, and that variable is also the row's result. Selection
+    // binds it like any other parameter, so the call's result is the
+    // argument's type rather than an unknown the caller may solve at will.
+    #[test]
+    fn variable_domains_bind_their_argument() {
+        // f : ('a, int) -> 'a ∧ ('b, float) -> 'b — `x` is only passed
+        // through, so no row constrains it.
+        let f = "let f = fn(x, n) => if n > 0 then x else x in ";
+        assert_clean(&format!("{}nth(f(1, 1), [1, 2])", f));
+        assert_errors(
+            &format!("{}nth(f(\"s\", 1), [1, 2])", f),
+            &["expected int, found string"],
+        );
+        // A numeric argument binds too: the result is the seq that went in.
+        assert_errors(
+            &format!("{}nth(f(seq(0)(1), 1), [1, 2])", f),
+            &["expected int, found seq"],
+        );
+        // An omitted named argument puts the same shape on the coverage
+        // path, where rows are candidates rather than applying outright.
+        let g = "let g = fn(x, k = 2) => x in ";
+        assert_clean(&format!("{}nth(g(1), [1, 2])", g));
+        assert_errors(
+            &format!("{}nth(g(\"s\"), [1, 2])", g),
+            &["expected int, found string"],
+        );
+        assert_errors(
+            &format!("{}<[g(true)]>", g),
+            &["expected [seq], found [bool]"],
         );
     }
 
