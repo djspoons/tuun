@@ -372,22 +372,32 @@ impl Evaluator {
             ProgramKind::Waveform => infer::Expectation::Playable,
             ProgramKind::Keys => infer::Expectation::NoteFunction,
         };
-        infer::check_program(
+        let start = time::Instant::now();
+        print!("Checking programs... ");
+        let errors = infer::check_program(
             |path| self.resolve(path),
             &bindings,
             &expr,
             Some(expectation),
-        )
-        .iter()
-        .filter(|finding| matches!(finding.source(), Some(Source::Program) | Some(Source::File)))
-        .map(|finding| {
-            let diagnostic = self.diagnose(finding, set, index);
-            match self.check_mode {
-                CheckMode::Errors => diagnostic,
-                CheckMode::Warnings => diagnostic.as_warning(),
-            }
-        })
-        .collect()
+        );
+        println!(
+            "{} total errors in {:.3}s",
+            errors.len(),
+            (time::Instant::now() - start).as_secs_f32()
+        );
+        errors
+            .iter()
+            .filter(|finding| {
+                matches!(finding.source(), Some(Source::Program) | Some(Source::File))
+            })
+            .map(|finding| {
+                let diagnostic = self.diagnose(finding, set, index);
+                match self.check_mode {
+                    CheckMode::Errors => diagnostic,
+                    CheckMode::Warnings => diagnostic.as_warning(),
+                }
+            })
+            .collect()
     }
 
     /// Returns the type of the identifier covering `offset` in the program at
