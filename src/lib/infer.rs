@@ -194,6 +194,18 @@ type TypeContext = Vec<(String, ContextEntry)>;
 /// 4^4, covering functions of up to four numeric parameters.
 const MAX_TABULATION_VECTORS: usize = 256;
 
+/// The four atoms of the sort lattice, most specific first.
+const FULL_ATOMS: [Sort; 4] = [
+    Sort::INT,
+    Sort::NON_INT_ONLY,
+    Sort::NON_CONST_WAVE,
+    Sort::SEQ,
+];
+
+/// The two-point unseq/seq split: the soundness-critical distinction, kept
+/// when the full basis does not fit the budget.
+const COARSE_ATOMS: [Sort; 2] = [Sort::WAVE, Sort::SEQ];
+
 /// How selection decided one intersection against one frame.
 enum Selection {
     /// A row applied; the application's result type.
@@ -705,7 +717,7 @@ impl<S: Clone> Infer<S> {
         let start = self.errors.len();
         let base = self.infer(context, &mut Vec::new(), expr);
         let explored = self.errors.len();
-        match self.tabulate(context, expr, &base) {
+        match self.tabulate(context, expr, &base, None) {
             Some(table) => {
                 // Drop what the base pass said, keeping what tabulation
                 // said: the rows re-check the body per atom, and the
@@ -717,6 +729,70 @@ impl<S: Clone> Infer<S> {
             }
             None => base,
         }
+    }
+
+    /// The atom basis a whole curried spine fits in, or `None` when even the
+    /// coarse split does not fit and the definition is left untabulated.
+    fn spine_basis<M>(&self, expr: &SourceExpr<M, S>, base: &Type) -> Option<&'static [Sort]> {
+        [&FULL_ATOMS[..], &COARSE_ATOMS[..]]
+            .into_iter()
+            .find(|atoms| {
+                self.spine_vectors(expr, base, atoms)
+                    .is_some_and(|vectors| vectors <= MAX_TABULATION_VECTORS)
+            })
+    }
+
+    /// The vectors a curried spine enumerates with `atoms` as its basis: the
+    /// product across every lambda in it, since each inner one is tabulated
+    /// again for every vector of the lambda outside it.
+    fn spine_vectors<M>(
+        &self,
+        expr: &SourceExpr<M, S>,
+        ty: &Type,
+        atoms: &[Sort],
+    ) -> Option<usize> {
+        let Expr::Function {
+            positional,
+            named,
+            body,
+        } = &expr.expr
+        else {
+            return Some(1);
+        };
+        let Type::Function {
+            positional: parameters,
+            named: named_parameters,
+            result,
+        } = self.resolve(ty)
+        else {
+            return Some(1);
+        };
+        if parameters.len() != positional.len() || named_parameters.len() != named.len() {
+            return Some(1);
+        }
+        let numeric: Vec<bool> = parameters
+            .iter()
+            .map(|parameter| matches!(self.resolve(parameter), Type::Numeric(_)))
+            .collect();
+        let named_numeric: Vec<bool> = named_parameters
+            .iter()
+            .map(|(_, parameter)| matches!(self.resolve(parameter), Type::Numeric(_)))
+            .collect();
+        Self::level_vectors(atoms, &numeric, &named_numeric)?
+            .checked_mul(self.spine_vectors(body, &result, atoms)?)
+    }
+
+    /// The vectors one lambda enumerates: one choice per numeric positional
+    /// parameter, and one more than that per named parameter, which may also
+    /// be omitted.
+    fn level_vectors(atoms: &[Sort], numeric: &[bool], named_numeric: &[bool]) -> Option<usize> {
+        let positional = numeric.iter().filter(|numeric| **numeric).count();
+        let mut vectors = atoms.len().checked_pow(u32::try_from(positional).ok()?)?;
+        for numeric in named_numeric {
+            let radix = if *numeric { atoms.len() + 1 } else { 2 };
+            vectors = vectors.checked_mul(radix)?;
+        }
+        Some(vectors)
     }
 
     /// Tabulates a definition-bound function over its numeric parameters —
@@ -748,6 +824,7 @@ impl<S: Clone> Infer<S> {
         context: &mut TypeContext,
         expr: &SourceExpr<M, S>,
         base: &Type,
+        basis: Option<&'static [Sort]>,
     ) -> Option<Type> {
         let Expr::Function {
             positional,
@@ -787,34 +864,18 @@ impl<S: Clone> Infer<S> {
         if tabulated == 0 {
             return None;
         }
-        let positional_atoms = numeric.iter().filter(|numeric| **numeric).count();
-        let full: &[Sort] = &[
-            Sort::INT,
-            Sort::NON_INT_ONLY,
-            Sort::NON_CONST_WAVE,
-            Sort::SEQ,
-        ];
-        let coarse: &[Sort] = &[Sort::WAVE, Sort::SEQ];
-        // Every named parameter carries one choice more than the atoms a
-        // caller may pass: it may be *omitted*, and the row for that binds
-        // it to its default. A positional parameter has no such choice.
-        let fits = |set: &[Sort]| {
-            let mut vectors = set
-                .len()
-                .checked_pow(u32::try_from(positional_atoms).ok()?)?;
-            for numeric in &named_numeric {
-                let radix = if *numeric { set.len() + 1 } else { 2 };
-                vectors = vectors.checked_mul(radix)?;
-            }
-            Some(vectors).filter(|vectors| *vectors <= MAX_TABULATION_VECTORS)
+        // The atom basis is chosen once for a whole curried spine and passed
+        // down, because an inner lambda is re-tabulated once per outer
+        // vector: the spine costs the *product* of its levels. Choosing per
+        // lambda lets a curried definition evade the budget entirely, since
+        // no level need exceed it while their product does — `fn(a, b, c) =>
+        // fn(d, e) => ...` is 4³ × 4² = 1024 vectors, four times what the
+        // same parameters cost written flat.
+        let atoms = match basis {
+            Some(atoms) => atoms,
+            None => self.spine_basis(expr, base)?,
         };
-        let (atoms, vectors) = if let Some(vectors) = fits(full) {
-            (full, vectors)
-        } else if let Some(vectors) = fits(coarse) {
-            (coarse, vectors)
-        } else {
-            return None;
-        };
+        let vectors = Self::level_vectors(atoms, &numeric, &named_numeric)?;
         // Refinement variables reachable from the enclosing context belong
         // to outer scopes and must stay live in the rows (mirroring
         // `generalize`'s exclusion).
@@ -892,7 +953,7 @@ impl<S: Clone> Infer<S> {
             let inner = self.errors.len();
             let result = self.infer(context, &mut Vec::new(), body);
             let explored = self.errors.len();
-            let result = match self.tabulate(context, body, &result) {
+            let result = match self.tabulate(context, body, &result, Some(atoms)) {
                 Some(table) => {
                     self.errors.drain(inner..explored);
                     table
@@ -964,6 +1025,18 @@ impl<S: Clone> Infer<S> {
             // Numerics merge their bounds, failing only when one side's
             // guarantees conflict with the other's recorded contracts.
             (Type::Numeric(x), Type::Numeric(y)) => self.numeric_unify(x, y),
+            // Two tables unify conjunct by conjunct. Without this arm an
+            // intersection unified with *itself* failed, since nothing below
+            // matches a pair of them.
+            (Type::And(xs), Type::And(ys)) => {
+                if xs.len() != ys.len() {
+                    return Err(());
+                }
+                for (x, y) in xs.clone().iter().zip(ys.clone()) {
+                    self.unify(x, &y)?;
+                }
+                Ok(())
+            }
             (Type::Var(x), Type::Var(y)) => {
                 if x == y {
                     Ok(())
@@ -1159,9 +1232,26 @@ impl<S: Clone> Infer<S> {
                     }
                 }
             }
+            // A bare meta gives selection nothing to select on, so the
+            // intersection binds whole. Neither Sub-And rule fits: nothing
+            // here says which conjunct is used, and requiring the meta to
+            // meet every conjunct would solve it against the first and then
+            // fail against the rest.
+            (Type::And(_), Type::Meta(_)) | (Type::Meta(_), Type::And(_)) => self.unify(&a, &b),
+            // Meeting an intersection requires meeting every conjunct
+            // (rule Sub-And-R). It is tried before Sub-And-L below because
+            // it is invertible and Sub-And-L is not: an intersection meeting
+            // an intersection may need a *different* left conjunct for each
+            // right one, which committing to one conjunct first forecloses.
+            (_, Type::And(conjuncts)) => {
+                for conjunct in conjuncts.clone() {
+                    self.subtype(&a, &conjunct)?;
+                }
+                Ok(())
+            }
             // An intersection is usable where any of its conjuncts is
-            // (rules Sub-And-L/Sub-And-R); failed attempts roll back their
-            // partial solving.
+            // (rule Sub-And-L); failed attempts roll back their partial
+            // solving.
             //
             // Expected arrows *with named parameters* deliberately land
             // here too (the guard above): a pseudo-frame models a call,
@@ -1175,14 +1265,6 @@ impl<S: Clone> Infer<S> {
             // (and filter rows to those offering them) so named-having
             // arrows join the selection path.
             (Type::And(conjuncts), _) => self.subtype_any_conjunct(conjuncts.clone(), &b),
-            // Meeting an intersection requires meeting every conjunct
-            // (rule Sub-And).
-            (_, Type::And(conjuncts)) => {
-                for conjunct in conjuncts.clone() {
-                    self.subtype(&a, &conjunct)?;
-                }
-                Ok(())
-            }
             // AS-FunR/AS-FunL collapse into one n-ary case: parameters are
             // contravariant, the result covariant. Every named parameter the
             // supertype promises must be offered by the subtype; extra named
@@ -1292,19 +1374,121 @@ impl<S: Clone> Infer<S> {
                     .collect();
                 Type::Tuple(items)
             }
+            // Arrows join pointwise with the variance: a function usable as
+            // either accepts only what both accept and returns what either
+            // returns. A named parameter survives only when both offer it,
+            // since the joined type promises it to every caller. Where a
+            // parameter has no meet the two share no arrow at all, and the
+            // fallthrough reports them incompatible.
+            (
+                Type::Function {
+                    positional: p1,
+                    named: n1,
+                    result: r1,
+                },
+                Type::Function {
+                    positional: p2,
+                    named: n2,
+                    result: r2,
+                },
+            ) if p1.len() == p2.len() => {
+                let (p1, n1, r1) = (p1.clone(), n1.clone(), *r1.clone());
+                let (p2, n2, r2) = (p2.clone(), n2.clone(), *r2.clone());
+                let mut positional = Vec::with_capacity(p1.len());
+                for (x, y) in p1.iter().zip(&p2) {
+                    match self.meet(x, y) {
+                        Some(met) => positional.push(met),
+                        None => return self.incompatible(&a, &b, span),
+                    }
+                }
+                let mut named = Vec::new();
+                for (name, x) in &n1 {
+                    let Some((_, y)) = n2.iter().find(|(n, _)| n == name) else {
+                        continue;
+                    };
+                    match self.meet(x, y) {
+                        Some(met) => named.push((name.clone(), met)),
+                        None => return self.incompatible(&a, &b, span),
+                    }
+                }
+                let result = self.join(r1, r2, span);
+                Type::Function {
+                    positional,
+                    named,
+                    result: Box::new(result),
+                }
+            }
             _ => {
                 let mark = self.mark();
                 if self.unify(&a, &b).is_ok() {
                     self.resolve(&a)
                 } else {
                     self.rollback(mark);
-                    let message = format!(
-                        "incompatible types {} and {}",
-                        self.display(&a),
-                        self.display(&b)
-                    );
-                    self.error(message, span);
-                    Type::Dynamic
+                    self.incompatible(&a, &b, span)
+                }
+            }
+        }
+    }
+
+    /// Reports two types as having no join and recovers with `Dynamic`.
+    fn incompatible(&mut self, a: &Type, b: &Type, span: &Option<Span<S>>) -> Type {
+        let message = format!(
+            "incompatible types {} and {}",
+            self.display(a),
+            self.display(b)
+        );
+        self.error(message, span);
+        Type::Dynamic
+    }
+
+    /// The meet of two types, or `None` where they have none.
+    ///
+    /// The dual of [`Infer::join`], for the parameters of a joined arrow:
+    /// what both sides accept. Numerics meet by sort intersection, and an
+    /// empty intersection is no meet at all. Arrows meet with the variance
+    /// flipped again — join their parameters, meet their results — and
+    /// anything else must simply unify.
+    fn meet(&mut self, a: &Type, b: &Type) -> Option<Type> {
+        let a = self.resolve(a);
+        let b = self.resolve(b);
+        match (&a, &b) {
+            (Type::Dynamic, _) | (_, Type::Dynamic) => Some(Type::Dynamic),
+            (Type::Numeric(x), Type::Numeric(y)) => {
+                let met = self.may_of(x).intersect(self.may_of(y));
+                (!met.is_empty()).then(|| Type::ground(met))
+            }
+            (Type::List(x), Type::List(y)) => {
+                let (x, y) = ((**x).clone(), (**y).clone());
+                self.meet(&x, &y).map(|met| Type::List(Box::new(met)))
+            }
+            (
+                Type::Function {
+                    positional: p1,
+                    named: n1,
+                    result: r1,
+                },
+                Type::Function {
+                    positional: p2,
+                    named: n2,
+                    result: r2,
+                },
+            ) if p1.len() == p2.len() && n1.is_empty() && n2.is_empty() => {
+                let (p1, r1) = (p1.clone(), *r1.clone());
+                let (p2, r2) = (p2.clone(), *r2.clone());
+                let mut positional = Vec::with_capacity(p1.len());
+                for (x, y) in p1.iter().zip(&p2) {
+                    positional.push(self.join(x.clone(), y.clone(), &None));
+                }
+                let result = self.meet(&r1, &r2)?;
+                Some(Type::function(positional, result))
+            }
+            _ => {
+                let mark = self.mark();
+                if self.unify(&a, &b).is_ok() {
+                    Some(self.resolve(&a))
+                } else {
+                    self.rollback(mark);
+                    None
                 }
             }
         }
@@ -3030,6 +3214,33 @@ mod tests {
         }
     }
 
+    // The vector budget is spent over a whole curried spine rather than per
+    // lambda: an inner lambda is re-tabulated once per vector of the lambda
+    // outside it, so the spine costs the product of its levels, and choosing
+    // per lambda would let currying evade the cap entirely. A spine is
+    // coarsened at exactly the size the same parameters coarsen at flat.
+    #[test]
+    fn the_tabulation_budget_is_spent_over_the_whole_spine() {
+        // Four numeric parameters across two arrows still fit the full
+        // basis, so integrality survives the currying.
+        assert_clean(
+            "let f = fn(a, b) => fn(c, d) => a + b + c + d in nth(f(1, 1)(1, 1), [1, 2, 3, 4, 5])",
+        );
+        // Five do not — 4³ × 4² is past the cap — so the spine drops to the
+        // unseq/seq split, and integrality goes with it. Written flat the
+        // same five parameters have always been coarsened, and now agree.
+        let curried = "let f = fn(a, b, c) => fn(d, e) => a + b + c + d + e in ";
+        let flat = "let f = fn(a, b, c, d, e) => a + b + c + d + e in ";
+        assert_errors(
+            &format!("{}nth(f(1, 1, 1)(1, 1), [1, 2])", curried),
+            &["expected int, found waveform"],
+        );
+        assert_errors(
+            &format!("{}nth(f(1, 1, 1, 1, 1), [1, 2])", flat),
+            &["expected int, found waveform"],
+        );
+    }
+
     // Beyond 4^k the two-point unseq/seq split still tabulates, keeping
     // seq relationality for wide parameter lists like the synths'.
     #[test]
@@ -3369,30 +3580,56 @@ mod tests {
         assert_errors("1(2)", &["cannot apply a value of type int"]);
     }
 
-    // Branches join by `join`, which falls back to unification for the
-    // types it has no join for — functions among them. Unification is
-    // invariant, so two numeric domains that merely overlap do not merge:
-    // taking the then-branch's type wholesale would hand the else-branch's
-    // value a domain it does not accept.
+    // Branches join pointwise with the variance: a function usable as
+    // either accepts only what both accept and returns what either returns.
+    // What must not happen is taking one branch's type wholesale, which
+    // would hand the other's value a domain it does not accept.
     #[test]
-    fn branches_do_not_merge_distinct_numeric_domains() {
-        // sine takes waveforms and log takes floats; neither type covers
-        // the other, so there is no single arrow to give the branch.
+    fn an_intersection_passed_to_a_meta_binds_whole() {
+        // `g` is an intersection; a polymorphic parameter has nothing to
+        // select on, so it must bind all of it. Committing to the first
+        // conjunct would leave only `(int) -> int` behind.
+        assert_clean("let g = fn(v) => v + 1 in let id = fn(y) => y in id(g)(time)");
+        assert_clean("let g = fn(v) => v + 1 in nth(1, [g, g])(time)");
+        assert_clean("let g = fn(v) => v + 1 in let box = fn(y) => [y] in nth(0, box(g))(time)");
+        // Sub-And-R runs before Sub-And-L, so an intersection meeting an
+        // intersection may use a different conjunct for each obligation.
+        assert_clean("let h = fn(v) => v | fin(4) in let f = fn(x, k = h) => 1 in f(2, k = h)");
+        // The extra conjuncts are real, not just carried: each is usable.
+        assert_clean("let g = fn(v) => v + 1 in let id = fn(y) => y in id(g)(1)");
+        assert_clean("let g = fn(v) => v + 1 in let id = fn(y) => y in id(g)(0.5)");
+        // And a genuine mismatch is still rejected.
+        assert_errors(
+            "let g = fn(v) => v + 1 in let id = fn(y) => y in id(g)(\"s\")",
+            &["no use of id accepts (string)"],
+        );
+    }
+
+    #[test]
+    fn branches_join_arrows_with_the_variance() {
+        // sine takes waveforms and log takes floats; the branch takes what
+        // both take and returns what either returns.
+        assert_clean("(if false then sine else log)(0.5, 0.5)");
+        // So a waveform argument is rejected — at the argument, which only
+        // the joined domain can point at.
         assert_errors(
             "(if false then sine else log)(time, 0)",
-            &["incompatible types (waveform, waveform) -> waveform and (float, float) -> float"],
+            &["expected float, found waveform"],
         );
-        // The same in the result position: log's float result would be
-        // claimed for a value that returns waveforms.
-        assert_errors(
-            "if false then log else sine",
-            &["incompatible types (float, float) -> float and (waveform, waveform) -> waveform"],
-        );
-        // Lists join their elements, so they are unaffected...
+        // The join is symmetric.
+        assert_clean("(if false then log else sine)(0.5, 0.5)");
+        // An intersection joins with itself, which needs `unify` to know
+        // about intersections at all.
+        assert_clean("let g = fn(v) => v + 1 in nth(1, [g, g])(1)");
+        // Lists join their elements, and agreeing branches are unchanged.
         assert_clean("nth(0, [1, time])");
-        // ...as are branches whose types agree.
         assert_clean("(if false then sqrt else exp)(4)");
         assert_clean("(if false then append else reset)(time, time)");
+        // Two arrows with no common domain still have no join.
+        assert_errors(
+            "if false then sqrt else fixed",
+            &["incompatible types (float) -> float and ([float]) -> waveform"],
+        );
     }
 
     // Direct unit tests for the subtyping corners that full programs
