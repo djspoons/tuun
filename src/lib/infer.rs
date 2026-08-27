@@ -692,9 +692,31 @@ impl<S: Clone> Infer<S> {
     /// inference pass, plus tabulation into an intersection of arrows for
     /// the functions `tabulate` covers. Callers generalize the result as
     /// they would any inferred type.
+    ///
+    /// The base pass is exploratory whenever tabulation succeeds, and its
+    /// errors give way to the rows'. Its parameters are unsolved, so it has
+    /// to summarize every atom they admit at once — `2 * freq` is "some
+    /// numeric" there — and a summary no single call will ever see must not
+    /// be the thing that reports. What the rows keep instead is the per-atom
+    /// verdict: a vector whose body errors contributes no row, and a body
+    /// that errors at *every* vector leaves no rows at all, so an
+    /// unconditional error still surfaces through the base type.
     fn infer_definition<M>(&mut self, context: &mut TypeContext, expr: &SourceExpr<M, S>) -> Type {
+        let start = self.errors.len();
         let base = self.infer(context, &mut Vec::new(), expr);
-        self.tabulate(context, expr, &base).unwrap_or(base)
+        let explored = self.errors.len();
+        match self.tabulate(context, expr, &base) {
+            Some(table) => {
+                // Drop what the base pass said, keeping what tabulation
+                // said: the rows re-check the body per atom, and the
+                // defaults — which depend on no parameter — are judged once
+                // inside `tabulate`, so anything unconditional is reported
+                // there rather than here.
+                self.errors.drain(start..explored);
+                table
+            }
+            None => base,
+        }
     }
 
     /// Tabulates a definition-bound function over its numeric parameters —
@@ -807,6 +829,16 @@ impl<S: Clone> Infer<S> {
         // identifier would report whichever row happened to run last, and the
         // row's refinement variables are popped by its rollback anyway.
         let probe = self.probe.take();
+        // Defaults are inferred once, here: they are evaluated in the
+        // enclosing scope, so they see neither the parameters nor the row's
+        // atoms, and an error in one is unconditional rather than something
+        // a vector gets to re-decide. Inferring them inside the loop would
+        // also let a default see a positional parameter, which neither
+        // `infer` nor evaluation allows.
+        let default_types: Vec<Type> = named
+            .iter()
+            .map(|(_, default)| self.infer(context, &mut Vec::new(), default))
+            .collect();
         let mut rows = Vec::new();
         for index in 0..vectors {
             let errors = self.errors.len();
@@ -825,7 +857,9 @@ impl<S: Clone> Infer<S> {
                 }
             }
             let mut named_domains = Vec::with_capacity(named.len());
-            for ((name, default), numeric) in named.iter().zip(&named_numeric) {
+            for (((name, default), numeric), default_ty) in
+                named.iter().zip(&named_numeric).zip(&default_types)
+            {
                 let radix = if *numeric { atoms.len() + 1 } else { 2 };
                 let choice = (index / stride) % radix;
                 stride *= radix;
@@ -836,13 +870,12 @@ impl<S: Clone> Infer<S> {
                 // call — see `named_matches`.
                 let omitted = choice == radix - 1;
                 let parameter = if omitted {
-                    self.infer(context, &mut Vec::new(), default)
+                    default_ty.clone()
                 } else if *numeric {
                     Type::ground(atoms[choice])
                 } else {
-                    let default_ty = self.infer(context, &mut Vec::new(), default);
                     let parameter = self.fresh_meta();
-                    self.subtype_check(&default_ty, &parameter, &default.span);
+                    self.subtype_check(default_ty, &parameter, &default.span);
                     parameter
                 };
                 context.push((name.clone(), ContextEntry::Ty(parameter.clone())));
@@ -850,7 +883,22 @@ impl<S: Clone> Infer<S> {
                     named_domains.push((name.clone(), parameter));
                 }
             }
+            // A lambda body is itself tabulated: Freeman and Pfenning's
+            // ABS applies at every abstraction, not once per definition, so
+            // a curried function gets an intersection at each arrow rather
+            // than only at the outermost. Its base pass summarizes over
+            // parameters this row leaves unsolved, so those errors are
+            // exploratory too and must not decide whether this row stands.
+            let inner = self.errors.len();
             let result = self.infer(context, &mut Vec::new(), body);
+            let explored = self.errors.len();
+            let result = match self.tabulate(context, body, &result) {
+                Some(table) => {
+                    self.errors.drain(inner..explored);
+                    table
+                }
+                None => result,
+            };
             context.truncate(depth);
             if self.errors.len() == errors {
                 // Resolve the row fully before rolling back the state it
@@ -2937,6 +2985,49 @@ mod tests {
         // Seqs and lists have no arm.
         assert_errors("append(seq(0)(1), time)", &["expected waveform, found seq"]);
         assert_errors("append([1], time)", &["expected waveform, found [int]"]);
+    }
+
+    // Freeman and Pfenning's ABS applies at every abstraction, so a
+    // curried definition is tabulated at each arrow rather than only at the
+    // outermost. Without that the inner parameter stays an unsolved
+    // variable and selection falls back on its wildcard path, which reads
+    // the first row's result whatever the argument turns out to be.
+    #[test]
+    fn curried_definitions_tabulate_at_every_arrow() {
+        let add = "let add = fn(a) => fn(b) => a + b in ";
+        // Each arrow carries its own table, so the result tracks *both*
+        // arguments rather than just the first.
+        assert_errors(
+            &format!("{}nth(add(1)(time), [1, 2, 3])", add),
+            &["expected int, found waveform"],
+        );
+        assert_clean(&format!("{}nth(add(1)(2), [1, 2, 3])", add));
+        // The relational gap survives the currying: `+` has no (seq, seq)
+        // row, and partial application does not lose that.
+        assert_clean(&format!("{}add(seq(0)(1))", add));
+        assert_errors(
+            &format!("{}add(seq(0)(1))(seq(0)(2))", add),
+            &["expected waveform, found seq"],
+        );
+        // A named parameter on the inner lambda tabulates the same way.
+        let named = "let f = fn(a) => fn(k = 2) => a + k in ";
+        assert_clean(&format!("{}nth(f(1)(), [1, 2, 3])", named));
+        assert_errors(
+            &format!("{}nth(f(1)(k = time), [1, 2, 3])", named),
+            &["expected int, found waveform"],
+        );
+    }
+
+    // Defaults are inferred once, outside the vectors, so an error in one is
+    // reported even when the rows themselves check out — the base pass's
+    // summary is dropped in favor of the rows, and a default depends on no
+    // parameter, so it is not part of that summary.
+    #[test]
+    fn a_default_that_does_not_check_is_reported_at_the_definition() {
+        for wrapper in ["let f = {} in 0", "let f = {} in f()", "{}"] {
+            let program = wrapper.replace("{}", "fn(k = <[1, 2]>) => 1");
+            assert_errors(&program, &["expected [seq], found [int]"]);
+        }
     }
 
     // Beyond 4^k the two-point unseq/seq split still tabulates, keeping
