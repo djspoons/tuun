@@ -582,7 +582,16 @@ impl Names {
     }
 }
 
-fn fmt_type(ty: &Type, names: &Names, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+/// Renders `ty`, with `nested` set where it is written as part of another
+/// type.
+///
+/// An intersection carries no delimiters of its own, so one nested inside
+/// another type needs parentheses to say where it ends: without them
+/// `(int) -> (int) -> int ∧ (float) -> float` does not distinguish a result
+/// that is an intersection from a conjunct of the intersection around it.
+/// Brackets and a parameter list already delimit what they contain, so a
+/// list element does not need them.
+fn fmt_type(ty: &Type, names: &Names, f: &mut fmt::Formatter<'_>, nested: bool) -> fmt::Result {
     match ty {
         Type::Var(id) => write!(f, "{}", names.var(*id)),
         Type::Meta(id) => write!(f, "{}", names.meta(*id)),
@@ -605,7 +614,7 @@ fn fmt_type(ty: &Type, names: &Names, f: &mut fmt::Formatter<'_>) -> fmt::Result
                     write!(f, ", ")?;
                 }
                 first = false;
-                fmt_type(t, names, f)?;
+                fmt_type(t, names, f, true)?;
             }
             for (name, t) in named {
                 if !first {
@@ -613,17 +622,23 @@ fn fmt_type(ty: &Type, names: &Names, f: &mut fmt::Formatter<'_>) -> fmt::Result
                 }
                 first = false;
                 write!(f, "{}: ", name)?;
-                fmt_type(t, names, f)?;
+                fmt_type(t, names, f, true)?;
             }
             write!(f, ") -> ")?;
-            fmt_type(result, names, f)
+            fmt_type(result, names, f, true)
         }
         Type::And(conjuncts) => {
+            if nested {
+                write!(f, "(")?;
+            }
             for (i, t) in conjuncts.iter().enumerate() {
                 if i > 0 {
                     write!(f, " ∧ ")?;
                 }
-                fmt_type(t, names, f)?;
+                fmt_type(t, names, f, true)?;
+            }
+            if nested {
+                write!(f, ")")?;
             }
             Ok(())
         }
@@ -633,14 +648,14 @@ fn fmt_type(ty: &Type, names: &Names, f: &mut fmt::Formatter<'_>) -> fmt::Result
                 if i > 0 {
                     write!(f, ", ")?;
                 }
-                fmt_type(t, names, f)?;
+                fmt_type(t, names, f, true)?;
             }
             write!(f, ")")?;
             Ok(())
         }
         Type::List(item) => {
             write!(f, "[")?;
-            fmt_type(item, names, f)?;
+            fmt_type(item, names, f, false)?;
             write!(f, "]")
         }
         Type::Module(entries) => {
@@ -655,13 +670,13 @@ fn fmt_type(ty: &Type, names: &Names, f: &mut fmt::Formatter<'_>) -> fmt::Result
         }
         // Quantifiers are left implicit: the quantified vars simply render by
         // name, HM-style.
-        Type::Forall(_, body) => fmt_type(body, names, f),
+        Type::Forall(_, body) => fmt_type(body, names, f, nested),
     }
 }
 
 impl Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt_type(self, &Names::collect(self), f)
+        fmt_type(self, &Names::collect(self), f, false)
     }
 }
 
@@ -724,6 +739,38 @@ mod tests {
             ])
             .to_string(),
             "(int) -> int ∧ (float) -> float"
+        );
+    }
+
+    #[test]
+    fn nested_intersections_are_parenthesised() {
+        let inner = Type::And(vec![
+            Type::function(vec![Type::int()], Type::int()),
+            Type::function(vec![Type::float()], Type::float()),
+        ]);
+        // At the top there is nothing an intersection could be confused
+        // with, so it needs no parentheses.
+        assert_eq!(inner.to_string(), "(int) -> int ∧ (float) -> float");
+        // In a result position it does: without them the inner conjuncts
+        // read as conjuncts of the intersection around them, which is how a
+        // curried tabulated definition prints.
+        let curried = Type::And(vec![
+            Type::function(vec![Type::int()], inner.clone()),
+            Type::function(vec![Type::waveform()], Type::waveform()),
+        ]);
+        assert_eq!(
+            curried.to_string(),
+            "(int) -> ((int) -> int ∧ (float) -> float) ∧ (waveform) -> waveform"
+        );
+        // A tuple's commas have the same problem, so its components are
+        // parenthesised too — inside the tuple's own parentheses.
+        assert_eq!(
+            Type::Tuple(vec![inner.clone(), Type::String]).to_string(),
+            "(((int) -> int ∧ (float) -> float), string)"
+        );
+        assert_eq!(
+            Type::List(Box::new(inner)).to_string(),
+            "[(int) -> int ∧ (float) -> float]"
         );
     }
 
