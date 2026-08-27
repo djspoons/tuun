@@ -91,10 +91,16 @@ pub fn signature(name: &str) -> Option<Type> {
             Type::function(vec![Type::seq(), Type::seq()], Type::seq()),
             Type::function(vec![Type::seq(), Type::waveform()], Type::non_const_wave()),
         ]),
-        "==" | "!=" => Type::Forall(
-            vec![0],
-            Box::new(Type::function(vec![a(), a()], Type::Bool)),
-        ),
+        // Comparison is by value on the three kinds `equals` matches, not
+        // structural: two waveforms, two seqs, two lists — anything the
+        // runtime cannot take apart — have no arm rather than comparing
+        // false. Constants compare as the numbers they are, so the numeric
+        // row is `float` and not `waveform`.
+        "==" | "!=" => Type::And(vec![
+            Type::function(vec![Type::float(), Type::float()], Type::Bool),
+            Type::function(vec![Type::Bool, Type::Bool], Type::Bool),
+            Type::function(vec![Type::String, Type::String], Type::Bool),
+        ]),
         "<" | "<=" | ">" | ">=" => Type::function(vec![Type::float(), Type::float()], Type::Bool),
         "log" => Type::function(vec![Type::float(), Type::float()], Type::float()),
         "sqrt" | "exp" => Type::function(vec![Type::float()], Type::float()),
@@ -274,6 +280,28 @@ mod tests {
             rows[0],
             Type::function(vec![Type::float(), Type::float()], Type::float())
         );
+    }
+
+    /// Equality's table is exactly the arms `equals` matches, with no
+    /// polymorphic row — which is also what lets the conformance harness
+    /// below exercise it, since that skips rows with non-ground domains.
+    #[test]
+    fn equality_tables_mirror_the_runtime() {
+        for name in ["==", "!="] {
+            let Some(Type::And(rows)) = signature(name) else {
+                panic!("{} should be an intersection", name);
+            };
+            assert_eq!(
+                rows,
+                vec![
+                    Type::function(vec![Type::float(), Type::float()], Type::Bool),
+                    Type::function(vec![Type::Bool, Type::Bool], Type::Bool),
+                    Type::function(vec![Type::String, Type::String], Type::Bool),
+                ],
+                "for {}",
+                name
+            );
+        }
     }
 
     #[test]

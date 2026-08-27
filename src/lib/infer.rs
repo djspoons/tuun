@@ -1816,7 +1816,22 @@ impl<S: Clone> Infer<S> {
                         seqs += 1;
                     }
                 }
-                let both_seqs = frame.positional.len() == 2 && seqs == 2;
+                // "Two seqs" names a *relational* gap: each position takes a
+                // seq on its own and the table simply has no row taking both.
+                // Where no row admits one at all — `==` compares floats, bools
+                // and strings — the seqs are not the relation that failed, and
+                // the general message says more.
+                let admits_a_seq = |position: usize| {
+                    rows.iter().any(|row| {
+                        let Type::Function { positional, .. } = row else {
+                            unreachable!("rows are arrows");
+                        };
+                        matches!(self.resolve(&positional[position]), Type::Numeric(rep)
+                            if !self.may_of(&rep).intersect(Sort::SEQ).is_empty())
+                    })
+                };
+                let both_seqs =
+                    frame.positional.len() == 2 && seqs == 2 && admits_a_seq(0) && admits_a_seq(1);
                 let message = match (both_seqs, head) {
                     (true, Some(name)) => format!("cannot combine two seqs with {}", name),
                     (true, None) => "cannot combine two seqs".to_string(),
@@ -2941,6 +2956,42 @@ mod tests {
 
     // The checking policy: ground sorts judged by containment, selection
     // by atom coverage, unsolved-variable flows recorded and deferred.
+    // Equality compares by value on the three kinds the runtime matches,
+    // so anything it cannot take apart — a non-constant waveform, a seq, a
+    // list, a function — has no arm rather than comparing false.
+    #[test]
+    fn equality_is_not_structural() {
+        assert_clean("1 == 2");
+        assert_clean("0.5 == 1");
+        assert_clean("true != false");
+        assert_clean("\"a\" == \"b\"");
+        // A constant compares as the number it is, so the numeric row is
+        // `float`: a non-constant waveform has no arm.
+        assert_errors("time == 1", &["no use of == accepts (waveform, int)"]);
+        assert_errors(
+            "[time] == [time]",
+            &["no use of == accepts ([waveform], [waveform])"],
+        );
+        assert_errors(
+            "sqrt == sqrt",
+            &["no use of == accepts ((float) -> float, (float) -> float)"],
+        );
+        // Both sides must be the same kind.
+        assert_errors("1 == true", &["no use of == accepts (int, bool)"]);
+        // Two seqs get the general message, not the relational one: "cannot
+        // combine two seqs" is for a table that takes a seq on either side
+        // and simply has no row taking both, which is `+` and not `==`.
+        let seq = "(time | seq(time - 1))";
+        assert_errors(
+            &format!("{} == {}", seq, seq),
+            &["no use of == accepts (seq, seq)"],
+        );
+        assert_errors(
+            &format!("{} + {}", seq, seq),
+            &["cannot combine two seqs with +"],
+        );
+    }
+
     #[test]
     fn containment_judgments() {
         // A possibly-wrong value is an error: sine may fold to a float,
