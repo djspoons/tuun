@@ -935,9 +935,7 @@ impl<S: Clone> Infer<S> {
                 } else if *numeric {
                     Type::ground(atoms[choice])
                 } else {
-                    let parameter = self.fresh_meta();
-                    self.subtype_check(default_ty, &parameter, &default.span);
-                    parameter
+                    self.default_parameter(default_ty, &default.span)
                 };
                 context.push((name.clone(), ContextEntry::Ty(parameter.clone())));
                 if !omitted {
@@ -1295,6 +1293,30 @@ impl<S: Clone> Infer<S> {
                 }
                 self.subtype(r1, r2)
             }
+            // A structure meeting a meta solves it to a same-shaped
+            // skeleton of fresh metas and continues into that, so every
+            // leaf reaches an arm that preserves the direction. Falling
+            // through to `unify` would solve the meta to the structure
+            // itself, and a leaf frozen at a ground sort can no longer
+            // widen the way one met on its own does — nor, for an arrow,
+            // vary the way the arm below lets its parameters and result
+            // vary. This is Xie and Oliveira's arrow unification (Fig. 14,
+            // rule AF-Mono), which their AS-FunR/AS-FunL call for exactly
+            // this, and their AS-PairL/AS-PairR extend to structures.
+            (Type::Tuple(_) | Type::List(_) | Type::Function { .. }, Type::Meta(id))
+                if !self.occurs(*id, &a) =>
+            {
+                let skeleton = self.skeleton(&a);
+                self.solve(*id, skeleton.clone());
+                self.subtype(&a, &skeleton)
+            }
+            (Type::Meta(id), Type::Tuple(_) | Type::List(_) | Type::Function { .. })
+                if !self.occurs(*id, &b) =>
+            {
+                let skeleton = self.skeleton(&b);
+                self.solve(*id, skeleton.clone());
+                self.subtype(&skeleton, &b)
+            }
             (Type::Tuple(xs), Type::Tuple(ys)) => {
                 if xs.len() != ys.len() {
                     return Err(());
@@ -1305,8 +1327,75 @@ impl<S: Clone> Infer<S> {
                 Ok(())
             }
             (Type::List(x), Type::List(y)) => self.subtype(x, y),
-            // AS-Mono: everything else must unify.
-            _ => self.unify(&a, &b),
+            // A meta anywhere else has no subtyping left to do, only a
+            // solution to record, so unification takes it: AU-Refl for two
+            // of the same, AU-Var1/AU-Var2 otherwise, under the occurs
+            // check. The pairings where the direction *does* matter —
+            // against a numeric, an intersection, or a structure — are the
+            // arms above, and a structure whose occurs check failed there
+            // arrives here to fail on the same condition.
+            (Type::Meta(_), _) | (_, Type::Meta(_)) => self.unify(&a, &b),
+            // AS-Mono, the monotypes: a base type is a subtype of itself,
+            // and a rigid variable of no other variable.
+            (Type::Bool, Type::Bool) | (Type::String, Type::String) => Ok(()),
+            (Type::Var(x), Type::Var(y)) if x == y => Ok(()),
+            // Modules are invariant. `use` is the only way to bind one, so
+            // two module types meet only where they are the same module,
+            // exported binding for exported binding.
+            (Type::Module(_), Type::Module(_)) => self.unify(&a, &b),
+            // Nothing relates the rest: two different constructors, or two
+            // rigid variables that are not the same one. `Dynamic`,
+            // `Forall`, and `And` never reach here — the arms above take
+            // them on either side.
+            _ => Err(()),
+        }
+    }
+
+    /// Whether the meta `id` appears free in `ty` — AU-Var1's `α̂ ∉ ftv(S τ)`.
+    fn occurs(&self, id: u32, ty: &Type) -> bool {
+        let mut metas = Vec::new();
+        ty.free_metas(&self.subst, &mut metas);
+        metas.contains(&id)
+    }
+
+    /// Returns a type of the same shape as `ty` whose leaves are fresh metas.
+    ///
+    /// Structure is copied; everything under it is left to be solved.
+    ///
+    /// # Example
+    ///
+    /// The skeleton of `(int, [waveform])` is `(?a, [?b])`.
+    fn skeleton(&mut self, ty: &Type) -> Type {
+        match self.resolve(ty) {
+            Type::Tuple(items) => {
+                let mut skeletons = Vec::with_capacity(items.len());
+                for item in &items {
+                    skeletons.push(self.skeleton(item));
+                }
+                Type::Tuple(skeletons)
+            }
+            Type::List(item) => Type::List(Box::new(self.skeleton(&item))),
+            Type::Function {
+                positional,
+                named,
+                result,
+            } => {
+                let mut parameters = Vec::with_capacity(positional.len());
+                for parameter in &positional {
+                    parameters.push(self.skeleton(parameter));
+                }
+                let mut named_parameters = Vec::with_capacity(named.len());
+                for (name, parameter) in &named {
+                    let parameter = self.skeleton(parameter);
+                    named_parameters.push((name.clone(), parameter));
+                }
+                Type::Function {
+                    positional: parameters,
+                    named: named_parameters,
+                    result: Box::new(self.skeleton(&result)),
+                }
+            }
+            _ => Type::Meta(self.fresh_id()),
         }
     }
 
@@ -1322,6 +1411,35 @@ impl<S: Clone> Infer<S> {
             self.rollback(mark);
         }
         Err(())
+    }
+
+    /// Returns the type a named parameter starts from, with `default_ty`
+    /// flowed into it.
+    ///
+    /// A numeric default flows into an unknown as a guarantee, leaving the
+    /// parameter free to widen to whatever the body needs. A structural
+    /// default becomes the parameter's type outright: the body is checked
+    /// once, so a numeric leaf left open could be widened by a later call
+    /// after the result computed from it was already fixed.
+    ///
+    /// # Example
+    ///
+    /// `fn(k = 2) => k` starts `k` at an unknown guaranteeing `int`, while
+    /// `fn(k = [1, 2]) => k` starts it at `[int]`.
+    fn default_parameter(&mut self, default_ty: &Type, span: &Option<Span<S>>) -> Type {
+        // Through the quantifier first: a default bound by a definition is
+        // generalized, and the parameter takes an instance of it rather
+        // than the quantified type, so the shape to pin is the instance's.
+        let resolved = match self.resolve(default_ty) {
+            Type::Forall(vars, body) => self.instantiate(&vars, *body),
+            resolved => resolved,
+        };
+        let parameter = match resolved {
+            structural @ (Type::Tuple(_) | Type::List(_) | Type::Function { .. }) => structural,
+            _ => self.fresh_meta(),
+        };
+        self.subtype_check(default_ty, &parameter, span);
+        parameter
     }
 
     /// Checks `found <: expected` and reports an error at `span` on
@@ -2262,8 +2380,7 @@ impl<S: Clone> Infer<S> {
                     .iter()
                     .map(|(name, default)| {
                         let default_ty = self.infer(context, &mut Vec::new(), default);
-                        let parameter = self.fresh_meta();
-                        self.subtype_check(&default_ty, &parameter, &default.span);
+                        let parameter = self.default_parameter(&default_ty, &default.span);
                         (name.clone(), parameter)
                     })
                     .collect();
@@ -3112,6 +3229,73 @@ mod tests {
         assert_errors(&format!("{}f(x = 2) \\ 1", f), &["expected seq, found int"]);
         // A default the body cannot accept errors at the definition.
         assert_errors("fn(x = 100) => x \\ 1", &["expected seq, found int"]);
+    }
+
+    #[test]
+    fn an_arrow_met_by_a_meta_varies_like_an_arrow() {
+        // Arrow unification (Xie and Oliveira, Fig. 14): the meta becomes an
+        // arrow of fresh parts, so a fold whose seed and step are different
+        // functions settles on the arrow both fit rather than demanding one
+        // of them exactly.
+        assert_clean("reduce(fn(acc, x) => cos, sqrt, [1])");
+        assert_clean("unfold(fn(v) => cos, sqrt, 2)");
+        // Through a structure, too, where the leaf is the arrow.
+        assert_clean("reduce(fn(acc, x) => [cos], [sqrt], [1])");
+        assert_clean("reduce(fn(acc, x) => (cos, 1), (sqrt, 2), [1])");
+        // Parameters meet and results join, the same answer `join` gives two
+        // arrows: `sqrt` takes floats, so the fold's does too.
+        assert_clean("reduce(fn(acc, x) => cos, sqrt, [1])(0.5)");
+        assert_errors(
+            "reduce(fn(acc, x) => cos, sqrt, [1])(time)",
+            &["expected float, found waveform"],
+        );
+        // Arrows with no shared parameter shape still have nothing to meet.
+        assert_errors(
+            "reduce(fn(acc, x) => fixed, sqrt, [1])",
+            &["expected ([float]) -> waveform, found (float) -> float"],
+        );
+        // A function-valued named default still pins its parameter, and a
+        // definition-bound one is quantified, so the pin has to look through
+        // the quantifier to see the arrow.
+        assert_errors(
+            "let g = fn(v) => 1 in let h = fn(v) => time in \
+             let f = fn(k = g) => k(0) in nth(f(k = h), [1, 2, 3])",
+            &["expected (int) -> int, found ('a) -> waveform"],
+        );
+        assert_clean("let g = fn(v) => 1 in let f = fn(k = g) => k(0) in nth(f(), [1, 2, 3])");
+    }
+
+    #[test]
+    fn a_structure_met_by_a_meta_keeps_its_leaves_open() {
+        // A list of ints flowing into a polymorphic parameter used to pin
+        // the element's sort, so nothing that met the same parameter later
+        // could widen it — a fold whose step returns waveforms was rejected
+        // even though its seed is only the starting value.
+        assert_clean("unfold(fn(v) => [time], [1, 2], 2)");
+        assert_clean("reduce(fn(acc, x) => [time], [1, 2], [2])");
+        assert_clean("reduce(fn(acc, x) => (time, 1), (1, 2), [2])");
+        // The widened leaf is what the result carries, not the seed's sort.
+        assert_errors(
+            "nth(nth(0, reduce(fn(acc, x) => [time], [1, 2], [2])), [1, 2, 3])",
+            &["expected int, found int or waveform"],
+        );
+        // Only numeric leaves open up: the structure itself, and leaves of
+        // other kinds, still have to agree.
+        assert_errors(
+            "unfold(fn(v) => [true], [1, 2], 2)",
+            &["expected [bool], found [int]"],
+        );
+        assert_errors(
+            "unfold(fn(v) => time, [1, 2], 2)",
+            &["expected waveform, found [int]"],
+        );
+        // A structural named default still pins its parameter. The body is
+        // checked once, so an open leaf would let a call widen it after the
+        // result computed from it was fixed — and this program does fail.
+        assert_errors(
+            "let f = fn(k = [1, 2]) => nth(0, k) in nth(f(k = [time]), [1, 2])",
+            &["expected [int], found [waveform]"],
+        );
     }
 
     // A call that omits a named argument gets the value the default
