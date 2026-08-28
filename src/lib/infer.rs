@@ -1496,12 +1496,36 @@ impl<S: Clone> Infer<S> {
         (!bare(found) && !bare(expected)).then_some(conflict)
     }
 
-    /// Returns the join of the two types (a tuun extension; the paper has no
-    /// join because it has no subtyping between base types): unification if the
-    /// types agree structurally, sort union for numerics (mixed
-    /// float/waveform/seq lists and branches are common), pointwise for lists
-    /// and tuples, and `Dynamic` with an error otherwise. Quantified types join
-    /// at an instance.
+    /// Returns the join of the two types: unification if they agree
+    /// structurally, sort union for numerics (mixed float/waveform/seq lists
+    /// and branches are common), pointwise for lists and tuples, with the
+    /// variance for arrows, pairwise for two intersections, and `Dynamic`
+    /// with an error where there is none. Quantified types join at an
+    /// instance.
+    ///
+    /// Xie and Oliveira have no join, having no subtyping between base
+    /// types, but the refinement line does. Freeman and Pfenning give unions
+    /// a type constructor of their own — "such union types arise, for
+    /// example, from the different branches of an `if` expression" — in a
+    /// union normal form `unf ::= inf | unf ∨ unf` where an arrow reads
+    /// `inf → unf`: an intersection accepted, a union returned. Sorts are a
+    /// union already, so that shape falls out here rather than needing a
+    /// constructor, and the join of two tables produces it directly
+    /// (`(int) -> int or waveform`). What tuun has no representation for is a
+    /// union of two *structures*, which is why a pair with nothing in common
+    /// is an error rather than a type.
+    ///
+    /// The law behind the intersection case is Davies' (§4.5):
+    ///
+    /// ```text
+    /// (R1 → S1) & (R2 → S2)  ≤  (R1 ∨ R2) → (S1 ∨ S2)
+    /// ```
+    ///
+    /// He applied it "to each pair of conjuncts", as the intersection case
+    /// below does, and withdrew it: his lattice has no union operation, so
+    /// `R1 ∨ R2` had to be built by enumerating the common upper bounds,
+    /// "infeasible for even simple higher-order sorts". Here a union of sorts
+    /// is one instruction over four atoms, so the same algorithm is cheap.
     fn join(&mut self, a: Type, b: Type, span: &Option<Span<S>>) -> Type {
         let a = self.resolve(&a);
         let b = self.resolve(&b);
@@ -1575,6 +1599,56 @@ impl<S: Clone> Infer<S> {
                     result: Box::new(result),
                 }
             }
+            // Two tables join row by row. Every pair of rows that joins is a
+            // type both tables are subtypes of — each side reaches it by
+            // Sub-And-L through the row it contributed — so their join is the
+            // intersection of all such pairs. Pairs are tried rather than
+            // matched on the nose because the two sides need not split their
+            // domains the same way: one table's rows may be single atoms where
+            // the other's cover a whole class, and those still overlap. A pair
+            // whose domains do not overlap contributes nothing.
+            //
+            // Identical tables take the unification path first, so a table
+            // joined with itself keeps its refinement variables live rather
+            // than grounding them.
+            (Type::And(xs), Type::And(ys)) => {
+                let mark = self.mark();
+                if self.unify(&a, &b).is_ok() {
+                    return self.resolve(&a);
+                }
+                self.rollback(mark);
+                let (xs, ys) = (xs.clone(), ys.clone());
+                if xs.len().saturating_mul(ys.len()) > MAX_TABULATION_VECTORS {
+                    return self.incompatible(&a, &b, span);
+                }
+                let mut rows: Vec<Type> = Vec::new();
+                for x in &xs {
+                    for y in &ys {
+                        if !self.same_shape(x, y) {
+                            continue;
+                        }
+                        // A pair that does not join contributes no row — its
+                        // domains do not overlap, or its results disagree —
+                        // the same way a vector whose body does not check
+                        // contributes none to `tabulate`, and its errors are
+                        // exploratory either way.
+                        let before = self.errors.len();
+                        let row = self.join(x.clone(), y.clone(), span);
+                        if self.errors.len() > before {
+                            self.errors.truncate(before);
+                            continue;
+                        }
+                        if !rows.contains(&row) {
+                            rows.push(row);
+                        }
+                    }
+                }
+                match rows.len() {
+                    0 => self.incompatible(&a, &b, span),
+                    1 => rows.pop().expect("one row"),
+                    _ => Type::And(rows),
+                }
+            }
             _ => {
                 let mark = self.mark();
                 if self.unify(&a, &b).is_ok() {
@@ -1585,6 +1659,40 @@ impl<S: Clone> Infer<S> {
                 }
             }
         }
+    }
+
+    /// Returns whether two arrows have the same parameter shape.
+    ///
+    /// Arity must agree and named parameters must agree by name; the
+    /// parameter *types* are not consulted, since two rows that overlap
+    /// without coinciding still join. Anything that is not a pair of arrows
+    /// has no shape in common.
+    ///
+    /// # Example
+    ///
+    /// `(int) -> int` and `(float) -> float` share a shape; `(int) -> int`
+    /// and `(int, int) -> int` do not.
+    fn same_shape(&self, x: &Type, y: &Type) -> bool {
+        let (
+            Type::Function {
+                positional: p1,
+                named: n1,
+                ..
+            },
+            Type::Function {
+                positional: p2,
+                named: n2,
+                ..
+            },
+        ) = (self.resolve(x), self.resolve(y))
+        else {
+            return false;
+        };
+        p1.len() == p2.len()
+            && n1.len() == n2.len()
+            && n1
+                .iter()
+                .all(|(name, _)| n2.iter().any(|(other, _)| other == name))
     }
 
     /// Reports two types as having no join and recovers with `Dynamic`.
@@ -3850,6 +3958,37 @@ mod tests {
         assert_errors(
             "let g = fn(v) => v + 1 in let id = fn(y) => y in id(g)(\"s\")",
             &["no use of id accepts (string)"],
+        );
+    }
+
+    #[test]
+    fn branches_join_two_tables_row_by_row() {
+        let tables = "let g = fn(v) => v + 1 in let h = fn(v) => v | fin(4) in ";
+        // `h` takes waveforms and seqs, `g` takes anything; the branch offers
+        // a row wherever the two overlap, at the join of their results.
+        assert_clean(&format!("{}(if true then g else h)(time)", tables));
+        assert_clean(&format!("{}(if true then g else h)(0.5)", tables));
+        // The rows really are per-domain: at an int both are possible, so the
+        // result is either's.
+        assert_errors(
+            &format!("{}nth((if true then g else h)(1), [1, 2, 3])", tables),
+            &["expected int, found int or waveform"],
+        );
+        // Tables that differ in one conjunct join there and agree elsewhere,
+        // rather than being reported wholly incompatible.
+        assert_clean(
+            "let mk = fn(h) => h in let u = fn(k = 1) => k in let v = fn(k = time) => k in \
+             if true then mk(u) else mk(v)",
+        );
+        // A table joined with itself takes the unification path, so its
+        // variables stay live instead of grounding.
+        assert_clean("let g = fn(v) => v + 1 in (if true then g else g)(time)");
+        // Rows that share no domain leave nothing to offer.
+        assert_errors(
+            "let g = fn(v) => v + 1 in let b = fn(v) => true in if true then g else b",
+            &[
+                "incompatible types (int) -> int ∧ (float) -> float ∧ (waveform) -> waveform ∧ (seq) -> seq and (?a) -> bool",
+            ],
         );
     }
 
