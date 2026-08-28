@@ -222,6 +222,13 @@ enum Selection {
 /// Oliveira's substitution `S` and name supply `N` (Appendix E.1), plus the
 /// errors accumulated so far.
 struct Infer<S> {
+    /// The last sort conflict a refinement variable reported, as
+    /// (guaranteed, required).
+    ///
+    /// A breadcrumb for diagnostics only, never rolled back: it is cleared
+    /// at the start of each [`Infer::subtype_check`] and read only when that
+    /// check fails, so what it holds is a conflict from the failing check.
+    conflict: Option<(Sort, Sort)>,
     /// Solutions for meta variables — the paper's `S`. Kept acyclic by the
     /// occurs check; solutions may mention other solved metas, so readers
     /// follow chains.
@@ -285,6 +292,7 @@ impl<S: Clone> Infer<S> {
             refs: Vec::new(),
             journal: Vec::new(),
             errors: Vec::new(),
+            conflict: None,
             probe: None,
             probed: None,
         }
@@ -448,7 +456,9 @@ impl<S: Clone> Infer<S> {
             // only grow). The full judgment is deferred to the recorded
             // contracts.
             Refinement::Var(id) => {
-                if !self.refs[*id as usize].lower.is_subset(contract) {
+                let lower = self.refs[*id as usize].lower;
+                if !lower.is_subset(contract) {
+                    self.conflict = Some((lower, contract));
                     return Err(());
                 }
             }
@@ -1446,15 +1456,44 @@ impl<S: Clone> Infer<S> {
     /// failure, rolling back any partial solving from the failed attempt.
     fn subtype_check(&mut self, found: &Type, expected: &Type, span: &Option<Span<S>>) {
         let mark = self.mark();
+        self.conflict = None;
         if self.subtype(found, expected).is_err() {
             self.rollback(mark);
-            let message = format!(
-                "expected {}, found {}",
-                self.display(expected),
-                self.display(found)
-            );
+            let message = match self.nested_conflict(found, expected) {
+                Some((guaranteed, required)) => format!(
+                    "no sort fits here: guaranteed {}, required {}",
+                    guaranteed, required
+                ),
+                None => format!(
+                    "expected {}, found {}",
+                    self.display(expected),
+                    self.display(found)
+                ),
+            };
             self.error(message, span);
         }
+    }
+
+    /// Returns the sort conflict to report in place of the two types, when
+    /// naming them would not show where they disagree.
+    ///
+    /// A conflict on a numeric *nested* inside a structure cannot be seen in
+    /// an `expected ..., found ...` message: both sides render whole, and the
+    /// offending leaf is one position among several — often rendering as a
+    /// plausible sort, since a variable displays the guarantees it has
+    /// collected rather than the conflict it is in. Where either side *is* a
+    /// numeric, that side's name states its sort outright and the ordinary
+    /// message says more than this one.
+    ///
+    /// # Example
+    ///
+    /// A leaf conflict inside an arrow reports `no sort fits here: guaranteed
+    /// numeric, required waveform` rather than naming two arrows that read as
+    /// though they should match.
+    fn nested_conflict(&self, found: &Type, expected: &Type) -> Option<(Sort, Sort)> {
+        let conflict = self.conflict?;
+        let bare = |ty: &Type| matches!(self.resolve(ty), Type::Numeric(_));
+        (!bare(found) && !bare(expected)).then_some(conflict)
     }
 
     /// Returns the join of the two types (a tuun extension; the paper has no
@@ -3229,6 +3268,31 @@ mod tests {
         assert_errors(&format!("{}f(x = 2) \\ 1", f), &["expected seq, found int"]);
         // A default the body cannot accept errors at the definition.
         assert_errors("fn(x = 100) => x \\ 1", &["expected seq, found int"]);
+    }
+
+    #[test]
+    fn a_conflict_on_a_nested_sort_is_reported_as_one() {
+        // The conflicting position is a leaf inside two arrows, and a
+        // variable renders as the guarantees it has collected — so naming
+        // the two types produces `(numeric) -> numeric` against
+        // `(waveform) -> waveform`, which reads as though it should match.
+        assert_errors(
+            "let c = fn(f, g2) => fn(v) => f(g2(v)) in \
+             c(fn(x) => sqrt, fn(x) => (let f2 = fn(k = x) => k in f2(k = cos)))(cos)",
+            &["no sort fits here: guaranteed numeric, required waveform"],
+        );
+        // Where either side *is* a numeric, its name states the sort and the
+        // ordinary message says more.
+        assert_errors("nth(time, [1, 2, 3])", &["expected int, found waveform"]);
+        assert_errors(
+            "let f = fn(k = time) => k in nth(f(), [1, 2, 3])",
+            &["expected int, found waveform"],
+        );
+        // A mismatch that is not about sorts at all is untouched.
+        assert_errors(
+            "reduce(fn(acc, x) => fixed, sqrt, [1])",
+            &["expected ([float]) -> waveform, found (float) -> float"],
+        );
     }
 
     #[test]
