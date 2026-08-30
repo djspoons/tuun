@@ -206,6 +206,7 @@ mod tests {
 
     use super::*;
     use crate::builtins;
+    use crate::expr::ErrorKind;
     use crate::expr::{Binding, BuiltInFn, Expr, Pattern, SourceBinding, boxed};
     use crate::types::{Refinement, Sort};
     use crate::waveform::{Operator, Waveform};
@@ -440,22 +441,48 @@ mod tests {
                 vector.iter().map(|atom| representative(*atom)).collect();
             let result = function.0(arguments);
             let Some((_, declared)) = governing else {
-                assert!(
-                    matches!(result, Expr::Error(_)),
-                    "{} accepted uncovered ({}): {}",
-                    name,
-                    shown.join(", "),
-                    result
-                );
+                // The signature says this call cannot happen, so the builtin
+                // should refuse it on sort or arity — an internal error. A
+                // "evaluator" error here would mean the builtin accepts the
+                // type/sort and the signature is wrong to exclude it.
+                match &result {
+                    Ok(value) => panic!(
+                        "{} accepted uncovered ({}): {}",
+                        name,
+                        shown.join(", "),
+                        value
+                    ),
+                    Err(error) => assert_eq!(
+                        error.kind(),
+                        ErrorKind::Internal,
+                        "{} refuses uncovered ({}) as a non-internal error, so the signature \
+                         excludes a call the builtin is willing to shape-check: {}",
+                        name,
+                        shown.join(", "),
+                        error
+                    ),
+                }
                 continue;
             };
-            assert!(
-                !matches!(result, Expr::Error(_)),
-                "{} errored on covered ({}): {}",
-                name,
-                shown.join(", "),
-                result
-            );
+            // The signature promises this call, so an internal error is the two
+            // disagreeing; a evaluation error would be one the sorts cannot
+            // distinguish, which no representative should provoke.
+            let result = match result {
+                Ok(result) => result,
+                Err(error) if error.kind() == ErrorKind::Internal => panic!(
+                    "{} refuses covered ({}): the signature promises a call the builtin \
+                     rejects on sort or arity: {}",
+                    name,
+                    shown.join(", "),
+                    error
+                ),
+                Err(error) => panic!(
+                    "{} failed on covered ({}) for a non-internal reason: {}",
+                    name,
+                    shown.join(", "),
+                    error
+                ),
+            };
             match declared {
                 Type::Numeric(Refinement::Ground(sort)) => {
                     let actual = sort_of(&result).unwrap_or_else(|| {

@@ -334,7 +334,7 @@ fn check_block(
         modules
             .get(&key)
             .map(|v| v.as_slice())
-            .ok_or_else(|| expr::Error::new(format!("Module not found: {}", key)))
+            .ok_or_else(|| expr::Error::eval_here(format!("Module not found: {}", key)))
     };
 
     // The checker runs first and findings fail the block, mirroring the

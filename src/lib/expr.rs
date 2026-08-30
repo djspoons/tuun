@@ -36,22 +36,96 @@ impl Span {
     }
 }
 
+/// Which pass produced an error, and so whose mistake it reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrorKind {
+    /// The text does not parse.
+    Parse,
+    /// The type checker rejected the program.
+    Type,
+    /// An error caused by a value outside the domain of a built-in function: an
+    /// index past the end of a list, a square root of a negative.
+    Eval,
+    /// An error that should *not* have occurred at this point; this indicates
+    /// an unsoundness in the type checker.
+    Internal,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Error<S = ()> {
     span: Option<Span<S>>,
     message: String,
+    kind: ErrorKind,
 }
 
 impl<S> Error<S> {
-    pub fn new(message: String) -> Self {
+    fn of(kind: ErrorKind, message: impl Into<String>, span: Option<Span<S>>) -> Self {
         Self {
-            span: None,
-            message,
+            span,
+            message: message.into(),
+            kind,
         }
     }
-    /// Constructs an `Error` located at the given span.
-    pub fn with_span(message: String, span: Option<Span<S>>) -> Self {
-        Self { span, message }
+
+    /// An error from parsing: the text does not read as a program.
+    pub fn parse(message: impl Into<String>, span: Option<Span<S>>) -> Self {
+        Self::of(ErrorKind::Parse, message, span)
+    }
+
+    /// An error from the type checker.
+    pub fn types(message: impl Into<String>, span: Option<Span<S>>) -> Self {
+        Self::of(ErrorKind::Type, message, span)
+    }
+
+    /// An error from evaluation, caused by a value the checker cannot judge.
+    pub fn eval(message: impl Into<String>, span: Option<Span<S>>) -> Self {
+        Self::of(ErrorKind::Eval, message, span)
+    }
+
+    /// An error the type checker was supposed to have ruled out.
+    ///
+    /// The message is prefixed so the reader knows the fault is not theirs.
+    ///
+    /// # Example
+    ///
+    /// A builtin handed an argument of the wrong sort reports
+    /// `internal error: expected a seq, got 100`.
+    pub fn internal(message: impl Into<String>, span: Option<Span<S>>) -> Self {
+        Self::of(
+            ErrorKind::Internal,
+            format!("internal error: {}", message.into()),
+            span,
+        )
+    }
+
+    /// A parse error with no location.
+    pub fn parse_here(message: impl Into<String>) -> Self {
+        Self::parse(message, None)
+    }
+
+    /// A type error with no location.
+    pub fn types_here(message: impl Into<String>) -> Self {
+        Self::types(message, None)
+    }
+
+    /// An internal error with no location; the caller attaches one.
+    pub fn internal_here(message: impl Into<String>) -> Self {
+        Self::internal(message, None)
+    }
+
+    /// An evaluation error with no location; the caller attaches one.
+    pub fn eval_here(message: impl Into<String>) -> Self {
+        Self::eval(message, None)
+    }
+
+    /// Which pass produced this error — see [`ErrorKind`].
+    pub fn kind(&self) -> ErrorKind {
+        self.kind
+    }
+
+    /// Returns this error located at `span`.
+    pub fn at(self, span: Option<Span<S>>) -> Self {
+        Self { span, ..self }
     }
 
     /// The error's byte range, without its source identity.
@@ -127,11 +201,9 @@ impl<S> Display for Error<S> {
 
 /// The shared function backing a [`BuiltInFn`]: a function from a
 /// vector of values to a value.
-// TODO consider returning Result<Expr, Error<S>> instead of signaling failure with
-// Expr::Error, so a failure nested inside a compound result can't escape
-// as an ordinary value and element-level spans survive (e.g. `map` could
-// point at the failing element's origin).
-pub type BuiltInImpl<M, S> = Rc<dyn Fn(Vec<Expr<M, S>>) -> Expr<M, S>>;
+// TODO carry element-level spans, so `map` can point at the failing
+// element's origin rather than at the whole call.
+pub type BuiltInImpl<M, S> = Rc<dyn Fn(Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>>;
 
 #[derive(Clone)]
 pub struct BuiltInFn<M, S = ()>(pub BuiltInImpl<M, S>);
@@ -211,6 +283,8 @@ pub enum Expr<M, S = ()> {
     Tuple(Vec<SourceExpr<M, S>>),
     List(Vec<SourceExpr<M, S>>),
     // Errors
+    /// A parse failure, kept in the tree so the rest of a module still checks.
+    /// Evaluation refuses it; nothing else produces one.
     Error(String),
 }
 
@@ -553,6 +627,7 @@ pub(crate) fn stamp_errors<S: Copy>(errors: Vec<Error>, source: S) -> Vec<Error<
         .map(|error| Error {
             span: stamp_span(error.span, source),
             message: error.message,
+            kind: error.kind,
         })
         .collect()
 }
@@ -999,7 +1074,7 @@ where
                 write!(f, "]")
             }
             Expr::Seq { offset, waveform } => write!(f, "seq({}, {})", offset, waveform),
-            Expr::Error(s) => write!(f, "{}", s),
+            Expr::Error(message) => write!(f, "{}", message),
         }
     }
 }
@@ -1213,7 +1288,7 @@ where
             write_preserving(waveform, source, out)?;
             write!(out, ")")
         }
-        Expr::Error(s) => write!(out, "{}", s),
+        Expr::Error(message) => write!(out, "{}", message),
     }
 }
 
@@ -1480,9 +1555,9 @@ mod tests {
     #[test]
     fn test_display_with_source() {
         let source = "a = 1;\nb = nope;\n";
-        let error = Error::with_span("bad".to_string(), Some(Span::unstamped(11..15)));
+        let error = Error::eval("bad", Some(Span::unstamped(11..15)));
         assert_eq!(error.display_with_source(source), "2:5: bad");
-        let error = Error::<()>::new("bad".to_string());
+        let error = Error::<()>::eval_here("bad");
         assert_eq!(error.display_with_source(source), "bad");
     }
 }

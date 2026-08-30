@@ -37,7 +37,7 @@ pub fn denormalize(function: &expr::SliderFunction, normalized: f32) -> Result<f
             let mut bindings = Vec::new();
             builtins::add_bindings(&mut bindings);
             let resolve = |_: &[String]| {
-                Err(expr::Error::new(
+                Err(expr::Error::eval_here(
                     "didn't expect to resolve inside of slider function".to_string(),
                 ))
             };

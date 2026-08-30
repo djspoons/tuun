@@ -36,7 +36,7 @@ impl<'a> ToRange for Input<'a> {
 
 /// Builds an [`Error`] whose range covers `input`'s fragment.
 fn error_from_input(input: &Input, message: String) -> Error {
-    Error::with_span(message, Some(Span::unstamped(input.to_range())))
+    Error::parse(message, Some(Span::unstamped(input.to_range())))
 }
 
 impl<'a> nom::error::ParseError<Input<'a>> for Error {
@@ -334,10 +334,8 @@ fn parse_function<M>(input: Input) -> IResult<SourceExpr<M>> {
         }
     }
     if let Some((range, message)) = violation {
-        rest.extra.report_error(Error::with_span(
-            message.clone(),
-            Some(Span::unstamped(range)),
-        ));
+        rest.extra
+            .report_error(Error::parse(message.clone(), Some(Span::unstamped(range))));
         return Ok((
             rest,
             SourceExpr::with_span(Expr::Error(message), start..end),
@@ -438,13 +436,13 @@ fn parse_let<M>(input: Input) -> IResult<SourceExpr<M>> {
         match source_binding.binding {
             Binding::Definition(pattern, expr) => definitions.push((pattern, expr)),
             Binding::Open(_) => {
-                rest.extra.report_error(Error::with_span(
+                rest.extra.report_error(Error::parse(
                     "`open` is not allowed inside `let`; use it at the top level".to_string(),
                     source_binding.span,
                 ));
             }
             Binding::Use(_) => {
-                rest.extra.report_error(Error::with_span(
+                rest.extra.report_error(Error::parse(
                     "`use` is not allowed inside `let`; use it at the top level".to_string(),
                     source_binding.span,
                 ));
@@ -596,10 +594,8 @@ fn parse_arguments<M>(input: Input) -> IResult<(Vec<SourceExpr<M>>, NamedExprs<M
         }
     }
     if let Some((range, message)) = violation {
-        rest.extra.report_error(Error::with_span(
-            message.clone(),
-            Some(Span::unstamped(range)),
-        ));
+        rest.extra
+            .report_error(Error::parse(message.clone(), Some(Span::unstamped(range))));
         let error = SourceExpr::with_span(Expr::Error(message), args_start..args_end);
         return Ok((rest, (vec![error], Vec::new())));
     }
@@ -1161,7 +1157,7 @@ where
     M: Display,
 {
     if target_range.end > source.len() || target_range.start > target_range.end {
-        return Err(vec![Error::with_span(
+        return Err(vec![Error::parse(
             format!(
                 "target span {:?} is out of bounds for source of length {}",
                 target_range,
@@ -1568,7 +1564,7 @@ mod tests {
         assert_eq!(errors[0].range(), Some(4..4));
         assert!(matches!(
             &bindings[0].binding,
-            Binding::Definition(_, expr) if matches!(expr.expr, Expr::Error(_))
+            Binding::Definition(_, expr) if matches!(expr.expr, Expr::Error { .. })
         ));
 
         // Same for a non-empty unparseable body; the error covers the
@@ -2040,7 +2036,7 @@ synth = saw(220);";
         }
         match result {
             Ok((_, annos)) => Ok(annos.into_iter().map(|sa| sa.annotation).collect()),
-            Err(_) => Err(vec![Error::new("parse failed".to_string())]),
+            Err(_) => Err(vec![Error::parse_here("parse failed".to_string())]),
         }
     }
 

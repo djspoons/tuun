@@ -47,9 +47,7 @@ where
     M: Clone,
     S: Clone,
 {
-    use Expr::{
-        Application, Bool, BuiltIn, Error, Function, IfThenElse, List, String, Tuple, Variable,
-    };
+    use Expr::{Application, Bool, BuiltIn, Function, IfThenElse, List, String, Tuple, Variable};
     let SourceExpr { expr, span } = expr;
     Ok(match expr {
         Bool(_) | String(_) => SourceExpr { expr, span },
@@ -115,7 +113,7 @@ where
                     return Ok(value.clone());
                 }
             }
-            return Err(self::Error::with_span(
+            return Err(self::Error::eval(
                 format!("Variable '{}' not found in context", name),
                 span,
             ));
@@ -178,10 +176,7 @@ where
             ),
             span,
         },
-        Error(s) => SourceExpr {
-            expr: Error(s),
-            span,
-        },
+        error @ Expr::Error(_) => SourceExpr { expr: error, span },
     })
 }
 
@@ -201,7 +196,7 @@ where
         }
         (Pattern::Tuple(patterns), Expr::Tuple(arguments)) => {
             if patterns.len() != arguments.len() {
-                return Err(Error::with_span(
+                return Err(Error::eval(
                     format!(
                         "Mismatched number of elements in pattern {} and arguments {}",
                         pattern, argument
@@ -214,7 +209,7 @@ where
             }
             Ok(())
         }
-        _ => Err(Error::with_span(
+        _ => Err(Error::eval(
             format!(
                 "Pattern {} does not match actual expression {}",
                 pattern, argument.expr
@@ -272,7 +267,7 @@ where
                 span,
             })
         }
-        Variable(name) => Err(Error::with_span(
+        Variable(name) => Err(Error::eval(
             format!("Variable '{}' not found in context", name),
             span,
         )),
@@ -302,7 +297,7 @@ where
             match evaluate_closed(*condition)?.expr {
                 Bool(true) => evaluate_closed(*then),
                 Bool(false) => evaluate_closed(*else_),
-                _ => Err(Error::with_span(
+                _ => Err(Error::eval(
                     "Expected boolean condition".to_string(),
                     condition_span,
                 )),
@@ -337,26 +332,26 @@ where
                     // synthesized trees.)
                     for (i, (name, _)) in named.iter().enumerate() {
                         if named[..i].iter().any(|(n, _)| n == name) {
-                            return Err(Error::with_span(
+                            return Err(Error::eval(
                                 format!("named parameter \"{}\" appears more than once", name),
                                 span.clone(),
                             ));
                         }
                         if !defaults.iter().any(|(n, _)| n == name) {
-                            return Err(Error::with_span(
+                            return Err(Error::eval(
                                 format!("no named parameter \"{}\"", name),
                                 span.clone(),
                             ));
                         }
                     }
                     if pos_args.len() > pos_params.len() {
-                        return Err(Error::with_span(
+                        return Err(Error::eval(
                             "extra positional parameter".to_string(),
                             span.clone(),
                         ));
                     }
                     if pos_args.len() < pos_params.len() {
-                        return Err(Error::with_span(
+                        return Err(Error::eval(
                             format!("missing parameter \"{}\"", pos_params[pos_args.len()]),
                             span.clone(),
                         ));
@@ -380,7 +375,7 @@ where
                 }
                 (BuiltIn { name, function }, arguments) => {
                     if let Some((named_name, _)) = named.first() {
-                        return Err(Error::with_span(
+                        return Err(Error::eval(
                             format!(
                                 "named argument \"{}\" is not supported by built-in \"{}\"",
                                 named_name, name
@@ -396,12 +391,14 @@ where
                     // see spans.
                     let actuals: Vec<Expr<M, S>> = arguments.into_iter().map(|s| s.expr).collect();
                     let result = function.0(actuals);
-                    match result {
-                        Expr::Error(s) => Err(Error::with_span(s, span.clone())),
-                        _ => Ok(SourceExpr { expr: result, span }),
-                    }
+                    result
+                        .map(|expr| SourceExpr {
+                            expr,
+                            span: span.clone(),
+                        })
+                        .map_err(|error| error.at(span))
                 }
-                (function, _) => Err(Error::with_span(
+                (function, _) => Err(Error::eval(
                     format!("Invalid application: {}", function),
                     span.clone(),
                 )),
@@ -414,12 +411,12 @@ where
         Expr::Project { module, name } => match evaluate_closed(*module)?.expr {
             Expr::BoundModule(entries) => match entries.into_iter().find(|(n, _)| n == &name) {
                 Some((_, value)) => Ok(value),
-                None => Err(Error::with_span(
+                None => Err(Error::eval(
                     format!("Module has no binding '{}'", name),
                     span,
                 )),
             },
-            other => Err(Error::with_span(
+            other => Err(Error::eval(
                 format!("Cannot project '{}' from a non-module: {}", name, other),
                 span,
             )),
@@ -442,7 +439,8 @@ where
             ),
             span,
         }),
-        Expr::Error(s) => Err(Error::with_span(s, span)),
+        // A parser error node, so the message is already the user's to read.
+        Expr::Error(message) => Err(Error::eval(message, span)),
     }
 }
 
@@ -523,7 +521,7 @@ where
             }
             Binding::Use(path) => {
                 let Some(name) = path.last() else {
-                    return Err(Error::with_span(
+                    return Err(Error::eval(
                         "`use` requires a module path".to_string(),
                         source_binding.span.clone(),
                     ));
@@ -568,6 +566,7 @@ fn dedup_last_wins<M, S>(entries: Vec<ContextEntry<M, S>>) -> Vec<ContextEntry<M
 mod tests {
     use super::*;
     use crate::builtins;
+    use crate::expr::ErrorKind;
     use crate::parser::{parse_module, parse_program};
 
     /// Parses and evaluates `input` with the built-ins in scope.
@@ -576,7 +575,7 @@ mod tests {
         builtins::add_bindings(&mut bindings);
         let expr = parse_program::<u32, _>(input, ()).unwrap();
         evaluate(
-            |_: &[String]| Err(Error::new("no modules".to_string())),
+            |_: &[String]| Err(Error::eval_here("no modules".to_string())),
             &bindings,
             expr,
         )
@@ -710,7 +709,7 @@ mod tests {
             )
             .into(),
         );
-        let resolve = |_: &[String]| Err(Error::new("no modules".to_string()));
+        let resolve = |_: &[String]| Err(Error::eval_here("no modules".to_string()));
 
         // The default is evaluated once, when the function value is
         // created — not at each of the three calls.
@@ -742,7 +741,7 @@ mod tests {
             } else if path == ["b"] {
                 Ok(&b[..])
             } else {
-                Err(Error::new(format!("no module {:?}", path)))
+                Err(Error::eval_here(format!("no module {:?}", path)))
             }
         };
         let (bindings, errors) = parse_module::<u32, _>("open a;", ()).unwrap();
@@ -766,7 +765,10 @@ mod tests {
         // would flow onward as ordinary data. (Applying the float 1 can only
         // fail at application time, past substitution's unbound-name check.)
         let error = eval_with_builtins("map(fn(x) => x(1), [1, 2])").unwrap_err();
-        assert_eq!(error.message(), "Invalid application: 1");
+        // Applying a non-function is a error the checker is meant to rule
+        // out, so it is reported as one.
+        assert_eq!(error.kind(), ErrorKind::Internal);
+        assert_eq!(error.message(), "internal error: Invalid application: 1");
     }
 
     #[test]
@@ -783,7 +785,7 @@ mod tests {
         // Same for a binding: the context build fails at the definition.
         let (bindings, errors) = parse_module::<u32, _>("f = fn(x) => nope(x);", ()).unwrap();
         assert!(errors.is_empty());
-        let resolve = |_: &[String]| Err(Error::new("no modules".to_string()));
+        let resolve = |_: &[String]| Err(Error::eval_here("no modules".to_string()));
         let error = evaluate_bindings(resolve, &bindings).unwrap_err();
         assert_eq!(error.message(), "Variable 'nope' not found in context");
     }
@@ -796,7 +798,7 @@ mod tests {
             if path == ["b"] || path == ["nested", "b"] {
                 Ok(&b[..])
             } else {
-                Err(Error::new(format!("no module {:?}", path)))
+                Err(Error::eval_here(format!("no module {:?}", path)))
             }
         };
 
@@ -822,7 +824,7 @@ mod tests {
             if path == ["b"] {
                 Ok(&b[..])
             } else {
-                Err(Error::new(format!("no module {:?}", path)))
+                Err(Error::eval_here(format!("no module {:?}", path)))
             }
         };
         let (bindings, errors) = parse_module::<u32, _>("use b;", ()).unwrap();
@@ -847,7 +849,7 @@ mod tests {
             if path == ["b"] {
                 Ok(&b[..])
             } else {
-                Err(Error::new(format!("no module {:?}", path)))
+                Err(Error::eval_here(format!("no module {:?}", path)))
             }
         };
         let (bindings, errors) = parse_module::<u32, _>("use b;", ()).unwrap();
@@ -877,7 +879,7 @@ mod tests {
             } else if path == ["b"] {
                 Ok(&b[..])
             } else {
-                Err(Error::new(format!("no module {:?}", path)))
+                Err(Error::eval_here(format!("no module {:?}", path)))
             }
         };
         let (bindings, errors) = parse_module::<u32, _>("use a;", ()).unwrap();

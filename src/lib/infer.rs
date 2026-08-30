@@ -299,7 +299,7 @@ impl<S: Clone> Infer<S> {
     }
 
     fn error(&mut self, message: String, span: &Option<Span<S>>) {
-        self.errors.push(Error::with_span(message, span.clone()));
+        self.errors.push(Error::types(message, span.clone()));
     }
 
     /// Records `ty` as the answer to a pending type query when `span` covers
@@ -3229,6 +3229,7 @@ fn dedup_last_wins<T>(entries: Vec<(String, T)>) -> Vec<(String, T)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::expr::ErrorKind;
     use std::rc::Rc;
 
     use crate::builtins;
@@ -3255,7 +3256,7 @@ mod tests {
             Pattern::Identifier("mark".to_string()),
             SourceExpr::from(Expr::BuiltIn {
                 name: "mark".to_string(),
-                function: BuiltInFn(Rc::new(|_| Expr::Error("stub".to_string()))),
+                function: BuiltInFn(Rc::new(|_| Err(Error::internal_here("stub")))),
             }),
         ));
         prelude.push(SourceBinding::definition(
@@ -3275,7 +3276,7 @@ mod tests {
         let bindings = test_prelude();
         let expr = parse_program::<u32, _>(input, ()).unwrap();
         check_program(
-            |_: &[String]| Err(Error::new("no modules".to_string())),
+            |_: &[String]| Err(Error::types_here("no modules".to_string())),
             &bindings,
             &expr,
             expectation,
@@ -3966,7 +3967,7 @@ mod tests {
         bindings.extend(opens);
         let expr = parse_program::<u32, _>("something_from_nope + 1", ()).unwrap();
         let errors = check_program(
-            |_: &[String]| Err(Error::new("no modules".to_string())),
+            |_: &[String]| Err(Error::types_here("no modules".to_string())),
             &bindings,
             &expr,
             None,
@@ -4033,7 +4034,7 @@ mod tests {
             } else if path == ["b"] {
                 Ok(&b[..])
             } else {
-                Err(Error::new(format!("no module {:?}", path)))
+                Err(Error::types_here(format!("no module {:?}", path)))
             }
         };
         let mut bindings = test_prelude();
@@ -4063,7 +4064,7 @@ mod tests {
             if path == ["b"] {
                 Ok(&b[..])
             } else {
-                Err(Error::new(format!("no module {:?}", path)))
+                Err(Error::types_here(format!("no module {:?}", path)))
             }
         };
         let mut bindings = test_prelude();
@@ -4253,15 +4254,17 @@ mod tests {
     /// cannot see (see "Toward a sound configuration" in the design doc).
     /// On a clean program, an eval error matching none of these
     /// classes is a soundness bug.
-    fn declared_residue(message: &str) -> bool {
-        [
-            "No element with index",        // nth out of bounds
-            "Invalid arguments for unfold", // negative count
-            "Cannot add offsets",           // offsets not linear in time
-            "Invalid arguments for filter", // empty feed-forward list
-        ]
-        .iter()
-        .any(|class| message.contains(class))
+    /// Whether a runtime failure is one the sort lattice cannot see.
+    ///
+    /// The runtime says which it is, so this asks rather than matching on
+    /// the message: a builtin marks the errors the lattice cannot judge, and
+    /// everything else it reports is a sort or arity the checker was meant to
+    /// rule out.
+    /// The default is the safe one — a error nobody has classified counts as
+    /// a checker failure, so adding a builtin cannot quietly widen what the
+    /// harness overlooks.
+    fn declared_residue<S>(error: &Error<S>) -> bool {
+        error.kind() == ErrorKind::Eval
     }
 
     /// A closed expression inhabiting `sort`, preferring the most general
@@ -4313,7 +4316,7 @@ mod tests {
             .iter()
             .find(|(name, _)| *name == key)
             .map(|(_, bindings)| &bindings[..])
-            .ok_or_else(|| Error::new(format!("no module {}", key)))
+            .ok_or_else(|| Error::types_here(format!("no module {}", key)))
     }
 
     #[test]
@@ -4347,7 +4350,7 @@ mod tests {
             );
             if let (true, Err(error)) = (clean, &evaluated) {
                 assert!(
-                    declared_residue(error.message()),
+                    declared_residue(error),
                     "soundness: module {} is clean but evaluates to: {}",
                     path,
                     error.message()
@@ -4446,7 +4449,7 @@ mod tests {
                     expr,
                 );
                 match &evaluated {
-                    Err(error) if declared_residue(error.message()) => residue += 1,
+                    Err(error) if declared_residue(error) => residue += 1,
                     Err(error) => {
                         assert!(
                             flagged.contains(&id),
@@ -4553,7 +4556,7 @@ mod tests {
                 .iter()
                 .find(|(name, _, _)| *name == key)
                 .map(|(_, _, bindings)| &bindings[..])
-                .ok_or_else(|| Error::new(format!("no module {}", key)))
+                .ok_or_else(|| Error::types_here(format!("no module {}", key)))
         };
         let expr = parse_program::<u32, _>("0", 9999).unwrap();
         for (index, (path, content, bindings)) in parsed.iter().enumerate() {
@@ -4662,7 +4665,7 @@ mod tests {
                 .iter()
                 .find(|(name, _, _)| *name == key)
                 .map(|(_, _, bindings)| &bindings[..])
-                .ok_or_else(|| Error::new(format!("no module {}", key)))
+                .ok_or_else(|| Error::types_here(format!("no module {}", key)))
         };
         let expr = parse_program::<u32, _>("0", 9999).unwrap();
         let mut report: Vec<String> = Vec::new();

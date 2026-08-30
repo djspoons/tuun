@@ -26,8 +26,10 @@ use crate::waveform;
 
 /// The `mark(N)` built-in: wraps a waveform in a `MarkId::UserDefined`
 /// mark.
-fn mark<S: 'static>(arguments: Vec<expr::Expr<MarkId, S>>) -> expr::Expr<MarkId, S> {
-    match &arguments[..] {
+fn mark<S: 'static>(
+    arguments: Vec<expr::Expr<MarkId, S>>,
+) -> Result<expr::Expr<MarkId, S>, expr::Error<S>> {
+    Ok(match &arguments[..] {
         [argument]
             if argument
                 .as_const_float()
@@ -47,8 +49,12 @@ fn mark<S: 'static>(arguments: Vec<expr::Expr<MarkId, S>>) -> expr::Expr<MarkId,
                 }),
             }
         }
-        _ => expr::Expr::Error("Invalid argument for mark".to_string()),
-    }
+        // TODO could be Error::Eval if this is a negative integer... but we
+        // should probably rethink exactly what the argument is for anyway
+        _ => {
+            return Err(expr::Error::internal_here("Invalid argument for mark"));
+        }
+    })
 }
 
 /// Returns the error to report for a module that failed to parse: the
@@ -57,7 +63,7 @@ fn first_module_error(errors: Vec<expr::Error<Source>>) -> expr::Error<Source> {
     errors
         .into_iter()
         .next()
-        .unwrap_or_else(|| expr::Error::new("Parse failed".to_string()))
+        .unwrap_or_else(|| expr::Error::eval_here("Parse failed".to_string()))
 }
 
 /// Returns the module's display path relative to the library root:
@@ -214,7 +220,7 @@ impl Evaluator {
         let current_mtime = fs::metadata(&file_path)
             .and_then(|m| m.modified())
             .map_err(|e| {
-                expr::Error::new(format!(
+                expr::Error::eval_here(format!(
                     "Failed to stat module {}: {}",
                     display_path.display(),
                     e
@@ -232,7 +238,7 @@ impl Evaluator {
         // text is recorded even on a failed parse so those errors can be
         // located.
         let contents = fs::read_to_string(&file_path).map_err(|e| {
-            expr::Error::new(format!(
+            expr::Error::eval_here(format!(
                 "Failed to read module {}: {}",
                 display_path.display(),
                 e
@@ -608,7 +614,7 @@ impl Evaluator {
             &mut bindings,
         );
         let resolve = |_: &[String]| {
-            Err(expr::Error::new(
+            Err(expr::Error::eval_here(
                 "Didn't expect to resolve in apply_note_function".to_string(),
             ))
         };
@@ -616,7 +622,7 @@ impl Evaluator {
         match expr.expr {
             Tuple(mut exprs) => {
                 if exprs.len() != 2 {
-                    return Err(expr::Error::new(format!(
+                    return Err(expr::Error::eval_here(format!(
                         "Expected 2 waveforms for note, got {} elements",
                         exprs.len()
                     )));
@@ -625,17 +631,17 @@ impl Evaluator {
                     (Waveform(note_on), Waveform(note_off)) => {
                         Ok((optimizer::optimize(note_on), optimizer::optimize(note_off)))
                     }
-                    (expr, Waveform(_)) => Err(expr::Error::new(format!(
+                    (expr, Waveform(_)) => Err(expr::Error::eval_here(format!(
                         "Expected waveform for note-on, got: {}",
                         expr
                     ))),
-                    (_, expr) => Err(expr::Error::new(format!(
+                    (_, expr) => Err(expr::Error::eval_here(format!(
                         "Expected waveform for note-off, got: {}",
                         expr
                     ))),
                 }
             }
-            expr => Err(expr::Error::new(format!(
+            expr => Err(expr::Error::eval_here(format!(
                 "Expected 2 waveforms for note, got: {}",
                 expr
             ))),
@@ -769,7 +775,7 @@ mod tests {
 
         // A program-local error shows a bare position relative to the
         // program's own text (matching the editor's display), no file.
-        let error = expr::Error::with_span(
+        let error = expr::Error::eval(
             "boom".to_string(),
             Some(expr::Span::new(Source::Program, 0..4)),
         );
@@ -780,7 +786,7 @@ mod tests {
 
         // A source-file error (e.g. from a sibling binding) locates into the
         // whole file: offset 24 is `bad` on line 3.
-        let error = expr::Error::with_span(
+        let error = expr::Error::eval(
             "boom".to_string(),
             Some(expr::Span {
                 source: Source::File,
@@ -797,7 +803,7 @@ mod tests {
         evaluator
             .resolve(&["std".to_string()])
             .expect("std resolves");
-        let error = expr::Error::with_span(
+        let error = expr::Error::eval(
             "boom".to_string(),
             Some(expr::Span {
                 source: Source::Module(0),
@@ -809,7 +815,7 @@ mod tests {
         assert!(diagnostic.program_range.is_none());
 
         // A module id that was never assigned degrades to the bare message.
-        let error = expr::Error::with_span(
+        let error = expr::Error::eval(
             "boom".to_string(),
             Some(expr::Span {
                 source: Source::Module(99),

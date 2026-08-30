@@ -134,7 +134,7 @@ fn bench_large(c: &mut Criterion) {
     }
 
     let resolve = |_: &[String]| {
-        Err(expr::Error::new(
+        Err(expr::Error::eval_here(
             "didn't expect to resolve in bench_large".to_string(),
         ))
     };

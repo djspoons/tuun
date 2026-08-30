@@ -116,10 +116,13 @@ major_triad = fn(root) => fn(fw) => [fw(@root), fw(@(root + 4)), fw(@(root + 7))
 // major_triad = fn(root, dur, inst) => [inst(dur, @root), inst(dur, @(root + 4)), inst(dur, @(root + 7))];
 minor_triad = fn(root) => fn(fw) => [fw(@root), fw(@(root + 3)), fw(@(root + 7))];
 // These get a little distorted... may need to scale a bit
-I = fn(key) => fn(inst) => fn(dur) => {map(amp(0.4), major_triad(key)(fn(freq) => inst(dur, freq)))} | seq(time - dur);
-II = fn(key) => fn(inst) => fn(dur) => {map(amp(0.4), major_triad(key + 2)(fn(freq) => inst(dur, freq)))} | seq(time - dur);
-III = fn(key) => fn(inst) => fn(dur) => {map(amp(0.4), major_triad(key + 4)(fn(freq) => inst(dur, freq)))} | seq(time - dur);
-i = fn(key) => fn(inst) => fn(dur) => {map(amp(0.4), minor_triad(key)(fn(freq) => inst(dur, freq)))} | seq(time - dur);
+// `inst` is an instrument: it takes a duration and a frequency and
+// returns a *seq*, so `unseq()` is what turns one note into the
+// waveform the chord mixes.
+I = fn(key) => fn(inst) => fn(dur) => {map(amp(0.4), major_triad(key)(fn(freq) => inst(dur, freq) | unseq()))} | seq(time - dur);
+II = fn(key) => fn(inst) => fn(dur) => {map(amp(0.4), major_triad(key + 2)(fn(freq) => inst(dur, freq) | unseq()))} | seq(time - dur);
+III = fn(key) => fn(inst) => fn(dur) => {map(amp(0.4), major_triad(key + 4)(fn(freq) => inst(dur, freq) | unseq()))} | seq(time - dur);
+i = fn(key) => fn(inst) => fn(dur) => {map(amp(0.4), minor_triad(key)(fn(freq) => inst(dur, freq) | unseq()))} | seq(time - dur);
 
 // In the key of C
 // I = I(60);
