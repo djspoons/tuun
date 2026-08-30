@@ -284,6 +284,10 @@ enum Undo {
 /// Marks nest LIFO: roll back an inner mark before an outer one.
 struct Mark(usize);
 
+/// What a module exports, once built; `None` while it is still being built,
+/// which is how a cycle is caught.
+type ModuleMemo = HashMap<usize, Option<Vec<(String, ContextEntry)>>>;
+
 impl<S: Clone> Infer<S> {
     fn new() -> Infer<S> {
         Infer {
@@ -3028,7 +3032,7 @@ impl<S: Clone> Infer<S> {
         resolve: &F,
         bindings: &'a [SourceBinding<M, S>],
         context: &mut TypeContext,
-        memo: &mut HashMap<usize, Vec<(String, ContextEntry)>>,
+        memo: &mut ModuleMemo,
     ) -> Vec<(String, ContextEntry)>
     where
         F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
@@ -3038,7 +3042,8 @@ impl<S: Clone> Infer<S> {
             match &source_binding.binding {
                 Binding::Open(path) => match resolve(path) {
                     Ok(module) => {
-                        let exports = self.module_exports(resolve, module, memo);
+                        let exports =
+                            self.module_exports(resolve, module, memo, path, &source_binding.span);
                         context.extend(exports);
                     }
                     Err(error) => {
@@ -3064,7 +3069,8 @@ impl<S: Clone> Infer<S> {
                             continue;
                         }
                     };
-                    let exports = self.module_exports(resolve, module, memo);
+                    let exports =
+                        self.module_exports(resolve, module, memo, path, &source_binding.span);
                     // The module type holds plain types; a re-exported
                     // built-in is fixed at its default signature.
                     let members = dedup_last_wins(exports)
@@ -3111,18 +3117,30 @@ impl<S: Clone> Infer<S> {
         &mut self,
         resolve: &F,
         module: &'a [SourceBinding<M, S>],
-        memo: &mut HashMap<usize, Vec<(String, ContextEntry)>>,
+        memo: &mut ModuleMemo,
+        path: &[String],
+        span: &Option<Span<S>>,
     ) -> Vec<(String, ContextEntry)>
     where
         F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
     {
         let key = module.as_ptr() as usize;
-        if let Some(exports) = memo.get(&key) {
-            return exports.clone();
+        match memo.get(&key) {
+            Some(Some(exports)) => return exports.clone(),
+            // Reached while still building: the module opens something that
+            // opens it back. The sentinel goes in *before* recursing so the
+            // second visit stops here rather than recurring forever.
+            Some(None) => {
+                let message = format!("module '{}' is opened from itself", path.join("."));
+                self.error(message, span);
+                return Vec::new();
+            }
+            None => {}
         }
+        memo.insert(key, None);
         let mut module_context = Vec::new();
         let exports = self.build_context(resolve, module, &mut module_context, memo);
-        memo.insert(key, exports.clone());
+        memo.insert(key, Some(exports.clone()));
         exports
     }
 }
@@ -4643,6 +4661,28 @@ mod tests {
             &[
                 "expected (numeric, int) -> seq, found ('a, int) -> waveform ∧ ('b, float) -> waveform ∧ ('c, waveform) -> waveform ∧ ('d, seq) -> seq",
             ],
+        );
+    }
+
+    #[test]
+    fn a_cyclic_open_is_reported_not_recursed() {
+        // Two modules that open each other. The memo entry goes in before
+        // the recursion, so the second visit finds it and stops; before that
+        // this overflowed the stack.
+        let (a, _) = parse_module::<u32, _>("open b;\nx = 1;\n", 0u32).unwrap();
+        let (b, _) = parse_module::<u32, _>("open a;\ny = 2;\n", 1u32).unwrap();
+        let resolve = |path: &[String]| match path.join(".").as_str() {
+            "a" => Ok(&a[..]),
+            "b" => Ok(&b[..]),
+            other => Err(Error::eval_here(format!("no module {}", other))),
+        };
+        let expr = parse_program::<u32, _>("0", 9999).unwrap();
+        let errors = check_program(resolve, &a, &expr, None);
+        let messages: Vec<&str> = errors.iter().map(|error| error.message()).collect();
+        assert!(
+            messages.iter().any(|m| m.contains("is opened from itself")),
+            "expected a cycle report, got {:?}",
+            messages
         );
     }
 

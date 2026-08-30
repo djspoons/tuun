@@ -6,7 +6,7 @@ use std::fmt;
 use std::fmt::{Debug, Display};
 
 use crate::expr::{
-    Binding, Error, Expr, NamedExpr, NamedExprs, Pattern, SourceBinding, SourceExpr,
+    Binding, Error, Expr, NamedExpr, NamedExprs, Pattern, SourceBinding, SourceExpr, Span,
 };
 
 /// A context entry: a bound name and the closed value it evaluates to.
@@ -391,6 +391,8 @@ where
                     // see spans.
                     let actuals: Vec<Expr<M, S>> = arguments.into_iter().map(|s| s.expr).collect();
                     let result = function.0(actuals);
+                    // A builtin reports out of band now, so a failure cannot
+                    // be mistaken for a value; it only needs the call's span.
                     result
                         .map(|expr| SourceExpr {
                             expr,
@@ -482,7 +484,7 @@ where
     S: Clone + Debug,
 {
     let mut context = Vec::new();
-    build_context(&resolve, bindings, &mut context)?;
+    build_context(&resolve, bindings, &mut context, &mut Vec::new())?;
     Ok(context)
 }
 
@@ -500,10 +502,42 @@ where
 }
 
 /// Walks `bindings`, accumulating evaluated entries into `context`.
+/// Returns what a module exports, refusing a module that is already being
+/// opened.
+///
+/// The checker reports the same cycle first, so reaching this means the
+/// evaluator was driven without it.
+fn module_exports<'a, M, S, F>(
+    resolve: &F,
+    module: &'a [SourceBinding<M, S>],
+    open: &mut Vec<usize>,
+    path: &[String],
+    span: &Option<Span<S>>,
+) -> Result<Vec<ContextEntry<M, S>>, Error<S>>
+where
+    F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
+    M: Clone + Display + Debug,
+    S: Clone + Debug,
+{
+    let key = module.as_ptr() as usize;
+    if open.contains(&key) {
+        return Err(Error::eval(
+            format!("module '{}' is opened from itself", path.join(".")),
+            span.clone(),
+        ));
+    }
+    open.push(key);
+    let mut module_context = Vec::new();
+    let exports = build_context(resolve, module, &mut module_context, open);
+    open.pop();
+    exports
+}
+
 fn build_context<'a, M, S, F>(
     resolve: &F,
     bindings: &'a [SourceBinding<M, S>],
     context: &mut Vec<ContextEntry<M, S>>,
+    open: &mut Vec<usize>,
 ) -> Result<Vec<ContextEntry<M, S>>, Error<S>>
 where
     F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
@@ -515,8 +549,7 @@ where
         match &source_binding.binding {
             Binding::Open(path) => {
                 let module = resolve(path)?;
-                let mut module_context = Vec::new();
-                let exports = build_context(resolve, module, &mut module_context)?;
+                let exports = module_exports(resolve, module, open, path, &source_binding.span)?;
                 context.extend(exports);
             }
             Binding::Use(path) => {
@@ -527,8 +560,7 @@ where
                     ));
                 };
                 let module = resolve(path)?;
-                let mut module_context = Vec::new();
-                let exports = build_context(resolve, module, &mut module_context)?;
+                let exports = module_exports(resolve, module, open, path, &source_binding.span)?;
                 context.push((
                     name.clone(),
                     SourceExpr::from(Expr::BoundModule(dedup_last_wins(exports))),
@@ -756,6 +788,26 @@ mod tests {
         let expr = parse_program::<u32, _>("two", ()).unwrap();
         let error = evaluate(resolve, &bindings, expr).unwrap_err();
         assert_eq!(error.message(), "Variable 'two' not found in context");
+    }
+
+    #[test]
+    fn a_cyclic_open_is_refused_not_recursed() {
+        // The checker reports this first, so reaching the evaluator means it
+        // was driven without one — which used to overflow the stack.
+        let (a, _) = parse_module::<u32, _>("open b;\nx = 1;\n", ()).unwrap();
+        let (b, _) = parse_module::<u32, _>("open a;\ny = 2;\n", ()).unwrap();
+        let resolve = |path: &[String]| match path.join(".").as_str() {
+            "a" => Ok(&a[..]),
+            "b" => Ok(&b[..]),
+            other => Err(Error::eval_here(format!("no module {}", other))),
+        };
+        let expr = parse_program::<u32, _>("0", ()).unwrap();
+        let error = evaluate(resolve, &a, expr).unwrap_err();
+        assert!(
+            error.message().contains("is opened from itself"),
+            "expected a cycle report, got {}",
+            error.message()
+        );
     }
 
     #[test]
