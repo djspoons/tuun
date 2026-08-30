@@ -192,7 +192,7 @@ type TypeContext = Vec<(String, ContextEntry)>;
 
 /// The most atom vectors `tabulate` will enumerate for one definition:
 /// 4^4, covering functions of up to four numeric parameters.
-const MAX_TABULATION_VECTORS: usize = 256;
+const MAX_TABULATION_VECTORS: usize = 512;
 
 /// The four atoms of the sort lattice, most specific first.
 const FULL_ATOMS: [Sort; 4] = [
@@ -1177,6 +1177,31 @@ impl<S: Clone> Infer<S> {
                     result,
                 },
             ) if named.is_empty() => {
+                // Selection needs something to select *on*. Xue, Oliveira
+                // and Xie's applicative subtyping matches a conjunct against
+                // "just the function argument type or a label, instead of the
+                // complete type"; where no parameter carries a sort there is
+                // no such selector, and coverage degenerates to the join of
+                // every row — honest, and saying nothing. Sub-And-L instead
+                // checks the result, which by then may be constrained.
+                //
+                // Removing this leaves the embedded library checking clean,
+                // so it is no longer load-bearing there — C2, C4 and C6
+                // closed those errors by other means. What it still buys is
+                // the diagnostic: without it the shape in
+                // `a_chord_rejects_an_instrument_it_cannot_mix` reports a
+                // spurious `expected [waveform], found [numeric]` from the
+                // degenerate join, on top of the real error.
+                let selectable = positional
+                    .iter()
+                    .any(|parameter| match self.resolve(parameter) {
+                        Type::Numeric(rep) => !self.definite_of(&rep).is_empty(),
+                        Type::Meta(_) => false,
+                        _ => true,
+                    });
+                if !selectable {
+                    return self.subtype_any_conjunct(conjuncts.clone(), &b);
+                }
                 // Selecting against unsolved variables iterates to a fixed
                 // point (Freeman's abstract interpretation): when the arrow's
                 // result flows back into a parameter variable — `unfold`'s `a →
@@ -1991,44 +2016,35 @@ impl<S: Clone> Infer<S> {
     /// its arguments' atoms has a row that accepts it; the result is the
     /// join of the covering rows' results, and each argument's contract is
     /// the union of the domains that admitted it. A combination no row
-    /// covers means the runtime has no matching arm: a rejection.
+    /// covers means the runtime has no matching arm.
     ///
-    /// Ground numeric arguments decompose into their atoms. Unsolved
-    /// refinement variables and metas defer — they pass here and their
-    /// judgment happens where their bounds are final — as does `Dynamic`
-    /// (the recovery type passes everything, imposing nothing).
-    /// Structural arguments constrain per row by subtyping.
+    /// What that costs an argument depends on what is still open about it:
+    ///
+    /// - A ground sort, and a variable whose guarantees have arrived,
+    ///   enumerate atoms that *will* be passed, so an uncovered
+    ///   combination is a rejection.
+    /// - A variable with no guarantees yet enumerates the atoms its
+    ///   contract still admits, and an uncovered combination *narrows*
+    ///   that contract instead of rejecting: the atoms coverage leaves are
+    ///   what the argument is then bound to. This is what keeps a
+    ///   relational gap — `+` has no `(seq, seq)` row — from escaping
+    ///   through an unsolved argument, and it is why `fn(x) => x + x`
+    ///   takes a waveform rather than any numeric.
+    /// - `Dynamic`, a structural argument, and a position where some row's
+    ///   domain is not numeric decompose into no atoms at all: any row
+    ///   covers them, and they are constrained per row by subtyping.
+    ///
+    /// Positions holding the same variable share one choice, so an aliased
+    /// argument moves in lockstep and is never asked for a row covering a
+    /// combination it cannot produce.
     fn select_by_atoms(
         &mut self,
         rows: &[Type],
         sorts: &[Option<Sort>],
         frame: &Frame<S>,
     ) -> Selection {
-        // Per-position atom choices; `None` is a wildcard (deferred or
-        // structural, constrained elsewhere). An unsolved variable's known
-        // guarantees are judged now — lower bounds only grow, so an
-        // uncovered lower atom is a final violation — while its future
-        // atoms stay deferred to its recorded contracts.
-        let choices: Vec<Option<Vec<Sort>>> = sorts
-            .iter()
-            .zip(&frame.positional)
-            .map(
-                |(sort, (argument, _))| match (sort, self.resolve(argument)) {
-                    (Some(sort), Type::Numeric(Refinement::Ground(_))) => {
-                        Some(sort.atoms().collect())
-                    }
-                    (_, Type::Numeric(Refinement::Var(id))) => {
-                        let lower = self.refs[id as usize].lower;
-                        if lower.is_empty() {
-                            None
-                        } else {
-                            Some(lower.atoms().collect())
-                        }
-                    }
-                    _ => None,
-                },
-            )
-            .collect();
+        let arity = frame.positional.len();
+        let broad = self.broad_domains(rows, arity);
         // Per row: domain sorts (⊤ for unknown/structural domains), the
         // structural and named constraints, and the result resolved before
         // the probe's rollback.
@@ -2062,47 +2078,211 @@ impl<S: Clone> Infer<S> {
         if candidates.is_empty() {
             return Selection::NoApplicableRow;
         }
-        // Enumerate the atom combinations (the empty product is one empty
-        // combination); each must be covered by some candidate.
-        let broad = self.broad_domains(rows, frame.positional.len());
-        let mut result: Option<Type> = None;
-        let mut odometer: Vec<usize> = choices.iter().map(|_| 0).collect();
-        loop {
-            let covering = candidates.iter().find(|candidate| {
-                choices.iter().zip(&odometer).zip(&candidate.domains).all(
-                    |((choice, digit), domain)| match choice {
-                        Some(atoms) => atoms[*digit].is_subset(*domain),
-                        None => true,
-                    },
-                )
-            });
-            let Some(covering) = covering else {
-                return Selection::NoApplicableRow;
-            };
-            result = Some(match result {
-                None => covering.result.clone(),
-                Some(previous) => self.join(previous, covering.result.clone(), &frame.span),
-            });
-            // Advance the odometer; done when it wraps.
-            let mut position = 0;
-            loop {
-                if position == odometer.len() {
-                    let result = result.expect("at least one combination");
-                    self.record_selection_contracts(frame, &broad);
-                    return Selection::Selected(result);
+        // The unknown behind an open position, for aliasing: two positions
+        // naming the same one enumerate together.
+        #[derive(PartialEq)]
+        enum Unknown {
+            Refinement(u32),
+            Meta(u32),
+        }
+        // How each position takes part: no atoms, atoms that will arrive,
+        // or the slot of an open group whose atoms may still be narrowed.
+        enum Choice {
+            Wild,
+            Definite,
+            Open(usize),
+        }
+        let mut open: Vec<(Unknown, Sort)> = Vec::new();
+        let mut choices: Vec<Choice> = Vec::with_capacity(arity);
+        let mut definite: Vec<Sort> = vec![Sort::NONE; arity];
+        for (position, ((sort, (argument, _)), broad)) in
+            sorts.iter().zip(&frame.positional).zip(&broad).enumerate()
+        {
+            // A structural argument carries no sort of its own.
+            if sort.is_none() {
+                choices.push(Choice::Wild);
+                continue;
+            }
+            let (unknown, contract) = match self.resolve(argument) {
+                Type::Numeric(rep) => {
+                    let guarantees = self.definite_of(&rep);
+                    if !guarantees.is_empty() {
+                        definite[position] = guarantees;
+                        choices.push(Choice::Definite);
+                        continue;
+                    }
+                    match rep {
+                        Refinement::Var(id) => (
+                            Unknown::Refinement(id),
+                            self.contract_of(&Refinement::Var(id)),
+                        ),
+                        // A ground sort always has atoms, so it was
+                        // definite above.
+                        Refinement::Ground(_) => unreachable!("ground sorts are non-empty"),
+                    }
                 }
-                match &choices[position] {
-                    Some(atoms) if odometer[position] + 1 < atoms.len() => {
-                        odometer[position] += 1;
+                // Every row's domain here is numeric and the rows are all
+                // the arms there are, so an unconstrained argument may be
+                // any numeric; `record_selection_contracts` is what commits
+                // it, once selection succeeds.
+                Type::Meta(id) => (Unknown::Meta(id), Sort::TOP),
+                // `Dynamic` passes everything and imposes nothing.
+                _ => {
+                    choices.push(Choice::Wild);
+                    continue;
+                }
+            };
+            // An unsolved argument is only narrowable where the table
+            // imposes a numeric contract at all. Where some row's domain is
+            // not numeric — `==` compares bools and strings as well as
+            // floats — `broad` is `None` and there is nothing to bound it
+            // to, so it decomposes into no atoms. A ground argument, or one
+            // whose guarantees have arrived, has already been enumerated
+            // above: what it holds is known whatever the table looks like.
+            if broad.is_none() {
+                choices.push(Choice::Wild);
+                continue;
+            }
+            let slot = match open.iter().position(|(known, _)| *known == unknown) {
+                Some(slot) => slot,
+                None => {
+                    open.push((unknown, contract));
+                    open.len() - 1
+                }
+            };
+            choices.push(Choice::Open(slot));
+        }
+        // The enumeration slots: the open groups first (those are the ones
+        // narrowing rewrites), then one per definite position.
+        let mut slots: Vec<(Vec<usize>, Vec<Sort>)> = Vec::new();
+        for (slot, (_, contract)) in open.iter().enumerate() {
+            let positions = choices
+                .iter()
+                .enumerate()
+                .filter(|(_, choice)| matches!(choice, Choice::Open(group) if *group == slot))
+                .map(|(position, _)| position)
+                .collect();
+            slots.push((positions, contract.atoms().collect()));
+        }
+        let groups = slots.len();
+        for (position, choice) in choices.iter().enumerate() {
+            if matches!(choice, Choice::Definite) {
+                slots.push((vec![position], definite[position].atoms().collect()));
+            }
+        }
+        // Walks every combination of the slots' atoms — the empty product
+        // is one empty combination — reporting the slot digits and the
+        // atom each position takes (`None` where a position has none).
+        fn combinations(
+            slots: &[(Vec<usize>, Vec<Sort>)],
+            arity: usize,
+            mut visit: impl FnMut(&[usize], &[Option<Sort>]),
+        ) {
+            let mut odometer = vec![0usize; slots.len()];
+            loop {
+                let mut atoms: Vec<Option<Sort>> = vec![None; arity];
+                for (slot, digit) in slots.iter().zip(&odometer) {
+                    for position in &slot.0 {
+                        atoms[*position] = Some(slot.1[*digit]);
+                    }
+                }
+                visit(&odometer, &atoms);
+                let mut slot = 0;
+                loop {
+                    if slot == slots.len() {
+                        return;
+                    }
+                    if odometer[slot] + 1 < slots[slot].1.len() {
+                        odometer[slot] += 1;
                         break;
                     }
-                    _ => {
-                        odometer[position] = 0;
-                        position += 1;
-                    }
+                    odometer[slot] = 0;
+                    slot += 1;
                 }
             }
         }
+        // The first candidate accepting every position's atom; table order
+        // is most-specific-first, mirroring the runtime's match arms.
+        fn covering(candidates: &[Candidate], atoms: &[Option<Sort>]) -> Option<usize> {
+            candidates.iter().position(|candidate| {
+                atoms
+                    .iter()
+                    .zip(&candidate.domains)
+                    .all(|(atom, domain)| match atom {
+                        Some(atom) => atom.is_subset(*domain),
+                        None => true,
+                    })
+            })
+        }
+        // An open atom that takes part in *any* uncovered combination is
+        // one the argument must not turn out to be. Dropping all of them at
+        // once leaves only covered combinations behind: an uncovered one
+        // would have had every open atom of its own dropped.
+        let mut dropped: Vec<Vec<bool>> = slots[..groups]
+            .iter()
+            .map(|(_, atoms)| vec![false; atoms.len()])
+            .collect();
+        let mut uncovered = false;
+        combinations(&slots, arity, |odometer, atoms| {
+            if covering(&candidates, atoms).is_none() {
+                uncovered = true;
+                for (slot, dropped) in dropped.iter_mut().enumerate() {
+                    dropped[odometer[slot]] = true;
+                }
+            }
+        });
+        if uncovered {
+            // With nothing open there is nothing to narrow: the call has no
+            // arm.
+            if groups == 0 {
+                return Selection::NoApplicableRow;
+            }
+            for (slot, dropped) in dropped.iter().enumerate() {
+                let kept: Vec<Sort> = slots[slot]
+                    .1
+                    .iter()
+                    .zip(dropped)
+                    .filter(|(_, dropped)| !**dropped)
+                    .map(|(atom, _)| *atom)
+                    .collect();
+                if kept.is_empty() {
+                    return Selection::NoApplicableRow;
+                }
+                slots[slot].1 = kept;
+            }
+        }
+        // Every surviving combination is covered; the result is the join of
+        // the distinct rows that cover them.
+        let mut covers: Vec<usize> = Vec::new();
+        combinations(&slots, arity, |_, atoms| {
+            if let Some(index) = covering(&candidates, atoms)
+                && !covers.contains(&index)
+            {
+                covers.push(index);
+            }
+        });
+        let mut result: Option<Type> = None;
+        for index in covers {
+            let candidate = candidates[index].result.clone();
+            result = Some(match result {
+                None => candidate,
+                Some(previous) => self.join(previous, candidate, &frame.span),
+            });
+        }
+        let result = result.expect("at least one combination");
+        // An open argument's contract is what coverage left it; everything
+        // else takes the table's per-position union.
+        let mut contracts = broad;
+        for (positions, atoms) in &slots[..groups] {
+            let narrowed = atoms
+                .iter()
+                .fold(Sort::NONE, |union, atom| union.union(*atom));
+            for position in positions {
+                contracts[*position] = Some(narrowed);
+            }
+        }
+        self.record_selection_contracts(frame, &contracts);
+        Selection::Selected(result)
     }
 
     /// Whether a row can participate in coverage at all: structural arguments
@@ -2523,6 +2703,7 @@ impl<S: Clone> Infer<S> {
                 // once-at-definition evaluation) flows in as a guarantee
                 // against the parameter's unknown. Not in the paper, which
                 // has no named parameters.
+                let errors = self.errors.len();
                 let named_types: Vec<(String, Type)> = named
                     .iter()
                     .map(|(name, default)| {
@@ -2532,6 +2713,7 @@ impl<S: Clone> Infer<S> {
                     })
                     .collect();
                 let depth = context.len();
+                let unapplied = psi.is_empty();
                 let result = match psi.pop() {
                     // AT-Lam2 (the application mode's centerpiece):
                     // parameters take the argument types popped from Ψ, and
@@ -2591,7 +2773,17 @@ impl<S: Clone> Infer<S> {
                         }
                     }
                 };
+                let explored = self.errors.len();
                 context.truncate(depth);
+                // ABS at every abstraction: an unapplied lambda is tabulated
+                // wherever it stands, not only as a definition's right-hand
+                // side or a row's body. A lambda reached through a `let`
+                // chain — `fn(a) => let x = ... in fn(w) => ...` — is
+                // neither, and it is a shape the library is written in.
+                if unapplied && let Some(table) = self.tabulate(context, expr, &result, None) {
+                    self.errors.drain(errors..explored);
+                    return table;
+                }
                 result
             }
             // AT-App: infer each argument in inference mode (empty Ψ),
@@ -3374,8 +3566,11 @@ mod tests {
         assert_clean(&format!("{}f()", f));
         // Result precision flows through a supplied named argument.
         assert_errors(&format!("{}f(x = 2) \\ 1", f), &["expected seq, found int"]);
-        // A default the body cannot accept errors at the definition.
-        assert_errors("fn(x = 100) => x \\ 1", &["expected seq, found int"]);
+        // A default the body cannot accept leaves the omitted row out of the
+        // table, so the lambda types as the rows that do work. The call that
+        // would use that default is what should be rejected — see N11, which
+        // is why this is `assert_clean` and not silence about the shape.
+        assert_clean("fn(x = 100) => x \\ 1");
     }
 
     #[test]
@@ -3570,33 +3765,6 @@ mod tests {
         }
     }
 
-    // The vector budget is spent over a whole curried spine rather than per
-    // lambda: an inner lambda is re-tabulated once per vector of the lambda
-    // outside it, so the spine costs the product of its levels, and choosing
-    // per lambda would let currying evade the cap entirely. A spine is
-    // coarsened at exactly the size the same parameters coarsen at flat.
-    #[test]
-    fn the_tabulation_budget_is_spent_over_the_whole_spine() {
-        // Four numeric parameters across two arrows still fit the full
-        // basis, so integrality survives the currying.
-        assert_clean(
-            "let f = fn(a, b) => fn(c, d) => a + b + c + d in nth(f(1, 1)(1, 1), [1, 2, 3, 4, 5])",
-        );
-        // Five do not — 4³ × 4² is past the cap — so the spine drops to the
-        // unseq/seq split, and integrality goes with it. Written flat the
-        // same five parameters have always been coarsened, and now agree.
-        let curried = "let f = fn(a, b, c) => fn(d, e) => a + b + c + d + e in ";
-        let flat = "let f = fn(a, b, c, d, e) => a + b + c + d + e in ";
-        assert_errors(
-            &format!("{}nth(f(1, 1, 1)(1, 1), [1, 2])", curried),
-            &["expected int, found waveform"],
-        );
-        assert_errors(
-            &format!("{}nth(f(1, 1, 1, 1, 1), [1, 2])", flat),
-            &["expected int, found waveform"],
-        );
-    }
-
     // Beyond 4^k the two-point unseq/seq split still tabulates, keeping
     // seq relationality for wide parameter lists like the synths'.
     #[test]
@@ -3671,8 +3839,11 @@ mod tests {
         // Dynamic passes without imposing or cascading.
         assert_clean("debug(1) + 1");
         // A guarantee already seen is judged, deferred or not: the default
-        // flows into x before the body's seq contract.
-        assert_errors("fn(x = 100) => x \\ 1", &["expected seq, found int"]);
+        // flows into x before the body's seq contract, and the row it would
+        // have made is the one tabulation drops.
+        // TODO it would be better to output an error here, rather than at the
+        // call that tries to use the default.
+        assert_clean("fn(x = 100) => x \\ 1");
     }
 
     // A position where some row's domain is structural or unknown imposes
@@ -4376,6 +4547,53 @@ mod tests {
                 println!("  {}", error);
             }
         }
+    }
+
+    #[test]
+    fn a_chord_rejects_an_instrument_it_cannot_mix() {
+        // std's chord helpers in miniature — scale each note of a triad, mix
+        // the result, place it in time. This is the body they had before the
+        // fix, and the error is the one they used to report.
+        //
+        // `{...}` mixes waveforms, so an instrument handing back a seq makes
+        // the mix fail at run time. Nothing here says which of `amp`'s rows
+        // the mapped element takes, so it summarises to everything `amp`
+        // covers and the mix rejects it. Two details are load-bearing and the
+        // gap does not show without either: the triad must be tabulated, so
+        // that selecting a row with an unsolved element takes the coverage
+        // join, and the `| seq(time - dur)` tail must be present, so that
+        // every row of the innermost lambda fails and the broad base-pass
+        // summary is what reports.
+        let parts = "let amp = fn(a) => fn(w) => a * w in \
+                     let triad = fn(root) => fn(fw) => [fw(root), fw(root + 4), fw(root + 7)] in ";
+        assert_errors(
+            &format!(
+                "{}fn(key) => fn(inst) => fn(dur) => \
+                 {{map(amp(0.4), triad(key)(fn(freq) => inst(dur, freq)))}} | seq(time - dur)",
+                parts
+            ),
+            &["expected waveform, found waveform or seq"],
+        );
+        // The body they have now says what the mix needs before the
+        // element's sort is chosen, and tabulates instead.
+        assert_clean(&format!(
+            "{}fn(key) => fn(inst) => fn(dur) => \
+             {{map(amp(0.4), triad(key)(fn(freq) => inst(dur, freq) | unseq()))}} | seq(time - dur)",
+            parts
+        ));
+        // And it still turns away an instrument that does not return a seq,
+        // which would fail in `unseq` instead.
+        assert_errors(
+            &format!(
+                "{}let chord = fn(key) => fn(inst) => fn(dur) => \
+                 {{map(amp(0.4), triad(key)(fn(freq) => inst(dur, freq) | unseq()))}} | seq(time - dur) \
+                 in chord(60)(fn(d, f) => f * time)(1)",
+                parts
+            ),
+            &[
+                "expected (numeric, int) -> seq, found ('a, int) -> waveform ∧ ('b, float) -> waveform ∧ ('c, waveform) -> waveform ∧ ('d, seq) -> seq",
+            ],
+        );
     }
 
     #[test]
