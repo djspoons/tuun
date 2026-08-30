@@ -391,8 +391,6 @@ where
                     // see spans.
                     let actuals: Vec<Expr<M, S>> = arguments.into_iter().map(|s| s.expr).collect();
                     let result = function.0(actuals);
-                    // A builtin reports out of band now, so a failure cannot
-                    // be mistaken for a value; it only needs the call's span.
                     result
                         .map(|expr| SourceExpr {
                             expr,
@@ -792,8 +790,8 @@ mod tests {
 
     #[test]
     fn a_cyclic_open_is_refused_not_recursed() {
-        // The checker reports this first, so reaching the evaluator means it
-        // was driven without one — which used to overflow the stack.
+        // The checker reports this first, so reaching the evaluator means
+        // it was driven without one.
         let (a, _) = parse_module::<u32, _>("open b;\nx = 1;\n", ()).unwrap();
         let (b, _) = parse_module::<u32, _>("open a;\ny = 2;\n", ()).unwrap();
         let resolve = |path: &[String]| match path.join(".").as_str() {

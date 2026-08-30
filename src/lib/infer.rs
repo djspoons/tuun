@@ -2607,6 +2607,13 @@ impl<S: Clone> Infer<S> {
     /// premises of rule AS-Fun2, plus tuun's arity and named-argument checks,
     /// which evaluation performs at application time).
     fn check_frame(&mut self, frame: &Frame<S>, positional: &[Type], named: &[(String, Type)]) {
+        // A call of the wrong arity has no pairing worth judging: matching
+        // the arguments off in order would report a mismatch for every
+        // position the shift moved. Rule AT-Lam2 binds `Dynamic` for the
+        // same reason. Named arguments are judged either way, since which
+        // names a call passes does not depend on how many positions it got
+        // right.
+        let arity = frame.positional.len() == positional.len();
         if frame.positional.len() > positional.len() {
             self.error("extra positional parameter".to_string(), &frame.span);
         } else if frame.positional.len() < positional.len() {
@@ -2625,14 +2632,16 @@ impl<S: Clone> Infer<S> {
             Type::Forall(_, body) => matches!(*body, Type::And(_)),
             _ => false,
         };
-        for ((argument, span), parameter) in frame.positional.iter().zip(positional) {
-            if !table(self, argument) {
-                self.subtype_check(argument, parameter, span);
+        if arity {
+            for ((argument, span), parameter) in frame.positional.iter().zip(positional) {
+                if !table(self, argument) {
+                    self.subtype_check(argument, parameter, span);
+                }
             }
-        }
-        for ((argument, span), parameter) in frame.positional.iter().zip(positional) {
-            if table(self, argument) {
-                self.subtype_check(argument, parameter, span);
+            for ((argument, span), parameter) in frame.positional.iter().zip(positional) {
+                if table(self, argument) {
+                    self.subtype_check(argument, parameter, span);
+                }
             }
         }
         for (name, argument, span) in &frame.named {
@@ -3672,10 +3681,9 @@ mod tests {
 
     #[test]
     fn a_structure_met_by_a_meta_keeps_its_leaves_open() {
-        // A list of ints flowing into a polymorphic parameter used to pin
-        // the element's sort, so nothing that met the same parameter later
-        // could widen it — a fold whose step returns waveforms was rejected
-        // even though its seed is only the starting value.
+        // A list of ints flowing into a polymorphic parameter must not pin
+        // the element's sort: a fold's seed is only its starting value, so a
+        // step returning waveforms has to be able to widen it.
         assert_clean("unfold(fn(v) => [time], [1, 2], 2)");
         assert_clean("reduce(fn(acc, x) => [time], [1, 2], [2])");
         assert_clean("reduce(fn(acc, x) => (time, 1), (1, 2), [2])");
@@ -4620,8 +4628,8 @@ mod tests {
     #[test]
     fn a_chord_rejects_an_instrument_it_cannot_mix() {
         // std's chord helpers in miniature — scale each note of a triad, mix
-        // the result, place it in time. This is the body they had before the
-        // fix, and the error is the one they used to report.
+        // the result, place it in time — written without the `unseq()` those
+        // helpers carry, which is the shape the checker must reject.
         //
         // `{...}` mixes waveforms, so an instrument handing back a seq makes
         // the mix fail at run time. Nothing here says which of `amp`'s rows
@@ -4662,6 +4670,36 @@ mod tests {
                 "expected (numeric, int) -> seq, found ('a, int) -> waveform ∧ ('b, float) -> waveform ∧ ('c, waveform) -> waveform ∧ ('d, seq) -> seq",
             ],
         );
+    }
+
+    #[test]
+    fn an_arity_mismatch_reports_once() {
+        // Pairing arguments against parameters they were never going to line
+        // up with reports a mismatch per position the shift moved. The arity
+        // is the one thing wrong, so it is the one thing said.
+        assert_errors(
+            "let f = fn(a, b) => nth(a, b) in f(\"s\")",
+            &["missing parameter of type [?a]"],
+        );
+        assert_errors(
+            "let f = fn(a, b) => nth(a, b) in f(\"s\", [1, 2], true)",
+            &["extra positional parameter"],
+        );
+        // Which names a call passes does not depend on how many positions it
+        // got right, so a bad name is still its own error.
+        assert_errors(
+            "sine(440, y = 1)",
+            &[
+                "missing parameter of type waveform",
+                "no named parameter \"y\"",
+            ],
+        );
+        // A call of the right arity is judged as before.
+        assert_errors(
+            "let f = fn(a, b) => nth(a, b) in f(\"s\", [1, 2])",
+            &["expected int, found string"],
+        );
+        assert_clean("let f = fn(a, b) => nth(a, b) in f(1, [1, 2])");
     }
 
     #[test]
