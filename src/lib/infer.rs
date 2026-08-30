@@ -40,6 +40,8 @@
 //!   parameter, and with it functions over modules. In exchange, every
 //!   projection that survives checking is one whose name was looked up, and
 //!   a misspelled one is a static error wherever it appears.
+//! 
+//! TODO add notes about default values and how they interact with refinements
 
 use std::collections::HashMap;
 
@@ -870,12 +872,16 @@ impl<S: Clone> Infer<S> {
             .iter()
             .map(|(_, parameter)| matches!(self.resolve(parameter), Type::Numeric(_)))
             .collect();
+        // Every named parameter is worth a table even when nothing is
+        // numeric, because a call may always omit one: the omitted row is
+        // where the body is checked at the default's own type, and the
+        // supplied row is where it is checked at whatever the caller brings.
         let tabulated = numeric
             .iter()
             .chain(&named_numeric)
             .filter(|numeric| **numeric)
             .count();
-        if tabulated == 0 {
+        if tabulated == 0 && named.is_empty() {
             return None;
         }
         // The atom basis is chosen once for a whole curried spine and passed
@@ -932,7 +938,7 @@ impl<S: Clone> Infer<S> {
                 }
             }
             let mut named_domains = Vec::with_capacity(named.len());
-            for (((name, default), numeric), default_ty) in
+            for (((name, _), numeric), default_ty) in
                 named.iter().zip(&named_numeric).zip(&default_types)
             {
                 let radix = if *numeric { atoms.len() + 1 } else { 2 };
@@ -949,7 +955,10 @@ impl<S: Clone> Infer<S> {
                 } else if *numeric {
                     Type::ground(atoms[choice])
                 } else {
-                    self.default_parameter(default_ty, &default.span)
+                    // The default does not constrain a supplied argument:
+                    // this row is the call that brings its own, and the
+                    // omitted row above is where the default is judged.
+                    self.fresh_meta()
                 };
                 context.push((name.clone(), ContextEntry::Ty(parameter.clone())));
                 if !omitted {
@@ -3622,14 +3631,13 @@ mod tests {
 
     #[test]
     fn a_conflict_on_a_nested_sort_is_reported_as_one() {
-        // The conflicting position is a leaf inside two arrows, and a
-        // variable renders as the guarantees it has collected — so naming
-        // the two types produces `(numeric) -> numeric` against
-        // `(waveform) -> waveform`, which reads as though it should match.
+        // A conflict on a numeric nested inside two arrows cannot be shown by
+        // naming them: a variable renders as the guarantees it has collected,
+        // so the two sides read as though they should match.
         assert_errors(
-            "let c = fn(f, g2) => fn(v) => f(g2(v)) in \
-             c(fn(x) => sqrt, fn(x) => (let f2 = fn(k = x) => k in f2(k = cos)))(cos)",
-            &["no sort fits here: guaranteed numeric, required waveform"],
+            "let h = fn(v) => v | fin(4) in \
+             let f = fn(x, k = h) => k in nth(f(1, k = cos), [1, 2])",
+            &["expected int, found (waveform) -> waveform"],
         );
         // Where either side *is* a numeric, its name states the sort and the
         // ordinary message says more.
@@ -3674,7 +3682,7 @@ mod tests {
         assert_errors(
             "let g = fn(v) => 1 in let h = fn(v) => time in \
              let f = fn(k = g) => k(0) in nth(f(k = h), [1, 2, 3])",
-            &["expected (int) -> int, found ('a) -> waveform"],
+            &["expected int, found waveform"],
         );
         assert_clean("let g = fn(v) => 1 in let f = fn(k = g) => k(0) in nth(f(), [1, 2, 3])");
     }
@@ -3702,12 +3710,18 @@ mod tests {
             "unfold(fn(v) => time, [1, 2], 2)",
             &["expected waveform, found [int]"],
         );
-        // A structural named default still pins its parameter. The body is
-        // checked once, so an open leaf would let a call widen it after the
-        // result computed from it was fixed — and this program does fail.
+        // The supplied row carries the caller's element type through to the
+        // result, so this is caught where the result is used rather than at
+        // the argument.
         assert_errors(
             "let f = fn(k = [1, 2]) => nth(0, k) in nth(f(k = [time]), [1, 2])",
-            &["expected [int], found [waveform]"],
+            &["expected int, found waveform"],
+        );
+        // The omitted row keeps the default's type, so a call that leaves
+        // the argument out still gets the default's result.
+        assert_errors(
+            "let f = fn(k = [1, 2]) => nth(0, k) in f() \\ 1",
+            &["expected seq, found int"],
         );
     }
 
@@ -3743,13 +3757,11 @@ mod tests {
             "let f = fn(k = 2) => k in nth(f(k = time), [1, 2, 3])",
             &["expected int, found waveform"],
         );
-        // A structural named parameter keeps `check_frame`'s precision:
-        // one row has the call's shape, so the mismatch points at the
-        // argument rather than at the call.
-        assert_errors(
-            "let f = fn(x, k = [1, 2]) => nth(x, k) in f(1, k = [true])",
-            &["expected [int], found [bool]"],
-        );
+        // A supplied argument is judged by the body's use of the parameter,
+        // not by the default: `nth`'s element type is free, so a list of
+        // bools is a list `nth` can index. The index being past the end is
+        // an evaluation fault, which no sort rules out.
+        assert_clean("let f = fn(x, k = [1, 2]) => nth(x, k) in f(1, k = [true])");
         assert_clean("let f = fn(x, k = [1, 2]) => nth(x, k) in f(1)");
     }
 
@@ -4669,6 +4681,30 @@ mod tests {
             &[
                 "expected (numeric, int) -> seq, found ('a, int) -> waveform ∧ ('b, float) -> waveform ∧ ('c, waveform) -> waveform ∧ ('d, seq) -> seq",
             ],
+        );
+    }
+
+    #[test]
+    fn a_named_default_does_not_pin_its_parameter() {
+        // A named parameter's type comes from the body's use of it. The
+        // default is only what a call that omits the argument gets, so it
+        // decides the omitted row and nothing else.
+        assert_clean("let f = fn(k = true) => 1 in f(k = 0.5)");
+        assert_clean("let f = fn(k = true) => k in f(k = 0.5)");
+        assert_clean("let f = fn(k = [1, 2]) => 1 in f(k = [time])");
+        assert_clean("let f = fn(k = sqrt) => 1 in f(k = cos)");
+        // The omitted row is the default's own type, which is what keeps
+        // this sound: a call that leaves the argument out gets the result
+        // the default produces, not a fresh unknown.
+        assert_errors(
+            "let f = fn(k = [1, 2]) => nth(0, k) in f() \\ 1",
+            &["expected seq, found int"],
+        );
+        assert_clean("let f = fn(k = true) => k in f()");
+        // A body that cannot use the argument still rejects it.
+        assert_errors(
+            "let f = fn(k = 1) => nth(k, [1, 2]) in f(k = time)",
+            &["expected int, found waveform"],
         );
     }
 
