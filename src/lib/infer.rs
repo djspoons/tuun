@@ -987,6 +987,23 @@ impl<S: Clone> Infer<S> {
         if rows.is_empty() {
             return None;
         }
+        // A call may always leave a named argument out, so the vectors that
+        // omit one are not optional the way an atom's are: an atom a row
+        // cannot take is a call the caller can avoid making, but omitting is
+        // always available. If no row stands with the name left off, the
+        // default does not work and every such call is unanswerable — report
+        // it here rather than hand back a table that promises a parameter it
+        // cannot honour.
+        for (name, default) in named {
+            let omitted_stands = rows.iter().any(|row| match row {
+                Type::Function { named, .. } => !named.iter().any(|(other, _)| other == name),
+                _ => false,
+            });
+            if !omitted_stands {
+                let message = format!("default value for \"{}\" cannot be used in the body", name);
+                self.error(message, &default.span);
+            }
+        }
         let mut rows = merge_rows(rows);
         Some(if rows.len() == 1 {
             rows.remove(0)
@@ -3567,10 +3584,12 @@ mod tests {
         // Result precision flows through a supplied named argument.
         assert_errors(&format!("{}f(x = 2) \\ 1", f), &["expected seq, found int"]);
         // A default the body cannot accept leaves the omitted row out of the
-        // table, so the lambda types as the rows that do work. The call that
-        // would use that default is what should be rejected — see N11, which
-        // is why this is `assert_clean` and not silence about the shape.
-        assert_clean("fn(x = 100) => x \\ 1");
+        // table, and a call may always omit it, so the definition is what is
+        // reported.
+        assert_errors(
+            "fn(x = 100) => x \\ 1",
+            &["default value for \"x\" cannot be used in the body"],
+        );
     }
 
     #[test]
@@ -3840,10 +3859,12 @@ mod tests {
         assert_clean("debug(1) + 1");
         // A guarantee already seen is judged, deferred or not: the default
         // flows into x before the body's seq contract, and the row it would
-        // have made is the one tabulation drops.
-        // TODO it would be better to output an error here, rather than at the
-        // call that tries to use the default.
-        assert_clean("fn(x = 100) => x \\ 1");
+        // have made is the one tabulation drops — which is reported, since
+        // no call can avoid omitting.
+        assert_errors(
+            "fn(x = 100) => x \\ 1",
+            &["default value for \"x\" cannot be used in the body"],
+        );
     }
 
     // A position where some row's domain is structural or unknown imposes
@@ -4547,6 +4568,32 @@ mod tests {
                 println!("  {}", error);
             }
         }
+    }
+
+    #[test]
+    fn a_default_that_does_not_work_is_reported() {
+        // Every named argument may be left out, so the row that omits one is
+        // the only row some calls can reach. When the default does not check,
+        // that row is dropped and the table quietly keeps the rows that need
+        // the argument supplied — which `check_frame` then lets an omitting
+        // call through, since a named parameter is optional by construction.
+        // The definition is where this can be said.
+        assert_errors(
+            "fn(x = 100) => x \\ 1",
+            &["default value for \"x\" cannot be used in the body"],
+        );
+        // The call that would have used it is the one that crashed:
+        // `Expected seq as first argument to \\, got 100`.
+        assert_errors(
+            "let f = fn(x = 100) => x \\ 1 in f()",
+            &["default value for \"x\" cannot be used in the body"],
+        );
+        // A default the body can use is fine, supplied or not.
+        assert_clean("let f = fn(x = 100) => x + 1 in f()");
+        assert_clean("let f = fn(x = 100) => x + 1 in f(x = time)");
+        // And a row dropped for an *atom* is not reported: a caller can
+        // simply not pass a seq there.
+        assert_clean("let f = fn(x = 1) => sqrt(x) in f(x = 4)");
     }
 
     #[test]
