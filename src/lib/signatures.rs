@@ -26,32 +26,32 @@ use crate::types::Type;
 /// one seq threads its offset, and two seqs match no conjunct (a runtime
 /// error).
 fn binary_arithmetic(int_row: bool) -> Type {
-    let mut rows = Vec::new();
+    let mut conjuncts = Vec::new();
     if int_row {
-        rows.push(Type::function(vec![Type::int(), Type::int()], Type::int()));
+        conjuncts.push(Type::function(vec![Type::int(), Type::int()], Type::int()));
     }
-    rows.push(Type::function(
+    conjuncts.push(Type::function(
         vec![Type::float(), Type::float()],
         Type::float(),
     ));
-    rows.push(Type::function(
+    conjuncts.push(Type::function(
         vec![Type::waveform(), Type::waveform()],
         Type::non_const_wave(),
     ));
-    rows.push(Type::function(
+    conjuncts.push(Type::function(
         vec![Type::seq(), Type::waveform()],
         Type::seq(),
     ));
-    rows.push(Type::function(
+    conjuncts.push(Type::function(
         vec![Type::waveform(), Type::seq()],
         Type::seq(),
     ));
-    Type::And(rows)
+    Type::And(conjuncts)
 }
 
 /// The result type of curried waveform filters (`fin(len)`, `filter(...)`,
-/// `capture(name)`, `mark(id)`): applied to a waveform they produce a
-/// waveform, and a seq threads through (`builtins::curry`).
+/// `capture(name)`, `mark(id)`): applied to a waveform they produce a waveform,
+/// and a seq threads through (`builtins::curry`).
 fn waveform_filter() -> Type {
     Type::And(vec![
         Type::function(vec![Type::waveform()], Type::non_const_wave()),
@@ -69,9 +69,9 @@ pub fn signature(name: &str) -> Option<Type> {
     let ty = match name {
         "+" | "*" | "&" => binary_arithmetic(true),
         "/" | "pow" => binary_arithmetic(false),
-        // Unary and binary rows in one intersection; selection matches the
-        // call's arity. Unary minus preserves integrality; there is no
-        // unary seq row (`unary_op` has no `Seq` arm).
+        // Unary and binary conjuncts in one intersection; selection matches the
+        // call's arity. Unary minus preserves integrality; there is no unary
+        // seq conjunct (`unary_op` has no `Seq` arm).
         "-" => {
             let unary = vec![
                 Type::function(vec![Type::int()], Type::int()),
@@ -95,7 +95,9 @@ pub fn signature(name: &str) -> Option<Type> {
         // structural: two waveforms, two seqs, two lists — anything the
         // runtime cannot take apart — have no arm rather than comparing
         // false. Constants compare as the numbers they are, so the numeric
-        // row is `float` and not `waveform`.
+        // conjunct is `float` and not `waveform`.
+        // TODO consider making this fully polymorphic: the intersection here
+        // doesn't make sense in our application of Freeman's refinement system.
         "==" | "!=" => Type::And(vec![
             Type::function(vec![Type::float(), Type::float()], Type::Bool),
             Type::function(vec![Type::Bool, Type::Bool], Type::Bool),
@@ -237,63 +239,63 @@ mod tests {
         assert!(signature("debug").is_some());
     }
 
-    /// The intersection rows must mirror `binary_op`'s runtime arms: no
+    /// The intersection conjuncts must mirror `binary_op`'s runtime arms: no
     /// conjunct accepts two seqs, exactly one seq threads through, and
     /// constants fold (preserving integrality for `+`).
     #[test]
     fn arithmetic_tables_mirror_the_runtime() {
-        let Some(Type::And(rows)) = signature("+") else {
+        let Some(Type::And(conjuncts)) = signature("+") else {
             panic!("+ should be an intersection");
         };
         assert_eq!(
-            rows[0],
+            conjuncts[0],
             Type::function(vec![Type::int(), Type::int()], Type::int())
         );
-        for row in &rows {
-            let Type::Function { positional, .. } = row else {
+        for conjunct in &conjuncts {
+            let Type::Function { positional, .. } = conjunct else {
                 panic!("conjuncts are arrows");
             };
             let both_admit_seq = positional.iter().all(|domain| {
                 matches!(domain, Type::Numeric(crate::types::Refinement::Ground(sort))
                     if !sort.intersect(Sort::SEQ).is_empty())
             });
-            assert!(!both_admit_seq, "no row may accept two seqs");
+            assert!(!both_admit_seq, "no conjunct may accept two seqs");
         }
-        // `-` carries unary and binary rows in one intersection.
-        let Some(Type::And(rows)) = signature("-") else {
+        // `-` carries unary and binary conjuncts in one intersection.
+        let Some(Type::And(conjuncts)) = signature("-") else {
             panic!("- should be an intersection");
         };
         assert!(
-            rows.iter().any(
-                |row| matches!(row, Type::Function { positional, .. } if positional.len() == 1)
+            conjuncts.iter().any(
+                |conjunct| matches!(conjunct, Type::Function { positional, .. } if positional.len() == 1)
             )
         );
         assert!(
-            rows.iter().any(
-                |row| matches!(row, Type::Function { positional, .. } if positional.len() == 2)
+            conjuncts.iter().any(
+                |conjunct| matches!(conjunct, Type::Function { positional, .. } if positional.len() == 2)
             )
         );
-        // `/` has no int row: integers divide to floats.
-        let Some(Type::And(rows)) = signature("/") else {
+        // `/` has no int conjunct: integers divide to floats.
+        let Some(Type::And(conjuncts)) = signature("/") else {
             panic!("/ should be an intersection");
         };
         assert_eq!(
-            rows[0],
+            conjuncts[0],
             Type::function(vec![Type::float(), Type::float()], Type::float())
         );
     }
 
     /// Equality's table is exactly the arms `equals` matches, with no
-    /// polymorphic row — which is also what lets the conformance harness
-    /// below exercise it, since that skips rows with non-ground domains.
+    /// polymorphic conjunct — which is also what lets the conformance harness
+    /// below exercise it, since that skips conjuncts with non-ground domains.
     #[test]
     fn equality_tables_mirror_the_runtime() {
         for name in ["==", "!="] {
-            let Some(Type::And(rows)) = signature(name) else {
+            let Some(Type::And(conjuncts)) = signature(name) else {
                 panic!("{} should be an intersection", name);
             };
             assert_eq!(
-                rows,
+                conjuncts,
                 vec![
                     Type::function(vec![Type::float(), Type::float()], Type::Bool),
                     Type::function(vec![Type::Bool, Type::Bool], Type::Bool),
@@ -359,13 +361,13 @@ mod tests {
         }
     }
 
-    /// The rows of `ty` at `arity` whose domains are all numeric grounds.
-    fn numeric_rows(ty: &Type, arity: usize) -> Vec<(Vec<Sort>, Type)> {
+    /// The conjuncts of `ty` at `arity` whose domains are all numeric grounds.
+    fn numeric_conjuncts(ty: &Type, arity: usize) -> Vec<(Vec<Sort>, Type)> {
         let conjuncts: Vec<&Type> = match ty {
-            Type::And(rows) => rows.iter().collect(),
+            Type::And(conjuncts) => conjuncts.iter().collect(),
             other => vec![other],
         };
-        let mut rows = Vec::new();
+        let mut numeric = Vec::new();
         for conjunct in conjuncts {
             let Type::Function {
                 positional,
@@ -386,16 +388,16 @@ mod tests {
                 })
                 .collect();
             if let Some(domains) = domains {
-                rows.push((domains, (**result).clone()));
+                numeric.push((domains, (**result).clone()));
             }
         }
-        rows
+        numeric
     }
 
     /// The distinct arities of `ty`'s arrow conjuncts.
     fn arities(ty: &Type) -> Vec<usize> {
         let conjuncts: Vec<&Type> = match ty {
-            Type::And(rows) => rows.iter().collect(),
+            Type::And(conjuncts) => conjuncts.iter().collect(),
             other => vec![other],
         };
         let mut arities = Vec::new();
@@ -410,14 +412,14 @@ mod tests {
     }
 
     /// Conformance of one callable to its table at one arity, mirroring
-    /// selection semantics: every atom vector covered by some row must
-    /// evaluate without error to a value within the *first* covering
-    /// row's result (table order is most-specific-first, as selection
-    /// reads it), and every uncovered vector must error. Curried results
-    /// recurse on the returned callable.
+    /// selection semantics: every atom vector covered by some conjunct must
+    /// evaluate without error to a value within the *first* covering conjunct's
+    /// result (table order is most-specific-first, as selection reads it), and
+    /// every uncovered vector must error. Curried results recurse on the
+    /// returned callable.
     fn conform(name: &str, function: &BuiltInFn<u32, ()>, ty: &Type, arity: usize) {
-        let rows = numeric_rows(ty, arity);
-        if rows.is_empty() {
+        let conjuncts = numeric_conjuncts(ty, arity);
+        if conjuncts.is_empty() {
             return;
         }
         let atoms = [
@@ -431,7 +433,7 @@ mod tests {
                 .map(|position| atoms[(index / atoms.len().pow(position as u32)) % atoms.len()])
                 .collect();
             let shown: Vec<String> = vector.iter().map(Sort::to_string).collect();
-            let governing = rows.iter().find(|(domains, _)| {
+            let governing = conjuncts.iter().find(|(domains, _)| {
                 vector
                     .iter()
                     .zip(domains)
@@ -521,9 +523,9 @@ mod tests {
         }
     }
 
-    /// Every built-in with numeric-ground rows conforms to them — the
+    /// Every built-in with numeric-ground conjuncts conforms to them — the
     /// signature-faithfulness obligation of the sound configuration. Rows
-    /// over structural domains (lists, functions, ∀-polymorphic) are out
+    /// over non-numeric domains (lists, functions, ∀-polymorphic) are out
     /// of scope here; `mark` is prelude-native and `debug` is Dynamic.
     #[test]
     fn signatures_conform_to_the_runtime() {
@@ -543,7 +545,7 @@ mod tests {
                 continue;
             };
             for arity in arities(&ty) {
-                if !numeric_rows(&ty, arity).is_empty() {
+                if !numeric_conjuncts(&ty, arity).is_empty() {
                     conformed += 1;
                     conform(name, function, &ty, arity);
                 }

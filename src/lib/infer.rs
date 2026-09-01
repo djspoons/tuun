@@ -40,7 +40,7 @@
 //!   parameter, and with it functions over modules. In exchange, every
 //!   projection that survives checking is one whose name was looked up, and
 //!   a misspelled one is a static error wherever it appears.
-//! 
+//!
 //! TODO add notes about default values and how they interact with refinements
 
 use std::collections::HashMap;
@@ -210,14 +210,14 @@ const COARSE_ATOMS: [Sort; 2] = [Sort::WAVE, Sort::SEQ];
 
 /// How selection decided one intersection against one frame.
 enum Selection {
-    /// A row applied; the application's result type.
+    /// A conjunct applied; the application's result type.
     Selected(Type),
     /// No conjunct has the frame's shape; selection does not apply, and callers
     /// fall back to plain conjunct subtyping.
-    NoMatchingRows,
-    /// Conjuncts match the frame's shape but none accepts the arguments —
-    /// the runtime has no matching arm.
-    NoApplicableRow,
+    NoMatchingConjuncts,
+    /// Conjuncts match the frame's shape but none accepts the arguments — the
+    /// runtime has no matching arm.
+    NoApplicableConjunct,
 }
 
 /// The algorithmic state threaded through every judgment: Xie and
@@ -722,12 +722,12 @@ impl<S: Clone> Infer<S> {
     /// they would any inferred type.
     ///
     /// The base pass is exploratory whenever tabulation succeeds, and its
-    /// errors give way to the rows'. Its parameters are unsolved, so it has
+    /// errors give way to the conjuncts'. Its parameters are unsolved, so it has
     /// to summarize every atom they admit at once — `2 * freq` is "some
     /// numeric" there — and a summary no single call will ever see must not
-    /// be the thing that reports. What the rows keep instead is the per-atom
-    /// verdict: a vector whose body errors contributes no row, and a body
-    /// that errors at *every* vector leaves no rows at all, so an
+    /// be the thing that reports. What the conjuncts keep instead is the per-atom
+    /// verdict: a vector whose body errors contributes no conjunct, and a body
+    /// that errors at *every* vector leaves no conjuncts at all, so an
     /// unconditional error still surfaces through the base type.
     fn infer_definition<M>(&mut self, context: &mut TypeContext, expr: &SourceExpr<M, S>) -> Type {
         let start = self.errors.len();
@@ -736,7 +736,7 @@ impl<S: Clone> Infer<S> {
         match self.tabulate(context, expr, &base, None) {
             Some(table) => {
                 // Drop what the base pass said, keeping what tabulation
-                // said: the rows re-check the body per atom, and the
+                // said: the conjuncts re-check the body per atom, and the
                 // defaults — which depend on no parameter — are judged once
                 // inside `tabulate`, so anything unconditional is reported
                 // there rather than here.
@@ -812,29 +812,26 @@ impl<S: Clone> Infer<S> {
     }
 
     /// Tabulates a definition-bound function over its numeric parameters —
-    /// Freeman and Pfenning §4: the principal refinement type of a
-    /// definition is a finite intersection of arrows, found by re-checking
-    /// the body at each point of the finite refinement lattice, here each
-    /// vector of atoms over the numeric parameters (positional and named
-    /// alike). Structural parameters ride along as fresh unknowns (solved
-    /// per row by the body, quantified by the caller's generalization),
-    /// and a structural named parameter's default flows in as a guarantee,
-    /// as in the base pass. A vector whose body check errors contributes no
-    /// row (the function is not applicable there), and the exploratory
-    /// errors are discarded — the base pass has already reported
-    /// anything unconditional.
+    /// Freeman and Pfenning §4: the principal refinement type of a definition
+    /// is a finite intersection of arrows, found by re-checking the body at
+    /// each point of the finite refinement lattice, here each vector of atoms
+    /// over the numeric parameters (positional and named alike). Non-numeric
+    /// parameters ride along as fresh unknowns (solved per conjunct by the
+    /// body, quantified by the caller's generalization), and a non-numeric
+    /// named parameter's default flows in as a guarantee, as in the base pass.
+    /// A vector whose body check errors contributes no conjunct (the function
+    /// is not applicable there), and the exploratory errors are discarded — the
+    /// base pass has already reported anything unconditional.
     ///
-    /// Beyond `MAX_TABULATION_VECTORS`, enumeration retries on the
-    /// two-point unseq/seq split — keeping the relational seq holes, the
-    /// soundness-critical part, at the cost of the int/float distinctions
-    /// — and returns `None` (keep the base type, the freeze-at-generalize
-    /// summary) only past that, or for functions with no numeric
-    /// parameters.
+    /// Beyond `MAX_TABULATION_VECTORS`, enumeration retries on the two-point
+    /// unseq/seq split — keeping the relational seq holes, the
+    /// soundness-critical part, at the cost of the int/float distinctions — and
+    /// returns `None` (keep the base type, the freeze-at-generalize summary)
+    /// only past that, or for functions with no numeric parameters.
     ///
     /// This is what makes parameter contracts *relational* rather than
-    /// per-position: `fn(a, b) => a + b` gets no `(seq, seq)` row, so a
-    /// two-seq call errors even though each position separately admits a
-    /// seq.
+    /// per-position: `fn(a, b) => a + b` gets no `(seq, seq)` conjunct, so a
+    /// two-seq call errors even though each position separately admits a seq.
     fn tabulate<M>(
         &mut self,
         context: &mut TypeContext,
@@ -872,10 +869,10 @@ impl<S: Clone> Infer<S> {
             .iter()
             .map(|(_, parameter)| matches!(self.resolve(parameter), Type::Numeric(_)))
             .collect();
-        // Every named parameter is worth a table even when nothing is
-        // numeric, because a call may always omit one: the omitted row is
-        // where the body is checked at the default's own type, and the
-        // supplied row is where it is checked at whatever the caller brings.
+        // Every named parameter is worth a table even when nothing is numeric,
+        // because a call may always omit one: the omitted conjunct is where the
+        // body is checked at the default's own type, and the supplied conjunct
+        // is where it is checked at whatever the caller brings.
         let tabulated = numeric
             .iter()
             .chain(&named_numeric)
@@ -896,8 +893,8 @@ impl<S: Clone> Infer<S> {
             None => self.spine_basis(expr, base)?,
         };
         let vectors = Self::level_vectors(atoms, &numeric, &named_numeric)?;
-        // Refinement variables reachable from the enclosing context belong
-        // to outer scopes and must stay live in the rows (mirroring
+        // Refinement variables reachable from the enclosing context belong to
+        // outer scopes and must stay live in the conjuncts (mirroring
         // `generalize`'s exclusion).
         let mut keep = Vec::new();
         for (_, entry) in context.iter() {
@@ -907,20 +904,21 @@ impl<S: Clone> Infer<S> {
         }
         // A type query is not answered from here. Each vector re-checks the
         // body with the parameters pinned to one hypothetical atom, so an
-        // identifier would report whichever row happened to run last, and the
-        // row's refinement variables are popped by its rollback anyway.
+        // identifier would report whichever conjunct happened to run last, and
+        // the conjunct's refinement variables are popped by its rollback
+        // anyway.
         let probe = self.probe.take();
-        // Defaults are inferred once, here: they are evaluated in the
-        // enclosing scope, so they see neither the parameters nor the row's
-        // atoms, and an error in one is unconditional rather than something
-        // a vector gets to re-decide. Inferring them inside the loop would
-        // also let a default see a positional parameter, which neither
-        // `infer` nor evaluation allows.
+        // Defaults are inferred once, here: they are evaluated in the enclosing
+        // scope, so they see neither the parameters nor the conjunct's atoms,
+        // and an error in one is unconditional rather than something a vector
+        // gets to re-decide. Inferring them inside the loop would also let a
+        // default see a positional parameter, which neither `infer` nor
+        // evaluation allows.
         let default_types: Vec<Type> = named
             .iter()
             .map(|(_, default)| self.infer(context, &mut Vec::new(), default))
             .collect();
-        let mut rows = Vec::new();
+        let mut conjuncts = Vec::new();
         for index in 0..vectors {
             let errors = self.errors.len();
             let mark = self.mark();
@@ -944,10 +942,10 @@ impl<S: Clone> Infer<S> {
                 let radix = if *numeric { atoms.len() + 1 } else { 2 };
                 let choice = (index / stride) % radix;
                 stride *= radix;
-                // The last choice is the omitted one: the parameter takes
-                // the value a call that leaves it out would get, so the body
-                // is checked at the default's own type. Leaving the name off
-                // the row is what tells selection the row is for such a
+                // The last choice is the omitted one: the parameter takes the
+                // value a call that leaves it out would get, so the body is
+                // checked at the default's own type. Leaving the name off the
+                // conjunct is what tells selection the conjunct is for such a
                 // call — see `named_matches`.
                 let omitted = choice == radix - 1;
                 let parameter = if omitted {
@@ -955,9 +953,9 @@ impl<S: Clone> Infer<S> {
                 } else if *numeric {
                     Type::ground(atoms[choice])
                 } else {
-                    // The default does not constrain a supplied argument:
-                    // this row is the call that brings its own, and the
-                    // omitted row above is where the default is judged.
+                    // The default does not constrain a supplied argument: this
+                    // conjunct is the call that brings its own, and the omitted
+                    // conjunct above is where the default is judged.
                     self.fresh_meta()
                 };
                 context.push((name.clone(), ContextEntry::Ty(parameter.clone())));
@@ -965,12 +963,12 @@ impl<S: Clone> Infer<S> {
                     named_domains.push((name.clone(), parameter));
                 }
             }
-            // A lambda body is itself tabulated: Freeman and Pfenning's
-            // ABS applies at every abstraction, not once per definition, so
-            // a curried function gets an intersection at each arrow rather
-            // than only at the outermost. Its base pass summarizes over
-            // parameters this row leaves unsolved, so those errors are
-            // exploratory too and must not decide whether this row stands.
+            // A lambda body is itself tabulated: Freeman and Pfenning's ABS
+            // applies at every abstraction, not once per definition, so a
+            // curried function gets an intersection at each arrow rather than
+            // only at the outermost. Its base pass summarizes over parameters
+            // this conjunct leaves unsolved, so those errors are exploratory
+            // too and must not decide whether this conjunct stands.
             let inner = self.errors.len();
             let result = self.infer(context, &mut Vec::new(), body);
             let explored = self.errors.len();
@@ -983,32 +981,32 @@ impl<S: Clone> Infer<S> {
             };
             context.truncate(depth);
             if self.errors.len() == errors {
-                // Resolve the row fully before rolling back the state it
+                // Resolve the conjunct fully before rolling back the state it
                 // was solved in.
-                let row = Type::Function {
+                let conjunct = Type::Function {
                     positional: domains,
                     named: named_domains,
                     result: Box::new(result),
                 }
                 .apply(&self.subst);
-                rows.push(self.freeze_refinements(&row, true, &keep));
+                conjuncts.push(self.freeze_refinements(&conjunct, true, &keep));
             }
             self.errors.truncate(errors);
             self.rollback(mark);
         }
         self.probe = probe;
-        if rows.is_empty() {
+        if conjuncts.is_empty() {
             return None;
         }
         // A call may always leave a named argument out, so the vectors that
-        // omit one are not optional the way an atom's are: an atom a row
+        // omit one are not optional the way an atom's are: an atom a conjunct
         // cannot take is a call the caller can avoid making, but omitting is
-        // always available. If no row stands with the name left off, the
-        // default does not work and every such call is unanswerable — report
-        // it here rather than hand back a table that promises a parameter it
+        // always available. If no conjunct stands with the name left off, the
+        // default does not work and every such call is unanswerable — report it
+        // here rather than hand back a table that promises a parameter it
         // cannot honour.
         for (name, default) in named {
-            let omitted_stands = rows.iter().any(|row| match row {
+            let omitted_stands = conjuncts.iter().any(|conjunct| match conjunct {
                 Type::Function { named, .. } => !named.iter().any(|(other, _)| other == name),
                 _ => false,
             });
@@ -1017,11 +1015,11 @@ impl<S: Clone> Infer<S> {
                 self.error(message, &default.span);
             }
         }
-        let mut rows = merge_rows(rows);
-        Some(if rows.len() == 1 {
-            rows.remove(0)
+        let mut conjuncts = merge_conjuncts(conjuncts);
+        Some(if conjuncts.len() == 1 {
+            conjuncts.remove(0)
         } else {
-            Type::And(rows)
+            Type::And(conjuncts)
         })
     }
 
@@ -1196,7 +1194,7 @@ impl<S: Clone> Infer<S> {
             // An intersection against an expected arrow selects with the
             // arrow's parameters as a pseudo-frame — the same applicative
             // subtyping as at applications, so committing to one conjunct
-            // cannot poison a sibling argument: when no single row applies
+            // cannot poison a sibling argument: when no single conjunct applies
             // outright, the coverage join plays the summary role
             // (⋀(Aᵢ→Bᵢ) <: (⋃Aᵢ)→(⋁Bᵢ), sound by atom disjointness).
             (
@@ -1212,7 +1210,7 @@ impl<S: Clone> Infer<S> {
                 // "just the function argument type or a label, instead of the
                 // complete type"; where no parameter carries a sort there is
                 // no such selector, and coverage degenerates to the join of
-                // every row — honest, and saying nothing. Sub-And-L instead
+                // every conjunct — honest, and saying nothing. Sub-And-L instead
                 // checks the result, which by then may be constrained.
                 //
                 // Removing this leaves the embedded library checking clean,
@@ -1235,11 +1233,11 @@ impl<S: Clone> Infer<S> {
                 // Selecting against unsolved variables iterates to a fixed
                 // point (Freeman's abstract interpretation): when the arrow's
                 // result flows back into a parameter variable — `unfold`'s `a →
-                // a`, `reduce`'s accumulator — the growth can change which rows
+                // a`, `reduce`'s accumulator — the growth can change which conjuncts
                 // apply and what contracts they may impose, so a one-shot
                 // selection over-commits (e.g. a float seed selects the float
-                // row, whose result grows the variable and then violates the
-                // row's own contract). Roll the attempt back, carry the growth,
+                // conjunct, whose result grows the variable and then violates the
+                // conjunct's own contract). Roll the attempt back, carry the growth,
                 // and reselect; sorts only grow, so this terminates within the
                 // lattice height.
                 let variables: Vec<u32> = positional
@@ -1265,9 +1263,11 @@ impl<S: Clone> Infer<S> {
                         span: None,
                     };
                     let outcome = match self.select_core(conjuncts, &pseudo) {
-                        Selection::Selected(row_result) => self.subtype(&row_result, result),
-                        Selection::NoApplicableRow => Err(()),
-                        Selection::NoMatchingRows => {
+                        Selection::Selected(conjunct_result) => {
+                            self.subtype(&conjunct_result, result)
+                        }
+                        Selection::NoApplicableConjunct => Err(()),
+                        Selection::NoMatchingConjuncts => {
                             self.subtype_any_conjunct(conjuncts.clone(), &b)
                         }
                     };
@@ -1320,12 +1320,12 @@ impl<S: Clone> Infer<S> {
             // here too (the guard above): a pseudo-frame models a call,
             // and a promised named parameter is not a call argument — as
             // an "omitted argument" it would skip its contravariant check,
-            // and a row lacking the name would wrongly stay eligible. The
-            // per-conjunct path does the full named discipline per row,
-            // with the first fitting row committing — no distributive
+            // and a conjunct lacking the name would wrongly stay eligible. The
+            // per-conjunct path does the full named discipline per conjunct,
+            // with the first fitting conjunct committing — no distributive
             // reading, no fixed-point iteration.
             // TODO extend the pseudo-frame with promised named parameters
-            // (and filter rows to those offering them) so named-having
+            // (and filter conjuncts to those offering them) so named-having
             // arrows join the selection path.
             (Type::And(conjuncts), _) => self.subtype_any_conjunct(conjuncts.clone(), &b),
             // AS-FunR/AS-FunL collapse into one n-ary case: parameters are
@@ -1478,14 +1478,14 @@ impl<S: Clone> Infer<S> {
         Err(())
     }
 
-    /// Returns the type a named parameter starts from, with `default_ty`
-    /// flowed into it.
+    /// Returns the type a named parameter starts from, with `default_ty` flowed
+    /// into it.
     ///
-    /// A numeric default flows into an unknown as a guarantee, leaving the
-    /// parameter free to widen to whatever the body needs. A structural
-    /// default becomes the parameter's type outright: the body is checked
-    /// once, so a numeric leaf left open could be widened by a later call
-    /// after the result computed from it was already fixed.
+    /// A numeric default flows into an unknown sort as a guarantee, leaving the
+    /// parameter free to widen to whatever the body needs. A non-numeric
+    /// default becomes the parameter's type outright. The body is checked once,
+    /// so a numeric leaf left open could be widened by a later call after the
+    /// result computed from it was already fixed.
     ///
     /// # Example
     ///
@@ -1500,7 +1500,7 @@ impl<S: Clone> Infer<S> {
             resolved => resolved,
         };
         let parameter = match resolved {
-            structural @ (Type::Tuple(_) | Type::List(_) | Type::Function { .. }) => structural,
+            compound @ (Type::Tuple(_) | Type::List(_) | Type::Function { .. }) => compound,
             _ => self.fresh_meta(),
         };
         self.subtype_check(default_ty, &parameter, span);
@@ -1654,12 +1654,12 @@ impl<S: Clone> Infer<S> {
                     result: Box::new(result),
                 }
             }
-            // Two tables join row by row. Every pair of rows that joins is a
+            // Two tables join conjunct by conjunct. Every pair of conjuncts that joins is a
             // type both tables are subtypes of — each side reaches it by
-            // Sub-And-L through the row it contributed — so their join is the
+            // Sub-And-L through the conjunct it contributed — so their join is the
             // intersection of all such pairs. Pairs are tried rather than
             // matched on the nose because the two sides need not split their
-            // domains the same way: one table's rows may be single atoms where
+            // domains the same way: one table's conjuncts may be single atoms where
             // the other's cover a whole class, and those still overlap. A pair
             // whose domains do not overlap contributes nothing.
             //
@@ -1676,32 +1676,32 @@ impl<S: Clone> Infer<S> {
                 if xs.len().saturating_mul(ys.len()) > MAX_TABULATION_VECTORS {
                     return self.incompatible(&a, &b, span);
                 }
-                let mut rows: Vec<Type> = Vec::new();
+                let mut conjuncts: Vec<Type> = Vec::new();
                 for x in &xs {
                     for y in &ys {
                         if !self.same_shape(x, y) {
                             continue;
                         }
-                        // A pair that does not join contributes no row — its
+                        // A pair that does not join contributes no conjunct — its
                         // domains do not overlap, or its results disagree —
                         // the same way a vector whose body does not check
                         // contributes none to `tabulate`, and its errors are
                         // exploratory either way.
                         let before = self.errors.len();
-                        let row = self.join(x.clone(), y.clone(), span);
+                        let conjunct = self.join(x.clone(), y.clone(), span);
                         if self.errors.len() > before {
                             self.errors.truncate(before);
                             continue;
                         }
-                        if !rows.contains(&row) {
-                            rows.push(row);
+                        if !conjuncts.contains(&conjunct) {
+                            conjuncts.push(conjunct);
                         }
                     }
                 }
-                match rows.len() {
+                match conjuncts.len() {
                     0 => self.incompatible(&a, &b, span),
-                    1 => rows.pop().expect("one row"),
-                    _ => Type::And(rows),
+                    1 => conjuncts.pop().expect("one conjunct"),
+                    _ => Type::And(conjuncts),
                 }
             }
             _ => {
@@ -1718,15 +1718,15 @@ impl<S: Clone> Infer<S> {
 
     /// Returns whether two arrows have the same parameter shape.
     ///
-    /// Arity must agree and named parameters must agree by name; the
-    /// parameter *types* are not consulted, since two rows that overlap
-    /// without coinciding still join. Anything that is not a pair of arrows
-    /// has no shape in common.
+    /// Arity must agree and named parameters must agree by name; the parameter
+    /// *types* are not consulted, since two conjuncts that overlap without
+    /// coinciding still join. Anything that is not a pair of arrows has no
+    /// shape in common.
     ///
     /// # Example
     ///
-    /// `(int) -> int` and `(float) -> float` share a shape; `(int) -> int`
-    /// and `(int, int) -> int` do not.
+    /// `(int) -> int` and `(float) -> float` share a shape;
+    /// `(int) -> int` and `(int, int) -> int` do not.
     fn same_shape(&self, x: &Type, y: &Type) -> bool {
         let (
             Type::Function {
@@ -1888,11 +1888,11 @@ impl<S: Clone> Infer<S> {
     /// the selector:
     ///
     /// - the first conjunct that applies outright supplies the result: each
-    ///   numeric argument's sort contained in the domain, each structural
+    ///   numeric argument's sort contained in the domain, each non-numeric
     ///   argument a subtype of it (table order is most-specific-first,
     ///   mirroring the runtime match arms);
     /// - otherwise coverage decides (`select_by_atoms`): every atom combination
-    ///   of the arguments must have an accepting row, and the covering rows'
+    ///   of the arguments must have an accepting conjunct, and the covering conjuncts'
     ///   results join;
     /// - no coverage means the runtime has no matching arm: a rejection.
     ///
@@ -1901,8 +1901,8 @@ impl<S: Clone> Infer<S> {
     /// expected arrow's parameters.
     fn select_core(&mut self, conjuncts: &[Type], frame: &Frame<S>) -> Selection {
         // The argument sorts. Dynamic and unsolved metas may be any
-        // numeric; a structural argument (list, function, ...) has no sort
-        // and is checked against each row's domain by subtyping.
+        // numeric; a non-numeric argument (list, function, ...) has no sort
+        // and is checked against each conjunct's domain by subtyping.
         let sorts: Vec<Option<Sort>> = frame
             .positional
             .iter()
@@ -1912,7 +1912,8 @@ impl<S: Clone> Infer<S> {
                 _ => None,
             })
             .collect();
-        let rows: Vec<Type> = conjuncts
+        // Only the conjuncts shaped like this call can answer it.
+        let shaped: Vec<Type> = conjuncts
             .iter()
             .filter(|conjunct| {
                 matches!(conjunct, Type::Function { positional, .. }
@@ -1920,67 +1921,70 @@ impl<S: Clone> Infer<S> {
             })
             .cloned()
             .collect();
-        if rows.is_empty() {
-            return Selection::NoMatchingRows;
+        if shaped.is_empty() {
+            return Selection::NoMatchingConjuncts;
         }
-        // Contracts for unsolved arguments use the union of every row's domain
+        // Contracts for unsolved arguments use the union of every conjunct's domain
         // at the position: the variable may still grow (an arrow's result can
         // feed back into it — see the fixed-point iteration in `subtype`), and
-        // any narrower contract, such as a chosen row's own domain, would
+        // any narrower contract, such as a chosen conjunct's own domain, would
         // reject that growth. Ground arguments are already judged by
         // applicability.
-        let broad = self.broad_domains(&rows, frame.positional.len());
-        // First definitely-applicable row wins; its structural subtyping
+        let unions = self.domain_unions(&shaped, frame.positional.len());
+        // First definitely-applicable conjunct wins; its subtyping
         // commits (and is rolled back when a later position rejects it).
-        for row in &rows {
+        for conjunct in &shaped {
             let mark = self.mark();
-            if self.row_applies(row, &sorts, frame).is_some() {
-                self.record_selection_contracts(frame, &broad);
-                let Type::Function { result, .. } = row else {
-                    unreachable!("rows are arrows");
+            if self.conjunct_applies(conjunct, &sorts, frame).is_some() {
+                self.record_selection_contracts(frame, &unions);
+                let Type::Function { result, .. } = conjunct else {
+                    unreachable!("conjuncts are arrows");
                 };
                 return Selection::Selected((**result).clone());
             }
             self.rollback(mark);
         }
         // Otherwise, atom-decomposition coverage.
-        self.select_by_atoms(&rows, &sorts, frame)
+        self.select_by_atoms(&shaped, &sorts, frame)
     }
 
-    /// The per-position union of every row's domain sort — the loosest
-    /// honest contract for an argument that may still grow — or `None`
-    /// where any row's domain is unknown or structural: such a row may
-    /// accept non-numeric values, so the table imposes no numeric
-    /// contract at that position.
-    fn broad_domains(&self, rows: &[Type], arity: usize) -> Vec<Option<Sort>> {
-        let mut broad = vec![Some(Sort::NONE); arity];
-        for row in rows {
-            let Type::Function { positional, .. } = row else {
-                unreachable!("rows are arrows");
+    /// Returns the union of the sorts for each positional parameter in
+    /// `conjuncts` (which all should be function types). For each position, the
+    /// loosest contract that may still grow — or `None` where any positions
+    /// type is unknown or non-numeric: such a conjunct may accept non-numeric
+    /// values, so the table imposes no numeric contract at that position.
+    fn domain_unions(&self, conjuncts: &[Type], arity: usize) -> Vec<Option<Sort>> {
+        let mut unions = vec![Some(Sort::NONE); arity];
+        for conjunct in conjuncts {
+            let Type::Function { positional, .. } = conjunct else {
+                unreachable!("conjuncts are arrows");
             };
-            for (broad, domain) in broad.iter_mut().zip(positional) {
-                match self.resolve(domain) {
+            for (result, ty) in unions.iter_mut().zip(positional) {
+                match self.resolve(ty) {
                     Type::Numeric(rep) => {
                         let sort = self.may_of(&rep);
-                        *broad = broad.map(|union| union.union(sort));
+                        *result = result.map(|union| union.union(sort));
                     }
-                    _ => *broad = None,
+                    // A `Sort` is a union of numeric atoms and has no room for
+                    // anything else, so a non-numeric domain leaves the
+                    // position with no expressible union at all.
+                    _ => *result = None,
                 }
             }
         }
-        broad
+        unions
     }
 
-    /// Whether the row's named parameters line up with the call's named
+    /// Whether the conjunct's named parameters line up with the call's named
     /// arguments, each supplied argument fitting its domain.
     ///
-    /// A row declares exactly the names its call must supply. Tabulation
-    /// emits one row per omission pattern — declaring a named parameter for
-    /// calls that pass it, and leaving the name off for calls that take the
+    /// A conjunct declares exactly the names its call must supply. Tabulation
+    /// emits one conjunct per omission pattern — declaring a named parameter
+    /// for calls that pass it, and leaving the name off for calls that take the
     /// default — so matching the two sets is what keeps those apart. Both
-    /// directions matter: a row that ignored an argument the call supplies
+    /// directions matter: a conjunct that ignored an argument the call supplies
     /// would select on the strength of a default the call overrode, and a
-    /// row that declared a parameter the call omits would answer for a
+    /// conjunct that declared a parameter the call omits would answer for a
     /// value the call never passes.
     fn named_matches(&mut self, named: &[(String, Type)], frame: &Frame<S>) -> bool {
         for (name, _, _) in &frame.named {
@@ -2007,24 +2011,24 @@ impl<S: Clone> Infer<S> {
         true
     }
 
-    /// Returns the row's domains as contract sorts when the row applies
+    /// Returns the conjunct's domains as contract sorts when the conjunct applies
     /// outright — every argument's sort contained in its domain — and
     /// `None` otherwise. Numeric positions check by sort containment and
-    /// report their domain sort; unknown and structural domains accept by
+    /// report their domain sort; unknown and non-numeric domains accept by
     /// subtyping and report ⊤ (no sort contract). Named parameters are
-    /// judged by `named_matches`. Structural subtyping solves state, so
+    /// judged by `named_matches`. Subtyping solves state, so
     /// callers snapshot around the call.
-    fn row_applies(
+    fn conjunct_applies(
         &mut self,
-        row: &Type,
+        conjunct: &Type,
         sorts: &[Option<Sort>],
         frame: &Frame<S>,
     ) -> Option<Vec<Sort>> {
         let Type::Function {
             positional, named, ..
-        } = row
+        } = conjunct
         else {
-            unreachable!("rows are arrows");
+            unreachable!("conjuncts are arrows");
         };
         let mut domains = Vec::with_capacity(positional.len());
         for ((sort, domain), (argument, _)) in sorts.iter().zip(positional).zip(&frame.positional) {
@@ -2040,60 +2044,61 @@ impl<S: Clone> Infer<S> {
         Some(domains)
     }
 
-    /// Selection by atom coverage (sorts are unions over a disjoint atom
-    /// basis — Freeman's union normal form): a runtime value inhabits
-    /// exactly one atom, so a call is covered when every combination of
-    /// its arguments' atoms has a row that accepts it; the result is the
-    /// join of the covering rows' results, and each argument's contract is
-    /// the union of the domains that admitted it. A combination no row
-    /// covers means the runtime has no matching arm.
+    /// Selection by atom coverage (sorts are unions over a disjoint atom basis
+    /// — Freeman's union normal form): a runtime value inhabits exactly one
+    /// atom, so a call is covered when every combination of its arguments'
+    /// atoms has a conjunct that accepts it; the result is the join of the
+    /// covering conjuncts' results, and each argument's contract is the union
+    /// of the domains that admitted it. A combination no conjunct covers means
+    /// the runtime has no matching arm.
     ///
     /// What that costs an argument depends on what is still open about it:
     ///
-    /// - A ground sort, and a variable whose guarantees have arrived,
-    ///   enumerate atoms that *will* be passed, so an uncovered
-    ///   combination is a rejection.
-    /// - A variable with no guarantees yet enumerates the atoms its
-    ///   contract still admits, and an uncovered combination *narrows*
-    ///   that contract instead of rejecting: the atoms coverage leaves are
-    ///   what the argument is then bound to. This is what keeps a
-    ///   relational gap — `+` has no `(seq, seq)` row — from escaping
-    ///   through an unsolved argument, and it is why `fn(x) => x + x`
-    ///   takes a waveform rather than any numeric.
-    /// - `Dynamic`, a structural argument, and a position where some row's
-    ///   domain is not numeric decompose into no atoms at all: any row
-    ///   covers them, and they are constrained per row by subtyping.
+    /// - A ground sort, and a variable whose guarantees have arrived, enumerate
+    ///   atoms that *will* be passed, so an uncovered combination is a
+    ///   rejection.
+    /// - A variable with no guarantees yet enumerates the atoms its contract
+    ///   still admits, and an uncovered combination *narrows* that contract
+    ///   instead of rejecting: the atoms coverage leaves are what the argument
+    ///   is then bound to. This is what keeps a relational gap — `+` has no
+    ///   `(seq, seq)` conjunct — from escaping through an unsolved argument,
+    ///   and it is why `fn(x) => x + x` takes a waveform rather than any
+    ///   numeric.
+    /// - `Dynamic`, a non-numeric argument, and a position where some
+    ///   conjunct's domain is not numeric decompose into no atoms at all: any
+    ///   conjunct covers them, and they are constrained per conjunct by
+    ///   subtyping.
     ///
     /// Positions holding the same variable share one choice, so an aliased
-    /// argument moves in lockstep and is never asked for a row covering a
+    /// argument moves in lockstep and is never asked for a conjunct covering a
     /// combination it cannot produce.
     fn select_by_atoms(
         &mut self,
-        rows: &[Type],
+        conjuncts: &[Type],
         sorts: &[Option<Sort>],
         frame: &Frame<S>,
     ) -> Selection {
         let arity = frame.positional.len();
-        let broad = self.broad_domains(rows, arity);
-        // Per row: domain sorts (⊤ for unknown/structural domains), the
-        // structural and named constraints, and the result resolved before
+        // Per conjunct: domain sorts (⊤ for unknown and non-numeric domains), the
+        // non-numeric and named constraints, and the result resolved before
         // the probe's rollback.
         struct Candidate {
             domains: Vec<Sort>,
             result: Type,
         }
         let mut candidates: Vec<Candidate> = Vec::new();
-        for row in rows {
+        let mut admitting: Vec<Type> = Vec::new();
+        for conjunct in conjuncts {
             // The probe's own refinement variables are popped by its
             // rollback, so the result it carries out is grounded at them
             // (`resolve_refinements`); variables that predate the probe
             // survive it and stay live.
             let floor = self.refs.len() as u32;
             let mark = self.mark();
-            let applies = self.row_admits(row, sorts, frame);
+            let applies = self.conjunct_admits(conjunct, sorts, frame);
             let candidate = applies.map(|domains| {
-                let Type::Function { result, .. } = row else {
-                    unreachable!("rows are arrows");
+                let Type::Function { result, .. } = conjunct else {
+                    unreachable!("conjuncts are arrows");
                 };
                 Candidate {
                     domains,
@@ -2103,11 +2108,19 @@ impl<S: Clone> Infer<S> {
             self.rollback(mark);
             if let Some(candidate) = candidate {
                 candidates.push(candidate);
+                admitting.push(conjunct.clone());
             }
         }
         if candidates.is_empty() {
-            return Selection::NoApplicableRow;
+            return Selection::NoApplicableConjunct;
         }
+        // Contracts come from the conjuncts that could still serve this call, not
+        // from every conjunct in the table: an argument the caller has already
+        // pinned rules conjuncts out, and a conjunct ruled out imposes nothing. `x !=
+        // 0.5` keeps only the float conjunct, so `x` is a float — reading the
+        // whole table would see bool and string domains too and demand
+        // nothing at all.
+        let unions = self.domain_unions(&admitting, arity);
         // The unknown behind an open position, for aliasing: two positions
         // naming the same one enumerate together.
         #[derive(PartialEq)]
@@ -2125,10 +2138,10 @@ impl<S: Clone> Infer<S> {
         let mut open: Vec<(Unknown, Sort)> = Vec::new();
         let mut choices: Vec<Choice> = Vec::with_capacity(arity);
         let mut definite: Vec<Sort> = vec![Sort::NONE; arity];
-        for (position, ((sort, (argument, _)), broad)) in
-            sorts.iter().zip(&frame.positional).zip(&broad).enumerate()
+        for (position, ((sort, (argument, _)), unions)) in
+            sorts.iter().zip(&frame.positional).zip(&unions).enumerate()
         {
-            // A structural argument carries no sort of its own.
+            // A non-numeric argument carries no sort of its own.
             if sort.is_none() {
                 choices.push(Choice::Wild);
                 continue;
@@ -2151,7 +2164,7 @@ impl<S: Clone> Infer<S> {
                         Refinement::Ground(_) => unreachable!("ground sorts are non-empty"),
                     }
                 }
-                // Every row's domain here is numeric and the rows are all
+                // Every conjunct's domain here is numeric and the conjuncts are all
                 // the arms there are, so an unconstrained argument may be
                 // any numeric; `record_selection_contracts` is what commits
                 // it, once selection succeeds.
@@ -2163,13 +2176,13 @@ impl<S: Clone> Infer<S> {
                 }
             };
             // An unsolved argument is only narrowable where the table
-            // imposes a numeric contract at all. Where some row's domain is
+            // imposes a numeric contract at all. Where some conjunct's domain is
             // not numeric — `==` compares bools and strings as well as
-            // floats — `broad` is `None` and there is nothing to bound it
+            // floats — `unions` is `None` and there is nothing to bound it
             // to, so it decomposes into no atoms. A ground argument, or one
             // whose guarantees have arrived, has already been enumerated
             // above: what it holds is known whatever the table looks like.
-            if broad.is_none() {
+            if unions.is_none() {
                 choices.push(Choice::Wild);
                 continue;
             }
@@ -2265,7 +2278,7 @@ impl<S: Clone> Infer<S> {
             // With nothing open there is nothing to narrow: the call has no
             // arm.
             if groups == 0 {
-                return Selection::NoApplicableRow;
+                return Selection::NoApplicableConjunct;
             }
             for (slot, dropped) in dropped.iter().enumerate() {
                 let kept: Vec<Sort> = slots[slot]
@@ -2276,13 +2289,13 @@ impl<S: Clone> Infer<S> {
                     .map(|(atom, _)| *atom)
                     .collect();
                 if kept.is_empty() {
-                    return Selection::NoApplicableRow;
+                    return Selection::NoApplicableConjunct;
                 }
                 slots[slot].1 = kept;
             }
         }
         // Every surviving combination is covered; the result is the join of
-        // the distinct rows that cover them.
+        // the distinct conjuncts that cover them.
         let mut covers: Vec<usize> = Vec::new();
         combinations(&slots, arity, |_, atoms| {
             if let Some(index) = covering(&candidates, atoms)
@@ -2302,7 +2315,7 @@ impl<S: Clone> Infer<S> {
         let result = result.expect("at least one combination");
         // An open argument's contract is what coverage left it; everything
         // else takes the table's per-position union.
-        let mut contracts = broad;
+        let mut contracts = unions;
         for (positions, atoms) in &slots[..groups] {
             let narrowed = atoms
                 .iter()
@@ -2315,27 +2328,27 @@ impl<S: Clone> Infer<S> {
         Selection::Selected(result)
     }
 
-    /// Whether a row can participate in coverage at all: structural arguments
-    /// must subtype their domains, named parameters must line up as in
-    /// `row_applies`, and each position's contract sort is reported the same
-    /// way. Numeric positions are not judged here — coverage judges them atom
-    /// by atom.
-    fn row_admits(
+    /// Whether a conjunct can participate in coverage at all: non-numeric
+    /// arguments must subtype their domains, named parameters must line up as
+    /// in `conjunct_applies`, and each position's contract sort is reported the
+    /// same way. Numeric positions are not judged here — coverage judges them
+    /// atom by atom.
+    fn conjunct_admits(
         &mut self,
-        row: &Type,
+        conjunct: &Type,
         sorts: &[Option<Sort>],
         frame: &Frame<S>,
     ) -> Option<Vec<Sort>> {
         let Type::Function {
             positional, named, ..
-        } = row
+        } = conjunct
         else {
-            unreachable!("rows are arrows");
+            unreachable!("conjuncts are arrows");
         };
         let mut domains = Vec::with_capacity(positional.len());
         for ((sort, domain), (argument, _)) in sorts.iter().zip(positional).zip(&frame.positional) {
             // Numeric against numeric is coverage's job; every other pairing
-            // is judged exactly as `row_applies` judges it.
+            // is judged exactly as `conjunct_applies` judges it.
             let fits = match (sort, self.resolve(domain)) {
                 (Some(_), Type::Numeric(rep)) => {
                     domains.push(self.may_of(&rep));
@@ -2359,7 +2372,7 @@ impl<S: Clone> Infer<S> {
 
     /// Whether one argument fits one domain — sort containment for
     /// numeric domains, subtyping for the rest — and the contract sort the
-    /// domain imposes (⊤ for variable and structural domains). Subtyping
+    /// domain imposes (⊤ for variable and non-numeric domains). Subtyping
     /// solves state; callers snapshot.
     fn position_fits(
         &mut self,
@@ -2373,11 +2386,11 @@ impl<S: Clone> Infer<S> {
                 let domain = self.may_of(rep);
                 (sort.is_subset(domain), domain)
             }
-            // A structural argument never fits a numeric domain.
+            // A non-numeric argument never fits a numeric domain.
             (None, Type::Numeric(_)) => (false, Sort::TOP),
             // The recovery type accepts anything and imposes nothing.
             (_, Type::Dynamic) => (true, Sort::TOP),
-            // A variable domain is the row's own parameter, and the row's
+            // A variable domain is the conjunct's own parameter, and the conjunct's
             // result may be that same variable, so the argument has to
             // flow into it — the AS-Fun2 premise `check_frame` applies at
             // ordinary calls. Accepting without binding would leave the
@@ -2386,7 +2399,7 @@ impl<S: Clone> Infer<S> {
             (_, Type::Meta(_) | Type::Var(_)) => {
                 (self.subtype(argument, &resolved).is_ok(), Sort::TOP)
             }
-            // A numeric argument has no arm at a structural domain.
+            // A numeric argument has no arm at a non-numeric domain.
             (Some(_), _) => (false, Sort::TOP),
             (None, _) => (self.subtype(argument, &resolved).is_ok(), Sort::TOP),
         }
@@ -2422,7 +2435,7 @@ impl<S: Clone> Infer<S> {
             // Nothing has the call's shape: when the table is unambiguous
             // about its arity, report the arity mismatch the way
             // `check_frame` would.
-            Selection::NoMatchingRows => {
+            Selection::NoMatchingConjuncts => {
                 let mut arities: Vec<&Vec<Type>> = Vec::new();
                 for conjunct in conjuncts {
                     if let Type::Function { positional, .. } = conjunct
@@ -2446,28 +2459,31 @@ impl<S: Clone> Infer<S> {
                 self.error(message, &frame.span);
                 None
             }
-            Selection::NoApplicableRow => {
-                // When one argument alone rules out every row, pinpoint it
-                // the way `check_frame` would: report at that argument with
-                // the union of the domains it failed.
-                let rows: Vec<&Type> = conjuncts
+            Selection::NoApplicableConjunct => {
+                // TODO this case is pretty long... for just better error
+                // messages; re-evaluate whether or not all of this logic is
+                // necessary.
+                // When one argument alone rules out every conjunct, pinpoint it
+                // the way `check_frame` would: report at that argument with the
+                // union of the domains it failed.
+                let shaped: Vec<&Type> = conjuncts
                     .iter()
                     .filter(|conjunct| {
                         matches!(conjunct, Type::Function { positional, .. }
                             if positional.len() == frame.positional.len())
                     })
                     .collect();
-                // A table with exactly one row of the call's shape is a
+                // A table with exactly one conjunct of the call's shape is a
                 // plain arrow as far as the call is concerned, so let
                 // `check_frame` say precisely which argument is wrong. Its
-                // judgment is finer than applicability's sort containment
-                // and may find nothing to report, in which case the
-                // heuristics below still run.
-                let shaped: Vec<&&Type> = rows
+                // judgment is finer than applicability's sort containment and
+                // may find nothing to report, in which case the heuristics
+                // below still run.
+                let named_matching: Vec<&&Type> = shaped
                     .iter()
-                    .filter(|row| {
-                        let Type::Function { named, .. } = row else {
-                            unreachable!("rows are arrows");
+                    .filter(|conjunct| {
+                        let Type::Function { named, .. } = conjunct else {
+                            unreachable!("conjuncts are arrows");
                         };
                         named.len() == frame.named.len()
                             && named
@@ -2475,12 +2491,12 @@ impl<S: Clone> Infer<S> {
                                 .all(|(name, _)| frame.named.iter().any(|(n, _, _)| n == name))
                     })
                     .collect();
-                if let [row] = &shaped[..] {
+                if let [conjunct] = &named_matching[..] {
                     let Type::Function {
                         positional, named, ..
-                    } = **row
+                    } = **conjunct
                     else {
-                        unreachable!("rows are arrows");
+                        unreachable!("conjuncts are arrows");
                     };
                     let (positional, named) = (positional.clone(), named.clone());
                     let errors = self.errors.len();
@@ -2496,16 +2512,21 @@ impl<S: Clone> Infer<S> {
                     let may = self.may_of(&rep);
                     let mut union = Sort::NONE;
                     let mut sorted = true;
-                    for row in &rows {
-                        let Type::Function { positional, .. } = row else {
-                            unreachable!("rows are arrows");
+                    for conjunct in &shaped {
+                        let Type::Function { positional, .. } = conjunct else {
+                            unreachable!("conjuncts are arrows");
                         };
                         match self.resolve(&positional[position]) {
                             Type::Numeric(rep) => union = union.union(self.may_of(&rep)),
                             _ => sorted = false,
                         }
                     }
-                    if sorted && !rows.is_empty() && may.intersect(union).is_empty() {
+                    // `shaped`, not every conjunct: `union` is accumulated
+                    // from the shaped ones, so an empty set would leave it
+                    // `NONE`, which every argument fails to intersect —
+                    // reporting "expected nothing" at a position no conjunct
+                    // constrains.
+                    if sorted && !shaped.is_empty() && may.intersect(union).is_empty() {
                         let message = format!(
                             "expected {}, found {}",
                             Type::ground(union),
@@ -2524,14 +2545,14 @@ impl<S: Clone> Infer<S> {
                     }
                 }
                 // "Two seqs" names a *relational* gap: each position takes a
-                // seq on its own and the table simply has no row taking both.
-                // Where no row admits one at all — `==` compares floats, bools
+                // seq on its own and the table simply has no conjunct taking both.
+                // Where no conjunct admits one at all — `==` compares floats, bools
                 // and strings — the seqs are not the relation that failed, and
                 // the general message says more.
                 let admits_a_seq = |position: usize| {
-                    rows.iter().any(|row| {
-                        let Type::Function { positional, .. } = row else {
-                            unreachable!("rows are arrows");
+                    shaped.iter().any(|conjunct| {
+                        let Type::Function { positional, .. } = conjunct else {
+                            unreachable!("conjuncts are arrows");
                         };
                         matches!(self.resolve(&positional[position]), Type::Numeric(rep)
                             if !self.may_of(&rep).intersect(Sort::SEQ).is_empty())
@@ -2577,17 +2598,17 @@ impl<S: Clone> Infer<S> {
     /// requirements.
     fn record_selection_contracts(&mut self, frame: &Frame<S>, domains: &[Option<Sort>]) {
         for ((argument, span), domain) in frame.positional.iter().zip(domains) {
-            // No contract where some row's domain is structural or
-            // unknown: that row may accept non-numeric values, so the
+            // No contract where some conjunct's domain is non-numeric or
+            // unknown: that conjunct may accept non-numeric values, so the
             // table demands nothing of the argument.
             let Some(domain) = domain else { continue };
             let found = match self.resolve(argument) {
                 Type::Numeric(rep) => rep,
                 // An unconstrained argument commits to numeric here — every
-                // row's domain at this position is numeric, and the table's
-                // rows are all the runtime arms there are — so it becomes a
-                // refinement variable under the same contract (mirroring
-                // `subtype`'s meta-meets-numeric arms).
+                // conjunct's domain at this position is numeric, and the
+                // table's conjuncts are all the runtime arms there are — so it
+                // becomes a refinement variable under the same contract
+                // (mirroring `subtype`'s meta-meets-numeric arms).
                 Type::Meta(meta) => {
                     let fresh = self.fresh_refinement();
                     self.solve(meta, Type::Numeric(fresh.clone()));
@@ -2633,9 +2654,9 @@ impl<S: Clone> Infer<S> {
             );
         }
         // Arguments carrying tabulated tables (intersections) check after
-        // the rest, so row selection sees the sibling arguments' flows
+        // the rest, so conjunct selection sees the sibling arguments' flows
         // first — e.g. a fold's seed constrains the accumulator before
-        // the fold function's row is chosen.
+        // the fold function's conjunct is chosen.
         let table = |infer: &Self, ty: &Type| match infer.resolve(ty) {
             Type::And(_) => true,
             Type::Forall(_, body) => matches!(*body, Type::And(_)),
@@ -2816,7 +2837,7 @@ impl<S: Clone> Infer<S> {
                 context.truncate(depth);
                 // ABS at every abstraction: an unapplied lambda is tabulated
                 // wherever it stands, not only as a definition's right-hand
-                // side or a row's body. A lambda reached through a `let`
+                // side or a conjunct's body. A lambda reached through a `let`
                 // chain — `fn(a) => let x = ... in fn(w) => ...` — is
                 // neither, and it is a shape the library is written in.
                 if unapplied && let Some(table) = self.tabulate(context, expr, &result, None) {
@@ -3163,28 +3184,28 @@ impl<S: Clone> Infer<S> {
     }
 }
 
-/// Coalesces tabulated rows: two rows that differ at just one numeric domain
-/// position and agree on the result merge into one row with the union domain
-/// there — e.g. `({I}) -> float ∧ ({NonInt}) -> float` becomes `(float) ->
-/// float`. Purely a simplification: selection reads the merged table the same
-/// way, and displays stay legible.
-fn merge_rows(mut rows: Vec<Type>) -> Vec<Type> {
+/// Coalesces tabulated conjuncts: two conjuncts that differ at just one numeric
+/// domain position and agree on the result merge into one conjunct with the
+/// union domain there — e.g. `({I}) -> float ∧ ({NonInt}) -> float` becomes
+/// `(float) -> float`. Purely a simplification: selection reads the merged
+/// table the same way, and displays stay legible.
+fn merge_conjuncts(mut conjuncts: Vec<Type>) -> Vec<Type> {
     'restart: loop {
-        for i in 0..rows.len() {
-            for j in (i + 1)..rows.len() {
-                if let Some(merged) = merge_pair(&rows[i], &rows[j]) {
-                    rows[i] = merged;
-                    rows.remove(j);
+        for i in 0..conjuncts.len() {
+            for j in (i + 1)..conjuncts.len() {
+                if let Some(merged) = merge_pair(&conjuncts[i], &conjuncts[j]) {
+                    conjuncts[i] = merged;
+                    conjuncts.remove(j);
                     continue 'restart;
                 }
             }
         }
-        return rows;
+        return conjuncts;
     }
 }
 
-/// Returns the union of rows `a` and `b` when they agree everywhere except at
-/// most one numeric ground domain position (positional or named).
+/// Returns the union of conjuncts `a` and `b` when they agree everywhere except
+/// at most one numeric ground domain position (positional or named).
 fn merge_pair(a: &Type, b: &Type) -> Option<Type> {
     let (
         Type::Function {
@@ -3383,7 +3404,7 @@ mod tests {
     // A lambda argument's table meets map's ∀ instantiation: the list
     // checks first (`check_frame` defers table-typed arguments), so the
     // element variable already holds {I} when the table is selected
-    // against `(a) -> b`, and the int row covers it.
+    // against `(a) -> b`, and the int conjunct covers it.
     #[test]
     fn map_over_a_lambda_argument() {
         assert_clean("map(fn(x) => x + 1, [1, 2])");
@@ -3467,7 +3488,7 @@ mod tests {
         // may fold to a constant, hence the union in the message).
         assert_errors("sine(440, 0) \\ 1", &["expected seq, found waveform"]);
         // Arithmetic threads a seq operand through (`binary_op`'s seq
-        // rows), so seq-ness survives to the following `\`.
+        // conjuncts), so seq-ness survives to the following `\`.
         assert_clean("(seq(0)(sine(440, 0)) * 0.5) \\ 1");
     }
 
@@ -3503,7 +3524,7 @@ mod tests {
     }
 
     // Freeman §4: definition-bound numeric functions tabulate into
-    // intersections of arrows, one row per applicable atom vector.
+    // intersections of arrows, one conjunct per applicable atom vector.
     #[test]
     fn tabulated_definitions() {
         // Result precision at a direct call: double(2) is an int, and an
@@ -3513,7 +3534,7 @@ mod tests {
             &["expected seq, found int"],
         );
         // The missing (seq, seq) arm of + is relational and survives the
-        // definition boundary: double has no seq row at all.
+        // definition boundary: double has no seq conjunct at all.
         assert_errors(
             "let double = fn(x) => x + x in double(seq(0)(1))",
             &["expected waveform, found seq"],
@@ -3531,14 +3552,14 @@ mod tests {
     #[test]
     fn tabulated_argument_lambdas() {
         // In argument position the table is read distributively (the
-        // union of its rows), so a mixed list stays silent...
+        // union of its conjuncts), so a mixed list stays silent...
         assert_clean("map(fn(x) => x * 0.5, [time, 2])");
         // ...and a seq element is fine where the body threads seqs...
         assert_clean("map(fn(x) => x * 2, [seq(0)(1)])");
-        // ...but errors where no row accepts one: x + x has no seq row.
+        // ...but errors where no conjunct accepts one: x + x has no seq conjunct.
         // The list is checked before the table (see `check_frame`), so
         // the message shows the seq flowing into the expected arrow
-        // against the rows the function actually has.
+        // against the conjuncts the function actually has.
         assert_errors(
             "map(fn(x) => x + x, [seq(0)(1)])",
             &[
@@ -3547,20 +3568,20 @@ mod tests {
         );
     }
 
-    // Mixed parameter lists: numeric parameters tabulate while structural ones
+    // Mixed parameter lists: numeric parameters tabulate while non-numeric ones
     // ride along as quantified unknowns.
     #[test]
     fn tabulated_mixed_parameters() {
-        // The fold's accumulator row is precise: an int seed selects the
-        // int row, so the result is definitely not a seq.
+        // The fold's accumulator conjunct is precise: an int seed selects the
+        // int conjunct, so the result is definitely not a seq.
         assert_errors(
             "reduce(fn(acc, x) => acc + 1, 0, [1, 2]) \\ 1",
             &["expected seq, found int"],
         );
-        // The seed is checked before the table, so a float seed selects
-        // the float row rather than erroring against the int row.
+        // The seed is checked before the table, so a float seed selects the
+        // float conjunct rather than erroring against the int conjunct.
         assert_clean("reduce(fn(acc, x) => acc + 1, 0.5, [1, 2])");
-        // A structural domain solved by the body (xs used as a list)
+        // A non-numeric domain solved by the body (xs used as a list)
         // participates in selection at direct calls.
         assert_clean("let pick = fn(n, xs) => nth(n, xs) in pick(1, [1, 2])");
         assert_errors(
@@ -3569,14 +3590,14 @@ mod tests {
         );
     }
 
-    // A structural domain the body leaves *unsolved* stays a bare variable
-    // in every row, and that variable is also the row's result. Selection
-    // binds it like any other parameter, so the call's result is the
+    // A non-numeric domain the body leaves *unsolved* stays a bare variable in
+    // every conjunct, and that variable is also the conjunct's result.
+    // Selection binds it like any other parameter, so the call's result is the
     // argument's type rather than an unknown the caller may solve at will.
     #[test]
     fn variable_domains_bind_their_argument() {
         // f : ('a, int) -> 'a ∧ ('b, float) -> 'b — `x` is only passed
-        // through, so no row constrains it.
+        // through, so no conjunct constrains it.
         let f = "let f = fn(x, n) => if n > 0 then x else x in ";
         assert_clean(&format!("{}nth(f(1, 1), [1, 2])", f));
         assert_errors(
@@ -3589,7 +3610,7 @@ mod tests {
             &["expected int, found seq"],
         );
         // An omitted named argument puts the same shape on the coverage
-        // path, where rows are candidates rather than applying outright.
+        // path, where conjuncts are candidates rather than applying outright.
         let g = "let g = fn(x, k = 2) => x in ";
         assert_clean(&format!("{}nth(g(1), [1, 2])", g));
         assert_errors(
@@ -3610,17 +3631,17 @@ mod tests {
         // An int default still admits float and waveform arguments...
         assert_clean(&format!("{}f(x = time)", f));
         assert_clean(&format!("{}f(x = 0.5)", f));
-        // ...while the body's missing seq row still rejects a seq.
+        // ...while the body's missing seq conjunct still rejects a seq.
         assert_errors(
             &format!("{}f(x = seq(0)(1))", f),
             &["no use of f accepts (x = seq)"],
         );
         // An omitted argument takes the default; the join of the table
-        // covers it, so no single row's result is claimed.
+        // covers it, so no single conjunct's result is claimed.
         assert_clean(&format!("{}f()", f));
         // Result precision flows through a supplied named argument.
         assert_errors(&format!("{}f(x = 2) \\ 1", f), &["expected seq, found int"]);
-        // A default the body cannot accept leaves the omitted row out of the
+        // A default the body cannot accept leaves the omitted conjunct out of the
         // table, and a call may always omit it, so the definition is what is
         // reported.
         assert_errors(
@@ -3710,14 +3731,14 @@ mod tests {
             "unfold(fn(v) => time, [1, 2], 2)",
             &["expected waveform, found [int]"],
         );
-        // The supplied row carries the caller's element type through to the
+        // The supplied conjunct carries the caller's element type through to the
         // result, so this is caught where the result is used rather than at
         // the argument.
         assert_errors(
             "let f = fn(k = [1, 2]) => nth(0, k) in nth(f(k = [time]), [1, 2])",
             &["expected int, found waveform"],
         );
-        // The omitted row keeps the default's type, so a call that leaves
+        // The omitted conjunct keeps the default's type, so a call that leaves
         // the argument out still gets the default's result.
         assert_errors(
             "let f = fn(k = [1, 2]) => nth(0, k) in f() \\ 1",
@@ -3727,12 +3748,12 @@ mod tests {
 
     // A call that omits a named argument gets the value the default
     // supplies, so tabulation gives every named parameter an "omitted"
-    // choice: a row that leaves the name off and checks the body at the
-    // default's own type. Selection matches the row's names against the
-    // call's, so the omitted row answers only for calls that omit.
+    // choice: a conjunct that leaves the name off and checks the body at the
+    // default's own type. Selection matches the conjunct's names against the
+    // call's, so the omitted conjunct answers only for calls that omit.
     #[test]
     fn omitted_named_arguments_take_their_default() {
-        // The default's sort decides the result, not the first row's.
+        // The default's sort decides the result, not the first conjunct's.
         assert_errors(
             "let f = fn(k = time) => k in nth(f(), [1, 2, 3])",
             &["expected int, found waveform"],
@@ -3750,8 +3771,8 @@ mod tests {
             "let f = fn(a, b = 1, c = time) => a + b + c in nth(f(1), [1, 2, 3])",
             &["expected int, found waveform"],
         );
-        // A supplied argument overrides the default and selects the row
-        // that declares the name — the omitted row must not answer for it.
+        // A supplied argument overrides the default and selects the conjunct
+        // that declares the name — the omitted conjunct must not answer for it.
         assert_clean("let f = fn(k = 2) => k in nth(f(k = 1), [1, 2, 3])");
         assert_errors(
             "let f = fn(k = 2) => k in nth(f(k = time), [1, 2, 3])",
@@ -3784,7 +3805,7 @@ mod tests {
     // curried definition is tabulated at each arrow rather than only at the
     // outermost. Without that the inner parameter stays an unsolved
     // variable and selection falls back on its wildcard path, which reads
-    // the first row's result whatever the argument turns out to be.
+    // the first conjunct's result whatever the argument turns out to be.
     #[test]
     fn curried_definitions_tabulate_at_every_arrow() {
         let add = "let add = fn(a) => fn(b) => a + b in ";
@@ -3796,7 +3817,7 @@ mod tests {
         );
         assert_clean(&format!("{}nth(add(1)(2), [1, 2, 3])", add));
         // The relational gap survives the currying: `+` has no (seq, seq)
-        // row, and partial application does not lose that.
+        // conjunct, and partial application does not lose that.
         assert_clean(&format!("{}add(seq(0)(1))", add));
         assert_errors(
             &format!("{}add(seq(0)(1))(seq(0)(2))", add),
@@ -3812,8 +3833,8 @@ mod tests {
     }
 
     // Defaults are inferred once, outside the vectors, so an error in one is
-    // reported even when the rows themselves check out — the base pass's
-    // summary is dropped in favor of the rows, and a default depends on no
+    // reported even when the conjuncts themselves check out — the base pass's
+    // summary is dropped in favor of the conjuncts, and a default depends on no
     // parameter, so it is not part of that summary.
     #[test]
     fn a_default_that_does_not_check_is_reported_at_the_definition() {
@@ -3828,9 +3849,9 @@ mod tests {
     #[test]
     fn coarse_tabulation_beyond_the_cap() {
         let f = "let f = fn(a, b, c, d, e) => a + b + c + d + e in ";
-        // A single seq threads through the fold of + rows...
+        // A single seq threads through the fold of + conjuncts...
         assert_clean(&format!("{}f(1, 2, 3, seq(0)(4), 5) \\ 1", f));
-        // ...but two seqs have no row, even though each position alone
+        // ...but two seqs have no conjunct, even though each position alone
         // admits one.
         assert_errors(
             &format!("{}f(1, 2, 3, seq(0)(4), seq(0)(5))", f),
@@ -3849,7 +3870,7 @@ mod tests {
         assert_clean("0.5 == 1");
         assert_clean("true != false");
         assert_clean("\"a\" == \"b\"");
-        // A constant compares as the number it is, so the numeric row is
+        // A constant compares as the number it is, so the numeric conjunct is
         // `float`: a non-constant waveform has no arm.
         assert_errors("time == 1", &["no use of == accepts (waveform, int)"]);
         assert_errors(
@@ -3864,7 +3885,7 @@ mod tests {
         assert_errors("1 == true", &["no use of == accepts (int, bool)"]);
         // Two seqs get the general message, not the relational one: "cannot
         // combine two seqs" is for a table that takes a seq on either side
-        // and simply has no row taking both, which is `+` and not `==`.
+        // and simply has no conjunct taking both, which is `+` and not `==`.
         let seq = "(time | seq(time - 1))";
         assert_errors(
             &format!("{} == {}", seq, seq),
@@ -3886,32 +3907,32 @@ mod tests {
         );
         // Ground containment still passes what it should.
         assert_clean("exp(2) + sine(440, 0)");
-        // Atom coverage: no single row contains waveform-or-seq, but the
-        // waveform and seq atoms are covered by different rows.
+        // Atom coverage: no single conjunct contains waveform-or-seq, but the
+        // waveform and seq atoms are covered by different conjuncts.
         assert_clean("(if true then time else seq(0)(1)) * 1");
         // A definitely-uncovered atom still rejects.
         assert_errors("seq(0)(1) + seq(0)(2)", &["cannot combine two seqs with +"]);
         // Unconstrained parameters defer: the base pass records contracts
-        // instead of judging ⊤, and the tabulated rows judge per atom.
+        // instead of judging ⊤, and the tabulated conjuncts judge per atom.
         assert_clean("let f = fn(x) => x + 1 in f(time)");
         // Dynamic passes without imposing or cascading.
         assert_clean("debug(1) + 1");
         // A guarantee already seen is judged, deferred or not: the default
-        // flows into x before the body's seq contract, and the row it would
-        // have made is the one tabulation drops — which is reported, since
-        // no call can avoid omitting.
+        // flows into x before the body's seq contract, and the conjunct it
+        // would have made is the one tabulation drops — which is reported,
+        // since no call can avoid omitting.
         assert_errors(
             "fn(x = 100) => x \\ 1",
             &["default value for \"x\" cannot be used in the body"],
         );
     }
 
-    // A position where some row's domain is structural or unknown imposes
+    // A position where some conjunct's domain is non-numeric or unknown imposes
     // no numeric contract: a fold whose combiner ignores its element
     // parameter leaves the list's element type polymorphic (std's len),
     // so the same list's elements can still be used as waveforms.
     #[test]
-    fn structural_domains_impose_no_numeric_contract() {
+    fn non_numeric_domains_impose_no_numeric_contract() {
         assert_clean(
             "let count = fn(xs) => reduce(fn(acc, x) => acc + 1, 0, xs) in \
              let f = fn(xs) => (count(xs), map(fn(x) => sine(x, 0), xs)) in \
@@ -3940,7 +3961,7 @@ mod tests {
 
     // Selection against a variable that receives the arrow's own result
     // (`a → a`) iterates to a fixed point instead of committing to the seed's
-    // row — the float seed's doubled results stay floats, not rejections.
+    // conjunct — the float seed's doubled results stay floats, not rejections.
     #[test]
     fn fixed_point_selection() {
         assert_clean("unfold(fn(n) => n * 2, 65.41, 9)");
@@ -3956,22 +3977,22 @@ mod tests {
         );
     }
 
-    // Coverage (`select_by_atoms`): when no single row contains an
-    // argument's sort, its atoms decompose and every combination must
-    // find its own row.
+    // Coverage (`select_by_atoms`): when no single conjunct contains an
+    // argument's sort, its atoms decompose and every combination must find its
+    // own conjunct.
     #[test]
     fn coverage_selection() {
-        // {W,S} spans the waveform and seq rows of `*`: accepted, and the
-        // covering rows' results join — the result is waveform-or-seq,
-        // not one row's claim, as `\`'s rejection then shows. (It may
-        // still be a seq, so no single argument is pinpointed.)
+        // {W,S} spans the waveform and seq conjuncts of `*`: accepted, and the
+        // covering conjuncts' results join — the result is waveform-or-seq, not
+        // one conjunct's claim, as `\`'s rejection then shows. (It may still be
+        // a seq, so no single argument is pinpointed.)
         assert_clean("(if true then time else seq(0)(1)) * 2");
         assert_errors(
             "((if true then time else seq(0)(1)) * 2) \\ 1",
             &["no use of \\ accepts (waveform or seq, int)"],
         );
         // Each argument alone is covered, but the (seq, seq) combination
-        // has no row: coverage judges combinations, not positions.
+        // has no conjunct: coverage judges combinations, not positions.
         assert_errors(
             "(if true then 1 else seq(0)(1)) + (if true then 2 else seq(0)(2))",
             &["no use of + accepts (int or seq, int or seq)"],
@@ -4196,10 +4217,10 @@ mod tests {
     fn branches_join_two_tables_row_by_row() {
         let tables = "let g = fn(v) => v + 1 in let h = fn(v) => v | fin(4) in ";
         // `h` takes waveforms and seqs, `g` takes anything; the branch offers
-        // a row wherever the two overlap, at the join of their results.
+        // a conjunct wherever the two overlap, at the join of their results.
         assert_clean(&format!("{}(if true then g else h)(time)", tables));
         assert_clean(&format!("{}(if true then g else h)(0.5)", tables));
-        // The rows really are per-domain: at an int both are possible, so the
+        // The conjuncts really are per-domain: at an int both are possible, so the
         // result is either's.
         assert_errors(
             &format!("{}nth((if true then g else h)(1), [1, 2, 3])", tables),
@@ -4336,9 +4357,9 @@ mod tests {
     /// The soundness theorem as a regression test, over the library corpus: no
     /// clean program may evaluate to an error outside the declared
     /// residue. Covers every module as a program root, and every exported
-    /// function applied once per table row at representative arguments — the
+    /// function applied once per table conjunct at representative arguments — the
     /// tabulated analog of the builtin conformance test, checking result sorts
-    /// against the rows. Resolves modules for the differential harness; a
+    /// against the conjuncts. Resolves modules for the differential harness; a
     /// generic fn item so each call site can pick its own lifetime (the
     /// synthesized binding vectors are call-site-local).
     fn diff_resolve<'a>(
@@ -4396,7 +4417,7 @@ mod tests {
             }
             calls += 1;
         }
-        // Every exported function applied once per all-numeric table row.
+        // Every exported function applied once per all-numeric table conjunct.
         // The calls batch into one synthesized module per library module —
         // one check and one evaluation for all of them — with a
         // distinct source id per call for attribution.
@@ -4420,14 +4441,14 @@ mod tests {
                     Type::Forall(_, body) => &**body,
                     other => other,
                 };
-                let rows: Vec<&Type> = match body {
-                    Type::And(rows) => rows.iter().collect(),
+                let conjuncts: Vec<&Type> = match body {
+                    Type::And(conjuncts) => conjuncts.iter().collect(),
                     other => vec![other],
                 };
-                for row in rows {
+                for conjunct in conjuncts {
                     let Type::Function {
                         positional, result, ..
-                    } = row
+                    } = conjunct
                     else {
                         continue;
                     };
@@ -4503,7 +4524,7 @@ mod tests {
                         {
                             assert!(
                                 actual.is_subset(declared),
-                                "{:?}: runtime sort {} outside the row's declared {}",
+                                "{:?}: runtime sort {} outside the conjunct's declared {}",
                                 text,
                                 actual,
                                 declared
@@ -4548,7 +4569,7 @@ mod tests {
                         {
                             assert!(
                                 actual.is_subset(*declared),
-                                "{:?}: runtime sort {} outside the row's declared {}",
+                                "{:?}: runtime sort {} outside the conjunct's declared {}",
                                 text,
                                 actual,
                                 declared
@@ -4569,7 +4590,7 @@ mod tests {
             "differential: {} programs, {} true positives, {} residue hits",
             calls, true_positives, residue
         );
-        // The harness must be exercising real applied rows.
+        // The harness must be exercising real applied conjuncts.
         assert!(calls >= 40, "only {} programs checked", calls);
     }
 
@@ -4613,9 +4634,9 @@ mod tests {
 
     #[test]
     fn a_default_that_does_not_work_is_reported() {
-        // Every named argument may be left out, so the row that omits one is
-        // the only row some calls can reach. When the default does not check,
-        // that row is dropped and the table quietly keeps the rows that need
+        // Every named argument may be left out, so the conjunct that omits one is
+        // the only conjunct some calls can reach. When the default does not check,
+        // that conjunct is dropped and the table quietly keeps the conjuncts that need
         // the argument supplied — which `check_frame` then lets an omitting
         // call through, since a named parameter is optional by construction.
         // The definition is where this can be said.
@@ -4632,7 +4653,7 @@ mod tests {
         // A default the body can use is fine, supplied or not.
         assert_clean("let f = fn(x = 100) => x + 1 in f()");
         assert_clean("let f = fn(x = 100) => x + 1 in f(x = time)");
-        // And a row dropped for an *atom* is not reported: a caller can
+        // And a conjunct dropped for an *atom* is not reported: a caller can
         // simply not pass a seq there.
         assert_clean("let f = fn(x = 1) => sqrt(x) in f(x = 4)");
     }
@@ -4644,13 +4665,13 @@ mod tests {
         // helpers carry, which is the shape the checker must reject.
         //
         // `{...}` mixes waveforms, so an instrument handing back a seq makes
-        // the mix fail at run time. Nothing here says which of `amp`'s rows
+        // the mix fail at run time. Nothing here says which of `amp`'s conjuncts
         // the mapped element takes, so it summarises to everything `amp`
         // covers and the mix rejects it. Two details are load-bearing and the
         // gap does not show without either: the triad must be tabulated, so
-        // that selecting a row with an unsolved element takes the coverage
+        // that selecting a conjunct with an unsolved element takes the coverage
         // join, and the `| seq(time - dur)` tail must be present, so that
-        // every row of the innermost lambda fails and the broad base-pass
+        // every conjunct of the innermost lambda fails and the unions base-pass
         // summary is what reports.
         let parts = "let amp = fn(a) => fn(w) => a * w in \
                      let triad = fn(root) => fn(fw) => [fw(root), fw(root + 4), fw(root + 7)] in ";
@@ -4685,15 +4706,35 @@ mod tests {
     }
 
     #[test]
+    fn a_sibling_argument_narrows_the_table() {
+        // `!=` compares floats, bools or strings. A float on one side leaves
+        // only the float conjunct, so the other side is a float — reading the
+        // whole table would see the bool and string domains too and demand
+        // nothing, letting a seq through to a runtime failure.
+        assert_errors(
+            "nth(fn(x) => (x != 0.5), [1, 2])",
+            &["expected int, found (float) -> bool"],
+        );
+        assert_errors(
+            "let ap = fn(f, v) => f(v) in ap(fn(x) => (x != 0.5), (time | seq(time - 1)))",
+            &["expected float, found seq"],
+        );
+        assert_clean("let ap = fn(f, v) => f(v) in ap(fn(x) => (x != 0.5), 1.5)");
+        // Two unknowns narrow nothing, so the table demands nothing — the
+        // residue N12 records.
+        assert_clean("let f = fn(x) => fn(y) => 1 in f(1)(2)");
+    }
+
+    #[test]
     fn a_named_default_does_not_pin_its_parameter() {
         // A named parameter's type comes from the body's use of it. The
         // default is only what a call that omits the argument gets, so it
-        // decides the omitted row and nothing else.
+        // decides the omitted conjunct and nothing else.
         assert_clean("let f = fn(k = true) => 1 in f(k = 0.5)");
         assert_clean("let f = fn(k = true) => k in f(k = 0.5)");
         assert_clean("let f = fn(k = [1, 2]) => 1 in f(k = [time])");
         assert_clean("let f = fn(k = sqrt) => 1 in f(k = cos)");
-        // The omitted row is the default's own type, which is what keeps
+        // The omitted conjunct is the default's own type, which is what keeps
         // this sound: a call that leaves the argument out gets the result
         // the default produces, not a fresh unknown.
         assert_errors(
