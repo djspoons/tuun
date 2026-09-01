@@ -3129,7 +3129,16 @@ impl<S: Clone> Infer<S> {
                     }
                 },
                 Binding::Use(path) => {
-                    let Some(name) = path.last() else { continue };
+                    // Evaluation refuses this, so the checker must too: the
+                    // parser only produces an empty path when the path
+                    // failed to parse, and it reports that itself.
+                    let Some(name) = path.last() else {
+                        self.error(
+                            "`use` requires a module path".to_string(),
+                            &source_binding.span,
+                        );
+                        continue;
+                    };
                     let module = match resolve(path) {
                         Ok(module) => module,
                         Err(error) => {
@@ -4811,6 +4820,25 @@ mod tests {
             &["expected int, found string"],
         );
         assert_clean("let f = fn(a, b) => nth(a, b) in f(1, [1, 2])");
+    }
+
+    #[test]
+    fn a_use_without_a_path_is_reported() {
+        // The parser only builds an empty path when the path failed to
+        // parse, so this is unreachable from source — but the checker must
+        // not accept a binding evaluation refuses.
+        let bindings: Vec<SourceBinding<u32, u32>> = vec![Binding::Use(Vec::new()).into()];
+        let expr = parse_program::<u32, _>("0", 9999).unwrap();
+        let resolve =
+            |path: &[String]| Err(Error::eval_here(format!("no module {}", path.join("."))));
+        let errors = check_program(resolve, &bindings, &expr, None);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message().contains("requires a module path")),
+            "expected a report, got {:?}",
+            errors.iter().map(|e| e.message()).collect::<Vec<_>>()
+        );
     }
 
     #[test]
