@@ -196,6 +196,13 @@ type TypeContext = Vec<(String, ContextEntry)>;
 /// 4^4, covering functions of up to four numeric parameters.
 const MAX_TABULATION_VECTORS: usize = 512;
 
+/// The most rounds selection may take to reach a fixed point.
+///
+/// Each round that changes anything grows a variable's guarantees within the
+/// four-atom lattice, so convergence is bounded by its height; this is the
+/// backstop, not the budget.
+const MAX_SELECTION_ROUNDS: usize = 8;
+
 /// The four atoms of the sort lattice, most specific first.
 const FULL_ATOMS: [Sort; 4] = [
     Sort::INT,
@@ -1291,7 +1298,22 @@ impl<S: Clone> Infer<S> {
                         .map(|id| self.refs[*id as usize].lower)
                         .collect();
                     iterations += 1;
-                    if before == after || iterations >= 8 {
+                    if before == after {
+                        break outcome;
+                    }
+                    // Each round that does not settle grows some variable's
+                    // guarantees, and a sort has four atoms, so one variable
+                    // can grow at most four times before it is ⊤. The bound
+                    // is a backstop against a mistake in that reasoning, not
+                    // a budget: reaching it means the iteration is not the
+                    // ascending chain it is meant to be, and the result
+                    // would be whatever the last round happened to leave.
+                    debug_assert!(
+                        iterations < MAX_SELECTION_ROUNDS,
+                        "selection did not converge within {} rounds",
+                        MAX_SELECTION_ROUNDS
+                    );
+                    if iterations >= MAX_SELECTION_ROUNDS {
                         break outcome;
                     }
                     self.rollback(mark);
