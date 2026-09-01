@@ -508,7 +508,7 @@ where
 fn module_exports<'a, M, S, F>(
     resolve: &F,
     module: &'a [SourceBinding<M, S>],
-    open: &mut Vec<usize>,
+    open: &mut Vec<(usize, usize)>,
     path: &[String],
     span: &Option<Span<S>>,
 ) -> Result<Vec<ContextEntry<M, S>>, Error<S>>
@@ -517,7 +517,7 @@ where
     M: Clone + Display + Debug,
     S: Clone + Debug,
 {
-    let key = module.as_ptr() as usize;
+    let key = (module.as_ptr() as usize, module.len());
     if open.contains(&key) {
         return Err(Error::eval(
             format!("module '{}' is opened from itself", path.join(".")),
@@ -535,7 +535,7 @@ fn build_context<'a, M, S, F>(
     resolve: &F,
     bindings: &'a [SourceBinding<M, S>],
     context: &mut Vec<ContextEntry<M, S>>,
-    open: &mut Vec<usize>,
+    open: &mut Vec<(usize, usize)>,
 ) -> Result<Vec<ContextEntry<M, S>>, Error<S>>
 where
     F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,

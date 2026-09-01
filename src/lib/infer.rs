@@ -286,9 +286,21 @@ enum Undo {
 /// Marks nest LIFO: roll back an inner mark before an outer one.
 struct Mark(usize);
 
+/// Identifies a module by the slice it was resolved to.
+///
+/// Both halves matter: a start address alone would confuse two modules that
+/// share one — every empty module has the same dangling pointer, and a slice
+/// may begin where a longer one does.
+type ModuleKey = (usize, usize);
+
 /// What a module exports, once built; `None` while it is still being built,
 /// which is how a cycle is caught.
-type ModuleMemo = HashMap<usize, Option<Vec<(String, ContextEntry)>>>;
+type ModuleMemo = HashMap<ModuleKey, Option<Vec<(String, ContextEntry)>>>;
+
+/// Returns the key identifying `module`.
+fn module_key<M, S>(module: &[SourceBinding<M, S>]) -> ModuleKey {
+    (module.as_ptr() as usize, module.len())
+}
 
 impl<S: Clone> Infer<S> {
     fn new() -> Infer<S> {
@@ -3163,7 +3175,7 @@ impl<S: Clone> Infer<S> {
     where
         F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
     {
-        let key = module.as_ptr() as usize;
+        let key = module_key(module);
         match memo.get(&key) {
             Some(Some(exports)) => return exports.clone(),
             // Reached while still building: the module opens something that
@@ -4777,6 +4789,44 @@ mod tests {
             &["expected int, found string"],
         );
         assert_clean("let f = fn(a, b) => nth(a, b) in f(1, [1, 2])");
+    }
+
+    #[test]
+    fn modules_sharing_a_start_address_are_told_apart() {
+        // A prefix of a module's bindings starts where the module does, so a
+        // key of the pointer alone would make the two the same module: the
+        // first one built would answer for both, and the second's exports
+        // would never be seen.
+        let (whole, _) = parse_module::<u32, _>("x = 1;\ny = 2;\n", 0u32).unwrap();
+        let prefix = &whole[..1];
+        assert_eq!(
+            whole.as_ptr() as usize,
+            prefix.as_ptr() as usize,
+            "the prefix should share the module's start address"
+        );
+        let resolve = |path: &[String]| match path.join(".").as_str() {
+            "whole" => Ok(&whole[..]),
+            "prefix" => Ok(prefix),
+            other => Err(Error::eval_here(format!("no module {}", other))),
+        };
+        // `whole` exports both names; `prefix` only the first. Opening both
+        // must not let one stand in for the other.
+        let (bindings, _) = parse_module::<u32, _>("use whole;\nuse prefix;\n", 9998u32).unwrap();
+        let expr = parse_program::<u32, _>("(whole.y, prefix.x)", 9999).unwrap();
+        let errors = check_program(resolve, &bindings, &expr, None);
+        assert!(
+            errors.is_empty(),
+            "each module should keep its own exports, got {:?}",
+            errors.iter().map(|e| e.message()).collect::<Vec<_>>()
+        );
+        // And the name the prefix does not export is still absent from it.
+        let expr = parse_program::<u32, _>("prefix.y", 9999).unwrap();
+        let errors = check_program(resolve, &bindings, &expr, None);
+        assert!(
+            errors.iter().any(|error| error.message().contains("y")),
+            "expected the prefix to lack 'y', got {:?}",
+            errors.iter().map(|e| e.message()).collect::<Vec<_>>()
+        );
     }
 
     #[test]
