@@ -291,7 +291,10 @@ enum Undo {
 
 /// A point in the solver's history; everything after it can be rolled back.
 /// Marks nest LIFO: roll back an inner mark before an outer one.
-struct Mark(usize);
+struct Mark {
+    journal: usize,
+    errors: usize,
+}
 
 /// Identifies a module by the slice it was resolved to.
 ///
@@ -360,12 +363,22 @@ impl<S: Clone> Infer<S> {
 
     /// The current point in the solver's history, for `rollback`.
     fn mark(&self) -> Mark {
-        Mark(self.journal.len())
+        Mark {
+            journal: self.journal.len(),
+            errors: self.errors.len(),
+        }
     }
 
     /// Undoes every solver step recorded since `mark`.
     fn rollback(&mut self, mark: Mark) {
-        while self.journal.len() > mark.0 {
+        // Errors are part of what a speculative path produces, so undoing
+        // the path undoes them: a probe that reports and is then abandoned
+        // would otherwise leave its complaint behind, about a reading of the
+        // program the checker went on to reject. `tabulate` already truncates
+        // per conjunct for that reason; doing it here covers the subtyping
+        // probes too.
+        self.errors.truncate(mark.errors);
+        while self.journal.len() > mark.journal {
             match self.journal.pop().expect("journal is non-empty") {
                 Undo::Solved(id) => {
                     self.subst.remove(&id);
