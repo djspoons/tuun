@@ -1,29 +1,35 @@
-//! The tuun type language used by the static checker.
+//! The tuun type language: a predicative polymorphic lambda calculus extended
+//! with:
 //!
-//! Types never appear in tuun's concrete syntax; they exist only inside the
-//! checker (see [`crate::infer`]) and in the text of its errors.
+//!  * Compound types: lists, tuples, and modules (a limited form of record)
+//!  * Multiple parameter functions with optional named parameters
+//!  * Intersection types (limited to intersections of functions)
+//!  * Base types: boolean, string, and numeric
 //!
-//! The structure follows Xie and Oliveira, "Let Arguments Go First" (ESOP
-//! 2018), §3.1: types `A, B ::= a | A -> B | ∀a.A | Int`, extended with tuun's
-//! base, tuple, list, and module types. Meta (unification) variables `α̂` come
-//! from the algorithmic system (§3.5 and Appendix E.1), which replaces the
-//! declarative system's guessed monotypes with solvable unknowns.
+//! The numeric type describes values which are subject to arithmetic operations
+//! (e.g., +, *, pow). These include waveforms (both sequenced and unsequenced),
+//! floating point numbers, and integers (which are represented as constant
+//! waveforms). A numeric type may be refined by a [`Sort`] which distinguishes
+//! these cases. However, unseq numeric values are uniformly represented:
+//! floating point numbers and integers are represented as constant waveforms.
 //!
-//! The Numeric type represents waveforms and related values: streams of
-//! floating point numbers. Literals (like `3`) are interpreted as constant
-//! waveforms. Numeric is refined by a [`Sort`], a union of four disjoint atoms,
-//! and overloaded built-in functions carry intersections of arrows
-//! ([`Type::And`]) in the style of Freeman and Pfenning, "Refinement Types for
-//! ML" (PLDI 1991).
+//! Types also include meta variables that are used during type inference (see
+//! [`crate::infer`]) and a "dynamic" type, which is used to recover from a type
+//! error and for certain built-in functions that lack a precise signature
+//! (e.g., `debug`).
+//!
+//! Tuun types currently do not appear in the concrete syntax.
 
 use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Display;
 
-/// A numeric sort: a point of the checker's refinement lattice over tuun's
-/// numeric values, a union of the four disjoint atoms, ordered by inclusion
-/// (join = union). "Sort" follows the refinement-types literature, where every
-/// lattice point, atomic or not, is a sort.
+/// A numeric sort: a point of the refinement lattice over tuun's numeric
+/// values.
+///
+/// This a union of the four disjoint atoms, ordered by inclusion (join =
+/// union). "Sort" follows the refinement-types literature, where every lattice
+/// point, atomic or not, is a sort.
 ///
 /// The atoms:
 ///  * `I` — an integer-valued constant waveform
@@ -171,8 +177,8 @@ pub enum Type {
     },
     /// An intersection of types.
     ///
-    /// Currently always a set of arrows refining a common function type, for
-    /// example, the principal type of an overloaded built-in function.
+    /// Always a set of arrows refining a common function type, for example, the
+    /// principal type of an overloaded built-in function.
     And(Vec<Type>),
     Tuple(Vec<Type>),
     List(Box<Type>),

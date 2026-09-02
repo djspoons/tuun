@@ -1,47 +1,77 @@
-//! Static type inference for tuun expressions.
+//! Static type inference for tuun expressions, drawing from several related
+//! disciplines.
 //!
-//! Implements the algorithmic type system of Xie and Oliveira, "Let Arguments
-//! Go First" (ESOP 2018), §3.5 and Appendix E: bi-directional type checking
-//! with an *application mode*. At an application, the argument types are
-//! inferred first, generalized (rule AT-Gen), and pushed onto an application
-//! context Ψ — a stack of pending applications; the applied function is then
-//! typed under Ψ, so unannotated parameters take their types from the arguments
-//! the function is actually applied to (rule AT-Lam2). Because the parser
-//! desugars `let x = e in b` into `(fn(x) => b)(e)`, the generalization step
-//! gives `let` bindings HM-style polymorphism without a dedicated rule (paper
-//! §2.3 and §3.2, T-Let).
+//!  * The algorithmic type system of Xie and Oliveira, "Let Arguments Go First"
+//!    (ESOP 2018), §3.5 and Appendix E, a form of bi-directional type checking
+//!    with an *application mode*
+//!  * The intersection types and inference of Freeman and Pfenning, "Refinement
+//!    Types for ML" (PLDI 1991) to support overloaded built-in functions
+//!  * The applicative subtyping and overloading semantics of Xue et al.'s
+//!    "Applicative Intersection Types" (APLAS 2022)
 //!
-//! The paper's algorithmic judgment is `(S, N) ∣ Γ ∣ Ψ ⊢ e ⇒ A ↪ (S', N')`
-//! (Fig. 16), threading a substitution `S` of meta-variable solutions and a
-//! fresh-name supply `N`; here both live in [`Infer`], mutated in place. Tuun
-//! departs from the paper as follows:
+//! Tuun's subtyping follows the usual rules on structural types (as in Xie and
+//! Oliveira) with *no* subtyping relationship between base types. Instead, tuun
+//! uses a form of type refinements from Freeman and Pfenning, with a single,
+//! fixed type that can be refined: numeric.
 //!
-//! - Functions are n-ary and applied all at once, so each Ψ entry is a
-//!   [`Frame`] holding a whole call's argument types (positional and named)
-//!   rather than a single type.
-//! - Judgments return only the *residual* result type, with Ψ's worth of
-//!   parameters already consumed — the style of the paper's §4.2 (rule
-//!   T-Lam-Alt), which Lemma 1 (Ψ coincides with typing results) justifies
-//!   against the §3 presentation.
-//! - Numerics are refined by [`crate::types::Sort`]s — unions of four
-//!   disjoint atoms — judged by containment, with overloaded functions
-//!   typed as intersections of arrows selected per call (Freeman &
-//!   Pfenning, "Refinement Types for ML", PLDI 1991; Xue, Oliveira & Xie,
-//!   "Applicative Intersection Types"). A float *is* a constant waveform
-//!   (`Waveform::Const` — see [`Expr::as_const_float`]), so `Float ⊆
-//!   waveform` is genuine subset inclusion.
-//! - Each failed check produces an [`Error`] and inference recovers with
-//!   [`Type::Dynamic`] so one mistake does not cascade.
-//! - A projection is resolved against the module's own bindings, so it
-//!   requires the checker to know *which* module: an expression whose type
-//!   is still unknown is rejected rather than trusted. The type is tracked
-//!   wherever it flows — a `let`, a directly applied lambda, a list or tuple
-//!   element — so what this rules out is a module arriving as an unannotated
-//!   parameter, and with it functions over modules. In exchange, every
-//!   projection that survives checking is one whose name was looked up, and
-//!   a misspelled one is a static error wherever it appears.
+//! At an application, the argument types are inferred first, generalized (Xie
+//! and Oliveira's rule AT-Gen), and pushed onto an application context Ψ — a
+//! stack of pending applications; the applied function is then typed under Ψ,
+//! so unannotated parameters take their types from the arguments the function
+//! is actually applied to (rule AT-Lam2). Because the parser desugars `let x =
+//! e in b` into `(fn(x) => b)(e)`, the generalization step gives `let` bindings
+//! HM-style polymorphism without a dedicated rule (paper §2.3 and §3.2, T-Let).
 //!
-//! TODO add notes about default values and how they interact with refinements
+//! At an abstraction, Freeman and Pfenning's ABS rule is used and the function
+//! body is checked under each of the numeric atoms (see [`Infer::tabulate`]).
+//! The function is assigned an intersection type based on the results of this
+//! enumeration.
+//!
+//! At an application with an intersection type, the current frame is used to
+//! select an appropriate conjunct either by:
+//!
+//!  * Taking the first single conjunct that applies and using its result, or
+//!  * Falling back on a set of conjuncts whose union of parameter sorts covers
+//!    the arguments and taking the join of the results.
+//!
+//! (This is Freeman and Pfenning's `apptype` and Xue et al.'s applicative
+//! subtyping `A ≪ B = C`.)
+//!
+//! Judgments return only the *residual* result type, with Ψ's worth of
+//! parameters already consumed — the style of Xie and Oliveira's §4.2 (rule
+//! T-Lam-Alt), which Lemma 1 (Ψ coincides with typing results) justifies
+//! against the §3 presentation. The paper's algorithmic judgment is `(S, N) ∣ Γ
+//! ∣ Ψ ⊢ e ⇒ A ↪ (S', N')` (Fig. 16), threading a substitution `S` of
+//! meta-variable solutions and a fresh-name supply `N`; here both live in
+//! [`Infer`], mutated in place.
+//!
+//! Tuun also extends these approaches with multi-parameter functions and
+//! optional named parameters. Each Ψ entry is a [`Frame`] holding a whole
+//! call's argument types (positional and named) rather than a single type.
+//! Function abstractions must consider refinements of *all* parameters, so the
+//! enumeration is exponential in their number: [Infer::tabulate] uses fixed
+//! budget, giving up precision, and eventually the intersection itself, rather
+//! than exceeding it. Intersections are used to record the relationship between
+//! the refinements of default parameter types and result types: when a
+//! parameter is omitted at an application, its sort is fixed by the default
+//! value.
+//!
+//! Though tuun does not include recursive functions, recursive built-ins like
+//! `reduce` require a limited form of abstract interpretation akin to Freeman
+//! and Pfenning's FIX* rules that is applied to function types during
+//! subtyping. This is guaranteed to terminate given the finite lattice of
+//! refinements.
+//!
+//! Each failed check produces an [`Error`] and inference recovers with
+//! [`Type::Dynamic`] so one mistake does not cascade.
+//!
+//! Modules are recursively checked and the resulting entries are added into the
+//! context either directly (as in the case of `open`) or under a record-like
+//! value (as in the case of `use`). A projection is resolved against the
+//! module's own bindings, so it requires the checker to know *which* module: an
+//! expression whose type is still unknown is rejected rather than trusted. What
+//! this rules out is a module arriving as an unannotated parameter, and with it
+//! functions over modules.
 
 use std::collections::HashMap;
 
@@ -157,12 +187,12 @@ where
     Some(checker.display(&ty))
 }
 
-/// One application's worth of argument types, awaiting the function they
-/// apply to.
+/// One application's worth of argument types, awaiting the function they apply
+/// to.
 ///
-/// The paper's application context Ψ (§3.1) is a stack holding one argument
-/// type per entry, because its applications are curried. Tuun applies all of
-/// a call's arguments at once, so each Ψ entry here is a whole call:
+/// Xie and Oliveira's application context Ψ (§3.1) is a stack holding one
+/// argument type per entry, because its applications are curried. Tuun applies
+/// all of a call's arguments at once, so each Ψ entry here is a whole call:
 /// positional argument types in order plus named arguments. Each argument
 /// carries its own span so a mismatch can point at the offending argument;
 /// `span` locates the call as a whole.
@@ -178,10 +208,10 @@ type Psi<S> = Vec<Frame<S>>;
 /// A typing-context entry.
 ///
 /// Built-in definitions stay name-resolved rather than being typed once at
-/// their binding: their signature is looked up at each use, with the arity
-/// of the call in Ψ, so arity-overloaded built-ins (unary versus binary `-`)
-/// pick the form matching the call site. This keeps rule AT-Var's context
-/// lookup happening where the paper performs it — at the variable, under Ψ.
+/// their binding: their signature is looked up at each use, with the arity of
+/// the call in Ψ, so arity-overloaded built-ins (unary versus binary `-`) pick
+/// the form matching the call site. This keeps rule AT-Var's context lookup
+/// happening where Xie and Oliveira perform it — at the variable, under Ψ.
 #[derive(Clone)]
 enum ContextEntry {
     Ty(Type),
@@ -242,7 +272,7 @@ struct Infer<S> {
     /// occurs check; solutions may mention other solved metas, so readers
     /// follow chains.
     subst: HashMap<u32, Type>,
-    /// Fresh-id supply — the paper's `N`, shared by metas and rigid
+    /// Fresh-id supply — Xie and Oliveira's `N`, shared by metas and rigid
     /// variables.
     supply: u32,
     /// Bounds for refinement variables, indexed by `Refinement::Var` id.
@@ -1055,12 +1085,12 @@ impl<S: Clone> Infer<S> {
         })
     }
 
-    /// Unifies two types, solving metas by equality — Fig. 13. Fails
-    /// silently; callers decide whether a failure warrants an error.
+    /// Unifies two types, solving metas by equality — Xie and Oliveira's Fig.
+    /// 13. Fails silently; callers decide whether a failure warrants an error.
     ///
     /// Structural cases generalize the paper's AU-Fun to tuun's n-ary
-    /// functions, tuples, lists, and modules. `Dynamic` unifies with
-    /// anything (a tuun extension; no counterpart in the paper).
+    /// functions, tuples, lists, and modules. `Dynamic` unifies with anything
+    /// (a tuun extension; no counterpart in the paper).
     fn unify(&mut self, a: &Type, b: &Type) -> Result<(), ()> {
         let a = self.resolve(a);
         let b = self.resolve(b);
@@ -1169,8 +1199,8 @@ impl<S: Clone> Infer<S> {
     }
 
     /// Checks `a <: b` ("`a` is at least as polymorphic as `b`") — the
-    /// subtyping judgment of Fig. 15, extended with tuun's numeric sorts,
-    /// intersections of arrows, and `Dynamic`.
+    /// subtyping judgment of Xie and Oliveira's Fig. 15, extended with tuun's
+    /// numeric sorts, intersections of arrows, and `Dynamic`.
     fn subtype(&mut self, a: &Type, b: &Type) -> Result<(), ()> {
         let a = self.resolve(a);
         let b = self.resolve(b);
@@ -1931,8 +1961,8 @@ impl<S: Clone> Infer<S> {
     }
 
     /// Selects from an intersection of arrows against one frame — Freeman's
-    /// `apptype`, Xue et al.'s applicative subtyping `A ≪ S` with the frame as
-    /// the selector:
+    /// `apptype`, Xue et al.'s applicative subtyping `A ≪ B = C` with the
+    /// frame as the argument `B`:
     ///
     /// - the first conjunct that applies outright supplies the result: each
     ///   numeric argument's sort contained in the domain, each non-numeric
@@ -2803,13 +2833,13 @@ impl<S: Clone> Infer<S> {
                 named,
                 body,
             } => {
-                // A named parameter's type comes from the body's use of
-                // it, not from its default: the default is only the value
-                // the parameter takes when a call omits the argument, so
-                // its type (inferred in the enclosing scope, mirroring
-                // once-at-definition evaluation) flows in as a guarantee
-                // against the parameter's unknown. Not in the paper, which
-                // has no named parameters.
+                // A named parameter's type comes from the body's use of it, not
+                // from its default: the default is only the value the parameter
+                // takes when a call omits the argument, so its type (inferred
+                // in the enclosing scope, mirroring once-at-definition
+                // evaluation) flows in as a guarantee against the parameter's
+                // unknown. Not in the referenced prior work, which has no named
+                // parameters.
                 let errors = self.errors.len();
                 let named_types: Vec<(String, Type)> = named
                     .iter()
