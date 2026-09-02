@@ -83,6 +83,7 @@
 //   fn(x) => fn(y) => (x != y)
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::expr::{Binding, Error, Expr, Pattern, SourceBinding, SourceExpr, Span};
 use crate::signatures;
@@ -627,7 +628,7 @@ impl<S: Clone> Infer<S> {
                     .iter()
                     .map(|(n, t)| (n.clone(), self.resolve_refinements(t, floor)))
                     .collect(),
-                result: Box::new(self.resolve_refinements(result, floor)),
+                result: Rc::new(self.resolve_refinements(result, floor)),
             },
             Type::And(conjuncts) => Type::And(
                 conjuncts
@@ -789,7 +790,7 @@ impl<S: Clone> Infer<S> {
                     .iter()
                     .map(|(n, t)| (n.clone(), self.freeze_refinements(t, !positive, keep)))
                     .collect(),
-                result: Box::new(self.freeze_refinements(result, positive, keep)),
+                result: Rc::new(self.freeze_refinements(result, positive, keep)),
             },
             Type::And(conjuncts) => Type::And(
                 conjuncts
@@ -1086,9 +1087,9 @@ impl<S: Clone> Infer<S> {
                 // Resolve the conjunct fully before rolling back the state it
                 // was solved in.
                 let conjunct = Type::Function {
-                    positional: domains,
-                    named: named_domains,
-                    result: Box::new(result),
+                    positional: domains.into(),
+                    named: named_domains.into(),
+                    result: Rc::new(result),
                 }
                 .apply(&self.subst);
                 conjuncts.push(if conjunct.has_refinement_var() {
@@ -1111,7 +1112,7 @@ impl<S: Clone> Infer<S> {
         // default does not work and every such call is unanswerable — report it
         // here rather than hand back a table that promises a parameter it
         // cannot honour.
-        for (name, default) in named {
+        for (name, default) in named.iter() {
             let omitted_stands = conjuncts.iter().any(|conjunct| match conjunct {
                 Type::Function { named, .. } => !named.iter().any(|(other, _)| other == name),
                 _ => false,
@@ -1125,7 +1126,7 @@ impl<S: Clone> Infer<S> {
         Some(if conjuncts.len() == 1 {
             conjuncts.remove(0)
         } else {
-            Type::And(conjuncts)
+            Type::And(conjuncts.into())
         })
     }
 
@@ -1174,8 +1175,8 @@ impl<S: Clone> Infer<S> {
                 if xs.len() != ys.len() {
                     return Err(());
                 }
-                for (x, y) in xs.clone().iter().zip(ys.clone()) {
-                    self.unify(x, &y)?;
+                for (x, y) in xs.iter().zip(ys.iter()) {
+                    self.unify(x, y)?;
                 }
                 Ok(())
             }
@@ -1205,10 +1206,10 @@ impl<S: Clone> Infer<S> {
                 if p1.len() != p2.len() || n1.len() != n2.len() {
                     return Err(());
                 }
-                for (x, y) in p1.iter().zip(p2) {
+                for (x, y) in p1.iter().zip(p2.iter()) {
                     self.unify(x, y)?;
                 }
-                for (name, x) in n1 {
+                for (name, x) in n1.iter() {
                     let Some((_, y)) = n2.iter().find(|(n, _)| n == name) else {
                         return Err(());
                     };
@@ -1220,7 +1221,7 @@ impl<S: Clone> Infer<S> {
                 if xs.len() != ys.len() {
                     return Err(());
                 }
-                for (x, y) in xs.iter().zip(ys) {
+                for (x, y) in xs.iter().zip(ys.iter()) {
                     self.unify(x, y)?;
                 }
                 Ok(())
@@ -1230,7 +1231,7 @@ impl<S: Clone> Infer<S> {
                 if xs.len() != ys.len() {
                     return Err(());
                 }
-                for (name, x) in xs {
+                for (name, x) in xs.iter() {
                     let Some((_, y)) = ys.iter().find(|(n, _)| n == name) else {
                         return Err(());
                     };
@@ -1334,7 +1335,7 @@ impl<S: Clone> Infer<S> {
                         _ => true,
                     });
                 if !selectable {
-                    return self.subtype_any_conjunct(conjuncts.clone(), &b);
+                    return self.subtype_any_conjunct(conjuncts, &b);
                 }
                 // Selecting against unsolved variables iterates to a fixed
                 // point (Freeman's abstract interpretation): when the arrow's
@@ -1373,9 +1374,7 @@ impl<S: Clone> Infer<S> {
                             self.subtype(&conjunct_result, result)
                         }
                         Selection::NoApplicableConjunct => Err(()),
-                        Selection::NoMatchingConjuncts => {
-                            self.subtype_any_conjunct(conjuncts.clone(), &b)
-                        }
+                        Selection::NoMatchingConjuncts => self.subtype_any_conjunct(conjuncts, &b),
                     };
                     if outcome.is_err() {
                         break outcome;
@@ -1428,8 +1427,8 @@ impl<S: Clone> Infer<S> {
             // an intersection may need a *different* left conjunct for each
             // right one, which committing to one conjunct first forecloses.
             (_, Type::And(conjuncts)) => {
-                for conjunct in conjuncts.clone() {
-                    self.subtype(&a, &conjunct)?;
+                for conjunct in conjuncts.iter() {
+                    self.subtype(&a, conjunct)?;
                 }
                 Ok(())
             }
@@ -1448,7 +1447,7 @@ impl<S: Clone> Infer<S> {
             // TODO extend the pseudo-frame with promised named parameters
             // (and filter conjuncts to those offering them) so named-having
             // arrows join the selection path.
-            (Type::And(conjuncts), _) => self.subtype_any_conjunct(conjuncts.clone(), &b),
+            (Type::And(conjuncts), _) => self.subtype_any_conjunct(conjuncts, &b),
             // AS-FunR/AS-FunL collapse into one n-ary case: parameters are
             // contravariant, the result covariant. Every named parameter the
             // supertype promises must be offered by the subtype; extra named
@@ -1468,10 +1467,10 @@ impl<S: Clone> Infer<S> {
                 if p1.len() != p2.len() {
                     return Err(());
                 }
-                for (sub, sup) in p1.iter().zip(p2) {
+                for (sub, sup) in p1.iter().zip(p2.iter()) {
                     self.subtype(sup, sub)?;
                 }
-                for (name, sup) in n2 {
+                for (name, sup) in n2.iter() {
                     let Some((_, sub)) = n1.iter().find(|(n, _)| n == name) else {
                         return Err(());
                     };
@@ -1507,7 +1506,7 @@ impl<S: Clone> Infer<S> {
                 if xs.len() != ys.len() {
                     return Err(());
                 }
-                for (x, y) in xs.iter().zip(ys) {
+                for (x, y) in xs.iter().zip(ys.iter()) {
                     self.subtype(x, y)?;
                 }
                 Ok(())
@@ -1567,18 +1566,18 @@ impl<S: Clone> Infer<S> {
                 result,
             } => {
                 let mut parameters = Vec::with_capacity(positional.len());
-                for parameter in &positional {
+                for parameter in positional.iter() {
                     parameters.push(self.skeleton(parameter));
                 }
                 let mut named_parameters = Vec::with_capacity(named.len());
-                for (name, parameter) in &named {
+                for (name, parameter) in named.iter() {
                     let parameter = self.skeleton(parameter);
                     named_parameters.push((name.clone(), parameter));
                 }
                 Type::Function {
-                    positional: parameters,
-                    named: named_parameters,
-                    result: Box::new(self.skeleton(&result)),
+                    positional: parameters.into(),
+                    named: named_parameters.into(),
+                    result: Rc::new(self.skeleton(&result)),
                 }
             }
             _ => Type::Meta(self.fresh_id()),
@@ -1588,10 +1587,10 @@ impl<S: Clone> Infer<S> {
     /// Tries `<:` against each conjunct in order, keeping the first
     /// success and rolling back failed attempts (rules
     /// Sub-And-L/Sub-And-R).
-    fn subtype_any_conjunct(&mut self, conjuncts: Vec<Type>, b: &Type) -> Result<(), ()> {
-        for conjunct in conjuncts {
+    fn subtype_any_conjunct(&mut self, conjuncts: &[Type], b: &Type) -> Result<(), ()> {
+        for conjunct in conjuncts.iter() {
             let mark = self.mark();
-            if self.subtype(&conjunct, b).is_ok() {
+            if self.subtype(conjunct, b).is_ok() {
                 return Ok(());
             }
             self.rollback(mark);
@@ -1726,7 +1725,7 @@ impl<S: Clone> Infer<S> {
             (Type::Tuple(xs), Type::Tuple(ys)) if xs.len() == ys.len() => {
                 let items = xs
                     .iter()
-                    .zip(ys)
+                    .zip(ys.iter())
                     .map(|(x, y)| self.join(x.clone(), y.clone(), span))
                     .collect();
                 Type::Tuple(items)
@@ -1749,17 +1748,17 @@ impl<S: Clone> Infer<S> {
                     result: r2,
                 },
             ) if p1.len() == p2.len() => {
-                let (p1, n1, r1) = (p1.clone(), n1.clone(), *r1.clone());
-                let (p2, n2, r2) = (p2.clone(), n2.clone(), *r2.clone());
+                let (p1, n1, r1) = (p1.clone(), n1.clone(), (**r1).clone());
+                let (p2, n2, r2) = (p2.clone(), n2.clone(), (**r2).clone());
                 let mut positional = Vec::with_capacity(p1.len());
-                for (x, y) in p1.iter().zip(&p2) {
+                for (x, y) in p1.iter().zip(p2.iter()) {
                     match self.meet(x, y) {
                         Some(met) => positional.push(met),
                         None => return self.incompatible(&a, &b, span),
                     }
                 }
                 let mut named = Vec::new();
-                for (name, x) in &n1 {
+                for (name, x) in n1.iter() {
                     let Some((_, y)) = n2.iter().find(|(n, _)| n == name) else {
                         continue;
                     };
@@ -1770,9 +1769,9 @@ impl<S: Clone> Infer<S> {
                 }
                 let result = self.join(r1, r2, span);
                 Type::Function {
-                    positional,
-                    named,
-                    result: Box::new(result),
+                    positional: positional.into(),
+                    named: named.into(),
+                    result: Rc::new(result),
                 }
             }
             // Two tables join conjunct by conjunct. Every pair of conjuncts that joins is a
@@ -1798,8 +1797,8 @@ impl<S: Clone> Infer<S> {
                     return self.incompatible(&a, &b, span);
                 }
                 let mut conjuncts: Vec<Type> = Vec::new();
-                for x in &xs {
-                    for y in &ys {
+                for x in xs.iter() {
+                    for y in ys.iter() {
                         if !self.same_shape(x, y) {
                             continue;
                         }
@@ -1822,7 +1821,7 @@ impl<S: Clone> Infer<S> {
                 match conjuncts.len() {
                     0 => self.incompatible(&a, &b, span),
                     1 => conjuncts.pop().expect("one conjunct"),
-                    _ => Type::And(conjuncts),
+                    _ => Type::And(conjuncts.into()),
                 }
             }
             _ => {
@@ -1914,10 +1913,10 @@ impl<S: Clone> Infer<S> {
                     result: r2,
                 },
             ) if p1.len() == p2.len() && n1.is_empty() && n2.is_empty() => {
-                let (p1, r1) = (p1.clone(), *r1.clone());
-                let (p2, r2) = (p2.clone(), *r2.clone());
+                let (p1, r1) = (p1.clone(), (**r1).clone());
+                let (p2, r2) = (p2.clone(), (**r2).clone());
                 let mut positional = Vec::with_capacity(p1.len());
-                for (x, y) in p1.iter().zip(&p2) {
+                for (x, y) in p1.iter().zip(p2.iter()) {
                     positional.push(self.join(x.clone(), y.clone(), &None));
                 }
                 let result = self.meet(&r1, &r2)?;
@@ -1962,7 +1961,7 @@ impl<S: Clone> Infer<S> {
                 result,
             } => {
                 self.check_frame(&frame, &positional, &named);
-                self.app_subtype(psi, *result, head)
+                self.app_subtype(psi, (*result).clone(), head)
             }
             // Applicative selection from an intersection (Xue et al.):
             // conjuncts are tried in table order against the frame's
@@ -1987,7 +1986,7 @@ impl<S: Clone> Infer<S> {
                 let function = Type::Function {
                     positional,
                     named,
-                    result: Box::new(self.fresh_meta()),
+                    result: Rc::new(self.fresh_meta()),
                 };
                 // Cannot fail: the meta is unsolved and the arrow is
                 // built of fresh metas.
@@ -2082,11 +2081,11 @@ impl<S: Clone> Infer<S> {
     /// values, so the table imposes no numeric contract at that position.
     fn domain_unions(&self, conjuncts: &[Type], arity: usize) -> Vec<Option<Sort>> {
         let mut unions = vec![Some(Sort::NONE); arity];
-        for conjunct in conjuncts {
+        for conjunct in conjuncts.iter() {
             let Type::Function { positional, .. } = conjunct else {
                 unreachable!("conjuncts are arrows");
             };
-            for (result, ty) in unions.iter_mut().zip(positional) {
+            for (result, ty) in unions.iter_mut().zip(positional.iter()) {
                 match self.resolved(ty) {
                     Type::Numeric(rep) => {
                         let sort = self.may_of(rep);
@@ -2119,7 +2118,7 @@ impl<S: Clone> Infer<S> {
                 return false;
             }
         }
-        for (name, domain) in named {
+        for (name, domain) in named.iter() {
             let Some((_, argument, _)) = frame.named.iter().find(|(n, _, _)| n == name) else {
                 return false;
             };
@@ -2158,7 +2157,9 @@ impl<S: Clone> Infer<S> {
             unreachable!("conjuncts are arrows");
         };
         let mut domains = Vec::with_capacity(positional.len());
-        for ((sort, domain), (argument, _)) in sorts.iter().zip(positional).zip(&frame.positional) {
+        for ((sort, domain), (argument, _)) in
+            sorts.iter().zip(positional.iter()).zip(&frame.positional)
+        {
             let (fits, domain) = self.position_fits(argument, *sort, domain);
             domains.push(domain);
             if !fits {
@@ -2215,7 +2216,7 @@ impl<S: Clone> Infer<S> {
         }
         let mut candidates: Vec<Candidate> = Vec::new();
         let mut admitting: Vec<Type> = Vec::new();
-        for conjunct in conjuncts {
+        for conjunct in conjuncts.iter() {
             // The probe's own refinement variables are popped by its
             // rollback, so the result it carries out is grounded at them
             // (`resolve_refinements`); variables that predate the probe
@@ -2473,7 +2474,9 @@ impl<S: Clone> Infer<S> {
             unreachable!("conjuncts are arrows");
         };
         let mut domains = Vec::with_capacity(positional.len());
-        for ((sort, domain), (argument, _)) in sorts.iter().zip(positional).zip(&frame.positional) {
+        for ((sort, domain), (argument, _)) in
+            sorts.iter().zip(positional.iter()).zip(&frame.positional)
+        {
             // Numeric against numeric is coverage's job; every other pairing
             // is judged exactly as `conjunct_applies` judges it.
             let fits = match (sort, self.resolve(domain)) {
@@ -2563,8 +2566,8 @@ impl<S: Clone> Infer<S> {
             // about its arity, report the arity mismatch the way
             // `check_frame` would.
             Selection::NoMatchingConjuncts => {
-                let mut arities: Vec<&Vec<Type>> = Vec::new();
-                for conjunct in conjuncts {
+                let mut arities: Vec<&Rc<[Type]>> = Vec::new();
+                for conjunct in conjuncts.iter() {
                     if let Type::Function { positional, .. } = conjunct
                         && !arities.iter().any(|known| known.len() == positional.len())
                     {
@@ -2724,7 +2727,7 @@ impl<S: Clone> Infer<S> {
     /// them, so a parameter used with an operator inherits the operator's
     /// requirements.
     fn record_selection_contracts(&mut self, frame: &Frame<S>, domains: &[Option<Sort>]) {
-        for ((argument, span), domain) in frame.positional.iter().zip(domains) {
+        for ((argument, span), domain) in frame.positional.iter().zip(domains.iter()) {
             // No contract where some conjunct's domain is non-numeric or
             // unknown: that conjunct may accept non-numeric values, so the
             // table demands nothing of the argument.
@@ -2790,12 +2793,12 @@ impl<S: Clone> Infer<S> {
             _ => false,
         };
         if arity {
-            for ((argument, span), parameter) in frame.positional.iter().zip(positional) {
+            for ((argument, span), parameter) in frame.positional.iter().zip(positional.iter()) {
                 if !table(self, argument) {
                     self.subtype_check(argument, parameter, span);
                 }
             }
-            for ((argument, span), parameter) in frame.positional.iter().zip(positional) {
+            for ((argument, span), parameter) in frame.positional.iter().zip(positional.iter()) {
                 if table(self, argument) {
                     self.subtype_check(argument, parameter, span);
                 }
@@ -2954,9 +2957,9 @@ impl<S: Clone> Infer<S> {
                         }
                         let body_ty = self.infer(context, &mut Vec::new(), body);
                         Type::Function {
-                            positional: param_types,
-                            named: named_types,
-                            result: Box::new(body_ty),
+                            positional: param_types.into(),
+                            named: named_types.into(),
+                            result: Rc::new(body_ty),
                         }
                     }
                 };
@@ -3035,7 +3038,7 @@ impl<S: Clone> Infer<S> {
             }
             Expr::List(items) => {
                 let mut element: Option<Type> = None;
-                for item in items {
+                for item in items.iter() {
                     let ty = self.infer(context, &mut Vec::new(), item);
                     element = Some(match element {
                         None => ty,
@@ -3131,8 +3134,8 @@ impl<S: Clone> Infer<S> {
             }
             Pattern::Tuple(patterns) => match self.resolve(&ty) {
                 Type::Tuple(items) if items.len() == patterns.len() => {
-                    for (pattern, item) in patterns.iter().zip(items) {
-                        self.bind_pattern(context, pattern, item, span, generalize_leaves);
+                    for (pattern, item) in patterns.iter().zip(items.iter()) {
+                        self.bind_pattern(context, pattern, item.clone(), span, generalize_leaves);
                     }
                 }
                 meta @ Type::Meta(_) => {
@@ -3366,13 +3369,13 @@ fn merge_pair(a: &Type, b: &Type) -> Option<Type> {
     }
     if named_a
         .iter()
-        .zip(named_b)
+        .zip(named_b.iter())
         .any(|((name_a, _), (name_b, _))| name_a != name_b)
     {
         return None;
     }
-    let mut merged = positional_a.clone();
-    let mut merged_named = named_a.clone();
+    let mut merged = positional_a.to_vec();
+    let mut merged_named = named_a.to_vec();
     let mut differences = 0;
     let union = |x: &Type, y: &Type, differences: &mut i32| -> Option<Option<Type>> {
         if x == y {
@@ -3389,19 +3392,19 @@ fn merge_pair(a: &Type, b: &Type) -> Option<Type> {
         }
         Some(Some(Type::ground(sort_x.union(*sort_y))))
     };
-    for (position, (x, y)) in positional_a.iter().zip(positional_b).enumerate() {
+    for (position, (x, y)) in positional_a.iter().zip(positional_b.iter()).enumerate() {
         if let Some(unioned) = union(x, y, &mut differences)? {
             merged[position] = unioned;
         }
     }
-    for (position, ((_, x), (_, y))) in named_a.iter().zip(named_b).enumerate() {
+    for (position, ((_, x), (_, y))) in named_a.iter().zip(named_b.iter()).enumerate() {
         if let Some(unioned) = union(x, y, &mut differences)? {
             merged_named[position].1 = unioned;
         }
     }
     Some(Type::Function {
-        positional: merged,
-        named: merged_named,
+        positional: merged.into(),
+        named: merged_named.into(),
         result: result_a.clone(),
     })
 }
@@ -4581,7 +4584,7 @@ mod tests {
                     Type::And(conjuncts) => conjuncts.iter().collect(),
                     other => vec![other],
                 };
-                for conjunct in conjuncts {
+                for conjunct in conjuncts.iter() {
                     let Type::Function {
                         positional, result, ..
                     } = conjunct

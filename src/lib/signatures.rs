@@ -46,14 +46,14 @@ fn binary_arithmetic(int_row: bool) -> Type {
         vec![Type::waveform(), Type::seq()],
         Type::seq(),
     ));
-    Type::And(conjuncts)
+    Type::intersection(conjuncts)
 }
 
 /// The result type of curried waveform filters (`fin(len)`, `filter(...)`,
 /// `capture(name)`, `mark(id)`): applied to a waveform they produce a waveform,
 /// and a seq threads through (`builtins::curry`).
 fn waveform_filter() -> Type {
-    Type::And(vec![
+    Type::intersection(vec![
         Type::function(vec![Type::waveform()], Type::non_const_wave()),
         Type::function(vec![Type::seq()], Type::seq()),
     ])
@@ -81,13 +81,13 @@ pub fn signature(name: &str) -> Option<Type> {
             let Type::And(binary) = binary_arithmetic(true) else {
                 unreachable!("binary_arithmetic returns an intersection");
             };
-            Type::And(unary.into_iter().chain(binary).collect())
+            Type::intersection(unary.into_iter().chain(binary.iter().cloned()).collect())
         }
         // The left operand must be an actual seq; the right may be any
         // numeric. A seq right threads the combined offset (`followed_by`'s
         // `Seq` arm), so the result is again a seq and `\` chains type
         // precisely; anything else ends the chain with a waveform.
-        "\\" => Type::And(vec![
+        "\\" => Type::intersection(vec![
             Type::function(vec![Type::seq(), Type::seq()], Type::seq()),
             Type::function(vec![Type::seq(), Type::waveform()], Type::non_const_wave()),
         ]),
@@ -98,7 +98,7 @@ pub fn signature(name: &str) -> Option<Type> {
         // conjunct is `float` and not `waveform`.
         // TODO consider making this fully polymorphic: the intersection here
         // doesn't make sense in our application of Freeman's refinement system.
-        "==" | "!=" => Type::And(vec![
+        "==" | "!=" => Type::intersection(vec![
             Type::function(vec![Type::float(), Type::float()], Type::Bool),
             Type::function(vec![Type::Bool, Type::Bool], Type::Bool),
             Type::function(vec![Type::String, Type::String], Type::Bool),
@@ -251,7 +251,7 @@ mod tests {
             conjuncts[0],
             Type::function(vec![Type::int(), Type::int()], Type::int())
         );
-        for conjunct in &conjuncts {
+        for conjunct in conjuncts.iter() {
             let Type::Function { positional, .. } = conjunct else {
                 panic!("conjuncts are arrows");
             };
@@ -295,7 +295,7 @@ mod tests {
                 panic!("{} should be an intersection", name);
             };
             assert_eq!(
-                conjuncts,
+                conjuncts.to_vec(),
                 vec![
                     Type::function(vec![Type::float(), Type::float()], Type::Bool),
                     Type::function(vec![Type::Bool, Type::Bool], Type::Bool),
@@ -436,7 +436,7 @@ mod tests {
             let governing = conjuncts.iter().find(|(domains, _)| {
                 vector
                     .iter()
-                    .zip(domains)
+                    .zip(domains.iter())
                     .all(|(atom, domain)| atom.is_subset(*domain))
             });
             let arguments: Vec<Expr<u32, ()>> =

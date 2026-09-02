@@ -23,6 +23,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Display;
+use std::rc::Rc;
 
 /// A numeric sort: a point of the refinement lattice over tuun's numeric
 /// values.
@@ -171,15 +172,15 @@ pub enum Type {
     /// An n-ary function applied all at once; `named` parameters are
     /// optional-with-default at call sites.
     Function {
-        positional: Vec<Type>,
-        named: Vec<(String, Type)>,
-        result: Box<Type>,
+        positional: Rc<[Type]>,
+        named: Rc<[(String, Type)]>,
+        result: Rc<Type>,
     },
     /// An intersection of types.
     ///
     /// Always a set of arrows refining a common function type, for example, the
     /// principal type of an overloaded built-in function.
-    And(Vec<Type>),
+    And(Rc<[Type]>),
     Tuple(Vec<Type>),
     List(Box<Type>),
     /// The type of a module value (from `use`); one entry per exported
@@ -199,9 +200,9 @@ impl Type {
     /// Builds a function type from positional parameter types and a result.
     pub fn function(positional: Vec<Type>, result: Type) -> Type {
         Type::Function {
-            positional,
-            named: Vec::new(),
-            result: Box::new(result),
+            positional: positional.into(),
+            named: Rc::from(Vec::new()),
+            result: Rc::new(result),
         }
     }
 
@@ -263,7 +264,8 @@ impl Type {
                     || named.iter().any(|(_, ty)| ty.has_refinement_var())
                     || result.has_refinement_var()
             }
-            Type::And(types) | Type::Tuple(types) => types.iter().any(Type::has_refinement_var),
+            Type::And(types) => types.iter().any(Type::has_refinement_var),
+            Type::Tuple(types) => types.iter().any(Type::has_refinement_var),
             Type::List(item) => item.has_refinement_var(),
             Type::Module(entries) => entries.iter().any(|(_, ty)| ty.has_refinement_var()),
             Type::Forall(_, body) => body.has_refinement_var(),
@@ -275,6 +277,11 @@ impl Type {
     /// Syntactic, and deliberately not read through a substitution: a meta that
     /// is solved now can be unsolved again by a rollback, so only a type that
     /// never mentions one is settled for good.
+    /// Returns the intersection of `types`.
+    pub fn intersection(types: Vec<Type>) -> Type {
+        Type::And(types.into())
+    }
+
     pub fn settled(&self) -> bool {
         match self {
             Type::Meta(_) | Type::Numeric(Refinement::Var(_)) => false,
@@ -288,7 +295,8 @@ impl Type {
                     && named.iter().all(|(_, ty)| ty.settled())
                     && result.settled()
             }
-            Type::And(types) | Type::Tuple(types) => types.iter().all(Type::settled),
+            Type::And(types) => types.iter().all(Type::settled),
+            Type::Tuple(types) => types.iter().all(Type::settled),
             Type::List(item) => item.settled(),
             Type::Module(entries) => entries.iter().all(|(_, ty)| ty.settled()),
             Type::Forall(_, body) => body.settled(),
@@ -318,7 +326,7 @@ impl Type {
                     .iter()
                     .map(|(n, t)| (n.clone(), t.apply(subst)))
                     .collect(),
-                result: Box::new(result.apply(subst)),
+                result: Rc::new(result.apply(subst)),
             },
             Type::And(conjuncts) => Type::And(conjuncts.iter().map(|t| t.apply(subst)).collect()),
             Type::Tuple(items) => Type::Tuple(items.iter().map(|t| t.apply(subst)).collect()),
@@ -354,16 +362,16 @@ impl Type {
                 named,
                 result,
             } => {
-                for t in positional {
+                for t in positional.iter() {
                     t.free_metas(subst, acc);
                 }
-                for (_, t) in named {
+                for (_, t) in named.iter() {
                     t.free_metas(subst, acc);
                 }
                 result.free_metas(subst, acc);
             }
             Type::And(conjuncts) => {
-                for t in conjuncts {
+                for t in conjuncts.iter() {
                     t.free_metas(subst, acc);
                 }
             }
@@ -405,16 +413,16 @@ impl Type {
                 named,
                 result,
             } => {
-                for t in positional {
+                for t in positional.iter() {
                     t.free_refinements(subst, acc);
                 }
-                for (_, t) in named {
+                for (_, t) in named.iter() {
                     t.free_refinements(subst, acc);
                 }
                 result.free_refinements(subst, acc);
             }
             Type::And(conjuncts) => {
-                for t in conjuncts {
+                for t in conjuncts.iter() {
                     t.free_refinements(subst, acc);
                 }
             }
@@ -492,7 +500,7 @@ impl Type {
                     .iter()
                     .map(|(n, t)| (n.clone(), t.substitute_vars(mapping)))
                     .collect(),
-                result: Box::new(result.substitute_vars(mapping)),
+                result: Rc::new(result.substitute_vars(mapping)),
             },
             Type::And(conjuncts) => Type::And(
                 conjuncts
@@ -549,7 +557,7 @@ impl Type {
                     .iter()
                     .map(|(n, t)| (n.clone(), t.substitute_metas(mapping)))
                     .collect(),
-                result: Box::new(result.substitute_metas(mapping)),
+                result: Rc::new(result.substitute_metas(mapping)),
             },
             Type::And(conjuncts) => Type::And(
                 conjuncts
@@ -670,14 +678,14 @@ fn fmt_type(ty: &Type, names: &Names, f: &mut fmt::Formatter<'_>, nested: bool) 
         } => {
             write!(f, "(")?;
             let mut first = true;
-            for t in positional {
+            for t in positional.iter() {
                 if !first {
                     write!(f, ", ")?;
                 }
                 first = false;
                 fmt_type(t, names, f, true)?;
             }
-            for (name, t) in named {
+            for (name, t) in named.iter() {
                 if !first {
                     write!(f, ", ")?;
                 }
@@ -786,15 +794,15 @@ mod tests {
         );
         assert_eq!(
             Type::Function {
-                positional: vec![Type::float()],
-                named: vec![("y".to_string(), Type::float())],
-                result: Box::new(Type::float()),
+                positional: vec![Type::float()].into(),
+                named: vec![("y".to_string(), Type::float())].into(),
+                result: Rc::new(Type::float()),
             }
             .to_string(),
             "(float, y: float) -> float"
         );
         assert_eq!(
-            Type::And(vec![
+            Type::intersection(vec![
                 Type::function(vec![Type::int()], Type::int()),
                 Type::function(vec![Type::float()], Type::float()),
             ])
@@ -805,7 +813,7 @@ mod tests {
 
     #[test]
     fn nested_intersections_are_parenthesised() {
-        let inner = Type::And(vec![
+        let inner = Type::intersection(vec![
             Type::function(vec![Type::int()], Type::int()),
             Type::function(vec![Type::float()], Type::float()),
         ]);
@@ -815,7 +823,7 @@ mod tests {
         // In a result position it does: without them the inner conjuncts
         // read as conjuncts of the intersection around them, which is how a
         // curried tabulated definition prints.
-        let curried = Type::And(vec![
+        let curried = Type::intersection(vec![
             Type::function(vec![Type::int()], inner.clone()),
             Type::function(vec![Type::waveform()], Type::waveform()),
         ]);
