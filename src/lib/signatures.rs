@@ -6,12 +6,12 @@
 //! registered built-in has an entry).
 //!
 //! Signatures are prenex schemes in the sense of "Let Arguments Go First" §3.1
-//! (polytypes quantify only at the top), playing the role that typing context
-//! entries `x : A` play in the paper's rule AT-Var (Fig. 16). Overloaded
-//! built-ins carry intersections of arrows ([`Type::And`]) whose conjuncts
-//! mirror the runtime's match arms in order — a declarative table in the style
-//! of Freeman and Pfenning's principal types for constructors; selection
-//! against the application context happens in [`crate::infer`].
+//! (polymorphic types quantify only at the top), playing the role that typing
+//! context entries `x : A` play in the paper's rule AT-Var (Fig. 16).
+//! Overloaded built-ins carry intersections of arrows ([`Type::And`]) whose
+//! conjuncts mirror the runtime's match arms in order — a declarative table in
+//! the style of Freeman and Pfenning's principal types for constructors;
+//! selection against the application context happens in [`crate::infer`].
 //!
 //! Domains are sorts — unions of the numeric atoms — and admit exactly the
 //! values the runtime arm accepts; contracts that require true scalars

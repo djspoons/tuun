@@ -641,7 +641,7 @@ mod tests {
     #[test]
     fn test_merge_of_constants_folds() {
         // `&` on two constants is their sum: both are endless, so the merge
-        // is pointwise addition everywhere and the shorter-operand extension
+        // is point-wise addition everywhere and the shorter-operand extension
         // never applies.
         assert_eq!(format!("{}", eval_with_builtins("1 & 2").unwrap()), "3");
         // A constant merged with a non-constant stays a merge tree.

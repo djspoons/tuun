@@ -1179,7 +1179,7 @@ impl<S: Clone> Infer<S> {
             // AU-Refl, extended to tuun's base types.
             (Type::Bool, Type::Bool) | (Type::String, Type::String) => Ok(()),
             // AU-Fun, n-ary: parameters (including named, matched by name)
-            // and result unify pointwise.
+            // and result unify point-wise.
             (
                 Type::Function {
                     positional: p1,
@@ -1664,7 +1664,7 @@ impl<S: Clone> Infer<S> {
 
     /// Returns the join of the two types: unification if they agree
     /// structurally, sort union for numerics (mixed float/waveform/seq lists
-    /// and branches are common), pointwise for lists and tuples, with the
+    /// and branches are common), point-wise for lists and tuples, with the
     /// variance for arrows, pairwise for two intersections, and `Dynamic`
     /// with an error where there is none. Quantified types join at an
     /// instance.
@@ -1721,7 +1721,7 @@ impl<S: Clone> Infer<S> {
                     .collect();
                 Type::Tuple(items)
             }
-            // Arrows join pointwise with the variance: a function usable as
+            // Arrows join point-wise with the variance: a function usable as
             // either accepts only what both accept and returns what either
             // returns. A named parameter survives only when both offer it,
             // since the joined type promises it to every caller. Where a
@@ -3971,7 +3971,7 @@ mod tests {
     }
 
     // Beyond 4^k the two-point unseq/seq split still tabulates, keeping
-    // seq relationality for wide parameter lists like the synths'.
+    // relations between arguments for wide parameter lists like the synths'.
     #[test]
     fn coarse_tabulation_beyond_the_cap() {
         let f = "let f = fn(a, b, c, d, e) => a + b + c + d + e in ";
@@ -4314,7 +4314,7 @@ mod tests {
         assert_errors("1(2)", &["cannot apply a value of type int"]);
     }
 
-    // Branches join pointwise with the variance: a function usable as
+    // Branches join point-wise with the variance: a function usable as
     // either accepts only what both accept and returns what either returns.
     // What must not happen is taking one branch's type wholesale, which
     // would hand the other's value a domain it does not accept.
@@ -5304,13 +5304,13 @@ mod tests {
         // helpers carry, which is the shape the checker must reject.
         //
         // `{...}` mixes waveforms, so an instrument handing back a seq makes
-        // the mix fail at run time. Nothing here says which of `amp`'s conjuncts
-        // the mapped element takes, so it summarises to everything `amp`
-        // covers and the mix rejects it. Two details are load-bearing and the
-        // gap does not show without either: the triad must be tabulated, so
+        // the mix fail at run time. Nothing here says which of `amp`'s
+        // conjuncts the mapped element takes, so it summarizes to everything
+        // `amp` covers and the mix rejects it. Two details are load-bearing and
+        // the gap does not show without either: the triad must be tabulated, so
         // that selecting a conjunct with an unsolved element takes the coverage
-        // join, and the `| seq(time - dur)` tail must be present, so that
-        // every conjunct of the innermost lambda fails and the unions base-pass
+        // join, and the `| seq(time - dur)` tail must be present, so that every
+        // conjunct of the innermost lambda fails and the unions base-pass
         // summary is what reports.
         let parts = "let amp = fn(a) => fn(w) => a * w in \
                      let triad = fn(root) => fn(fw) => [fw(root), fw(root + 4), fw(root + 7)] in ";
