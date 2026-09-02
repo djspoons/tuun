@@ -223,8 +223,20 @@ type Psi<S> = Vec<Frame<S>>;
 /// happening where Xie and Oliveira perform it — at the variable, under Ψ.
 #[derive(Clone)]
 enum ContextEntry {
-    Ty(Type),
+    /// A bound type, with whether it is settled ([`Type::settled`]).
+    ///
+    /// Collecting the context's live refinement variables and metas skips
+    /// settled entries outright. That matters because almost every entry is
+    /// settled — a definition already generalized has had its refinements
+    /// frozen — while the scan runs at every argument position.
+    Ty(Type, bool),
     Builtin(String),
+}
+
+/// Returns a context entry for `ty`, recording whether it is settled.
+fn bound(ty: Type) -> ContextEntry {
+    let settled = ty.settled();
+    ContextEntry::Ty(ty, settled)
 }
 
 /// The typing context Γ: in-scope identifiers and their entries; later
@@ -707,7 +719,7 @@ impl<S: Clone> Infer<S> {
         // quantification.
         let mut context_refinements = Vec::new();
         for (_, entry) in context.iter() {
-            if let ContextEntry::Ty(ty) = entry {
+            if let ContextEntry::Ty(ty, false) = entry {
                 ty.free_refinements(&self.subst, &mut context_refinements);
             }
         }
@@ -719,7 +731,7 @@ impl<S: Clone> Infer<S> {
         }
         let mut context_metas = Vec::new();
         for (_, entry) in context.iter() {
-            if let ContextEntry::Ty(ty) = entry {
+            if let ContextEntry::Ty(ty, false) = entry {
                 ty.free_metas(&self.subst, &mut context_metas);
             }
         }
@@ -982,7 +994,7 @@ impl<S: Clone> Infer<S> {
         // `generalize`'s exclusion).
         let mut keep = Vec::new();
         for (_, entry) in context.iter() {
-            if let ContextEntry::Ty(ty) = entry {
+            if let ContextEntry::Ty(ty, false) = entry {
                 ty.free_refinements(&self.subst, &mut keep);
             }
         }
@@ -1042,7 +1054,7 @@ impl<S: Clone> Infer<S> {
                     // conjunct above is where the default is judged.
                     self.fresh_meta()
                 };
-                context.push((name.clone(), ContextEntry::Ty(parameter.clone())));
+                context.push((name.clone(), bound(parameter.clone())));
                 if !omitted {
                     named_domains.push((name.clone(), parameter));
                 }
@@ -2830,7 +2842,7 @@ impl<S: Clone> Infer<S> {
             }
             // AT-Var: look the variable up and apply its type to Ψ.
             Expr::Variable(name) => match context.iter().rev().find(|(n, _)| n == name) {
-                Some((_, ContextEntry::Ty(ty))) => {
+                Some((_, ContextEntry::Ty(ty, _))) => {
                     let ty = ty.clone();
                     // A type query about this name wants what the context
                     // holds, not the residual after Ψ: on the `f` of
@@ -2916,7 +2928,7 @@ impl<S: Clone> Infer<S> {
                             }
                         }
                         for (name, ty) in &named_types {
-                            context.push((name.clone(), ContextEntry::Ty(ty.clone())));
+                            context.push((name.clone(), bound(ty.clone())));
                         }
                         self.infer(context, psi, body)
                     }
@@ -2928,7 +2940,7 @@ impl<S: Clone> Infer<S> {
                             .map(|pattern| self.pattern_param_type(context, pattern))
                             .collect();
                         for (name, ty) in &named_types {
-                            context.push((name.clone(), ContextEntry::Ty(ty.clone())));
+                            context.push((name.clone(), bound(ty.clone())));
                         }
                         let body_ty = self.infer(context, &mut Vec::new(), body);
                         Type::Function {
@@ -3105,7 +3117,7 @@ impl<S: Clone> Infer<S> {
                 } else {
                     ty
                 };
-                context.push((name.clone(), ContextEntry::Ty(ty)));
+                context.push((name.clone(), bound(ty)));
             }
             Pattern::Tuple(patterns) => match self.resolve(&ty) {
                 Type::Tuple(items) if items.len() == patterns.len() => {
@@ -3151,7 +3163,7 @@ impl<S: Clone> Infer<S> {
         match pattern {
             Pattern::Identifier(name) => {
                 let meta = self.fresh_meta();
-                context.push((name.clone(), ContextEntry::Ty(meta.clone())));
+                context.push((name.clone(), bound(meta.clone())));
                 meta
             }
             Pattern::Tuple(patterns) => Type::Tuple(
@@ -3230,7 +3242,7 @@ impl<S: Clone> Infer<S> {
                         .into_iter()
                         .map(|(member, entry)| {
                             let ty = match entry {
-                                ContextEntry::Ty(ty) => ty,
+                                ContextEntry::Ty(ty, _) => ty,
                                 ContextEntry::Builtin(builtin) => {
                                     signatures::signature(&builtin).unwrap_or(Type::Dynamic)
                                 }
@@ -3238,7 +3250,7 @@ impl<S: Clone> Infer<S> {
                             (member, ty)
                         })
                         .collect();
-                    context.push((name.clone(), ContextEntry::Ty(Type::Module(members))));
+                    context.push((name.clone(), bound(Type::Module(members))));
                 }
                 Binding::Definition(pattern, expr) => {
                     let before = context.len();
@@ -4548,7 +4560,7 @@ mod tests {
             // (name to bind, call text, source id, declared result sort)
             let mut applied: Vec<(String, String, u32, Option<Sort>)> = Vec::new();
             for (name, entry) in exports {
-                let ContextEntry::Ty(ty) = entry else {
+                let ContextEntry::Ty(ty, _) = entry else {
                     continue;
                 };
                 let body = match &ty {

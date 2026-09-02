@@ -240,6 +240,31 @@ impl Type {
         Type::ground(Sort::TOP)
     }
 
+    /// Whether this type holds no meta and no refinement variable.
+    ///
+    /// Syntactic, and deliberately not read through a substitution: a meta that
+    /// is solved now can be unsolved again by a rollback, so only a type that
+    /// never mentions one is settled for good.
+    pub fn settled(&self) -> bool {
+        match self {
+            Type::Meta(_) | Type::Numeric(Refinement::Var(_)) => false,
+            Type::Var(_) | Type::Numeric(_) | Type::Bool | Type::String | Type::Dynamic => true,
+            Type::Function {
+                positional,
+                named,
+                result,
+            } => {
+                positional.iter().all(Type::settled)
+                    && named.iter().all(|(_, ty)| ty.settled())
+                    && result.settled()
+            }
+            Type::And(types) | Type::Tuple(types) => types.iter().all(Type::settled),
+            Type::List(item) => item.settled(),
+            Type::Module(entries) => entries.iter().all(|(_, ty)| ty.settled()),
+            Type::Forall(_, body) => body.settled(),
+        }
+    }
+
     /// Returns this type with `subst` applied deeply: every solved `Meta` is
     /// replaced by its (recursively applied) solution.
     ///
