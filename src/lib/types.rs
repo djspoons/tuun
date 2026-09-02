@@ -240,6 +240,36 @@ impl Type {
         Type::ground(Sort::TOP)
     }
 
+    /// Whether any refinement variable appears in this type.
+    ///
+    /// Syntactic, like the freezing it guards: freezing rewrites exactly these
+    /// nodes and leaves a meta alone, so a type without one is already what
+    /// freezing would return.
+    pub fn has_refinement_var(&self) -> bool {
+        match self {
+            Type::Numeric(Refinement::Var(_)) => true,
+            Type::Meta(_)
+            | Type::Var(_)
+            | Type::Numeric(_)
+            | Type::Bool
+            | Type::String
+            | Type::Dynamic => false,
+            Type::Function {
+                positional,
+                named,
+                result,
+            } => {
+                positional.iter().any(Type::has_refinement_var)
+                    || named.iter().any(|(_, ty)| ty.has_refinement_var())
+                    || result.has_refinement_var()
+            }
+            Type::And(types) | Type::Tuple(types) => types.iter().any(Type::has_refinement_var),
+            Type::List(item) => item.has_refinement_var(),
+            Type::Module(entries) => entries.iter().any(|(_, ty)| ty.has_refinement_var()),
+            Type::Forall(_, body) => body.has_refinement_var(),
+        }
+    }
+
     /// Whether this type holds no meta and no refinement variable.
     ///
     /// Syntactic, and deliberately not read through a substitution: a meta that

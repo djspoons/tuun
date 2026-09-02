@@ -723,7 +723,13 @@ impl<S: Clone> Infer<S> {
                 ty.free_refinements(&self.subst, &mut context_refinements);
             }
         }
-        let applied = self.freeze_refinements(&applied, true, &context_refinements);
+        // Freezing rewrites refinement variables and copies the rest, so a
+        // type without one would be rebuilt into itself.
+        let applied = if applied.has_refinement_var() {
+            self.freeze_refinements(&applied, true, &context_refinements)
+        } else {
+            applied
+        };
         let mut metas = Vec::new();
         applied.free_metas(&self.subst, &mut metas);
         if metas.is_empty() {
@@ -1085,7 +1091,11 @@ impl<S: Clone> Infer<S> {
                     result: Box::new(result),
                 }
                 .apply(&self.subst);
-                conjuncts.push(self.freeze_refinements(&conjunct, true, &keep));
+                conjuncts.push(if conjunct.has_refinement_var() {
+                    self.freeze_refinements(&conjunct, true, &keep)
+                } else {
+                    conjunct
+                });
             }
             self.errors.truncate(errors);
             self.rollback(mark);
