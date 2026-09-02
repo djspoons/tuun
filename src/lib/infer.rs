@@ -646,10 +646,23 @@ impl<S: Clone> Infer<S> {
 
     /// Follows substitution chains at the root of `ty` only.
     fn resolve(&self, ty: &Type) -> Type {
-        let mut ty = ty.clone();
-        while let Type::Meta(id) = &ty {
+        self.resolved(ty).clone()
+    }
+
+    /// Borrows `ty` with its meta-variable chain followed.
+    ///
+    /// The borrowing half of [`Infer::resolve`], for callers that only need to
+    /// look: the result borrows either `ty` itself or a solution in the
+    /// substitution, so nothing is copied. Most types reaching here are not
+    /// metas at all and are returned untouched.
+    ///
+    /// A caller that needs to keep the type, or that needs `&mut self` while
+    /// holding it, wants [`Infer::resolve`] instead.
+    fn resolved<'a>(&'a self, ty: &'a Type) -> &'a Type {
+        let mut ty = ty;
+        while let Type::Meta(id) = ty {
             match self.subst.get(id) {
-                Some(solution) => ty = solution.clone(),
+                Some(solution) => ty = solution,
                 None => break,
             }
         }
@@ -859,11 +872,11 @@ impl<S: Clone> Infer<S> {
         }
         let numeric: Vec<bool> = parameters
             .iter()
-            .map(|parameter| matches!(self.resolve(parameter), Type::Numeric(_)))
+            .map(|parameter| matches!(self.resolved(parameter), Type::Numeric(_)))
             .collect();
         let named_numeric: Vec<bool> = named_parameters
             .iter()
-            .map(|(_, parameter)| matches!(self.resolve(parameter), Type::Numeric(_)))
+            .map(|(_, parameter)| matches!(self.resolved(parameter), Type::Numeric(_)))
             .collect();
         Self::level_vectors(atoms, &numeric, &named_numeric)?
             .checked_mul(self.spine_vectors(body, &result, atoms)?)
@@ -934,11 +947,11 @@ impl<S: Clone> Infer<S> {
         }
         let numeric: Vec<bool> = parameters
             .iter()
-            .map(|parameter| matches!(self.resolve(parameter), Type::Numeric(_)))
+            .map(|parameter| matches!(self.resolved(parameter), Type::Numeric(_)))
             .collect();
         let named_numeric: Vec<bool> = named_parameters
             .iter()
-            .map(|(_, parameter)| matches!(self.resolve(parameter), Type::Numeric(_)))
+            .map(|(_, parameter)| matches!(self.resolved(parameter), Type::Numeric(_)))
             .collect();
         // Every named parameter is worth a table even when nothing is numeric,
         // because a call may always omit one: the omitted conjunct is where the
@@ -1633,7 +1646,7 @@ impl<S: Clone> Infer<S> {
     /// though they should match.
     fn nested_conflict(&self, found: &Type, expected: &Type) -> Option<(Sort, Sort)> {
         let conflict = self.conflict?;
-        let bare = |ty: &Type| matches!(self.resolve(ty), Type::Numeric(_));
+        let bare = |ty: &Type| matches!(self.resolved(ty), Type::Numeric(_));
         (!bare(found) && !bare(expected)).then_some(conflict)
     }
 
@@ -1906,7 +1919,13 @@ impl<S: Clone> Infer<S> {
     fn app_subtype(&mut self, psi: &mut Psi<S>, ty: Type, head: Option<&str>) -> Type {
         // AS-Empty: not applied to anything, so the type stands as is.
         let Some(frame) = psi.pop() else { return ty };
-        match self.resolve(&ty) {
+        // `ty` is already owned, so only a meta needs resolving; anything else
+        // is matched where it stands rather than copied to be looked at.
+        let ty = match ty {
+            Type::Meta(_) => self.resolve(&ty),
+            settled => settled,
+        };
+        match ty {
             // AS-ForallL2: instantiate and keep consuming.
             Type::Forall(vars, body) => {
                 let instance = self.instantiate(&vars, *body);
@@ -1992,8 +2011,8 @@ impl<S: Clone> Infer<S> {
         let sorts: Vec<Option<Sort>> = frame
             .positional
             .iter()
-            .map(|(argument, _)| match self.resolve(argument) {
-                Type::Numeric(rep) => Some(self.may_of(&rep)),
+            .map(|(argument, _)| match self.resolved(argument) {
+                Type::Numeric(rep) => Some(self.may_of(rep)),
                 Type::Dynamic | Type::Meta(_) => Some(Sort::TOP),
                 _ => None,
             })
@@ -2046,9 +2065,9 @@ impl<S: Clone> Infer<S> {
                 unreachable!("conjuncts are arrows");
             };
             for (result, ty) in unions.iter_mut().zip(positional) {
-                match self.resolve(ty) {
+                match self.resolved(ty) {
                     Type::Numeric(rep) => {
-                        let sort = self.may_of(&rep);
+                        let sort = self.may_of(rep);
                         *result = result.map(|union| union.union(sort));
                     }
                     // A `Sort` is a union of numeric atoms and has no room for
@@ -2082,8 +2101,8 @@ impl<S: Clone> Infer<S> {
             let Some((_, argument, _)) = frame.named.iter().find(|(n, _, _)| n == name) else {
                 return false;
             };
-            let sort = match self.resolve(argument) {
-                Type::Numeric(rep) => Some(self.may_of(&rep)),
+            let sort = match self.resolved(argument) {
+                Type::Numeric(rep) => Some(self.may_of(rep)),
                 Type::Dynamic | Type::Meta(_) => Some(Sort::TOP),
                 _ => None,
             };
@@ -2640,8 +2659,8 @@ impl<S: Clone> Infer<S> {
                         let Type::Function { positional, .. } = conjunct else {
                             unreachable!("conjuncts are arrows");
                         };
-                        matches!(self.resolve(&positional[position]), Type::Numeric(rep)
-                            if !self.may_of(&rep).intersect(Sort::SEQ).is_empty())
+                        matches!(self.resolved(&positional[position]), Type::Numeric(rep)
+                            if !self.may_of(rep).intersect(Sort::SEQ).is_empty())
                     })
                 };
                 let both_seqs =
