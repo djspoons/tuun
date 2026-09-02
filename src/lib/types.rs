@@ -206,6 +206,18 @@ impl Type {
         }
     }
 
+    /// Builds the intersection of `types`, which is the type itself where
+    /// there is only one of them.
+    ///
+    /// A one-conjunct intersection selects and displays exactly as its conjunct
+    /// does, so building one only makes the type harder to read.
+    pub fn intersection(mut types: Vec<Type>) -> Type {
+        if types.len() == 1 {
+            return types.remove(0);
+        }
+        Type::And(types.into())
+    }
+
     /// Builds the numeric type with exactly the given sort.
     pub fn ground(sort: Sort) -> Type {
         Type::Numeric(Refinement::Ground(sort))
@@ -277,11 +289,6 @@ impl Type {
     /// Syntactic, and deliberately not read through a substitution: a meta that
     /// is solved now can be unsolved again by a rollback, so only a type that
     /// never mentions one is settled for good.
-    /// Returns the intersection of `types`.
-    pub fn intersection(types: Vec<Type>) -> Type {
-        Type::And(types.into())
-    }
-
     pub fn settled(&self) -> bool {
         match self {
             Type::Meta(_) | Type::Numeric(Refinement::Var(_)) => false,

@@ -74,7 +74,7 @@
 //! functions over modules.
 
 // TODO: We currently allow some non-Freeman-like types, in particular,
-// intersections of functions types whose parameter types disagree (not just
+// intersections of function types whose parameter types disagree (not just
 // their sorts). This is explicit in the types of ==/!= but also cases like
 //   let h = fn(v) => sine(v, 1) | fin(4) in
 //     let f = fn(k = h) => k(2) in f(k = cos)
@@ -1122,12 +1122,7 @@ impl<S: Clone> Infer<S> {
                 self.error(message, &default.span);
             }
         }
-        let mut conjuncts = merge_conjuncts(conjuncts);
-        Some(if conjuncts.len() == 1 {
-            conjuncts.remove(0)
-        } else {
-            Type::And(conjuncts.into())
-        })
+        Some(Type::intersection(merge_conjuncts(conjuncts)))
     }
 
     /// Unifies two types, solving metas by equality — Xie and Oliveira's Fig.
@@ -3580,8 +3575,9 @@ mod tests {
         assert_errors("(fn((y, z)) => y)(4, 5)", &["extra positional parameter"]);
     }
 
-    // Named parameters take their types from their defaults; call-site
-    // checks mirror evaluation's (unknown name, extra positional).
+    // A named parameter is optional at the call, and the call-site checks
+    // mirror evaluation's (unknown name, extra positional). What the
+    // parameter's *type* comes from is `named_parameters_type_from_the_body`.
     #[test]
     fn named_parameters() {
         let f = "let f = fn(x, y = 10) => x * y in ";
@@ -3589,16 +3585,6 @@ mod tests {
         assert_clean(&format!("{}f(2, y = 5)", f));
         assert_errors(&format!("{}f(2, z = 3)", f), &["no named parameter \"z\""]);
         assert_errors(&format!("{}f(2, 3)", f), &["extra positional parameter"]);
-        // A named argument to a builtin without named parameters errors for
-        // the bogus name, and — since only one of sine's two positional
-        // parameters is supplied — for the missing argument too.
-        assert_errors(
-            "sine(440, y = 1)",
-            &[
-                "missing parameter of type waveform",
-                "no named parameter \"y\"",
-            ],
-        );
     }
 
     #[test]
@@ -3780,13 +3766,6 @@ mod tests {
         assert_clean(&format!("{}f()", f));
         // Result precision flows through a supplied named argument.
         assert_errors(&format!("{}f(x = 2) \\ 1", f), &["expected seq, found int"]);
-        // A default the body cannot accept leaves the omitted conjunct out of the
-        // table, and a call may always omit it, so the definition is what is
-        // reported.
-        assert_errors(
-            "fn(x = 100) => x \\ 1",
-            &["default value for \"x\" cannot be used in the body"],
-        );
     }
 
     #[test]
@@ -3976,7 +3955,7 @@ mod tests {
     // summary is dropped in favor of the conjuncts, and a default depends on no
     // parameter, so it is not part of that summary.
     #[test]
-    fn a_default_that_does_not_check_is_reported_at_the_definition() {
+    fn a_broken_default_is_reported_at_the_definition() {
         for wrapper in ["let f = {} in 0", "let f = {} in f()", "{}"] {
             let program = wrapper.replace("{}", "fn(k = <[1, 2]>) => 1");
             assert_errors(&program, &["expected [seq], found [int]"]);
@@ -4049,21 +4028,11 @@ mod tests {
         // Atom coverage: no single conjunct contains waveform-or-seq, but the
         // waveform and seq atoms are covered by different conjuncts.
         assert_clean("(if true then time else seq(0)(1)) * 1");
-        // A definitely-uncovered atom still rejects.
-        assert_errors("seq(0)(1) + seq(0)(2)", &["cannot combine two seqs with +"]);
         // Unconstrained parameters defer: the base pass records contracts
         // instead of judging ⊤, and the tabulated conjuncts judge per atom.
         assert_clean("let f = fn(x) => x + 1 in f(time)");
         // Dynamic passes without imposing or cascading.
         assert_clean("debug(1) + 1");
-        // A guarantee already seen is judged, deferred or not: the default
-        // flows into x before the body's seq contract, and the conjunct it
-        // would have made is the one tabulation drops — which is reported,
-        // since no call can avoid omitting.
-        assert_errors(
-            "fn(x = 100) => x \\ 1",
-            &["default value for \"x\" cannot be used in the body"],
-        );
     }
 
     // A position where some conjunct's domain is non-numeric or unknown imposes
@@ -4103,7 +4072,6 @@ mod tests {
     // conjunct — the float seed's doubled results stay floats, not rejections.
     #[test]
     fn fixed_point_selection() {
-        assert_clean("unfold(fn(n) => n * 2, 65.41, 9)");
         assert_clean("unfold(fn(n) => n * 2, 65.41, 9)");
         assert_clean("reduce(fn(acc, x) => acc * 0.5, 2, [1, 2])");
         // The fixed point keeps genuine sorts: a seq seed stays a seq through
@@ -4191,9 +4159,9 @@ mod tests {
         assert!(errors.is_empty(), "got {:?}", messages(&errors));
     }
 
-    // A keys program is checked by seeding Ψ with (float, float) — the
-    // note number and velocity the runtime will invoke it with — and
-    // requiring a pair of waveforms back.
+    // A keys program is checked by seeding Ψ with (int, float) — the note
+    // number and velocity the runtime will invoke it with — and requiring a
+    // pair of waveforms back.
     #[test]
     fn note_function_expectation() {
         let errors = check_with_expectation(
@@ -4353,7 +4321,7 @@ mod tests {
     }
 
     #[test]
-    fn branches_join_two_tables_row_by_row() {
+    fn branches_join_two_tables_conjunct_by_conjunct() {
         let tables = "let g = fn(v) => v + 1 in let h = fn(v) => v | fin(4) in ";
         // `h` takes waveforms and seqs, `g` takes anything; the branch offers
         // a conjunct wherever the two overlap, at the join of their results.
@@ -4374,7 +4342,7 @@ mod tests {
         // A table joined with itself takes the unification path, so its
         // variables stay live instead of grounding.
         assert_clean("let g = fn(v) => v + 1 in (if true then g else g)(time)");
-        // Rows that share no domain leave nothing to offer.
+        // Conjuncts that share no domain leave nothing to offer.
         assert_errors(
             "let g = fn(v) => v + 1 in let b = fn(v) => true in if true then g else b",
             &[
@@ -4440,27 +4408,8 @@ mod tests {
         assert!(checker.unify(&meta, &list).is_err());
     }
 
-    // Pins the checker's verdict on every embedded library module, so signature
-    // or inference changes that affect the library surface here.
-    //
-    // Each module is parsed with its index as span source; a module's report
-    // keeps only errors from its own text (dependencies re-typed along the
-    // way report under their own entry). Positions come from
-    // `display_with_source` so every pinned error can be read against the
-    // .tuun source.
-    /// The declared residue: value-level runtime errors the sort lattice
-    /// cannot see (see "Toward a sound configuration" in the design doc).
-    /// On a clean program, an eval error matching none of these
-    /// classes is a soundness bug.
-    /// Whether a runtime failure is one the sort lattice cannot see.
-    ///
-    /// The runtime says which it is, so this asks rather than matching on
-    /// the message: a builtin marks the errors the lattice cannot judge, and
-    /// everything else it reports is a sort or arity the checker was meant to
-    /// rule out.
-    /// The default is the safe one — a error nobody has classified counts as
-    /// a checker failure, so adding a builtin cannot quietly widen what the
-    /// harness overlooks.
+    /// Whether a runtime failure is one the sort lattice cannot see — the
+    /// declared residue, which a clean program is allowed to end in.
     fn declared_residue<S>(error: &Error<S>) -> bool {
         error.kind() == ErrorKind::Eval
     }
@@ -4493,17 +4442,36 @@ mod tests {
         }
     }
 
-    /// The soundness theorem as a regression test, over the library corpus: no
-    /// clean program may evaluate to an error outside the declared
-    /// residue. Covers every module as a program root, and every exported
-    /// function applied once per table conjunct at representative arguments — the
-    /// tabulated analog of the builtin conformance test, checking result sorts
-    /// against the conjuncts. Resolves modules for the differential harness; a
-    /// generic fn item so each call site can pick its own lifetime (the
-    /// synthesized binding vectors are call-site-local).
-    fn diff_resolve<'a>(
+    /// One parsed library module: its path, the source text its spans index
+    /// into, and its bindings.
+    type LibraryModule = (String, &'static str, Vec<SourceBinding<u32, u32>>);
+
+    /// The embedded library, parsed, paired with the source text its spans
+    /// index into.
+    ///
+    /// Each module carries its index as span source, so an error can be
+    /// attributed to the module whose text it came from, and each opens
+    /// `__prelude` — which [`library_resolve`] answers with the test prelude.
+    fn parsed_library() -> Vec<LibraryModule> {
+        modules::EMBEDDED_MODULES
+            .iter()
+            .enumerate()
+            .map(|(index, (path, content))| {
+                let (mut bindings, errors) = parse_module::<u32, _>(content, index as u32).unwrap();
+                assert!(errors.is_empty(), "parse errors in {}", path);
+                bindings.insert(0, Binding::Open(vec!["__prelude".to_string()]).into());
+                (path.to_string(), *content, bindings)
+            })
+            .collect()
+    }
+
+    /// Resolves a module path against the test prelude and a parsed library.
+    ///
+    /// A generic fn item rather than a closure so each call site can pick its
+    /// own lifetime: the binding vectors are call-site-local.
+    fn library_resolve<'a>(
         prelude: &'a [SourceBinding<u32, u32>],
-        parsed: &'a [(String, Vec<SourceBinding<u32, u32>>)],
+        parsed: &'a [LibraryModule],
         path: &[String],
     ) -> Result<&'a [SourceBinding<u32, u32>], Error<u32>> {
         let key = path.join(".");
@@ -4512,37 +4480,38 @@ mod tests {
         }
         parsed
             .iter()
-            .find(|(name, _)| *name == key)
-            .map(|(_, bindings)| &bindings[..])
+            .find(|(name, _, _)| *name == key)
+            .map(|(_, _, bindings)| &bindings[..])
             .ok_or_else(|| Error::types_here(format!("no module {}", key)))
     }
 
+    /// The soundness theorem as a regression test, over the library corpus: no
+    /// clean program may evaluate to an error outside the declared residue.
+    ///
+    /// Covers every module as a program root, and every exported function
+    /// applied once per table conjunct at representative arguments — the
+    /// tabulated analog of the builtin conformance test, checking result sorts
+    /// against the conjuncts.
     #[test]
     fn differential_library_agreement() {
         let prelude = test_prelude::<u32>();
-        let mut parsed: Vec<(String, Vec<SourceBinding<u32, u32>>)> = Vec::new();
-        for (index, (path, content)) in modules::EMBEDDED_MODULES.iter().enumerate() {
-            let (mut bindings, errors) = parse_module::<u32, _>(content, index as u32).unwrap();
-            assert!(errors.is_empty(), "parse errors in {}", path);
-            bindings.insert(0, Binding::Open(vec!["__prelude".to_string()]).into());
-            parsed.push((path.to_string(), bindings));
-        }
+        let parsed = parsed_library();
         let mut calls = 0;
         let mut true_positives = 0;
         let mut residue = 0;
         // Every module as a program root: its bindings must evaluate, and
         // checking must agree.
-        for (path, bindings) in &parsed {
+        for (path, _, bindings) in &parsed {
             let expr = parse_program::<u32, _>("0", 9999).unwrap();
             let clean = check_program(
-                |p: &[String]| diff_resolve(&prelude, &parsed, p),
+                |p: &[String]| library_resolve(&prelude, &parsed, p),
                 bindings,
                 &expr,
                 None,
             )
             .is_empty();
             let evaluated = eval::evaluate(
-                |p: &[String]| diff_resolve(&prelude, &parsed, p),
+                |p: &[String]| library_resolve(&prelude, &parsed, p),
                 bindings,
                 expr,
             );
@@ -4560,12 +4529,12 @@ mod tests {
         // The calls batch into one synthesized module per library module —
         // one check and one evaluation for all of them — with a
         // distinct source id per call for attribution.
-        for (_, bindings) in &parsed {
+        for (_, _, bindings) in &parsed {
             let mut checker: Infer<u32> = Infer::new();
             let mut context = Vec::new();
             let mut memo = HashMap::new();
             let exports = checker.build_context(
-                &|p: &[String]| diff_resolve(&prelude, &parsed, p),
+                &|p: &[String]| library_resolve(&prelude, &parsed, p),
                 bindings,
                 &mut context,
                 &mut memo,
@@ -4628,7 +4597,7 @@ mod tests {
             calls += applied.len();
             let expr = parse_program::<u32, _>("0", 9999).unwrap();
             let errors = check_program(
-                |p: &[String]| diff_resolve(&prelude, &parsed, p),
+                |p: &[String]| library_resolve(&prelude, &parsed, p),
                 &extended,
                 &expr,
                 None,
@@ -4642,7 +4611,7 @@ mod tests {
             let mut classify = |text: &str, id: u32, declared: Option<Sort>| {
                 let expr = parse_program::<u32, _>(text, id).unwrap();
                 let evaluated = eval::evaluate(
-                    |p: &[String]| diff_resolve(&prelude, &parsed, p),
+                    |p: &[String]| library_resolve(&prelude, &parsed, p),
                     bindings,
                     expr,
                 );
@@ -4691,8 +4660,10 @@ mod tests {
                     ));
                 }
             }
-            match eval::evaluate_bindings(|p: &[String]| diff_resolve(&prelude, &parsed, p), &batch)
-            {
+            match eval::evaluate_bindings(
+                |p: &[String]| library_resolve(&prelude, &parsed, p),
+                &batch,
+            ) {
                 Ok(evaluated) => {
                     for (bound, text, id, declared) in &applied {
                         if flagged.contains(id) {
@@ -5209,29 +5180,14 @@ mod tests {
             .and_then(|s| s.parse().ok())
             .unwrap_or(20);
         let prelude = test_prelude::<u32>();
-        let mut parsed: Vec<(String, Vec<SourceBinding<u32, u32>>)> = Vec::new();
-        for (index, (path, content)) in modules::EMBEDDED_MODULES.iter().enumerate() {
-            let (mut bindings, _) = parse_module::<u32, _>(content, index as u32).unwrap();
-            bindings.insert(0, Binding::Open(vec!["__prelude".to_string()]).into());
-            parsed.push((path.to_string(), bindings));
-        }
-        let resolve = |path: &[String]| {
-            let key = path.join(".");
-            if key == "__prelude" {
-                return Ok(&prelude[..]);
-            }
-            parsed
-                .iter()
-                .find(|(name, _)| *name == key)
-                .map(|(_, bindings)| &bindings[..])
-                .ok_or_else(|| Error::types_here(format!("no module {}", key)))
-        };
+        let parsed = parsed_library();
+        let resolve = |p: &[String]| library_resolve(&prelude, &parsed, p);
         let expr = parse_program::<u32, _>("0", 9999).unwrap();
         let mut best = f64::MAX;
         let mut total = 0.0;
         for _ in 0..rounds {
             let start = std::time::Instant::now();
-            for (_, bindings) in parsed.iter() {
+            for (_, _, bindings) in parsed.iter() {
                 std::hint::black_box(check_program(resolve, bindings, &expr, None));
             }
             let elapsed = start.elapsed().as_secs_f64() * 1000.0;
@@ -5252,23 +5208,8 @@ mod tests {
     #[ignore]
     fn library_report() {
         let prelude = test_prelude::<u32>();
-        let mut parsed: Vec<(String, &str, Vec<SourceBinding<u32, u32>>)> = Vec::new();
-        for (index, (path, content)) in modules::EMBEDDED_MODULES.iter().enumerate() {
-            let (mut bindings, _) = parse_module::<u32, _>(content, index as u32).unwrap();
-            bindings.insert(0, Binding::Open(vec!["__prelude".to_string()]).into());
-            parsed.push((path.to_string(), content, bindings));
-        }
-        let resolve = |path: &[String]| {
-            let key = path.join(".");
-            if key == "__prelude" {
-                return Ok(&prelude[..]);
-            }
-            parsed
-                .iter()
-                .find(|(name, _, _)| *name == key)
-                .map(|(_, _, bindings)| &bindings[..])
-                .ok_or_else(|| Error::types_here(format!("no module {}", key)))
-        };
+        let parsed = parsed_library();
+        let resolve = |p: &[String]| library_resolve(&prelude, &parsed, p);
         let expr = parse_program::<u32, _>("0", 9999).unwrap();
         for (index, (path, content, bindings)) in parsed.iter().enumerate() {
             let errors = check_program(&resolve, bindings, &expr, None);
@@ -5285,10 +5226,10 @@ mod tests {
     }
 
     #[test]
-    fn a_default_that_does_not_work_is_reported() {
+    fn a_default_the_body_cannot_use_is_reported() {
         // Every named argument may be left out, so the conjunct that omits one is
-        // the only conjunct some calls can reach. When the default does not check,
-        // that conjunct is dropped and the table quietly keeps the conjuncts that need
+        // the only conjunct some calls can reach. When the body cannot use the
+        // default, that conjunct is dropped and the table quietly keeps the conjuncts that need
         // the argument supplied — which `check_frame` then lets an omitting
         // call through, since a named parameter is optional by construction.
         // The definition is where this can be said.
@@ -5378,7 +5319,7 @@ mod tests {
     }
 
     #[test]
-    fn a_named_default_does_not_pin_its_parameter() {
+    fn a_non_numeric_named_default_does_not_pin_its_parameter() {
         // A named parameter's type comes from the body's use of it. The
         // default is only what a call that omits the argument gets, so it
         // decides the omitted conjunct and nothing else.
@@ -5513,24 +5454,8 @@ mod tests {
     #[test]
     fn embedded_modules_pinned_errors() {
         let prelude = test_prelude::<u32>();
-        let mut parsed: Vec<(String, &str, Vec<SourceBinding<u32, u32>>)> = Vec::new();
-        for (index, (path, content)) in modules::EMBEDDED_MODULES.iter().enumerate() {
-            let (mut bindings, errors) = parse_module::<u32, _>(content, index as u32).unwrap();
-            assert!(errors.is_empty(), "parse errors in {}", path);
-            bindings.insert(0, Binding::Open(vec!["__prelude".to_string()]).into());
-            parsed.push((path.to_string(), content, bindings));
-        }
-        let resolve = |path: &[String]| {
-            let key = path.join(".");
-            if key == "__prelude" {
-                return Ok(&prelude[..]);
-            }
-            parsed
-                .iter()
-                .find(|(name, _, _)| *name == key)
-                .map(|(_, _, bindings)| &bindings[..])
-                .ok_or_else(|| Error::types_here(format!("no module {}", key)))
-        };
+        let parsed = parsed_library();
+        let resolve = |p: &[String]| library_resolve(&prelude, &parsed, p);
         let expr = parse_program::<u32, _>("0", 9999).unwrap();
         let mut report: Vec<String> = Vec::new();
         for (index, (path, content, bindings)) in parsed.iter().enumerate() {

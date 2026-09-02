@@ -22,12 +22,12 @@ use crate::types::Type;
 
 /// Builds the intersection table shared by the binary arithmetic operators,
 /// mirroring `binary_op`'s runtime arms: constants fold (preserving
-/// integrality when `int_row`), any waveform involvement builds a waveform,
+/// integrality when `int_conjunct`), any waveform involvement builds a waveform,
 /// one seq threads its offset, and two seqs match no conjunct (a runtime
 /// error).
-fn binary_arithmetic(int_row: bool) -> Type {
+fn binary_arithmetic(int_conjunct: bool) -> Type {
     let mut conjuncts = Vec::new();
-    if int_row {
+    if int_conjunct {
         conjuncts.push(Type::function(vec![Type::int(), Type::int()], Type::int()));
     }
     conjuncts.push(Type::function(
@@ -524,9 +524,9 @@ mod tests {
     }
 
     /// Every built-in with numeric-ground conjuncts conforms to them — the
-    /// signature-faithfulness obligation of the sound configuration. Rows
-    /// over non-numeric domains (lists, functions, ∀-polymorphic) are out
-    /// of scope here; `mark` is prelude-native and `debug` is Dynamic.
+    /// signature-faithfulness obligation of the sound configuration. Conjuncts
+    /// over non-numeric domains (lists, functions, ∀-polymorphic) are out of
+    /// scope here; `mark` is prelude-native and `debug` is Dynamic.
     #[test]
     fn signatures_conform_to_the_runtime() {
         let mut bindings: Vec<SourceBinding<u32, ()>> = Vec::new();
