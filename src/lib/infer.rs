@@ -244,9 +244,33 @@ fn bound(ty: Type) -> ContextEntry {
 /// entries shadow earlier ones, mirroring the evaluation context.
 type TypeContext = Vec<(String, ContextEntry)>;
 
-/// The most atom vectors `tabulate` will enumerate for one definition:
-/// 4^4, covering functions of up to four numeric parameters.
-const MAX_TABULATION_VECTORS: usize = 512;
+/// The most atom vectors `tabulate` will enumerate on the full four-atom
+/// basis: 4^4, covering functions of up to four numeric parameters. Past this
+/// the coarse basis takes over, trading the int/float distinctions for room.
+const MAX_FULL_VECTORS: usize = 512;
+
+/// The most atom vectors `tabulate` will enumerate on the coarse unseq/seq
+/// basis: 2^12, covering functions of up to twelve numeric parameters.
+///
+/// Larger than the full basis's budget for two reasons. This is the last basis
+/// there is, so what lies past it is not a coarser table but no table at all —
+/// a refusal ([`Infer::too_wide`]), because the untabulated summary is unsound.
+/// And it costs less per parameter: 2^n rather than 4^n, about 70ms at twelve
+/// parameters against 7ms at nine.
+///
+/// The two budgets are separate because one shared bound is not monotone in
+/// cost. Raising a single budget to 4096 would also let a *five*-parameter
+/// function onto the full basis at 1024 vectors, and a shared 65536 would put
+/// eight parameters there at 65536 — seven minutes for one definition.
+const MAX_COARSE_VECTORS: usize = 4096;
+
+/// The most conjunct pairs [`Infer::join`] will enumerate when joining two
+/// tables.
+///
+/// Joining is quadratic where tabulating is linear, so this is its own bound
+/// rather than a tabulation budget: two tables at the coarse basis's limit
+/// would be 16M pairs.
+const MAX_JOIN_PAIRS: usize = 512;
 
 /// The most rounds selection may take to reach a fixed point.
 ///
@@ -266,6 +290,18 @@ const FULL_ATOMS: [Sort; 4] = [
 /// The two-point unseq/seq split: the soundness-critical distinction, kept
 /// when the full basis does not fit the budget.
 const COARSE_ATOMS: [Sort; 2] = [Sort::WAVE, Sort::SEQ];
+
+/// An atom basis and the vector budget allowed for it.
+///
+/// Carried together so a level of a curried spine is enumerated under the same
+/// bound the whole spine was measured against.
+type Basis = (&'static [Sort], usize);
+
+/// The bases `tabulate` may enumerate over, most precise first.
+const BASES: [Basis; 2] = [
+    (&FULL_ATOMS, MAX_FULL_VECTORS),
+    (&COARSE_ATOMS, MAX_COARSE_VECTORS),
+];
 
 /// How selection decided one intersection against one frame.
 enum Selection {
@@ -846,19 +882,24 @@ impl<S: Clone> Infer<S> {
                 self.errors.drain(start..explored);
                 table
             }
-            None => base,
+            // Tabulation contributed no type, so it contributes no errors
+            // either: it walked the same definition the base pass did, and
+            // anything it found on the way — a width past the budget, above
+            // all — the base pass reported first. Keeping both says it twice.
+            None => {
+                self.errors.truncate(explored);
+                base
+            }
         }
     }
 
     /// The atom basis a whole curried spine fits in, or `None` when even the
     /// coarse split does not fit and the definition is left untabulated.
-    fn spine_basis<M>(&self, expr: &SourceExpr<M, S>, base: &Type) -> Option<&'static [Sort]> {
-        [&FULL_ATOMS[..], &COARSE_ATOMS[..]]
-            .into_iter()
-            .find(|atoms| {
-                self.spine_vectors(expr, base, atoms)
-                    .is_some_and(|vectors| vectors <= MAX_TABULATION_VECTORS)
-            })
+    fn spine_basis<M>(&self, expr: &SourceExpr<M, S>, base: &Type) -> Option<Basis> {
+        BASES.into_iter().find(|(atoms, budget)| {
+            self.spine_vectors(expr, base, atoms)
+                .is_some_and(|vectors| vectors <= *budget)
+        })
     }
 
     /// The vectors a curried spine enumerates with `atoms` as its basis: the
@@ -914,6 +955,29 @@ impl<S: Clone> Infer<S> {
         Some(vectors)
     }
 
+    /// Reports a function with more numeric parameters than tabulation can
+    /// enumerate, naming the `cases` it would have taken against the `limit` it
+    /// passed, where the count is known.
+    ///
+    /// The alternative to reporting is the base pass's type, and that summary
+    /// judges each parameter on its own: it has one domain per position, so it
+    /// has no way to say that two positions may not *both* be seqs. Every
+    /// relation the conjuncts carry — the missing `(seq, seq)` arm of `+` above
+    /// all — is exactly what it drops, and nothing checks what is left.
+    /// Refusing keeps the checker answering from one approximation rather than
+    /// falling back, unannounced, to another at the width where nobody is
+    /// watching.
+    fn too_wide(&mut self, cases: Option<usize>, limit: usize, span: &Option<Span<S>>) {
+        let message = match cases {
+            Some(cases) => format!(
+                "too many numeric parameters to check ({} cases, limit {})",
+                cases, limit
+            ),
+            None => "too many numeric parameters to check".to_string(),
+        };
+        self.error(message, span);
+    }
+
     /// Tabulates a definition-bound function over its numeric parameters —
     /// Freeman and Pfenning §4: the principal refinement type of a definition
     /// is a finite intersection of arrows, found by re-checking the body at
@@ -926,11 +990,22 @@ impl<S: Clone> Infer<S> {
     /// is not applicable there), and the exploratory errors are discarded — the
     /// base pass has already reported anything unconditional.
     ///
-    /// Beyond `MAX_TABULATION_VECTORS`, enumeration retries on the two-point
+    /// Beyond `MAX_FULL_VECTORS`, enumeration retries on the two-point
     /// unseq/seq split — keeping the relational seq holes, the
-    /// soundness-critical part, at the cost of the int/float distinctions — and
-    /// returns `None` (keep the base type, the freeze-at-generalize summary)
-    /// only past that, or for functions with no numeric parameters.
+    /// soundness-critical part, at the cost of the int/float distinctions —
+    /// under its own, larger `MAX_COARSE_VECTORS`. Past that the function is
+    /// too wide to tabulate at all, which is an error rather than a fallback
+    /// ([`Infer::too_wide`]).
+    ///
+    /// Returns `None`, leaving the base type to stand, where there is simply
+    /// nothing to tabulate: a non-function, a function with no parameters or no
+    /// numeric ones, or one whose every vector's body errored.
+    ///
+    /// A refusal answers with [`Type::Dynamic`] rather than `None`, so the base
+    /// type does not stand in its place: that type is the unsound summary the
+    /// refusal exists to avoid, and letting the rest of the program be checked
+    /// against it would report from it. This is the recovery every other
+    /// reported error makes.
     ///
     /// This is what makes parameter contracts *relational* rather than
     /// per-position: `fn(a, b) => a + b` gets no `(seq, seq)` conjunct, so a
@@ -940,7 +1015,7 @@ impl<S: Clone> Infer<S> {
         context: &mut TypeContext,
         expr: &SourceExpr<M, S>,
         base: &Type,
-        basis: Option<&'static [Sort]>,
+        basis: Option<Basis>,
     ) -> Option<Type> {
         let Expr::Function {
             positional,
@@ -991,11 +1066,37 @@ impl<S: Clone> Infer<S> {
         // no level need exceed it while their product does — `fn(a, b, c) =>
         // fn(d, e) => ...` is 4³ × 4² = 1024 vectors, four times what the
         // same parameters cost written flat.
-        let atoms = match basis {
-            Some(atoms) => atoms,
-            None => self.spine_basis(expr, base)?,
+        let (atoms, budget) = match basis {
+            Some(basis) => basis,
+            None => match self.spine_basis(expr, base) {
+                Some(basis) => basis,
+                // No basis fits, the coarse one included, so there is no table
+                // to be had — see `too_wide` for why that is refused rather
+                // than left to the base pass.
+                None => {
+                    let cases = self.spine_vectors(expr, base, &COARSE_ATOMS);
+                    self.too_wide(cases, MAX_COARSE_VECTORS, &expr.span);
+                    return Some(Type::Dynamic);
+                }
+            },
         };
         let vectors = Self::level_vectors(atoms, &numeric, &named_numeric)?;
+        // `spine_basis` bounded the product across the whole spine, and this
+        // level is one of its factors, so a level past the budget means the
+        // count it bounded was not this one: a parameter that resolves to a
+        // numeric here where the base pass it measured left one unknown. The
+        // assertion says that reasoning failed; the refusal keeps a build
+        // without assertions from enumerating past the budget instead.
+        debug_assert!(
+            vectors <= budget,
+            "a spine level enumerates {} vectors, past the {} `spine_basis` allowed",
+            vectors,
+            budget
+        );
+        if vectors > budget {
+            self.too_wide(Some(vectors), budget, &expr.span);
+            return Some(Type::Dynamic);
+        }
         // Refinement variables reachable from the enclosing context belong to
         // outer scopes and must stay live in the conjuncts (mirroring
         // `generalize`'s exclusion).
@@ -1075,7 +1176,7 @@ impl<S: Clone> Infer<S> {
             let inner = self.errors.len();
             let result = self.infer(context, &mut Vec::new(), body);
             let explored = self.errors.len();
-            let result = match self.tabulate(context, body, &result, Some(atoms)) {
+            let result = match self.tabulate(context, body, &result, Some((atoms, budget))) {
                 Some(table) => {
                     self.errors.drain(inner..explored);
                     table
@@ -1788,8 +1889,20 @@ impl<S: Clone> Infer<S> {
                 }
                 self.rollback(mark);
                 let (xs, ys) = (xs.clone(), ys.clone());
-                if xs.len().saturating_mul(ys.len()) > MAX_TABULATION_VECTORS {
-                    return self.incompatible(&a, &b, span);
+                // Pairing every conjunct with every conjunct is quadratic, and
+                // two wide tables would spend more here than tabulating either
+                // of them did. This is a budget, not a verdict on the two
+                // types, so it says so: joining them coarsely instead would
+                // hand back a weaker type the caller cannot tell from a precise
+                // one.
+                let pairs = xs.len().saturating_mul(ys.len());
+                if pairs > MAX_JOIN_PAIRS {
+                    let message = format!(
+                        "too many cases to join ({} pairs, limit {})",
+                        pairs, MAX_JOIN_PAIRS
+                    );
+                    self.error(message, span);
+                    return Type::Dynamic;
                 }
                 let mut conjuncts: Vec<Type> = Vec::new();
                 for x in xs.iter() {
@@ -1813,10 +1926,10 @@ impl<S: Clone> Infer<S> {
                         }
                     }
                 }
-                match conjuncts.len() {
-                    0 => self.incompatible(&a, &b, span),
-                    1 => conjuncts.pop().expect("one conjunct"),
-                    _ => Type::And(conjuncts.into()),
+                if conjuncts.is_empty() {
+                    self.incompatible(&a, &b, span)
+                } else {
+                    Type::intersection(conjuncts)
                 }
             }
             _ => {
@@ -5313,8 +5426,7 @@ mod tests {
             &["expected float, found seq"],
         );
         assert_clean("let ap = fn(f, v) => f(v) in ap(fn(x) => (x != 0.5), 1.5)");
-        // Two unknowns narrow nothing, so the table demands nothing — the
-        // residue N12 records.
+        // Two unknowns narrow nothing, so the table demands nothing.
         assert_clean("let f = fn(x) => fn(y) => 1 in f(1)(2)");
     }
 
@@ -5448,6 +5560,230 @@ mod tests {
             messages.iter().any(|m| m.contains("is opened from itself")),
             "expected a cycle report, got {:?}",
             messages
+        );
+    }
+
+    // Past the coarse split there is no basis left to tabulate on, and the base
+    // pass's summary — one domain per position, and a result frozen from
+    // guarantees the domains need not account for — declares sorts the value
+    // does not inhabit. The definition is refused rather than checked by it,
+    // and answers `Dynamic` so nothing downstream reports from it either.
+    #[test]
+    fn a_function_too_wide_to_tabulate_is_refused() {
+        // `fn(p0, .., pn) => p0 + .. + pn`, every parameter numeric.
+        let wide = |n: usize| {
+            let names: Vec<String> = (0..n).map(|i| format!("p{}", i)).collect();
+            format!("fn({}) => {}", names.join(", "), names.join(" + "))
+        };
+        let ones = |n: usize| vec!["1"; n].join(", ");
+        // Twelve numeric parameters still fit the coarse split (2^12), so they
+        // tabulate, relational gap and all.
+        assert_clean(&format!("let f = {} in f({})", wide(12), ones(12)));
+        assert_errors(
+            &format!(
+                "let f = {} in f(seq(0)(1), seq(0)(2), {})",
+                wide(12),
+                ones(10)
+            ),
+            &[concat!(
+                "no use of f accepts (seq, seq, int, int, int, int, ",
+                "int, int, int, int, int, int)"
+            )],
+        );
+        // Thirteen do not, and the count names how far over it is.
+        let too_wide = "too many numeric parameters to check (8192 cases, limit 4096)";
+        assert_errors(
+            &format!("let f = {} in f({})", wide(13), ones(13)),
+            &[too_wide],
+        );
+        // The refusal recovers with `Dynamic`, so a call that the base pass's
+        // summary would have rejected adds nothing: the definition is the one
+        // thing wrong, and the one thing said.
+        assert_errors(
+            &format!(
+                "let f = {} in f(seq(0)(1), seq(0)(2), {})",
+                wide(13),
+                ones(11)
+            ),
+            &[too_wide],
+        );
+        // The spine costs the product of its levels, so two levels that each
+        // fit alone are still refused together.
+        assert_errors(
+            "let f = fn(a, b, c, d, e, f2, g2) => fn(u, v, w, x2, y2, z, t) => \
+             a + b + c + d + e + f2 + g2 + u + v + w + x2 + y2 + z + t \
+             in f(1, 1, 1, 1, 1, 1, 1)(1, 1, 1, 1, 1, 1, 1)",
+            &["too many numeric parameters to check (16384 cases, limit 4096)"],
+        );
+        // A named parameter costs an extra choice (supplied or omitted), so it
+        // is a radix of three rather than two: eight of them are already past.
+        assert_errors(
+            "let f = fn(a = 1, b = 1, c = 1, d = 1, e = 1, f2 = 1, g2 = 1, h2 = 1) => \
+             a + b + c + d + e + f2 + g2 + h2 in f()",
+            &["too many numeric parameters to check (6561 cases, limit 4096)"],
+        );
+        // Reported once wherever the lambda stands — a definition's right-hand
+        // side reaches `tabulate` twice, and must still say it once.
+        assert_errors(&wide(13), &[too_wide]);
+        assert_errors(&format!("nth(0, [{}])", wide(13)), &[too_wide]);
+        assert_errors(
+            &format!("let f = fn(q) => ({}) in 1", wide(13)),
+            &[too_wide],
+        );
+        // Only the parameters the body uses numerically are tabulated, so
+        // arity alone does not refuse a definition.
+        assert_clean(&format!(
+            "let f = fn({}) => p0 + p1 in f({})",
+            (0..13)
+                .map(|i| format!("p{}", i))
+                .collect::<Vec<_>>()
+                .join(", "),
+            ones(13)
+        ));
+    }
+
+    /// Pins the checker's verdict on every embedded library module, so
+    /// signature or inference changes that affect the library surface here.
+    ///
+    /// A module's report keeps only errors from its own text — dependencies
+    /// re-typed along the way report under their own entry — and positions
+    /// come from `display_with_source`, so every pinned error can be read
+    /// against the .tuun source.
+    /// Searches for unsoundness among functions too wide to tabulate.
+    ///
+    /// The invariant is "refused *or* sound", which holds under any budget: a
+    /// definition past `MAX_COARSE_VECTORS` is refused today, and whatever
+    /// falls inside it is tabulated and still has to run. Run it whenever
+    /// either budget or the refusal changes.
+    ///
+    /// This is the harness that showed refusing was necessary. With the
+    /// refusal disabled, the base pass's summary — the fallback the checker
+    /// used before — declared sorts the values did not inhabit: three escapes
+    /// in 450,000 programs across nine seeds, all of the form "declared
+    /// `waveform or seq`, evaluated to a constant".
+    ///
+    /// ```text
+    /// SEED=7 COUNT=50000 cargo test --lib --release wide_function_fuzz -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore]
+    fn wide_function_fuzz() {
+        const OPS: &[&str] = &["+", "-", "*", "/", "&"];
+        const ARGS: &[&str] = &["1", "2", "0.5", "time", "(time | seq(time - 1))"];
+        let (seed, count) = sweep_bounds(20000);
+        let mut rng = Rng(seed);
+        let bindings = test_prelude::<u32>();
+        let resolve = |_: &[String]| Err(Error::eval_here("no modules"));
+        let (mut clean, mut found, mut widest) = (0usize, 0usize, 0usize);
+        let mut seqs = 0usize;
+        let mut kinds: Vec<String> = Vec::new();
+        for _ in 0..count {
+            // 10..14 parameters: past the coarse split's 2^9 budget.
+            let arity = 10 + rng.below(5);
+            let names: Vec<String> = (0..arity).map(|i| format!("p{}", i)).collect();
+            // A body that uses every parameter numerically, so all of them
+            // tabulate (and so the width is real). Each parameter enters
+            // through its own randomly chosen operator and filter, so the
+            // relation the body imposes is not uniform across positions.
+            const FILTERS: &[&str] = &["fin(4)", "unseq()", "capture(\"c\")", "cos", "sqrt"];
+            let wrap = |rng: &mut Rng, term: String| match rng.below(14) {
+                0 => format!("({} | {})", term, rng.pick(FILTERS)),
+                1 => format!("(- {})", term),
+                2 => format!("({} {} {})", term, rng.pick(OPS), rng.pick(ARGS)),
+                _ => term,
+            };
+            let mut body = wrap(&mut rng, names[0].clone());
+            for name in &names[1..] {
+                let term = wrap(&mut rng, name.clone());
+                body = format!("({} {} {})", body, rng.pick(OPS), term);
+            }
+            // A consumer gives the *result* a use, so a wrong result sort is
+            // caught rather than merely inferred.
+            const CONSUMERS: &[&str] = &[
+                "{}",
+                "({} \\ 1)",
+                "nth({}, [1, 2])",
+                "<[{}]>",
+                "sqrt({})",
+                "unseq()({})",
+                "({} + (time | seq(time - 1)))",
+                "fin({})(time)",
+                "{{[{}]}}",
+            ];
+            // Half the time the body stands alone: a consumer that rejects
+            // everything would leave nothing accepted to test.
+            if rng.below(2) == 0 {
+                body = CONSUMERS[rng.below(CONSUMERS.len())].replacen("{}", &body, 1);
+            }
+            let args: Vec<&str> = (0..arity).map(|_| rng.pick(ARGS)).collect();
+            let text = format!(
+                "let f = fn({}) => {} in f({})",
+                names.join(", "),
+                body,
+                args.join(", ")
+            );
+            widest = widest.max(arity);
+            let Ok(expr) = parse_program::<u32, _>(&text, 0u32) else {
+                continue;
+            };
+            if !check_program(resolve, &bindings, &expr, None).is_empty() {
+                continue;
+            }
+            clean += 1;
+            if text.contains("seq") {
+                seqs += 1;
+            }
+            let mut checker: Infer<u32> = Infer::new();
+            let mut context = Vec::new();
+            let mut memo = HashMap::new();
+            checker.build_context(&resolve, &bindings, &mut context, &mut memo);
+            let ty = checker.infer(&mut context, &mut Vec::new(), &expr);
+            let declared = match checker.resolve_refinements(&ty.apply(&checker.subst), 0) {
+                Type::Numeric(Refinement::Ground(sort)) => Some(sort),
+                _ => None,
+            };
+            let (kind, detail) = match eval::evaluate(resolve, &bindings, expr) {
+                Err(error) => {
+                    if declared_residue(&error) {
+                        continue;
+                    }
+                    ("eval-error".to_string(), error.message().to_string())
+                }
+                Ok(value) => {
+                    let Some(declared) = declared else { continue };
+                    let Some(actual) = runtime_sort(&value.expr) else {
+                        continue;
+                    };
+                    if actual.is_subset(declared) {
+                        continue;
+                    }
+                    (
+                        "sort-escape".to_string(),
+                        format!("declared {} but evaluated to {}", declared, actual),
+                    )
+                }
+            };
+            let signature = format!("{}: {}", kind, detail);
+            if kinds.contains(&signature) {
+                continue;
+            }
+            kinds.push(signature);
+            found += 1;
+            println!(
+                "WIDE-UNSOUND[{}] ({}) {}\n    {}",
+                found, kind, text, detail
+            );
+            if found > 30 {
+                break;
+            }
+        }
+        println!(
+            "wide: {} of {} accepted ({} of them pass a seq, widest arity {}), {} distinct classes",
+            clean, count, seqs, widest, found
+        );
+        assert_eq!(
+            found, 0,
+            "a function too wide to tabulate was accepted and does not run"
         );
     }
 
