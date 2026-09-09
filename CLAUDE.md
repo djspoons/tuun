@@ -1,3 +1,7 @@
+## Claim Discipline
+
+- Never assert a mechanistic root cause, a soundness property, or the existence of a doc/file until it has been empirically verified (test, fuzz run, or `rg`/`Read` of the actual file) or formally proven. If unverified, label it explicitly as a hypothesis: "Hypothesis (unverified): ...".
+- When a prior claim is disproven, update the docs and code comments that repeated it, not just the chat reply.
 
 ## Comments & Documentation
 
