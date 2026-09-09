@@ -28,14 +28,17 @@
 //! enumeration.
 //!
 //! At an application with an intersection type, the current frame is used to
-//! select an appropriate conjunct either by:
-//!
-//!  * Taking the first single conjunct that applies and using its result, or
-//!  * Falling back on a set of conjuncts whose union of parameter sorts covers
-//!    the arguments and taking the join of the results.
-//!
-//! (This is Freeman and Pfenning's `apptype` and Xue et al.'s applicative
-//! subtyping `A ≪ B = C`.)
+//! select a conjunct. Conjuncts are ordered and potentially overlapping,
+//! however, so some care must be taken. Where only one conjunct answers a whole
+//! call, the application is an ordinary one: the implementation is equivalent
+//! to Xie and Oliveira's AS-Fun2, whose premise checks the arguments against
+//! that conjunct's parameters. (Though see the comment for [`Infer::shadowed`]
+//! for some subtle restrictions on when this case can be applied.) In general,
+//! the tuun follows the spirit of Freeman and Pfenning's rule APPL (Fig. 2), `Γ
+//! ⊢ e e' : ⋁ᵢⱼ apptype(Cᵢ, C'ⱼ)`: the two sides' types are split into their
+//! union components, a conjunct is chosen for each pair, and the results are
+//! joined. A [`Sort`] *is* such a union — a set of atoms — so the split is into
+//! atoms and the join is over them ([`Infer::select_by_atoms`]).
 //!
 //! Judgments return only the *residual* result type, with Ψ's worth of
 //! parameters already consumed — the style of Xie and Oliveira's §4.2 (rule
@@ -302,6 +305,17 @@ const BASES: [Basis; 2] = [
     (&FULL_ATOMS, MAX_FULL_VECTORS),
     (&COARSE_ATOMS, MAX_COARSE_VECTORS),
 ];
+
+/// How [`Infer::conjunct_accepts`] treats a numeric argument at a numeric
+/// domain: judged here by sort containment, or left to coverage.
+#[derive(Clone, Copy, PartialEq)]
+enum Numerics {
+    /// The conjunct must accept the position on its own — what the
+    /// single-conjunct rule needs.
+    Judged,
+    /// Report the domain without judging it; coverage decides atom by atom.
+    Deferred,
+}
 
 /// How selection decided one intersection against one frame.
 enum Selection {
@@ -2117,17 +2131,26 @@ impl<S: Clone> Infer<S> {
         }
     }
 
-    /// Selects from an intersection of arrows against one frame — Freeman's
-    /// `apptype`, Xue et al.'s applicative subtyping `A ≪ B = C` with the
-    /// frame as the argument `B`:
+    /// Selects from an intersection of arrows against one frame — Xue et al.'s
+    /// applicative subtyping `A ≪ B = C` with the frame as the argument `B` or
+    /// Freeman's `apptype`.
     ///
-    /// - the first conjunct that applies outright supplies the result: each
-    ///   numeric argument's sort contained in the domain, each non-numeric
-    ///   argument a subtype of it (table order is most-specific-first,
-    ///   mirroring the runtime match arms);
-    /// - otherwise coverage decides (`select_by_atoms`): every atom combination
-    ///   of the arguments must have an accepting conjunct, and the covering conjuncts'
-    ///   results join;
+    /// The two arms below are two different rules; the first is an optimization
+    /// and should always yield the same results when it applies.
+    ///
+    /// - where one conjunct answers the whole call — it applies outright and no
+    ///   earlier conjunct shares an atom with the arguments
+    ///   ([`Infer::shadowed`]) — this is an ordinary application of that arrow,
+    ///   and the rule is Xie and Oliveira's AS-Fun2: the arguments are checked
+    ///   *against* its parameters, exactly as [`Infer::check_frame`] does for a
+    ///   plain arrow, and the check commits. Committing is the point; see the
+    ///   loop below;
+    /// - where several conjuncts answer between them, the rule is Freeman and
+    ///   Pfenning's APPL ([`Infer::select_by_atoms`]): the arguments' sorts are
+    ///   split into their union components, a conjunct is chosen per
+    ///   combination, and the results join — APPL's `⋁`. This arm cannot
+    ///   commit, because there is no single arrow whose parameters to check
+    ///   against;
     /// - no coverage means the runtime has no matching arm: a rejection.
     ///
     /// Serves elimination and checking alike: `app_subtype` selects with a real
@@ -2165,11 +2188,28 @@ impl<S: Clone> Infer<S> {
         // reject that growth. Ground arguments are already judged by
         // applicability.
         let unions = self.domain_unions(&shaped, frame.positional.len());
-        // First definitely-applicable conjunct wins; its subtyping
-        // commits (and is rolled back when a later position rejects it).
-        for conjunct in &shaped {
+        // First definitely-applicable conjunct wins; its subtyping commits (and
+        // is rolled back when a later position rejects it). A conjunct an
+        // earlier one shadows cannot answer for the whole call, and neither can
+        // any conjunct after it, so the search stops there and coverage
+        // (Freeman) takes over.
+        //
+        // Committing matters — AS-Fun2 checks the argument against the
+        // parameter, which for a domain that is a variable *identifies* the
+        // two, and when the conjunct's result is that same variable the call's
+        // result is the argument's type — but this loop is no longer the only
+        // place it happens. `select_by_atoms` commits too, once it knows which
+        // conjuncts cover, so this loop is purely an optimization, and measured
+        // as one:
+        for (index, conjunct) in shaped.iter().enumerate() {
+            if self.shadowed(&shaped[..index], &sorts) {
+                break;
+            }
             let mark = self.mark();
-            if self.conjunct_applies(conjunct, &sorts, frame).is_some() {
+            if self
+                .conjunct_accepts(conjunct, &sorts, frame, Numerics::Judged)
+                .is_some()
+            {
                 self.record_selection_contracts(frame, &unions);
                 let Type::Function { result, .. } = conjunct else {
                     unreachable!("conjuncts are arrows");
@@ -2180,6 +2220,57 @@ impl<S: Clone> Infer<S> {
         }
         // Otherwise, atom-decomposition coverage.
         self.select_by_atoms(&shaped, &sorts, frame)
+    }
+
+    /// Whether one of `earlier` could take a call the argument `sorts` still
+    /// allow.
+    ///
+    /// Selection's first-applicable path commits a whole call to one conjunct,
+    /// but the runtime dispatches on the value: an argument whose sort spans
+    /// several atoms may be routed to a different arm for each of them. Where
+    /// an earlier conjunct's domains meet the sorts at *every* position, some
+    /// combination of atoms really does reach it — pick one atom from each
+    /// overlap — so committing would claim that conjunct's result for calls the
+    /// runtime sends elsewhere. Coverage has to decide those, atom by atom.
+    ///
+    /// Positions with no sort to compare — a non-numeric argument, a
+    /// non-numeric or still-unknown domain — are counted as overlapping, since
+    /// nothing here rules them out. Only *positional* positions are compared at
+    /// all, which is the same conservative direction: a conjunct the call's
+    /// named arguments would rule out anyway is still counted as shadowing, and
+    /// coverage then answers a call the first-applicable rule could have.
+    ///
+    /// Named parameters need no atom comparison of their own, and the reason is
+    /// where they come from. The false conjunct this guard exists for —
+    /// `binary_op`'s `(waveform, waveform) -> non-const`, true only of arguments
+    /// the int and float conjuncts did not take — belongs to a hand-written
+    /// signature, and no built-in signature has a named parameter. A *tabulated*
+    /// named domain is one atom, or a union `merge_conjuncts` built out of
+    /// conjuncts whose results were identical; either way the domain's result
+    /// holds for every atom in it, so there is no arm to be routed away to. The
+    /// library's widest are the RBJ filters' `lpf_Q`/`hpf_Q`, merged to
+    /// `waveform` over three atoms that share one result.
+    ///
+    /// # Example
+    ///
+    /// `(if true then 1 else time) * 2` reaches `*`'s waveform conjunct with
+    /// `{int, non-const}` on the left, which the int conjunct before it also
+    /// meets: the call is an `int` one when the branch takes `1`, and the
+    /// result is `int or waveform` rather than the waveform conjunct's alone.
+    fn shadowed(&self, earlier: &[Type], sorts: &[Option<Sort>]) -> bool {
+        earlier.iter().any(|conjunct| {
+            let Type::Function { positional, .. } = conjunct else {
+                unreachable!("conjuncts are arrows");
+            };
+            sorts.iter().zip(positional.iter()).all(|(sort, domain)| {
+                match (sort, self.resolved(domain)) {
+                    (Some(sort), Type::Numeric(rep)) => {
+                        !sort.intersect(self.may_of(rep)).is_empty()
+                    }
+                    _ => true,
+                }
+            })
+        })
     }
 
     /// Returns the union of the sorts for each positional parameter in
@@ -2245,18 +2336,27 @@ impl<S: Clone> Infer<S> {
         true
     }
 
-    /// Returns the conjunct's domains as contract sorts when the conjunct applies
-    /// outright — every argument's sort contained in its domain — and
-    /// `None` otherwise. Numeric positions check by sort containment and
-    /// report their domain sort; unknown and non-numeric domains accept by
-    /// subtyping and report ⊤ (no sort contract). Named parameters are
-    /// judged by `named_matches`. Subtyping solves state, so
-    /// callers snapshot around the call.
-    fn conjunct_applies(
+    /// Whether `conjunct` accepts the call in `frame`, and the contract sort
+    /// each position imposes; `None` where it does not accept.
+    ///
+    /// This is rule AS-Fun2's premise — the arguments checked *against* the
+    /// conjunct's parameters — and the check is more than a test. A domain that
+    /// is a variable is *identified* with the argument it accepts, so a caller
+    /// that keeps the state keeps the identification, and a conjunct whose
+    /// result is that same variable then answers with the argument's type.
+    /// Both of selection's rules turn on that (see [`Infer::select_core`]),
+    /// which is why both snapshot around this call and then decide whether to
+    /// keep it rather than treating it as a predicate.
+    ///
+    /// Unknown and non-numeric domains accept by subtyping and report ⊤ (no
+    /// sort contract); named parameters are judged by
+    /// [`Infer::named_matches`]. Numeric positions depend on `numerics`.
+    fn conjunct_accepts(
         &mut self,
         conjunct: &Type,
         sorts: &[Option<Sort>],
         frame: &Frame<S>,
+        numerics: Numerics,
     ) -> Option<Vec<Sort>> {
         let Type::Function {
             positional, named, ..
@@ -2268,8 +2368,19 @@ impl<S: Clone> Infer<S> {
         for ((sort, domain), (argument, _)) in
             sorts.iter().zip(positional.iter()).zip(&frame.positional)
         {
-            let (fits, domain) = self.position_fits(argument, *sort, domain);
-            domains.push(domain);
+            let fits = match (numerics, sort, self.resolve(domain)) {
+                // Deferred: coverage judges this position atom by atom, so only
+                // its domain is reported here.
+                (Numerics::Deferred, Some(_), Type::Numeric(rep)) => {
+                    domains.push(self.may_of(&rep));
+                    true
+                }
+                _ => {
+                    let (fits, contract) = self.position_fits(argument, *sort, domain);
+                    domains.push(contract);
+                    fits
+                }
+            };
             if !fits {
                 return None;
             }
@@ -2331,7 +2442,7 @@ impl<S: Clone> Infer<S> {
             // survive it and stay live.
             let floor = self.refs.len() as u32;
             let mark = self.mark();
-            let applies = self.conjunct_admits(conjunct, sorts, frame);
+            let applies = self.conjunct_accepts(conjunct, sorts, frame, Numerics::Deferred);
             let candidate = applies.map(|domains| {
                 let Type::Function { result, .. } = conjunct else {
                     unreachable!("conjuncts are arrows");
@@ -2540,9 +2651,38 @@ impl<S: Clone> Infer<S> {
                 covers.push(index);
             }
         });
+        // The probes above were rolled back, so a variable domain that accepted
+        // an argument is no longer identified with it. Re-run the covering
+        // conjuncts' argument checks and *keep* them — AS-Fun2's premise, the
+        // same step the single-conjunct rule takes. Committing several at once
+        // identifies the argument with every covering domain, which is what
+        // makes the join of their results carry it: whichever arm the runtime
+        // takes, the call returns what went in. Without this, `fn(x) => f(a, x)`
+        // where the call needs two conjuncts leaves the result free for the
+        // caller to solve.
+        //
+        // Committing can fail where two covering conjuncts want incompatible
+        // things of one argument, which probing separately did not see; that
+        // rolls back to the probes' own answers rather than reporting, since
+        // coverage has already established the call has an arm.
+        let mark = self.mark();
+        let committed = covers.iter().all(|index| {
+            self.conjunct_accepts(&admitting[*index], sorts, frame, Numerics::Deferred)
+                .is_some()
+        });
+        if !committed {
+            self.rollback(mark);
+        }
         let mut result: Option<Type> = None;
-        for index in covers {
-            let candidate = candidates[index].result.clone();
+        for index in &covers {
+            let candidate = if committed {
+                let Type::Function { result, .. } = &admitting[*index] else {
+                    unreachable!("conjuncts are arrows");
+                };
+                (**result).clone()
+            } else {
+                candidates[*index].result.clone()
+            };
             result = Some(match result {
                 None => candidate,
                 Some(previous) => self.join(previous, candidate, &frame.span),
@@ -2562,50 +2702,6 @@ impl<S: Clone> Infer<S> {
         }
         self.record_selection_contracts(frame, &contracts);
         Selection::Selected(result)
-    }
-
-    /// Whether a conjunct can participate in coverage at all: non-numeric
-    /// arguments must subtype their domains, named parameters must line up as
-    /// in `conjunct_applies`, and each position's contract sort is reported the
-    /// same way. Numeric positions are not judged here — coverage judges them
-    /// atom by atom.
-    fn conjunct_admits(
-        &mut self,
-        conjunct: &Type,
-        sorts: &[Option<Sort>],
-        frame: &Frame<S>,
-    ) -> Option<Vec<Sort>> {
-        let Type::Function {
-            positional, named, ..
-        } = conjunct
-        else {
-            unreachable!("conjuncts are arrows");
-        };
-        let mut domains = Vec::with_capacity(positional.len());
-        for ((sort, domain), (argument, _)) in
-            sorts.iter().zip(positional.iter()).zip(&frame.positional)
-        {
-            // Numeric against numeric is coverage's job; every other pairing
-            // is judged exactly as `conjunct_applies` judges it.
-            let fits = match (sort, self.resolve(domain)) {
-                (Some(_), Type::Numeric(rep)) => {
-                    domains.push(self.may_of(&rep));
-                    true
-                }
-                _ => {
-                    let (fits, contract) = self.position_fits(argument, *sort, domain);
-                    domains.push(contract);
-                    fits
-                }
-            };
-            if !fits {
-                return None;
-            }
-        }
-        if !self.named_matches(named, frame) {
-            return None;
-        }
-        Some(domains)
     }
 
     /// Whether one argument fits one domain — sort containment for
@@ -3858,6 +3954,28 @@ mod tests {
         assert_errors(
             &format!("{}<[g(true)]>", g),
             &["expected [seq], found [bool]"],
+        );
+        // Coverage binds where it is the only rule that can answer: `p`'s
+        // conjuncts take one numeric atom each, and `sqrt(2)` is int-or-non-int,
+        // so no single conjunct applies and the commit pass in
+        // `select_by_atoms` is what carries the argument's type to the result.
+        let p = "let p = fn(n, a) => if n > 0 then a else a in ";
+        assert_clean(&format!("{}nth(p(sqrt(2), 1), [1, 2])", p));
+        assert_errors(
+            &format!("{}nth(p(sqrt(2), \"s\"), [1, 2])", p),
+            &["expected int, found string"],
+        );
+        // Through a parameter, which is where losing the binding showed: the
+        // result was free and the caller solved it at will.
+        let q = format!("{}let q = fn(x) => p(sqrt(2), x) in ", p);
+        assert_clean(&format!("{}nth(q(1), [1, 2])", q));
+        assert_errors(
+            &format!("{}nth(q(\"s\"), [1, 2])", q),
+            &["expected int, found string"],
+        );
+        assert_errors(
+            &format!("{}fin(q((2, [time])))(time)", q),
+            &["expected waveform, found (int, [waveform])"],
         );
     }
 
@@ -5785,6 +5903,76 @@ mod tests {
             found, 0,
             "a function too wide to tabulate was accepted and does not run"
         );
+    }
+
+    /// The ground sort a program's type resolves to, or `None` where the type
+    /// is not a ground numeric.
+    ///
+    /// Reads the sort itself rather than its rendering: `waveform` names both
+    /// the whole unseq class and the non-constant part of it alone, so a
+    /// message cannot tell a widened result from one conjunct's own.
+    fn declared_sort(input: &str) -> Option<Sort> {
+        let bindings = test_prelude::<()>();
+        let expr = parse_program::<u32, _>(input, ()).unwrap();
+        let mut checker: Infer<()> = Infer::new();
+        let mut context = Vec::new();
+        let mut memo = HashMap::new();
+        checker.build_context(
+            &|_: &[String]| Err(Error::types_here("no modules".to_string())),
+            &bindings,
+            &mut context,
+            &mut memo,
+        );
+        let ty = checker.infer(&mut context, &mut Vec::new(), &expr);
+        match checker.resolve_refinements(&ty.apply(&checker.subst), 0) {
+            Type::Numeric(Refinement::Ground(sort)) => Some(sort),
+            _ => None,
+        }
+    }
+
+    // Selection's first-applicable path commits a whole call to one conjunct,
+    // but the runtime dispatches on the value: an argument whose sort spans
+    // several atoms is routed to a different arm for each of them. Committing
+    // claimed one conjunct's result for all of them — and `*`'s waveform arm
+    // returns a *non-constant* waveform, a sort the value does not inhabit when
+    // the argument turns out to be the constant.
+    #[test]
+    fn a_multi_atom_argument_does_not_commit_to_one_arm() {
+        let int_or_wave = Sort::INT.union(Sort::NON_CONST_WAVE);
+        // A branch gives {int, non-const}. The int conjunct sits before the
+        // waveform one and takes part, so the result is either's.
+        assert_eq!(
+            declared_sort("(if true then 1 else time) * 2"),
+            Some(int_or_wave)
+        );
+        assert_errors(
+            "nth((if true then 1 else time) * 2, [1, 2])",
+            &["expected int, found int or waveform"],
+        );
+        assert_errors(
+            "<[(if true then 1 else time) * 2]>",
+            &["expected [seq], found [int or waveform]"],
+        );
+        // The coarse basis pins a parameter to the whole unseq class, so every
+        // definition tabulated on it reached selection this way — five numeric
+        // parameters are already past the full basis.
+        assert_eq!(
+            declared_sort("let f = fn(a, b, c, d, e) => a * b * c * d * e in f(2, 1, 1, 1, 1)"),
+            Some(Sort::WAVE)
+        );
+        // Four still fit the full basis, where each atom is its own conjunct.
+        assert_eq!(
+            declared_sort("let f = fn(a, b, c, d) => a * b * c * d in f(2, 1, 1, 1)"),
+            Some(Sort::INT)
+        );
+        // Precision is kept where no earlier conjunct takes part: a
+        // single-atom argument still selects outright.
+        assert_eq!(declared_sort("time * 2"), Some(Sort::NON_CONST_WAVE));
+        assert_eq!(declared_sort("1 * 2"), Some(Sort::INT));
+        // Not `non-int`: `0.5 * 2` is `1.0`, which is integer-valued.
+        assert_eq!(declared_sort("0.5 * 2"), Some(Sort::FLOAT));
+        // And the seq arms still thread, which is what coverage is for.
+        assert_clean("(seq(0)(sine(440, 0)) * 0.5) \\ 1");
     }
 
     #[test]
