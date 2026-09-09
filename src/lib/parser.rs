@@ -8,7 +8,7 @@ use nom::{
     bytes::complete::{tag, take_till, take_while, take_while1},
     character::complete as character,
     character::complete::{alpha1, alphanumeric1, char},
-    combinator::{all_consuming, not, opt, peek, recognize, verify},
+    combinator::{all_consuming, map_opt, not, opt, peek, recognize, verify},
     multi::{many0, many1, separated_list0, separated_list1},
     number::complete as number,
     sequence::{delimited, preceded, separated_pair, terminated},
@@ -16,8 +16,9 @@ use nom::{
 
 use crate::expr::{
     self, Annotation, Binding, Error, Expr, NamedExprs, Pattern, Slider, SliderFunction,
-    SourceAnnotation, SourceBinding, SourceExpr, Span,
+    SourceAnnotation, SourceBinding, SourceExpr, Span, TypeAnnotation,
 };
+use crate::types::Sort;
 
 type Input<'a> = nom_locate::LocatedSpan<&'a str, ParseState<'a>>;
 type IResult<'a, T> = nom::IResult<Input<'a>, T>;
@@ -228,6 +229,48 @@ fn parse_pattern(input: Input) -> IResult<Pattern> {
     Ok((rest, pattern))
 }
 
+/// Parses an annotation's sort keyword.
+fn parse_sort(input: Input) -> IResult<Sort> {
+    map_opt(parse_identifier, |name| Sort::from_keyword(&name)).parse(input)
+}
+
+/// Parses a type annotation — `: sort` with an optional `[lo, hi]`
+/// range — as it appears after a parameter pattern or a parameter list.
+///
+/// TODO named parameters cannot carry annotations yet (their AST slot is
+/// a plain name–default pair).
+fn parse_type_annotation(input: Input) -> IResult<TypeAnnotation> {
+    let start = input.location_offset();
+    let (rest, (_, _, sort)) = (
+        char(':'),
+        trivia0,
+        expect(parse_sort, "expected a sort: int, float, wave, seq, or num"),
+    )
+        .parse(input)?;
+    let (rest, range) = opt((
+        ws(char('[')),
+        number::double,
+        ws(char(',')),
+        number::double,
+        preceded(trivia0, expect(char(']'), "expected ']' at end of range")),
+    ))
+    .parse(rest)?;
+    let range = range.map(|(_, lo, _, hi, _)| (lo, hi));
+    if let Some((lo, hi)) = range
+        && lo > hi
+    {
+        rest.extra.report_error(Error::parse(
+            format!("empty range: {} is greater than {}", lo, hi),
+            Some(Span::unstamped(start..rest.location_offset())),
+        ));
+    }
+    let annotation = TypeAnnotation {
+        sort: sort.unwrap_or(Sort::TOP),
+        range,
+    };
+    Ok((rest, annotation))
+}
+
 /// Parses `name = value`, the shared shape of a named parameter and a named
 /// argument.
 fn parse_named_item<'a, M>(
@@ -264,6 +307,7 @@ enum Parameter<M> {
 fn pattern_names(pattern: &Pattern, names: &mut Vec<String>) {
     match pattern {
         Pattern::Identifier(name) => names.push(name.clone()),
+        Pattern::Annotated(pattern, _) => pattern_names(pattern, names),
         Pattern::Tuple(patterns) => {
             for pattern in patterns {
                 pattern_names(pattern, names);
@@ -278,7 +322,14 @@ fn parse_parameter<M>(input: Input) -> IResult<(Range<usize>, Parameter<M>)> {
     let start = input.location_offset();
     let (rest, item) = alt((
         parse_named_parameter.map(|(name, value)| Parameter::Named(name, value)),
-        parse_pattern.map(Parameter::Positional),
+        (parse_pattern, opt(preceded(trivia0, parse_type_annotation))).map(
+            |(pattern, annotation)| {
+                Parameter::Positional(match annotation {
+                    Some(annotation) => Pattern::Annotated(Box::new(pattern), annotation),
+                    None => pattern,
+                })
+            },
+        ),
     ))
     .parse(input)?;
     Ok((rest, (start..rest.location_offset(), item)))
@@ -287,13 +338,15 @@ fn parse_parameter<M>(input: Input) -> IResult<(Range<usize>, Parameter<M>)> {
 fn parse_function<M>(input: Input) -> IResult<SourceExpr<M>> {
     let start = input.location_offset();
     #[rustfmt::skip]
-    let (rest, (params, body)) =
+    let (rest, (params, result, _, body)) =
         (delimited(
             (tag("fn"), trivia0),
             delimited((char('('), trivia0),
                     separated_list0(ws(char(',')), parse_parameter),
                     (trivia0, expect(char(')'), "expected ')' at end of parameter list"))),
-            ws(expect(tag("=>"), "expected '=>'"))),
+            trivia0),
+            opt(parse_type_annotation),
+            ws(expect(tag("=>"), "expected '=>'")),
             parse_expr,
         ).parse(input)?;
     let end = rest.location_offset();
@@ -344,6 +397,7 @@ fn parse_function<M>(input: Input) -> IResult<SourceExpr<M>> {
     let expr = Expr::Function {
         positional,
         named,
+        result,
         body: Box::new(body),
     };
     Ok((rest, SourceExpr::with_span(expr, start..end)))

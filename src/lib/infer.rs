@@ -90,7 +90,7 @@ use std::rc::Rc;
 
 use crate::expr::{Binding, Error, Expr, Pattern, SourceBinding, SourceExpr, Span};
 use crate::signatures;
-use crate::types::{Refinement, Sort, Type};
+use crate::types::{Interval, Refinement, Sort, Type};
 use crate::waveform;
 
 /// What a program's evaluated result is expected to be.
@@ -217,6 +217,17 @@ struct Frame<S> {
 
 /// The application context Ψ: pending applications, innermost call on top.
 type Psi<S> = Vec<Frame<S>>;
+
+/// The name a call's head resolved through, for selection messages and
+/// interval images.
+#[derive(Clone, Copy)]
+struct Head<'a> {
+    name: &'a str,
+    /// Whether the name resolved to the built-in of that name. Only then
+    /// does [`signatures::interval_image`] apply — a user binding may
+    /// shadow a built-in's name without sharing its semantics.
+    builtin: bool,
+}
 
 /// A typing-context entry.
 ///
@@ -513,7 +524,7 @@ impl<S: Clone> Infer<S> {
     /// The sort a numeric may turn out to inhabit.
     fn may_of(&self, rep: &Refinement) -> Sort {
         match rep {
-            Refinement::Ground(sort) => *sort,
+            Refinement::Ground(sort, _) => *sort,
             Refinement::Var(id) => {
                 let var = &self.refs[*id as usize];
                 if !var.lower.is_empty() {
@@ -528,7 +539,7 @@ impl<S: Clone> Infer<S> {
     /// The sort a numeric position requires (its contract).
     fn contract_of(&self, rep: &Refinement) -> Sort {
         match rep {
-            Refinement::Ground(sort) => *sort,
+            Refinement::Ground(sort, _) => *sort,
             Refinement::Var(id) => self.refs[*id as usize].upper.unwrap_or(Sort::TOP),
         }
     }
@@ -585,7 +596,7 @@ impl<S: Clone> Infer<S> {
         let contract = self.contract_of(expected);
         match found {
             // A ground sort is judged by containment.
-            Refinement::Ground(_) => {
+            Refinement::Ground(..) => {
                 if !may.is_subset(contract) {
                     return Err(());
                 }
@@ -617,9 +628,19 @@ impl<S: Clone> Infer<S> {
     /// its guarantees so far when unsolved. Unlike `may_of` there is no ⊤
     /// fallback — lower bounds hold only definite atoms, so they can be
     /// judged as final guarantees.
+    /// The interval a refinement's values may inhabit: a ground's own
+    /// interval, ⊤ for a variable (variable bounds carry no intervals
+    /// until the interval judgment lands).
+    fn may_interval_of(&self, rep: &Refinement) -> Interval {
+        match rep {
+            Refinement::Ground(_, interval) => *interval,
+            Refinement::Var(_) => Interval::TOP,
+        }
+    }
+
     fn definite_of(&self, rep: &Refinement) -> Sort {
         match rep {
-            Refinement::Ground(sort) => *sort,
+            Refinement::Ground(sort, _) => *sort,
             Refinement::Var(id) => self.refs[*id as usize].lower,
         }
     }
@@ -637,7 +658,7 @@ impl<S: Clone> Infer<S> {
     // handles a variable-variable constraint exactly so (merge the bounds,
     // alias the variables).
     fn numeric_unify(&mut self, x: &Refinement, y: &Refinement) -> Result<(), ()> {
-        if let (Refinement::Ground(x), Refinement::Ground(y)) = (x, y) {
+        if let (Refinement::Ground(x, _), Refinement::Ground(y, _)) = (x, y) {
             return if x == y { Ok(()) } else { Err(()) };
         }
         let definite_x = self.definite_of(x);
@@ -928,6 +949,7 @@ impl<S: Clone> Infer<S> {
         let Expr::Function {
             positional,
             named,
+            result: _,
             body,
         } = &expr.expr
         else {
@@ -1034,6 +1056,7 @@ impl<S: Clone> Infer<S> {
         let Expr::Function {
             positional,
             named,
+            result: result_annotation,
             body,
         } = &expr.expr
         else {
@@ -1194,6 +1217,16 @@ impl<S: Clone> Infer<S> {
                 Some(table) => {
                     self.errors.drain(inner..explored);
                     table
+                }
+                None => result,
+            };
+            // A declared result is a contract on the body — a vector whose
+            // body escapes it contributes no row — and the declaration is
+            // what the row publishes.
+            let result = match result_annotation {
+                Some(annotation) => {
+                    self.subtype_check(&result, &Type::ground(annotation.sort), &body.span);
+                    Type::ground(annotation.sort)
                 }
                 None => result,
             };
@@ -1824,9 +1857,13 @@ impl<S: Clone> Infer<S> {
         }
         match (&a, &b) {
             (Type::Dynamic, _) | (_, Type::Dynamic) => Type::Dynamic,
-            // Numerics join by sort union.
+            // Numerics join by sort union and interval join.
             (Type::Numeric(x), Type::Numeric(y)) => {
-                Type::ground(self.may_of(x).union(self.may_of(y)))
+                let interval = self.may_interval_of(x).join(self.may_interval_of(y));
+                Type::Numeric(Refinement::Ground(
+                    self.may_of(x).union(self.may_of(y)),
+                    interval,
+                ))
             }
             (Type::List(x), Type::List(y)) => {
                 let joined = self.join((**x).clone(), (**y).clone(), span);
@@ -2056,10 +2093,42 @@ impl<S: Clone> Infer<S> {
         }
     }
 
+    /// Refines a ground numeric result with the interval image of the
+    /// applied built-in over the frame's argument intervals
+    /// ([`signatures::interval_image`]); any other result, or a
+    /// non-built-in head, passes through unchanged.
+    fn image_result(&mut self, result: Type, frame: &Frame<S>, head: Option<Head>) -> Type {
+        let Some(Head {
+            name,
+            builtin: true,
+        }) = head
+        else {
+            return result;
+        };
+        let Type::Numeric(Refinement::Ground(sort, declared)) = self.resolve(&result) else {
+            return result;
+        };
+        let arguments: Vec<Interval> = frame
+            .positional
+            .iter()
+            .map(|(argument, _)| match self.resolve(argument) {
+                Type::Numeric(rep) => self.may_interval_of(&rep),
+                _ => Interval::TOP,
+            })
+            .collect();
+        let image = signatures::interval_image(name, &arguments);
+        // The image and the declared interval both bound the result, so
+        // their meet is the tightest honest claim; a disjoint pair means
+        // one of the two is wrong, and the declaration wins until proven
+        // otherwise.
+        let interval = image.meet(declared).unwrap_or(declared);
+        Type::Numeric(Refinement::Ground(sort, interval))
+    }
+
     /// Applies `ty` to the pending applications in `psi`, returning the
     /// residual result type — the application subtyping judgment
     /// `(S, N) ∣ Ψ ⊢ A <: B` of Fig. 15 (bottom), with one frame per call.
-    fn app_subtype(&mut self, psi: &mut Psi<S>, ty: Type, head: Option<&str>) -> Type {
+    fn app_subtype(&mut self, psi: &mut Psi<S>, ty: Type, head: Option<Head>) -> Type {
         // AS-Empty: not applied to anything, so the type stands as is.
         let Some(frame) = psi.pop() else { return ty };
         // `ty` is already owned, so only a meta needs resolving; anything else
@@ -2083,18 +2152,24 @@ impl<S: Clone> Infer<S> {
                 result,
             } => {
                 self.check_frame(&frame, &positional, &named);
-                self.app_subtype(psi, (*result).clone(), head)
+                let result = self.image_result((*result).clone(), &frame, head);
+                self.app_subtype(psi, result, head)
             }
             // Applicative selection from an intersection (Xue et al.):
             // conjuncts are tried in table order against the frame's
             // argument sorts; see `select_conjunct`.
-            Type::And(conjuncts) => match self.select_conjunct(&conjuncts, &frame, head) {
-                Some(result) => self.app_subtype(psi, result, head),
-                None => {
-                    psi.clear();
-                    Type::Dynamic
+            Type::And(conjuncts) => {
+                match self.select_conjunct(&conjuncts, &frame, head.map(|h| h.name)) {
+                    Some(result) => {
+                        let result = self.image_result(result, &frame, head);
+                        self.app_subtype(psi, result, head)
+                    }
+                    None => {
+                        psi.clear();
+                        Type::Dynamic
+                    }
                 }
-            },
+            }
             // AS-Mono2, via arrow unification (Fig. 14, AF-Mono): a meta
             // being applied must be a function; solve it to a function
             // shaped by the frame, then retry.
@@ -2508,7 +2583,7 @@ impl<S: Clone> Infer<S> {
                         ),
                         // A ground sort always has atoms, so it was
                         // definite above.
-                        Refinement::Ground(_) => unreachable!("ground sorts are non-empty"),
+                        Refinement::Ground(..) => unreachable!("ground sorts are non-empty"),
                     }
                 }
                 // Every conjunct's domain here is numeric and the conjuncts are all
@@ -2953,7 +3028,7 @@ impl<S: Clone> Infer<S> {
             // A contract contradicting the argument's bounds — one the
             // applicability sorts could not see — errors at that argument.
             if self
-                .numeric_subtype(&found, &Refinement::Ground(*domain))
+                .numeric_subtype(&found, &Refinement::Ground(*domain, Interval::TOP))
                 .is_err()
             {
                 let message = format!(
@@ -3068,6 +3143,7 @@ impl<S: Clone> Infer<S> {
         let Expr::Function {
             positional,
             named,
+            result: result_annotation,
             body,
         } = &argument.expr
         else {
@@ -3090,6 +3166,16 @@ impl<S: Clone> Infer<S> {
             }
             let body_ty = self.infer(context, &mut Vec::new(), body);
             context.truncate(depth);
+            // A declared result is checked against the body and stands in
+            // its place.
+            let body_ty = match result_annotation {
+                Some(annotation) => {
+                    let declared = Type::ground(annotation.sort);
+                    self.subtype_check(&body_ty, &declared, &body.span);
+                    declared
+                }
+                None => body_ty,
+            };
             self.subtype_check(&body_ty, result, &body.span);
             return;
         }
@@ -3157,11 +3243,12 @@ impl<S: Clone> Infer<S> {
             Expr::Waveform(waveform) => {
                 let ty = match waveform {
                     waveform::Waveform::Const(value) => {
-                        if value.fract() == 0.0 {
-                            Type::int()
+                        let sort = if value.fract() == 0.0 {
+                            Sort::INT
                         } else {
-                            Type::ground(Sort::NON_INT_ONLY)
-                        }
+                            Sort::NON_INT_ONLY
+                        };
+                        Type::constant(sort, f64::from(*value))
                     }
                     _ => Type::non_const_wave(),
                 };
@@ -3182,13 +3269,21 @@ impl<S: Clone> Infer<S> {
                     // holds, not the residual after Ψ: on the `f` of
                     // `f(1)` the residual is the call's result.
                     self.probe_type(&expr.span, &ty);
-                    self.app_subtype(psi, ty, Some(name))
+                    let head = Head {
+                        name,
+                        builtin: false,
+                    };
+                    self.app_subtype(psi, ty, Some(head))
                 }
                 Some((_, ContextEntry::Builtin(builtin))) => {
                     let builtin = builtin.clone();
                     let ty = signatures::signature(&builtin).unwrap_or(Type::Dynamic);
                     self.probe_type(&expr.span, &ty);
-                    self.app_subtype(psi, ty, Some(&builtin))
+                    let head = Head {
+                        name: &builtin,
+                        builtin: true,
+                    };
+                    self.app_subtype(psi, ty, Some(head))
                 }
                 None => {
                     self.error(format!("unbound variable '{}'", name), &expr.span);
@@ -3200,11 +3295,16 @@ impl<S: Clone> Infer<S> {
             // typing-context entry.
             Expr::BuiltIn { name, .. } => {
                 let ty = signatures::signature(name).unwrap_or(Type::Dynamic);
-                self.app_subtype(psi, ty, Some(name))
+                let head = Head {
+                    name,
+                    builtin: true,
+                };
+                self.app_subtype(psi, ty, Some(head))
             }
             Expr::Function {
                 positional,
                 named,
+                result: result_annotation,
                 body,
             } => {
                 // A named parameter's type comes from the body's use of it, not
@@ -3264,7 +3364,18 @@ impl<S: Clone> Infer<S> {
                         for (name, ty) in &named_types {
                             context.push((name.clone(), bound(ty.clone())));
                         }
-                        self.infer(context, psi, body)
+                        match result_annotation {
+                            None => self.infer(context, psi, body),
+                            // A declared result is a boundary: the body is
+                            // checked against it, and the rest of Ψ applies
+                            // to the declaration.
+                            Some(annotation) => {
+                                let body_ty = self.infer(context, &mut Vec::new(), body);
+                                let declared = Type::ground(annotation.sort);
+                                self.subtype_check(&body_ty, &declared, &body.span);
+                                self.app_subtype(psi, declared, None)
+                            }
+                        }
                     }
                     // AT-Lam1: unapplied, so parameters get fresh metas,
                     // HM-style.
@@ -3277,6 +3388,16 @@ impl<S: Clone> Infer<S> {
                             context.push((name.clone(), bound(ty.clone())));
                         }
                         let body_ty = self.infer(context, &mut Vec::new(), body);
+                        // A declared result is checked against the body and
+                        // published in its place.
+                        let body_ty = match result_annotation {
+                            Some(annotation) => {
+                                let declared = Type::ground(annotation.sort);
+                                self.subtype_check(&body_ty, &declared, &body.span);
+                                declared
+                            }
+                            None => body_ty,
+                        };
                         Type::Function {
                             positional: param_types.into(),
                             named: named_types.into(),
@@ -3484,6 +3605,14 @@ impl<S: Clone> Infer<S> {
                 };
                 context.push((name.clone(), bound(ty)));
             }
+            // The declaration is a contract on whatever flows in — an
+            // atom outside it contributes no tabulation row, an argument
+            // outside it errors — while the body keeps the argument's own
+            // (possibly finer) type.
+            Pattern::Annotated(pattern, annotation) => {
+                self.subtype_check(&ty, &Type::ground(annotation.sort), span);
+                self.bind_pattern(context, pattern, ty, span, generalize_leaves);
+            }
             Pattern::Tuple(patterns) => match self.resolve(&ty) {
                 Type::Tuple(items) if items.len() == patterns.len() => {
                     for (pattern, item) in patterns.iter().zip(items.iter()) {
@@ -3537,6 +3666,30 @@ impl<S: Clone> Infer<S> {
                     .map(|pattern| self.pattern_param_type(context, pattern))
                     .collect(),
             ),
+            Pattern::Annotated(pattern, annotation) => match &**pattern {
+                // The declaration lands as an immediate contract on a fresh
+                // refinement variable: the body is checked under it,
+                // flow-site errors cite it, and freezing publishes it.
+                Pattern::Identifier(name) => {
+                    let rep = self.fresh_refinement();
+                    let Refinement::Var(id) = rep else {
+                        unreachable!("fresh refinements are variables");
+                    };
+                    // Cannot fail: the variable is fresh, so no lower bound
+                    // can escape the contract.
+                    let _ = self.meet_upper(id, annotation.sort);
+                    let ty = Type::Numeric(rep);
+                    context.push((name.clone(), bound(ty.clone())));
+                    ty
+                }
+                _ => {
+                    self.error(
+                        "a type annotation applies to a single parameter name".to_string(),
+                        &None,
+                    );
+                    self.pattern_param_type(context, pattern)
+                }
+            },
         }
     }
 
@@ -3733,8 +3886,10 @@ fn merge_pair(a: &Type, b: &Type) -> Option<Type> {
         if x == y {
             return Some(None);
         }
-        let (Type::Numeric(Refinement::Ground(sort_x)), Type::Numeric(Refinement::Ground(sort_y))) =
-            (x, y)
+        let (
+            Type::Numeric(Refinement::Ground(sort_x, _)),
+            Type::Numeric(Refinement::Ground(sort_y, _)),
+        ) = (x, y)
         else {
             return None;
         };
@@ -3835,6 +3990,20 @@ mod tests {
         errors.iter().map(|w| w.message().to_string()).collect()
     }
 
+    /// Parses `input`, checks it with the prelude in scope, and returns
+    /// the program's inferred type, resolved.
+    fn infer_type(input: &str) -> Type {
+        let bindings = test_prelude();
+        let expr = parse_program::<u32, _>(input, ()).unwrap();
+        let mut checker: Infer<()> = Infer::new();
+        let mut context = Vec::new();
+        let mut memo = HashMap::new();
+        let resolve = |_: &[String]| Err(Error::types_here("no modules".to_string()));
+        checker.build_context(&resolve, &bindings, &mut context, &mut memo);
+        let ty = checker.infer(&mut context, &mut Vec::new(), &expr);
+        checker.resolve(&ty)
+    }
+
     #[track_caller]
     fn assert_clean(input: &str) {
         let errors = check(input);
@@ -3855,6 +4024,68 @@ mod tests {
             "for input {:?}",
             input
         );
+    }
+
+    // The sort half of annotations: a declared parameter restricts what
+    // tabulation enumerates and what call sites may pass, while arguments
+    // inside the declaration keep their finer types; a declared result is
+    // checked against the body and published in its place.
+    #[test]
+    fn annotations_declare_sorts() {
+        // The declaration excludes seq, so the table has no seq row...
+        assert_errors(
+            "let f = fn(x : wave) => x + 1 in f(seq(0)(1))",
+            &["expected waveform, found seq"],
+        );
+        // ...where the unannotated body would admit one.
+        assert_clean("let f = fn(x) => x + 1 in f(seq(0)(1))");
+        // Inside the declaration, arguments keep their precision.
+        assert_errors(
+            "let f = fn(x : wave) => x + 1 in f(2) \\ 1",
+            &["expected seq, found int"],
+        );
+        // A range is parsed and carried; nothing judges it yet.
+        assert_clean("let f = fn(Q : wave[0.1, 20]) => Q + 1 in f(2)");
+        // A declared result is checked against the body...
+        assert_errors("(fn(x) : seq => x + 1)(2)", &["expected seq, found int"]);
+        // ...so tabulation keeps only the conjuncts whose body meets it...
+        assert_eq!(
+            infer_type("fn(x) : seq => x + 1").to_string(),
+            "(seq) -> seq"
+        );
+        // ...and published in place of the body's finer type.
+        assert_errors(
+            "(fn(x) : wave => x + 1)(2) \\ 1",
+            &["expected seq, found waveform"],
+        );
+        // Annotations name a single parameter, not a tuple.
+        assert_errors(
+            "fn((a, b) : wave) => a",
+            &["a type annotation applies to a single parameter name"],
+        );
+    }
+
+    // Literals carry point intervals and built-in images propagate them
+    // exactly, so Nyquist (`sample_rate / 2`) is a concrete number; a
+    // join hulls, and everything non-point stays ⊤.
+    #[test]
+    fn points_propagate_through_builtin_images() {
+        #[track_caller]
+        fn interval_of(input: &str) -> Interval {
+            match infer_type(input) {
+                Type::Numeric(Refinement::Ground(_, interval)) => interval,
+                ty => panic!("expected a ground numeric for {:?}, got {}", input, ty),
+            }
+        }
+        assert_eq!(interval_of("3"), Interval::point(3.0));
+        assert_eq!(interval_of("3 + 4 * 2"), Interval::point(11.0));
+        assert_eq!(interval_of("sample_rate / 2"), Interval::point(22050.0));
+        assert_eq!(
+            interval_of("if true then 1 else 3"),
+            Interval { lo: 1.0, hi: 3.0 }
+        );
+        assert_eq!(interval_of("sine(440, 0)"), Interval::TOP);
+        assert_eq!(interval_of("time + 1"), Interval::TOP);
     }
 
     // The paper's motivating example (§2.2): an unannotated lambda,
@@ -4987,7 +5218,7 @@ mod tests {
                     let domains: Option<Vec<Sort>> = positional
                         .iter()
                         .map(|domain| match domain {
-                            Type::Numeric(Refinement::Ground(sort)) => Some(*sort),
+                            Type::Numeric(Refinement::Ground(sort, _)) => Some(*sort),
                             _ => None,
                         })
                         .collect();
@@ -5000,7 +5231,7 @@ mod tests {
                         .collect::<Vec<_>>()
                         .join(", ");
                     let declared = match &**result {
-                        Type::Numeric(Refinement::Ground(sort)) => Some(*sort),
+                        Type::Numeric(Refinement::Ground(sort, _)) => Some(*sort),
                         _ => None,
                     };
                     let id = 10_000 + applied.len() as u32;
@@ -5494,7 +5725,7 @@ mod tests {
             checker.build_context(&resolve, &bindings, &mut context, &mut memo);
             let ty = checker.infer(&mut context, &mut Vec::new(), &expr);
             let declared = match checker.resolve_refinements(&ty.apply(&checker.subst), 0) {
-                Type::Numeric(Refinement::Ground(sort)) => Some(sort),
+                Type::Numeric(Refinement::Ground(sort, _)) => Some(sort),
                 _ => None,
             };
             let evaluated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -6053,7 +6284,7 @@ mod tests {
             checker.build_context(&resolve, &bindings, &mut context, &mut memo);
             let ty = checker.infer(&mut context, &mut Vec::new(), &expr);
             let declared = match checker.resolve_refinements(&ty.apply(&checker.subst), 0) {
-                Type::Numeric(Refinement::Ground(sort)) => Some(sort),
+                Type::Numeric(Refinement::Ground(sort, _)) => Some(sort),
                 _ => None,
             };
             let (kind, detail) = match eval::evaluate(resolve, &bindings, expr) {
@@ -6121,7 +6352,7 @@ mod tests {
         );
         let ty = checker.infer(&mut context, &mut Vec::new(), &expr);
         match checker.resolve_refinements(&ty.apply(&checker.subst), 0) {
-            Type::Numeric(Refinement::Ground(sort)) => Some(sort),
+            Type::Numeric(Refinement::Ground(sort, _)) => Some(sort),
             _ => None,
         }
     }

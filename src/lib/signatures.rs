@@ -18,7 +18,53 @@
 //! (`unfold`'s count, `nth`'s index, the comparisons) say so with `float`/`int`
 //! refinements.
 
-use crate::types::Type;
+use crate::types::{Interval, Type};
+
+/// The interval image of applying the built-in `head` to arguments with
+/// the given intervals — the tightest interval the result can inhabit,
+/// or ⊤ where no image is known.
+///
+/// The point stage: arithmetic heads are exact when every argument is a
+/// point (a non-finite result — an overflow or domain error — widens to
+/// ⊤); `alt` is the join of its two branches, the trigger ignored, exact
+/// on any input; `&` and `\` hull the sum with both operands (merge
+/// sums where both play and passes the longer tail through). Hull images
+/// for non-point arguments arrive with the checker's interval judgment.
+pub fn interval_image(head: &str, arguments: &[Interval]) -> Interval {
+    // A finite computed value is the exact point image; anything else
+    // (NaN from a domain error, an overflow to ±∞) is unknown.
+    let of = |value: f64| {
+        if value.is_finite() {
+            Interval::point(value)
+        } else {
+            Interval::TOP
+        }
+    };
+    // The merge image on points: samples are a + b where both operands
+    // play and one operand alone in its solo region.
+    let merge = |a: f64, b: f64| of(a + b).join(Interval::point(a)).join(Interval::point(b));
+    match (head, arguments) {
+        ("alt", [_, positive, negative]) => positive.join(*negative),
+        _ => match (
+            head,
+            arguments.first().and_then(|a| a.as_point()),
+            arguments.get(1).and_then(|b| b.as_point()),
+        ) {
+            ("+", Some(a), Some(b)) => of(a + b),
+            ("-", Some(a), None) if arguments.len() == 1 => of(-a),
+            ("-", Some(a), Some(b)) => of(a - b),
+            ("*", Some(a), Some(b)) => of(a * b),
+            ("/", Some(a), Some(b)) => of(a / b),
+            ("&" | "\\", Some(a), Some(b)) => merge(a, b),
+            ("pow", Some(a), Some(b)) => of(a.powf(b)),
+            ("exp", Some(a), None) => of(a.exp()),
+            ("sqrt", Some(a), None) => of(a.sqrt()),
+            // The runtime's `log(value, base)` (`builtins.rs`).
+            ("log", Some(value), Some(base)) => of(value.log(base)),
+            _ => Interval::TOP,
+        },
+    }
+}
 
 /// Builds the intersection table shared by the binary arithmetic operators,
 /// mirroring `binary_op`'s runtime arms: constants fold (preserving
@@ -257,7 +303,7 @@ mod tests {
                 panic!("conjuncts are arrows");
             };
             let both_admit_seq = positional.iter().all(|domain| {
-                matches!(domain, Type::Numeric(crate::types::Refinement::Ground(sort))
+                matches!(domain, Type::Numeric(crate::types::Refinement::Ground(sort, _))
                     if !sort.intersect(Sort::SEQ).is_empty())
             });
             assert!(!both_admit_seq, "no conjunct may accept two seqs");
@@ -306,6 +352,48 @@ mod tests {
                 name
             );
         }
+    }
+
+    #[test]
+    fn interval_images_are_exact_on_points() {
+        let point = Interval::point;
+        assert_eq!(interval_image("+", &[point(3.0), point(4.0)]), point(7.0));
+        assert_eq!(interval_image("-", &[point(3.0)]), point(-3.0));
+        assert_eq!(
+            interval_image("/", &[point(44100.0), point(2.0)]),
+            point(22050.0)
+        );
+        assert_eq!(
+            interval_image("pow", &[point(2.0), point(10.0)]),
+            point(1024.0)
+        );
+        // A domain error is unknown, not a lie.
+        assert_eq!(interval_image("sqrt", &[point(-2.0)]), Interval::TOP);
+        // Division by zero is non-finite, so unknown.
+        assert_eq!(
+            interval_image("/", &[point(1.0), point(0.0)]),
+            Interval::TOP
+        );
+        // alt joins its branches whatever the trigger knows.
+        assert_eq!(
+            interval_image("alt", &[Interval::TOP, point(1.0), point(3.0)]),
+            Interval { lo: 1.0, hi: 3.0 }
+        );
+        // Merge covers the sum and both solo regions.
+        assert_eq!(
+            interval_image("&", &[point(1.0), point(3.0)]),
+            Interval { lo: 1.0, hi: 4.0 }
+        );
+        // Non-point arguments have no image yet.
+        assert_eq!(
+            interval_image("+", &[Interval::TOP, point(1.0)]),
+            Interval::TOP
+        );
+        // Unknown heads have no image at all.
+        assert_eq!(
+            interval_image("sine", &[point(0.0), point(0.0)]),
+            Interval::TOP
+        );
     }
 
     #[test]
@@ -384,7 +472,7 @@ mod tests {
             let domains: Option<Vec<Sort>> = positional
                 .iter()
                 .map(|domain| match domain {
-                    Type::Numeric(Refinement::Ground(sort)) => Some(*sort),
+                    Type::Numeric(Refinement::Ground(sort, _)) => Some(*sort),
                     _ => None,
                 })
                 .collect();
@@ -487,7 +575,7 @@ mod tests {
                 ),
             };
             match declared {
-                Type::Numeric(Refinement::Ground(sort)) => {
+                Type::Numeric(Refinement::Ground(sort, _)) => {
                     let actual = sort_of(&result).unwrap_or_else(|| {
                         panic!(
                             "{} on ({}) returned a non-numeric {}",

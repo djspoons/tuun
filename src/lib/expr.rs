@@ -7,6 +7,7 @@ use std::fmt::{Debug, Display};
 use std::ops::Range;
 use std::rc::Rc;
 
+use crate::types::Sort;
 use crate::waveform;
 
 /// A byte range plus the identity of the text it indexes.
@@ -214,10 +215,39 @@ impl<M, S> Debug for BuiltInFn<M, S> {
     }
 }
 
+/// A declared type on a function parameter or result: a sort and an
+/// optional value range.
+///
+/// Type annotations are checked statically and erased at evaluation.
+/// (Distinct from [`Annotation`], the `#{...}` program-header
+/// annotations.)
+#[derive(Clone, Debug, PartialEq)]
+pub struct TypeAnnotation {
+    pub sort: Sort,
+    /// Literal interval endpoints `[lo, hi]`; `None` when only the sort
+    /// is declared.
+    pub range: Option<(f64, f64)>,
+}
+
+impl fmt::Display for TypeAnnotation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.sort.keyword() {
+            Some(keyword) => write!(f, "{}", keyword)?,
+            None => write!(f, "{}", self.sort)?,
+        }
+        if let Some((lo, hi)) = self.range {
+            write!(f, "[{}, {}]", lo, hi)?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Pattern {
     Identifier(String),
     Tuple(Vec<Pattern>),
+    /// A pattern with a declared type: `Q : wave[0.1, 20]`.
+    Annotated(Box<Pattern>, TypeAnnotation),
 }
 
 /// A name paired with the expression bound to it.
@@ -241,6 +271,9 @@ pub enum Expr<M, S = ()> {
         /// itself is evaluated. A function is a value iff all of the defaults
         /// are values.
         named: NamedExprs<M, S>,
+        /// The declared result type, when the source carries one
+        /// (`fn(...) : wave[-1, 1] => ...`). Never read at evaluation.
+        result: Option<TypeAnnotation>,
         body: Box<SourceExpr<M, S>>,
     },
     BuiltIn {
@@ -385,6 +418,7 @@ impl<M, S> SourceExpr<M, S> {
         SourceExpr::from(Expr::Function {
             positional,
             named: Vec::new(),
+            result: None,
             body: Box::new(body),
         })
     }
@@ -557,10 +591,12 @@ pub(crate) fn stamp_expr<M, S: Copy>(expr: SourceExpr<M>, source: S) -> SourceEx
         Expr::Function {
             positional,
             named,
+            result,
             body,
         } => Expr::Function {
             positional,
             named: stamp_named(named, source),
+            result,
             body: Box::new(stamp_expr(*body, source)),
         },
         Expr::Seq { offset, waveform } => Expr::Seq {
@@ -819,6 +855,7 @@ fn as_let_binding<'a, M, S>(
     if let Expr::Function {
         positional,
         named: defaults,
+        result: _,
         body,
     } = &function.expr
         && named_args.is_empty()
@@ -925,6 +962,9 @@ impl Display for Pattern {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Pattern::Identifier(name) => write!(f, "{}", name),
+            Pattern::Annotated(pattern, annotation) => {
+                write!(f, "{} : {}", pattern, annotation)
+            }
             Pattern::Tuple(patterns) => {
                 write!(f, "(")?;
                 for (i, pattern) in patterns.iter().enumerate() {
@@ -964,6 +1004,7 @@ where
             Expr::Function {
                 positional,
                 named,
+                result,
                 body,
             } => {
                 write!(f, "fn(")?;
@@ -974,7 +1015,11 @@ where
                     write!(f, "{}", param)?;
                 }
                 fmt_named(named, positional.is_empty(), f)?;
-                write!(f, ") => {}", body)
+                write!(f, ")")?;
+                if let Some(annotation) = result {
+                    write!(f, " : {}", annotation)?;
+                }
+                write!(f, " => {}", body)
             }
             Expr::BuiltIn { name, .. } => write!(f, "{}", name),
             Expr::Variable(name) => write!(f, "{}", name),
@@ -1236,6 +1281,7 @@ where
         Expr::Function {
             positional,
             named,
+            result,
             body,
         } => {
             write!(out, "fn(")?;
@@ -1246,7 +1292,11 @@ where
                 write!(out, "{}", param)?;
             }
             write_preserving_named(named, positional.is_empty(), source, out)?;
-            write!(out, ") => ")?;
+            write!(out, ")")?;
+            if let Some(annotation) = result {
+                write!(out, " : {}", annotation)?;
+            }
+            write!(out, " => ")?;
             write_preserving(body, source, out)
         }
         Expr::IfThenElse {

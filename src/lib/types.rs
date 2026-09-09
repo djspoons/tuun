@@ -93,6 +93,31 @@ impl Sort {
         self.0 & !other.0 == 0
     }
 
+    /// The annotation keyword naming this sort, when it is one of the
+    /// five declarable sorts.
+    pub fn keyword(self) -> Option<&'static str> {
+        match self {
+            Sort::INT => Some("int"),
+            Sort::FLOAT => Some("float"),
+            Sort::WAVE => Some("wave"),
+            Sort::SEQ => Some("seq"),
+            Sort::TOP => Some("num"),
+            _ => None,
+        }
+    }
+
+    /// The sort named by an annotation keyword.
+    pub fn from_keyword(name: &str) -> Option<Sort> {
+        match name {
+            "int" => Some(Sort::INT),
+            "float" => Some(Sort::FLOAT),
+            "wave" => Some(Sort::WAVE),
+            "seq" => Some(Sort::SEQ),
+            "num" => Some(Sort::TOP),
+            _ => None,
+        }
+    }
+
     /// Returns the atoms of this sort, each as a singleton.
     pub fn atoms(self) -> impl Iterator<Item = Sort> {
         [
@@ -143,12 +168,70 @@ impl Display for Sort {
     }
 }
 
-/// The refinement carried by a numeric type: a known sort or a refinement
-/// variable solved by the checker (bounds live in the checker's state, not
-/// here).
+/// A closed interval `[lo, hi]` bounding the sample values a numeric takes.
+///
+/// A scalar is a constant waveform, so its interval is a point; a seq's
+/// interval covers its waveform's samples (the offset is time-like and
+/// uninvolved). ⊤ = `[−∞, ∞]` is the unconstrained interval; the endpoints
+/// use the native infinities rather than an `Option`.
+///
+/// The lattice methods are named to read beside the sort bounds in the
+/// checker's flow code: `join` (the hull of both — interval union rounds
+/// outward), `meet` (intersection, `None` when disjoint), and `is_subset`
+/// (containment).
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Interval {
+    pub lo: f64,
+    pub hi: f64,
+}
+
+impl Interval {
+    /// The unconstrained interval `[−∞, ∞]`.
+    pub const TOP: Interval = Interval {
+        lo: f64::NEG_INFINITY,
+        hi: f64::INFINITY,
+    };
+
+    /// The interval containing exactly `value`.
+    pub fn point(value: f64) -> Interval {
+        Interval {
+            lo: value,
+            hi: value,
+        }
+    }
+
+    /// Returns the single value this interval contains, if it is a point.
+    pub fn as_point(self) -> Option<f64> {
+        (self.lo == self.hi).then_some(self.lo)
+    }
+
+    /// The smallest interval containing both — the join (hull).
+    pub fn join(self, other: Interval) -> Interval {
+        Interval {
+            lo: self.lo.min(other.lo),
+            hi: self.hi.max(other.hi),
+        }
+    }
+
+    /// The intersection — the meet; `None` when the intervals are disjoint.
+    pub fn meet(self, other: Interval) -> Option<Interval> {
+        let lo = self.lo.max(other.lo);
+        let hi = self.hi.min(other.hi);
+        (lo <= hi).then_some(Interval { lo, hi })
+    }
+
+    /// Returns whether every value in `self` also lies in `other`.
+    pub fn is_subset(self, other: Interval) -> bool {
+        other.lo <= self.lo && self.hi <= other.hi
+    }
+}
+
+/// The refinement carried by a numeric type: a known sort with an interval
+/// bounding its values, or a refinement variable solved by the checker
+/// (bounds live in the checker's state, not here).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Refinement {
-    Ground(Sort),
+    Ground(Sort, Interval),
     Var(u32),
 }
 
@@ -218,9 +301,16 @@ impl Type {
         Type::And(types.into())
     }
 
-    /// Builds the numeric type with exactly the given sort.
+    /// Builds the numeric type with exactly the given sort and an
+    /// unconstrained interval.
     pub fn ground(sort: Sort) -> Type {
-        Type::Numeric(Refinement::Ground(sort))
+        Type::Numeric(Refinement::Ground(sort, Interval::TOP))
+    }
+
+    /// Builds the numeric type of the constant `value`: the given sort at
+    /// the point interval `[value, value]`.
+    pub fn constant(sort: Sort, value: f64) -> Type {
+        Type::Numeric(Refinement::Ground(sort, Interval::point(value)))
     }
 
     /// The integer-valued constants.
@@ -671,7 +761,7 @@ fn fmt_type(ty: &Type, names: &Names, f: &mut fmt::Formatter<'_>, nested: bool) 
     match ty {
         Type::Var(id) => write!(f, "{}", names.var(*id)),
         Type::Meta(id) => write!(f, "{}", names.meta(*id)),
-        Type::Numeric(Refinement::Ground(sort)) => write!(f, "{}", sort),
+        Type::Numeric(Refinement::Ground(sort, _)) => write!(f, "{}", sort),
         // Unresolved refinement variables read as "unknown numeric"; the
         // checker resolves known bounds before display.
         Type::Numeric(Refinement::Var(_)) => write!(f, "number"),
@@ -767,6 +857,27 @@ mod tests {
         assert!(!Sort::SEQ.is_subset(Sort::WAVE));
         assert!(Sort::SEQ.intersect(Sort::NON_CONST_WAVE).is_empty());
         assert_eq!(Sort::FLOAT.union(Sort::NON_CONST_WAVE), Sort::WAVE);
+    }
+
+    #[test]
+    fn intervals_order_by_inclusion() {
+        let unit = Interval { lo: 0.0, hi: 1.0 };
+        let wide = Interval { lo: -1.0, hi: 2.0 };
+        assert!(unit.is_subset(wide));
+        assert!(!wide.is_subset(unit));
+        assert!(unit.is_subset(Interval::TOP));
+        assert_eq!(unit.join(wide), wide);
+        assert_eq!(unit.meet(wide), Some(unit));
+        assert_eq!(
+            Interval::point(2.0).meet(Interval { lo: 3.0, hi: 4.0 }),
+            None
+        );
+        assert_eq!(Interval::point(2.0).as_point(), Some(2.0));
+        assert_eq!(Interval::TOP.as_point(), None);
+        assert_eq!(
+            Interval::point(1.0).join(Interval::point(3.0)),
+            Interval { lo: 1.0, hi: 3.0 }
+        );
     }
 
     #[test]

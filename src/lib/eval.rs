@@ -27,6 +27,8 @@ fn extend_with_trivial_context<M, S>(
                 extend_with_trivial_context(context, pattern);
             }
         }
+        // Type annotations are erased at evaluation.
+        Pattern::Annotated(pattern, _) => extend_with_trivial_context(context, pattern),
     }
 }
 
@@ -65,6 +67,7 @@ where
         Function {
             positional,
             named,
+            result,
             body,
         } => {
             // Named defaults are evaluated in the enclosing scope: they see
@@ -85,6 +88,7 @@ where
                 expr: Expr::Function {
                     positional,
                     named,
+                    result,
                     body: Box::new(body),
                 },
                 span,
@@ -194,6 +198,8 @@ where
             context.push((name.clone(), argument.clone()));
             Ok(())
         }
+        // Type annotations are erased at evaluation.
+        (Pattern::Annotated(pattern, _), _) => extend_context(context, pattern, argument),
         (Pattern::Tuple(patterns), Expr::Tuple(arguments)) => {
             if patterns.len() != arguments.len() {
                 return Err(Error::eval(
@@ -248,6 +254,7 @@ where
         Function {
             positional,
             named,
+            result,
             body,
         } => {
             // Named defaults are evaluated once, here — when the function
@@ -262,6 +269,7 @@ where
                 expr: Function {
                     positional,
                     named,
+                    result,
                     body,
                 },
                 span,
@@ -322,6 +330,7 @@ where
                     Function {
                         positional: pos_params,
                         named: defaults,
+                        result: _,
                         body,
                     },
                     pos_args,
@@ -598,6 +607,12 @@ mod tests {
     use crate::builtins;
     use crate::expr::ErrorKind;
     use crate::parser::{parse_module, parse_program};
+
+    #[test]
+    fn type_annotations_erase_at_evaluation() {
+        let result = eval_with_builtins("(fn(x : wave[0, 1]) : wave => x * 2)(3)").unwrap();
+        assert_eq!(result.expr.as_const_float(), Some(6.0));
+    }
 
     /// Parses and evaluates `input` with the built-ins in scope.
     fn eval_with_builtins(input: &str) -> Result<SourceExpr<u32, ()>, Error<()>> {
