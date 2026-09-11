@@ -3019,6 +3019,123 @@ impl<S: Clone> Infer<S> {
         }
     }
 
+    /// Whether `function` names a value typed by a single (possibly
+    /// quantified) arrow.
+    ///
+    /// Intersections are excluded: conjunct selection reads argument
+    /// types, so a deferred lambda would give it nothing to select on. So
+    /// is anything that is not a name: a callee still being inferred has
+    /// no type to peek at.
+    fn arrow_callee<M>(&self, context: &TypeContext, function: &SourceExpr<M, S>) -> bool {
+        let arrow = |ty: &Type| match ty {
+            Type::Function { .. } => true,
+            Type::Forall(_, body) => matches!(**body, Type::Function { .. }),
+            _ => false,
+        };
+        let name = match &function.expr {
+            Expr::Variable(name) => name,
+            Expr::BuiltIn { name, .. } => {
+                return signatures::signature(name).as_ref().is_some_and(arrow);
+            }
+            _ => return false,
+        };
+        match context.iter().rev().find(|(n, _)| n == name) {
+            Some((_, ContextEntry::Ty(ty, _))) => arrow(&self.resolve(ty)),
+            Some((_, ContextEntry::Builtin(builtin))) => {
+                signatures::signature(builtin).as_ref().is_some_and(arrow)
+            }
+            None => false,
+        }
+    }
+
+    /// Checks a deferred lambda argument against the domain its call
+    /// settled — the premise of AS-Fun2, run after the sibling arguments
+    /// have flowed.
+    ///
+    /// When the placeholder has resolved to an arrow whose parameters are
+    /// ready, the lambda's parameters take those types and the body is
+    /// judged once (AT-Lam2's shape) — precise where inferring first must
+    /// summarize. Otherwise the argument is inferred as it would have
+    /// been at the frame — AT-Lam1, tabulated and generalized — and
+    /// checked against whatever the placeholder holds, so an unsettled
+    /// domain keeps the summary path's behavior exactly.
+    fn check_deferred<M>(
+        &mut self,
+        context: &mut TypeContext,
+        placeholder: &Type,
+        argument: &SourceExpr<M, S>,
+    ) {
+        let Expr::Function {
+            positional,
+            named,
+            body,
+        } = &argument.expr
+        else {
+            unreachable!("only lambda literals defer");
+        };
+        let resolved = placeholder.apply(&self.subst);
+        if let Type::Function {
+            positional: domains,
+            named: named_domains,
+            result,
+        } = &resolved
+            && domains.len() == positional.len()
+            && named.is_empty()
+            && named_domains.is_empty()
+            && domains.iter().all(|domain| self.domain_ready(domain, true))
+        {
+            let depth = context.len();
+            for (pattern, domain) in positional.iter().zip(domains.iter()) {
+                self.bind_pattern(context, pattern, domain.clone(), &argument.span, false);
+            }
+            let body_ty = self.infer(context, &mut Vec::new(), body);
+            context.truncate(depth);
+            self.subtype_check(&body_ty, result, &body.span);
+            return;
+        }
+        let ty = self.infer_definition(context, argument);
+        let ty = self.generalize(context, ty);
+        self.subtype_check(&ty, placeholder, &argument.span);
+    }
+
+    /// Whether a deferred lambda's parameter can take this domain type (see
+    /// [`Infer::check_deferred`]).
+    ///
+    /// The guard protects exactly the positions the lambda's body reads and may
+    /// select on — `reads` positions: the parameter itself, and covariantly its
+    /// list and tuple leaves. A numeric there must have definite atoms (ground
+    /// or guarantees already arrived), or the body's selections would summarize
+    /// over every admitted sort where the fallback's table keeps the options
+    /// apart. Inside a function-typed domain the body only calls: arguments
+    /// flow *into* its parameters, and neither path enumerates through its
+    /// result, so unsolved refinements are no worse there — only a meta, a type
+    /// with no shape yet, falls back.
+    fn domain_ready(&self, ty: &Type, reads: bool) -> bool {
+        match ty {
+            Type::Meta(_) => false,
+            Type::Numeric(rep) => !reads || !self.definite_of(rep).is_empty(),
+            Type::Var(_) | Type::Bool | Type::String | Type::Dynamic => true,
+            Type::List(item) => self.domain_ready(item, reads),
+            Type::Tuple(items) => items.iter().all(|item| self.domain_ready(item, reads)),
+            Type::Function {
+                positional,
+                named,
+                result,
+            } => {
+                positional.iter().all(|p| self.domain_ready(p, false))
+                    && named.iter().all(|(_, p)| self.domain_ready(p, false))
+                    && self.domain_ready(result, false)
+            }
+            Type::And(conjuncts) => conjuncts
+                .iter()
+                .all(|conjunct| self.domain_ready(conjunct, reads)),
+            Type::Forall(_, body) => self.domain_ready(body, reads),
+            Type::Module(entries) => entries
+                .iter()
+                .all(|(_, entry)| self.domain_ready(entry, reads)),
+        }
+    }
+
     /// Infers the type of `expr` under `context` — the typing judgment of
     /// Fig. 16 — consuming every pending application in `psi`; the returned
     /// type is the residual after all those applications (§4.2 style, per
@@ -3184,16 +3301,43 @@ impl<S: Clone> Infer<S> {
             // generalize it (AT-Gen), push the call's frame, and type the
             // function under the extended Ψ. The recursive call's result is
             // already the application's type (§4.2 style).
+            //
+            // Settle-then-check, one deviation from the paper's
+            // arguments-first order: a lambda literal bound for a
+            // single-arrow callee is not inferred here with its siblings
+            // but checked after them, against the domain they will have
+            // instantiated by then (`check_deferred`). Inferring it up
+            // front (AT-Lam1 and ABS) has to summarize its body over every
+            // sort its parameters admit, and a demand that summary makes
+            // of an enclosing unknown — an instrument parameter applied to
+            // an overloaded result, say — is committed before the sorts
+            // are known. Tables keep the up-front path: conjunct selection
+            // reads the argument's type, so a deferred lambda would give
+            // it nothing to select on.
             Expr::Application {
                 function,
                 positional,
                 named,
             } => {
+                // The peek costs a context scan (and, for a built-in, a
+                // signature construction), so only calls that could defer
+                // — a lambda literal among the arguments — pay it.
+                let defer = positional
+                    .iter()
+                    .any(|argument| matches!(argument.expr, Expr::Function { .. }))
+                    && self.arrow_callee(context, function);
+                let mut deferred: Vec<(Type, &SourceExpr<M, S>)> = Vec::new();
                 let positional_types = positional
                     .iter()
                     .map(|argument| {
-                        let ty = self.infer_definition(context, argument);
-                        (self.generalize(context, ty), argument.span.clone())
+                        if defer && matches!(argument.expr, Expr::Function { .. }) {
+                            let placeholder = self.fresh_meta();
+                            deferred.push((placeholder.clone(), argument));
+                            (placeholder, argument.span.clone())
+                        } else {
+                            let ty = self.infer_definition(context, argument);
+                            (self.generalize(context, ty), argument.span.clone())
+                        }
                     })
                     .collect();
                 let named_types = named
@@ -3212,7 +3356,11 @@ impl<S: Clone> Infer<S> {
                     named: named_types,
                     span: expr.span.clone(),
                 });
-                self.infer(context, psi, function)
+                let result = self.infer(context, psi, function);
+                for (placeholder, argument) in deferred {
+                    self.check_deferred(context, &placeholder, argument);
+                }
+                result
             }
             // Conditionals are not applied directly to Ψ: both branches are
             // inferred in inference mode, joined, and the joined type is
@@ -3758,6 +3906,47 @@ mod tests {
         assert_clean("reduce(fn(acc, x) => acc + x, 0, [1, 2, 3])");
     }
 
+    // A mapped lambda calling an instrument whose type is already ground
+    // (AT-Lam2 bound it before the lambda was inferred) recovers
+    // precision through the lambda's own tabulation: the seq conjunct
+    // dies per-vector and the base pass's summary error is drained.
+    #[test]
+    fn mapped_lambda_over_a_ground_instrument() {
+        assert_clean(
+            "(fn(inst) => (fn(xs) => <map(fn(y) => \
+             inst((fn(m) => pow(2, (m - 69) / 12) * 440)(y)), xs)>)([60, 64]))\
+             (fn(freq) => sine(freq, 0) | fin(1) | seq(1))",
+        );
+    }
+
+    // Settle-then-check (the AS-Fun2 premise, deferred): when the
+    // instrument is still an unsolved parameter of the enclosing
+    // definition, a mapped lambda inferred up front summarizes the
+    // overloaded `h(y)` over every sort `y` admits — `numeric` — and
+    // solves the instrument's meta with that summary, which no real
+    // instrument satisfies. Deferring the lambda until the list argument
+    // settles the element sort lets the body be judged once, at that
+    // sort, so the demand on the instrument is what this call feeds it.
+    #[test]
+    fn deferred_lambda_argument_selects_at_the_element_sort() {
+        assert_clean(
+            "let f = fn(tonic, inst) => \
+               let g = fn(x) => tonic + round(x) in \
+               fn(xs) => let ys = map(g, xs) in \
+                 <map(fn(y) => inst((fn(m) => pow(2, (m - 69) / 12) * 440)(y)), ys)> in \
+             [60, 64] | f(1, fn(freq) => sine(freq, 0) | fin(1) | seq(1))",
+        );
+    }
+
+    // The deferred path only fires once the domain has settled; a list
+    // whose element type never resolves falls back to the inferred-table
+    // path, whose selection narrows the element from the lambda's own
+    // contracts.
+    #[test]
+    fn deferred_lambda_argument_falls_back_on_an_open_element() {
+        assert_clean("fn(xs) => map(fn(x) => x + 1, xs)");
+    }
+
     #[test]
     fn builtin_passed_as_argument() {
         // `sqrt` is referenced under an empty Ψ (rule AS-Empty): its
@@ -3891,14 +4080,12 @@ mod tests {
         // ...and a seq element is fine where the body threads seqs...
         assert_clean("map(fn(x) => x * 2, [seq(0)(1)])");
         // ...but errors where no conjunct accepts one: x + x has no seq conjunct.
-        // The list is checked before the table (see `check_frame`), so
-        // the message shows the seq flowing into the expected arrow
-        // against the conjuncts the function actually has.
+        // The list settles the element before the lambda is checked
+        // (`check_deferred`), so `x` is a seq in the body and the body's
+        // own relational message reports.
         assert_errors(
             "map(fn(x) => x + x, [seq(0)(1)])",
-            &[
-                "expected (seq) -> ?a, found (int) -> int ∧ (float) -> float ∧ (waveform) -> waveform",
-            ],
+            &["cannot combine two seqs with +"],
         );
     }
 
@@ -4016,10 +4203,12 @@ mod tests {
             "let f = fn(k = time) => k in nth(f(), [1, 2, 3])",
             &["expected int, found waveform"],
         );
-        // A mismatch that is not about sorts at all is untouched.
+        // A mismatch that is not about sorts at all is untouched. The
+        // seed settles the accumulator before the step lambda is checked
+        // (`check_deferred`), so the step's body is what mismatches.
         assert_errors(
             "reduce(fn(acc, x) => fixed, sqrt, [1])",
-            &["expected ([float]) -> waveform, found (float) -> float"],
+            &["expected (float) -> float, found ([float]) -> waveform"],
         );
     }
 
@@ -4041,10 +4230,12 @@ mod tests {
             "reduce(fn(acc, x) => cos, sqrt, [1])(time)",
             &["expected float, found waveform"],
         );
-        // Arrows with no shared parameter shape still have nothing to meet.
+        // Arrows with no shared parameter shape still have nothing to meet; the
+        // step lambda checks after the seed settles the accumulator, so its
+        // body is where the mismatch reports.
         assert_errors(
             "reduce(fn(acc, x) => fixed, sqrt, [1])",
-            &["expected ([float]) -> waveform, found (float) -> float"],
+            &["expected (float) -> float, found ([float]) -> waveform"],
         );
         // A function-valued named default still pins its parameter, and a
         // definition-bound one is quantified, so the pin has to look through
@@ -4071,14 +4262,16 @@ mod tests {
             &["expected int, found int or waveform"],
         );
         // Only numeric leaves open up: the structure itself, and leaves of
-        // other kinds, still have to agree.
+        // other kinds, still have to agree. The seed settles the parameter
+        // before the lambda is checked, so its body is where the disagreement
+        // reports.
         assert_errors(
             "unfold(fn(v) => [true], [1, 2], 2)",
-            &["expected [bool], found [int]"],
+            &["expected [int], found [bool]"],
         );
         assert_errors(
             "unfold(fn(v) => time, [1, 2], 2)",
-            &["expected waveform, found [int]"],
+            &["expected [int], found waveform"],
         );
         // The supplied conjunct carries the caller's element type through to the
         // result, so this is caught where the result is used rather than at
@@ -5539,9 +5732,12 @@ mod tests {
             "nth(fn(x) => (x != 0.5), [1, 2])",
             &["expected int, found (float) -> bool"],
         );
+        // With a seq sibling the lambda's parameter takes the seq
+        // directly (`check_deferred` runs it after the sibling), and the
+        // body's `!=` is what has no arm for it.
         assert_errors(
             "let ap = fn(f, v) => f(v) in ap(fn(x) => (x != 0.5), (time | seq(time - 1)))",
-            &["expected float, found seq"],
+            &["no use of != accepts (seq, float)"],
         );
         assert_clean("let ap = fn(f, v) => f(v) in ap(fn(x) => (x != 0.5), 1.5)");
         // Two unknowns narrow nothing, so the table demands nothing.
