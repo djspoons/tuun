@@ -17,6 +17,7 @@ Many of the pages below include embedded synthesizer elements, but if you'd like
 * [Architecture](architecture.md)
 * [Dynamic Waveforms](dynamic.md)
 * [Sine](sine.md)
+* [Alt and Reset](alt-and-reset.md)
 * [Filter](filter.md)
 
 ## Using Tuun
