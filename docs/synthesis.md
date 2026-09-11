@@ -102,7 +102,7 @@ To create a synthesizer instrument using the function below, provide:
  * $D$, which determines the frequency of the modulator
  * Parameters to the envelope: attack duration, decay duration, sustain level, and release duration
 
-This instrument is based on an example from Chowning's article.
+The instrument below is based on an example from Chowning's article.
 
 <div class="container">
   <tuun-synth description="Phase modulation synthesis" open='["std", "env.finseq"]' expanded>

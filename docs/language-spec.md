@@ -151,6 +151,7 @@ high_cutoff = filtered(440, cutoff_freq_hz = 6000);
 ### Seq and Followed-By
 
 
+<!-- TODO update or remove this overloading section
 
 ### Overloading
 
@@ -170,8 +171,15 @@ Many Tuun operators are overloaded to operate on floats, waveforms, and (where i
 | \\          | seq              | waveform          | seq         |
 | \\          | seq              | seq               | seq         |
 
+ -->
 
+<!--
 
+### optimization
+
+### Pre-computation
+
+ -->
 ## Type Inference
 
 <!--
