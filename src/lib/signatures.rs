@@ -61,7 +61,7 @@ fn waveform_filter() -> Type {
 
 /// Returns the signature of the built-in named `name`, or `None` for names
 /// without a declared signature; callers should treat those as
-/// [`Type::Dynamic`].
+/// [`Type::Erroneous`].
 pub fn signature(name: &str) -> Option<Type> {
     // Var ids are local to each signature; instantiation freshens them.
     let a = || Type::Var(0);
@@ -530,7 +530,7 @@ mod tests {
     /// Every built-in with numeric-ground conjuncts conforms to them — the
     /// signature-faithfulness obligation of the sound configuration. Conjuncts
     /// over non-numeric domains (lists, functions, ∀-polymorphic) are out of
-    /// scope here; `mark` is prelude-native and `debug` is Dynamic.
+    /// scope here; `mark` and `debug` are prelude-native.
     #[test]
     fn signatures_conform_to_the_runtime() {
         let mut bindings: Vec<SourceBinding<u32, ()>> = Vec::new();

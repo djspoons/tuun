@@ -1131,7 +1131,7 @@ where
                     if arguments.len() != 1 {
                         return Err(Error::internal_here("Expected one argument"));
                     }
-                    print(&format!("[DEBUG] {}: {}", label, arguments[0].to_string()));
+                    print(&format!("[DEBUG] {}: {}", label, arguments[0]));
                     Ok(arguments.pop().unwrap())
                 })),
             })

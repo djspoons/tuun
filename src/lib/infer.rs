@@ -70,7 +70,7 @@
 //! refinements.
 //!
 //! Each failed check produces an [`Error`] and inference recovers with
-//! [`Type::Dynamic`] so one mistake does not cascade.
+//! [`Type::Erroneous`] so one mistake does not cascade.
 //!
 //! Modules are recursively checked and the resulting entries are added into the
 //! context either directly (as in the case of `open`) or under a record-like
@@ -1077,7 +1077,7 @@ impl<S: Clone> Infer<S> {
     /// nothing to tabulate: a non-function, a function with no parameters or no
     /// numeric ones, or one whose every vector's body errored.
     ///
-    /// A refusal answers with [`Type::Dynamic`] rather than `None`, so the base
+    /// A refusal answers with [`Type::Erroneous`] rather than `None`, so the base
     /// type does not stand in its place: that type is the unsound summary the
     /// refusal exists to avoid, and letting the rest of the program be checked
     /// against it would report from it. This is the recovery every other
@@ -1152,7 +1152,7 @@ impl<S: Clone> Infer<S> {
                 None => {
                     let cases = self.spine_vectors(expr, base, &COARSE_ATOMS);
                     self.too_wide(cases, MAX_COARSE_VECTORS, &expr.span);
-                    return Some(Type::Dynamic);
+                    return Some(Type::Erroneous);
                 }
             },
         };
@@ -1171,7 +1171,7 @@ impl<S: Clone> Infer<S> {
         );
         if vectors > budget {
             self.too_wide(Some(vectors), budget, &expr.span);
-            return Some(Type::Dynamic);
+            return Some(Type::Erroneous);
         }
         // Refinement variables reachable from the enclosing context belong to
         // outer scopes and must stay live in the conjuncts (mirroring
@@ -1306,13 +1306,13 @@ impl<S: Clone> Infer<S> {
     /// 13. Fails silently; callers decide whether a failure warrants an error.
     ///
     /// Structural cases generalize the paper's AU-Fun to tuun's n-ary
-    /// functions, tuples, lists, and modules. `Dynamic` unifies with anything
+    /// functions, tuples, lists, and modules. `Erroneous` unifies with anything
     /// (a tuun extension; no counterpart in the paper).
     fn unify(&mut self, a: &Type, b: &Type) -> Result<(), ()> {
         let a = self.resolve(a);
         let b = self.resolve(b);
         match (&a, &b) {
-            (Type::Dynamic, _) | (_, Type::Dynamic) => Ok(()),
+            (Type::Erroneous, _) | (_, Type::Erroneous) => Ok(()),
             // AU-Refl.
             (Type::Meta(x), Type::Meta(y)) if x == y => Ok(()),
             // Predicative (§2.4): a meta never holds a quantified type.
@@ -1417,12 +1417,12 @@ impl<S: Clone> Infer<S> {
 
     /// Checks `a <: b` ("`a` is at least as polymorphic as `b`") — the
     /// subtyping judgment of Xie and Oliveira's Fig. 15, extended with tuun's
-    /// numeric sorts, intersections of arrows, and `Dynamic`.
+    /// numeric sorts, intersections of arrows, and `Erroneous`.
     fn subtype(&mut self, a: &Type, b: &Type) -> Result<(), ()> {
         let a = self.resolve(a);
         let b = self.resolve(b);
         match (&a, &b) {
-            (Type::Dynamic, _) | (_, Type::Dynamic) => Ok(()),
+            (Type::Erroneous, _) | (_, Type::Erroneous) => Ok(()),
             // AS-ForallR: freshen the quantified variables (skolemize),
             // check against the body, then require that no skolem leaked
             // into `a` (the rule's `b ∉ ftv(...)` side conditions) — a leak
@@ -1701,7 +1701,7 @@ impl<S: Clone> Infer<S> {
             // exported binding for exported binding.
             (Type::Module(_), Type::Module(_)) => self.unify(&a, &b),
             // Nothing relates the rest: two different constructors, or two
-            // rigid variables that are not the same one. `Dynamic`,
+            // rigid variables that are not the same one. `Erroneous`,
             // `Forall`, and `And` never reach here — the arms above take
             // them on either side.
             _ => Err(()),
@@ -1846,8 +1846,8 @@ impl<S: Clone> Infer<S> {
     /// Returns the join of the two types: unification if they agree
     /// structurally, sort union for numerics (mixed float/waveform/seq lists
     /// and branches are common), point-wise for lists and tuples, with the
-    /// variance for arrows, pairwise for two intersections, and `Dynamic`
-    /// with an error where there is none. Quantified types join at an
+    /// variance for arrows, pairwise for two intersections, and
+    /// `Erroneous` with an error where there is none. Quantified types join at an
     /// instance.
     ///
     /// Xie and Oliveira have no join, having no subtyping between base
@@ -1885,7 +1885,7 @@ impl<S: Clone> Infer<S> {
             return self.join(a, instance, span);
         }
         match (&a, &b) {
-            (Type::Dynamic, _) | (_, Type::Dynamic) => Type::Dynamic,
+            (Type::Erroneous, _) | (_, Type::Erroneous) => Type::Erroneous,
             // Numerics join by sort union.
             (Type::Numeric(x), Type::Numeric(y)) => {
                 Type::ground(self.may_of(x).union(self.may_of(y)))
@@ -1978,7 +1978,7 @@ impl<S: Clone> Infer<S> {
                         pairs, MAX_JOIN_PAIRS
                     );
                     self.error(message, span);
-                    return Type::Dynamic;
+                    return Type::Erroneous;
                 }
                 let mut conjuncts: Vec<Type> = Vec::new();
                 for x in xs.iter() {
@@ -2054,7 +2054,7 @@ impl<S: Clone> Infer<S> {
                 .all(|(name, _)| n2.iter().any(|(other, _)| other == name))
     }
 
-    /// Reports two types as having no join and recovers with `Dynamic`.
+    /// Reports two types as having no join and recovers with `Erroneous`.
     fn incompatible(&mut self, a: &Type, b: &Type, span: &Option<Span<S>>) -> Type {
         let message = format!(
             "incompatible types {} and {}",
@@ -2062,7 +2062,7 @@ impl<S: Clone> Infer<S> {
             self.display(b)
         );
         self.error(message, span);
-        Type::Dynamic
+        Type::Erroneous
     }
 
     /// The meet of two types, or `None` where they have none.
@@ -2076,7 +2076,7 @@ impl<S: Clone> Infer<S> {
         let a = self.resolve(a);
         let b = self.resolve(b);
         match (&a, &b) {
-            (Type::Dynamic, _) | (_, Type::Dynamic) => Some(Type::Dynamic),
+            (Type::Erroneous, _) | (_, Type::Erroneous) => Some(Type::Erroneous),
             (Type::Numeric(x), Type::Numeric(y)) => {
                 let met = self.may_of(x).intersect(self.may_of(y));
                 (!met.is_empty()).then(|| Type::ground(met))
@@ -2154,7 +2154,7 @@ impl<S: Clone> Infer<S> {
                 Some(result) => self.app_subtype(psi, result, head),
                 None => {
                     psi.clear();
-                    Type::Dynamic
+                    Type::Erroneous
                 }
             },
             // AS-Mono2, via arrow unification (Fig. 14, AF-Mono): a meta
@@ -2178,9 +2178,9 @@ impl<S: Clone> Infer<S> {
                 psi.push(frame);
                 self.app_subtype(psi, function, head)
             }
-            Type::Dynamic => {
+            Type::Erroneous => {
                 psi.clear();
-                Type::Dynamic
+                Type::Erroneous
             }
             // Applying a non-function: the static form of evaluation's
             // "Invalid application" error.
@@ -2188,7 +2188,7 @@ impl<S: Clone> Infer<S> {
                 let message = format!("cannot apply a value of type {}", self.display(&other));
                 self.error(message, &frame.span);
                 psi.clear();
-                Type::Dynamic
+                Type::Erroneous
             }
         }
     }
@@ -2219,7 +2219,7 @@ impl<S: Clone> Infer<S> {
     /// Ψ frame, and `subtype` selects with a pseudo-frame built from an
     /// expected arrow's parameters.
     fn select_core(&mut self, conjuncts: &[Type], frame: &Frame<S>) -> Selection {
-        // The argument sorts. Dynamic and unsolved metas may be any
+        // The argument sorts. Erroneous and unsolved metas may be any
         // numeric; a non-numeric argument (list, function, ...) has no sort
         // and is checked against each conjunct's domain by subtyping.
         let sorts: Vec<Option<Sort>> = frame
@@ -2227,7 +2227,7 @@ impl<S: Clone> Infer<S> {
             .iter()
             .map(|(argument, _)| match self.resolved(argument) {
                 Type::Numeric(rep) => Some(self.may_of(rep)),
-                Type::Dynamic | Type::Meta(_) => Some(Sort::TOP),
+                Type::Erroneous | Type::Meta(_) => Some(Sort::TOP),
                 _ => None,
             })
             .collect();
@@ -2385,7 +2385,7 @@ impl<S: Clone> Infer<S> {
             };
             let sort = match self.resolved(argument) {
                 Type::Numeric(rep) => Some(self.may_of(rep)),
-                Type::Dynamic | Type::Meta(_) => Some(Sort::TOP),
+                Type::Erroneous | Type::Meta(_) => Some(Sort::TOP),
                 _ => None,
             };
             // TODO record named-argument contracts the way
@@ -2473,7 +2473,7 @@ impl<S: Clone> Infer<S> {
     ///   `(seq, seq)` conjunct — from escaping through an unsolved argument,
     ///   and it is why `fn(x) => x + x` takes a waveform rather than any
     ///   numeric.
-    /// - `Dynamic`, a non-numeric argument, and a position where some
+    /// - `Erroneous`, a non-numeric argument, and a position where some
     ///   conjunct's domain is not numeric decompose into no atoms at all: any
     ///   conjunct covers them, and they are constrained per conjunct by
     ///   subtyping.
@@ -2578,7 +2578,7 @@ impl<S: Clone> Infer<S> {
                 // any numeric; `record_selection_contracts` is what commits
                 // it, once selection succeeds.
                 Type::Meta(id) => (Unknown::Meta(id), Sort::TOP),
-                // `Dynamic` passes everything and imposes nothing.
+                // `Erroneous` passes everything and imposes nothing.
                 _ => {
                     choices.push(Choice::Wild);
                     continue;
@@ -2785,7 +2785,7 @@ impl<S: Clone> Infer<S> {
             // A non-numeric argument never fits a numeric domain.
             (None, Type::Numeric(_)) => (false, Sort::TOP),
             // The recovery type accepts anything and imposes nothing.
-            (_, Type::Dynamic) => (true, Sort::TOP),
+            (_, Type::Erroneous) => (true, Sort::TOP),
             // A variable domain is the conjunct's own parameter, and the conjunct's
             // result may be that same variable, so the argument has to
             // flow into it — the AS-Fun2 premise `check_frame` applies at
@@ -3033,12 +3033,12 @@ impl<S: Clone> Infer<S> {
     /// premises of rule AS-Fun2, plus tuun's arity and named-argument checks,
     /// which evaluation performs at application time).
     fn check_frame(&mut self, frame: &Frame<S>, positional: &[Type], named: &[(String, Type)]) {
-        // A call of the wrong arity has no pairing worth judging: matching
-        // the arguments off in order would report a mismatch for every
-        // position the shift moved. Rule AT-Lam2 binds `Dynamic` for the
-        // same reason. Named arguments are judged either way, since which
-        // names a call passes does not depend on how many positions it got
-        // right.
+        // A call of the wrong arity has no pairing worth judging: matching the
+        // arguments off in order would report a mismatch for every position the
+        // shift moved. Rule AT-Lam2 gives the unpaired parameters fresh
+        // unknowns for the same reason. Named arguments are judged either way,
+        // since which names a call passes does not depend on how many positions
+        // it got right.
         let arity = frame.positional.len() == positional.len();
         if frame.positional.len() > positional.len() {
             self.error("extra positional parameter".to_string(), &frame.span);
@@ -3176,7 +3176,7 @@ impl<S: Clone> Infer<S> {
         match ty {
             Type::Meta(_) => false,
             Type::Numeric(rep) => !reads || !self.definite_of(rep).is_empty(),
-            Type::Var(_) | Type::Bool | Type::String | Type::Dynamic => true,
+            Type::Var(_) | Type::Bool | Type::String | Type::Erroneous => true,
             Type::List(item) => self.domain_ready(item, reads),
             Type::Tuple(items) => items.iter().all(|item| self.domain_ready(item, reads)),
             Type::Function {
@@ -3244,24 +3244,32 @@ impl<S: Clone> Infer<S> {
                     // holds, not the residual after Ψ: on the `f` of
                     // `f(1)` the residual is the call's result.
                     self.probe_type(&expr.span, &ty);
+                    // The name's definition reported an error where it
+                    // lives; this use of it must not check clean only to
+                    // fail at evaluation.
+                    if matches!(ty, Type::Erroneous) {
+                        self.error(format!("'{}' has a type error", name), &expr.span);
+                        psi.clear();
+                        return Type::Erroneous;
+                    }
                     self.app_subtype(psi, ty, Some(name))
                 }
                 Some((_, ContextEntry::Builtin(builtin))) => {
                     let builtin = builtin.clone();
-                    let ty = signatures::signature(&builtin).unwrap_or(Type::Dynamic);
+                    let ty = signatures::signature(&builtin).unwrap_or(Type::Erroneous);
                     self.probe_type(&expr.span, &ty);
                     self.app_subtype(psi, ty, Some(&builtin))
                 }
                 None => {
                     self.error(format!("unbound variable '{}'", name), &expr.span);
                     psi.clear();
-                    Type::Dynamic
+                    Type::Erroneous
                 }
             },
             // AT-Var for built-ins: the signature table stands in for the
             // typing-context entry.
             Expr::BuiltIn { name, .. } => {
-                let ty = signatures::signature(name).unwrap_or(Type::Dynamic);
+                let ty = signatures::signature(name).unwrap_or(Type::Erroneous);
                 self.app_subtype(psi, ty, Some(name))
             }
             Expr::Function {
@@ -3304,8 +3312,10 @@ impl<S: Clone> Infer<S> {
                                 frame.positional[index].clone()
                             } else {
                                 // Don't let an arity mismatch cascade into
-                                // per-argument mismatch errors.
-                                (Type::Dynamic, frame.span.clone())
+                                // per-argument mismatch errors: parameters the
+                                // frame cannot pair take fresh unknowns, the
+                                // AT-Lam1 treatment.
+                                (self.fresh_meta(), frame.span.clone())
                             };
                             self.bind_pattern(context, pattern, ty, &span, false);
                         }
@@ -3466,15 +3476,22 @@ impl<S: Clone> Infer<S> {
                 let module_ty = self.infer(context, &mut Vec::new(), module);
                 let ty = match self.resolve(&module_ty) {
                     Type::Module(entries) => match entries.iter().find(|(n, _)| n == name) {
+                        // The member's definition reported an error where it
+                        // lives; the projection is a use of it, and the use
+                        // must not check clean only to fail at evaluation.
+                        Some((_, Type::Erroneous)) => {
+                            self.error(format!("'{}' has a type error", name), &expr.span);
+                            Type::Erroneous
+                        }
                         Some((_, ty)) => ty.clone(),
                         None => {
                             self.error(format!("Module has no binding '{}'", name), &expr.span);
-                            Type::Dynamic
+                            Type::Erroneous
                         }
                     },
                     // The recovery type projects to itself, so one
                     // reported error does not cascade into more.
-                    Type::Dynamic => Type::Dynamic,
+                    Type::Erroneous => Type::Erroneous,
                     // An unknown does not: a projection has to name a module
                     // the checker can look the name up in, and the type here
                     // says nothing about which module — or whether it is one.
@@ -3489,7 +3506,7 @@ impl<S: Clone> Infer<S> {
                         let message =
                             format!("cannot project '{}' from a value of unknown type", name);
                         self.error(message, &expr.span);
-                        Type::Dynamic
+                        Type::Erroneous
                     }
                     other => {
                         let message = format!(
@@ -3498,7 +3515,7 @@ impl<S: Clone> Infer<S> {
                             self.display(&other)
                         );
                         self.error(message, &expr.span);
-                        Type::Dynamic
+                        Type::Erroneous
                     }
                 };
                 self.probe_type(&expr.span, &ty);
@@ -3516,7 +3533,7 @@ impl<S: Clone> Infer<S> {
             // The parser already reported the error.
             Expr::Error(_) => {
                 psi.clear();
-                Type::Dynamic
+                Type::Erroneous
             }
         }
     }
@@ -3563,9 +3580,17 @@ impl<S: Clone> Infer<S> {
                     let instance = self.instantiate(&vars, *body);
                     self.bind_pattern(context, pattern, instance, span, generalize_leaves);
                 }
-                Type::Dynamic => {
+                // Every name from an erroneous definition is erroneous: which
+                // component the mistake lives in is not knowable from here.
+                Type::Erroneous => {
                     for pattern in patterns {
-                        self.bind_pattern(context, pattern, Type::Dynamic, span, generalize_leaves);
+                        self.bind_pattern(
+                            context,
+                            pattern,
+                            Type::Erroneous,
+                            span,
+                            generalize_leaves,
+                        );
                     }
                 }
                 other => {
@@ -3576,7 +3601,13 @@ impl<S: Clone> Infer<S> {
                     );
                     self.error(message, span);
                     for pattern in patterns {
-                        self.bind_pattern(context, pattern, Type::Dynamic, span, generalize_leaves);
+                        self.bind_pattern(
+                            context,
+                            pattern,
+                            Type::Erroneous,
+                            span,
+                            generalize_leaves,
+                        );
                     }
                 }
             },
@@ -3684,7 +3715,7 @@ impl<S: Clone> Infer<S> {
                             let ty = match entry {
                                 ContextEntry::Ty(ty, _) => ty,
                                 ContextEntry::Builtin(builtin) => {
-                                    signatures::signature(&builtin).unwrap_or(Type::Dynamic)
+                                    signatures::signature(&builtin).unwrap_or(Type::Erroneous)
                                 }
                             };
                             (member, ty)
@@ -3702,7 +3733,18 @@ impl<S: Clone> Infer<S> {
                     {
                         context.push((name.clone(), ContextEntry::Builtin(builtin.clone())));
                     } else {
+                        let start = self.errors.len();
                         let ty = self.infer_definition(context, expr);
+                        // A definition whose inference errored binds the
+                        // poisoned type: the finding above names the
+                        // mistake, and every use of the name reports
+                        // against it (see [`Type::Erroneous`]) rather than
+                        // checking clean and failing at evaluation.
+                        let ty = if self.errors.len() > start {
+                            Type::Erroneous
+                        } else {
+                            ty
+                        };
                         self.bind_pattern(context, pattern, ty, &expr.span, true);
                     }
                     own.extend_from_slice(&context[before..]);
@@ -4655,7 +4697,7 @@ mod tests {
         assert_eq!(errors[0].range(), Some(start..start + 4));
 
         assert_errors("nope(1) * 2", &["unbound variable 'nope'"]);
-        // An unbound name recovers as Dynamic, so it produces exactly one
+        // An unbound name recovers as `Erroneous`, so it produces exactly one
         // error even when applied and used in arithmetic.
         assert_errors(
             "sine(missing, wrong)",
@@ -4711,11 +4753,20 @@ mod tests {
         );
         assert!(errors.is_empty(), "got {:?}", messages(&errors));
 
+        // The unpaired parameter takes a fresh unknown, so the body is
+        // still checked at the summary level: `note*100` may be a seq for
+        // all the arity-broken signature says, and `sine` cannot take one.
         let errors = check_with_expectation(
             "fn(note) => (sine(note*100, 0), sine(note, 0))",
             Some(Expectation::NoteFunction),
         );
-        assert_eq!(messages(&errors), ["extra positional parameter"]);
+        assert_eq!(
+            messages(&errors),
+            [
+                "extra positional parameter",
+                "expected waveform, found numeric"
+            ]
+        );
 
         let errors = check_with_expectation(
             "fn(note, vel) => (sine(note*100, 0), \"x\")",
@@ -5849,7 +5900,7 @@ mod tests {
                         free_vars(t, bound, free);
                     }
                 }
-                Type::Meta(_) | Type::Numeric(_) | Type::Bool | Type::String | Type::Dynamic => {}
+                Type::Meta(_) | Type::Numeric(_) | Type::Bool | Type::String | Type::Erroneous => {}
             }
         }
         let prelude = test_prelude::<u32>();
@@ -5892,6 +5943,87 @@ mod tests {
                 );
             }
         }
+    }
+
+    // A module definition whose inference errored exports `Type::Erroneous`:
+    // using the name — bare or through a `use` projection — is an error at
+    // the use site, so a dependent program gates instead of checking clean
+    // and failing at evaluation. Sibling exports stay
+    // usable.
+    #[test]
+    fn erroneous_module_definitions_error_at_their_uses() {
+        let prelude = test_prelude::<()>();
+        let (mut m, errors) =
+            parse_module::<u32, _>("broken = seq(0)(1) + seq(0)(2);\nfine = 440;", ()).unwrap();
+        assert!(errors.is_empty());
+        m.insert(0, Binding::Open(vec!["__prelude".to_string()]).into());
+        let resolve = |path: &[String]| match path.join(".").as_str() {
+            "__prelude" => Ok(prelude.as_slice()),
+            "m" => Ok(m.as_slice()),
+            other => Err(Error::types_here(format!("no module {}", other))),
+        };
+        let open_bindings: Vec<SourceBinding<u32, ()>> = vec![
+            Binding::Open(vec!["__prelude".to_string()]).into(),
+            Binding::Open(vec!["m".to_string()]).into(),
+        ];
+        let expr = parse_program::<u32, _>("broken * 2", ()).unwrap();
+        let errors = check_program(
+            resolve,
+            &open_bindings,
+            &expr,
+            None,
+            &mut ModuleCache::default(),
+        );
+        assert_eq!(
+            messages(&errors),
+            [
+                "cannot combine two seqs with +",
+                "'broken' has a type error"
+            ]
+        );
+        // The sibling is untouched: the module's own finding is the only one.
+        let expr = parse_program::<u32, _>("fine * 2", ()).unwrap();
+        let errors = check_program(
+            resolve,
+            &open_bindings,
+            &expr,
+            None,
+            &mut ModuleCache::default(),
+        );
+        assert_eq!(messages(&errors), ["cannot combine two seqs with +"]);
+        // Through a `use` projection too.
+        let use_bindings: Vec<SourceBinding<u32, ()>> = vec![
+            Binding::Open(vec!["__prelude".to_string()]).into(),
+            Binding::Use(vec!["m".to_string()]).into(),
+        ];
+        let expr = parse_program::<u32, _>("m.broken * 2", ()).unwrap();
+        let errors = check_program(
+            resolve,
+            &use_bindings,
+            &expr,
+            None,
+            &mut ModuleCache::default(),
+        );
+        assert_eq!(
+            messages(&errors),
+            [
+                "cannot combine two seqs with +",
+                "'broken' has a type error"
+            ]
+        );
+        // The poison survives the session cache: a warm check reports the
+        // same pair.
+        let mut cache = ModuleCache::default();
+        let expr = parse_program::<u32, _>("broken * 2", ()).unwrap();
+        check_program(resolve, &open_bindings, &expr, None, &mut cache);
+        let errors = check_program(resolve, &open_bindings, &expr, None, &mut cache);
+        assert_eq!(
+            messages(&errors),
+            [
+                "cannot combine two seqs with +",
+                "'broken' has a type error"
+            ]
+        );
     }
 
     // A cached module reports the same findings on every check: cold, warm,
@@ -6184,7 +6316,8 @@ mod tests {
     // pass's summary — one domain per position, and a result frozen from
     // guarantees the domains need not account for — declares sorts the value
     // does not inhabit. The definition is refused rather than checked by it,
-    // and answers `Dynamic` so nothing downstream reports from it either.
+    // and answers `Erroneous`, so every call is flagged as a use of the
+    // unchecked definition.
     #[test]
     fn a_function_too_wide_to_tabulate_is_refused() {
         // `fn(p0, .., pn) => p0 + .. + pn`, every parameter numeric.
@@ -6209,20 +6342,20 @@ mod tests {
         );
         // Thirteen do not, and the count names how far over it is.
         let too_wide = "too many numeric parameters to check (8192 cases, limit 4096)";
+        // The refusal recovers with `Erroneous`, so every call to the
+        // unchecked function is flagged as a use of a broken definition —
+        // the calls are exactly what the refusal left unverified.
         assert_errors(
             &format!("let f = {} in f({})", wide(13), ones(13)),
-            &[too_wide],
+            &[too_wide, "'f' has a type error"],
         );
-        // The refusal recovers with `Dynamic`, so a call that the base pass's
-        // summary would have rejected adds nothing: the definition is the one
-        // thing wrong, and the one thing said.
         assert_errors(
             &format!(
                 "let f = {} in f(seq(0)(1), seq(0)(2), {})",
                 wide(13),
                 ones(11)
             ),
-            &[too_wide],
+            &[too_wide, "'f' has a type error"],
         );
         // The spine costs the product of its levels, so two levels that each
         // fit alone are still refused together.
@@ -6230,14 +6363,20 @@ mod tests {
             "let f = fn(a, b, c, d, e, f2, g2) => fn(u, v, w, x2, y2, z, t) => \
              a + b + c + d + e + f2 + g2 + u + v + w + x2 + y2 + z + t \
              in f(1, 1, 1, 1, 1, 1, 1)(1, 1, 1, 1, 1, 1, 1)",
-            &["too many numeric parameters to check (16384 cases, limit 4096)"],
+            &[
+                "too many numeric parameters to check (16384 cases, limit 4096)",
+                "'f' has a type error",
+            ],
         );
         // A named parameter costs an extra choice (supplied or omitted), so it
         // is a radix of three rather than two: eight of them are already past.
         assert_errors(
             "let f = fn(a = 1, b = 1, c = 1, d = 1, e = 1, f2 = 1, g2 = 1, h2 = 1) => \
              a + b + c + d + e + f2 + g2 + h2 in f()",
-            &["too many numeric parameters to check (6561 cases, limit 4096)"],
+            &[
+                "too many numeric parameters to check (6561 cases, limit 4096)",
+                "'f' has a type error",
+            ],
         );
         // Reported once wherever the lambda stands — a definition's right-hand
         // side reaches `tabulate` twice, and must still say it once.

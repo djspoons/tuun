@@ -6,7 +6,7 @@
 //! `RefCell`.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path;
 use std::time;
@@ -165,6 +165,10 @@ pub struct Evaluator {
     modules_generation: Cell<u64>,
     /// The generation `module_types` was last known consistent with.
     checked_generation: Cell<u64>,
+    /// Modules whose findings have been printed this generation era, by
+    /// module id. Cleared with `module_types`, so a module's findings print
+    /// again — current as of its newest text — after any reload.
+    reported_modules: RefCell<HashSet<u32>>,
 }
 
 impl Evaluator {
@@ -204,6 +208,7 @@ impl Evaluator {
             module_types: RefCell::new(infer::ModuleCache::default()),
             modules_generation: Cell::new(0),
             checked_generation: Cell::new(0),
+            reported_modules: RefCell::new(HashSet::new()),
         }
     }
 
@@ -384,11 +389,12 @@ impl Evaluator {
     /// diagnostics.
     ///
     /// Mirrors [`Evaluator::evaluate_program`]'s setup — same bindings,
-    /// implicit prelude open, and module resolver. Findings are filtered to
-    /// those located in the program's own text or its source file; findings
-    /// inside `open`ed modules would repeat on every evaluation of every
-    /// dependent program without being actionable from the editor. Parse
-    /// failures return no findings.
+    /// implicit prelude open, and module resolver. Returned findings are
+    /// those located in the program's own text or its source file. A finding
+    /// inside a module belongs to the module, not to any one dependent
+    /// program, so it is printed instead — path-qualified, with its snippet
+    /// — the first time a check surfaces it, and again only after the
+    /// module reloads. Parse failures return no findings.
     pub fn check_program(&self, set: &ProgramSet, index: usize) -> Vec<Diagnostic> {
         let mut bindings = set.evaluation_bindings(index);
         bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
@@ -414,6 +420,7 @@ impl Evaluator {
             let generation = self.modules_generation.get();
             if self.checked_generation.get() != generation {
                 self.module_types.borrow_mut().clear();
+                self.reported_modules.borrow_mut().clear();
                 self.checked_generation.set(generation);
             }
             let could_be_stale = !self.module_types.borrow().is_empty();
@@ -439,6 +446,36 @@ impl Evaluator {
             errors.len(),
             (time::Instant::now() - start).as_secs_f32()
         );
+        // A module finding is not this program's diagnostic — returned, it
+        // would repeat on every dependent program's check — but neither may
+        // it stay invisible: a use-site diagnostic ("'x' has a type error")
+        // only points here. Print each module's findings once per loaded
+        // version (`reported_modules` clears with the type cache when any
+        // module reloads).
+        {
+            let mut reported = self.reported_modules.borrow_mut();
+            for finding in &errors {
+                let Some(Source::Module(id)) = finding.source() else {
+                    continue;
+                };
+                if reported.contains(&id) {
+                    continue;
+                }
+                let diagnostic = match self.check_mode {
+                    CheckMode::Errors => self.diagnose(finding, set, index),
+                    CheckMode::Warnings => self.diagnose(finding, set, index).as_warning(),
+                };
+                println!("{}: {}", diagnostic.severity.label(), diagnostic);
+                if let Some(snippet) = &diagnostic.snippet {
+                    println!("{}", snippet);
+                }
+            }
+            for finding in &errors {
+                if let Some(Source::Module(id)) = finding.source() {
+                    reported.insert(id);
+                }
+            }
+        }
         errors
             .iter()
             .filter(|finding| {
@@ -476,6 +513,7 @@ impl Evaluator {
         let generation = self.modules_generation.get();
         if self.checked_generation.get() != generation {
             self.module_types.borrow_mut().clear();
+            self.reported_modules.borrow_mut().clear();
             self.checked_generation.set(generation);
         }
         infer::type_at(
@@ -712,6 +750,92 @@ mod tests {
     use crate::player::substitute_current_slider_values;
     use std::fs;
     use std::path::PathBuf;
+
+    /// A program that uses a broken module definition gets its own
+    /// diagnostic at the use site and gates — evaluation is never
+    /// attempted, so the module's mistake cannot surface as a runtime
+    /// error.
+    #[test]
+    fn uses_of_erroneous_module_definitions_gate() {
+        let root =
+            std::env::temp_dir().join(format!("tuun-module-gate-test-{}", std::process::id()));
+        fs::create_dir_all(&root).expect("create temp library root");
+        // The mistake hides inside a function body (like an instrument
+        // definition), so the module itself still evaluates — only calls
+        // would fail.
+        fs::write(
+            root.join("m.tuun"),
+            "broken = fn(dur) => seq(0)(1) + seq(0)(dur);\nv = 440;\n",
+        )
+        .expect("write module");
+        // The healthy program comes first: program bindings are in scope
+        // for the programs after them, so a later broken sibling would
+        // (correctly) report on this one's check as a file finding.
+        let (mut set, warning) = ProgramSet::from_source(
+            "open m;\n#{level_db=0}\nu = sine(v, 0);\n#{level_db=0}\nw = sine(broken, 0);\n"
+                .to_string(),
+            PathBuf::from("song.tuun"),
+        )
+        .expect("test source should parse");
+        assert_eq!(warning, "");
+        let evaluator = Evaluator::new(44100, 90, root.clone());
+
+        // A program using only the module's healthy exports is untouched.
+        let diagnostics = evaluator.check_program(&set, 0);
+        assert_eq!(diagnostics.len(), 0, "got {:?}", diagnostics);
+        set.evaluate_and_record(&evaluator, 0)
+            .expect("healthy exports evaluate");
+
+        // The use site carries the diagnostic and the gate fires.
+        let diagnostics = evaluator.check_program(&set, 1);
+        assert_eq!(diagnostics.len(), 1, "got {:?}", diagnostics);
+        assert_eq!(diagnostics[0].to_string(), "1:6: 'broken' has a type error");
+        set.evaluate_and_record(&evaluator, 1)
+            .expect_err("a use of a broken definition gates evaluation");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A module's own findings are reported once per loaded version: not
+    /// among any program's diagnostics, marked reported after the first
+    /// check that surfaces them, and cleared for re-reporting only when a
+    /// module reloads.
+    #[test]
+    fn module_findings_report_once_per_version() {
+        let root =
+            std::env::temp_dir().join(format!("tuun-module-report-test-{}", std::process::id()));
+        fs::create_dir_all(&root).expect("create temp library root");
+        let module = root.join("m.tuun");
+        fs::write(&module, "broken = seq(0)(1) + seq(0)(2);\nv = 440;\n").expect("write module");
+        let (set, warning) = ProgramSet::from_source(
+            "open m;\n#{level_db=0}\nw = sine(v, 0);\n".to_string(),
+            PathBuf::from("song.tuun"),
+        )
+        .expect("test source should parse");
+        assert_eq!(warning, "");
+        let evaluator = Evaluator::new(44100, 90, root.clone());
+
+        // The module's finding is not among the program's diagnostics, and
+        // the module is marked reported by the first check.
+        let diagnostics = evaluator.check_program(&set, 0);
+        assert_eq!(diagnostics.len(), 0, "got {:?}", diagnostics);
+        assert_eq!(evaluator.reported_modules.borrow().len(), 1);
+
+        // A second check re-surfaces the cached finding but the module
+        // stays reported — nothing prints twice.
+        let diagnostics = evaluator.check_program(&set, 0);
+        assert_eq!(diagnostics.len(), 0, "got {:?}", diagnostics);
+        assert_eq!(evaluator.reported_modules.borrow().len(), 1);
+
+        // Fixing the module clears the reported set with the reload, and no
+        // finding refills it.
+        fs::write(&module, "v = 440;\n").expect("rewrite module");
+        let diagnostics = evaluator.check_program(&set, 0);
+        assert_eq!(diagnostics.len(), 0, "got {:?}", diagnostics);
+        assert!(evaluator.reported_modules.borrow().is_empty());
+
+        fs::remove_dir_all(&root).ok();
+    }
 
     /// The module type cache follows a module file's edits: a check after
     /// the file changes reports against the new text, and one more check

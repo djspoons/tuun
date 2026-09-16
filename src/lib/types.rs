@@ -14,9 +14,8 @@
 //! floating point numbers and integers are represented as constant waveforms.
 //!
 //! Types also include meta variables that are used during type inference (see
-//! [`crate::infer`]) and a "dynamic" type, which is used to recover from a type
-//! error and for certain built-in functions that lack a precise signature
-//! (e.g., `debug`).
+//! [`crate::infer`]) and an "erroneous" type, which is used to recover from a
+//! type error.
 //!
 //! Tuun types currently do not appear in the concrete syntax.
 
@@ -189,11 +188,16 @@ pub enum Type {
     /// A polymorphic type `∀ā.A` quantifying the listed `Var` ids. Always
     /// prenex: produced only by generalization (rule AT-Gen, Fig. 16).
     Forall(Vec<u32>, Box<Type>),
-    /// The escape hatch: compatible with every type in every position.
+    /// The recovery type: what a failed check's expression continues as,
+    /// and the type of a definition whose inference reported an error.
     ///
-    /// Used for built-ins without a precise signature and to recover after a
-    /// reported error without cascading follow-on errors.
-    Dynamic,
+    /// Structurally it accepts everything, so the one reported error does
+    /// not cascade into follow-on mismatches. The exception is a *use* of a
+    /// name bound to it, which is itself an error: the mistake lives in the
+    /// definition, and a dependent — a program using a broken module
+    /// export, above all — must hear about it rather than check clean and
+    /// fail at evaluation.
+    Erroneous,
 }
 
 impl Type {
@@ -266,7 +270,7 @@ impl Type {
             | Type::Numeric(_)
             | Type::Bool
             | Type::String
-            | Type::Dynamic => false,
+            | Type::Erroneous => false,
             Type::Function {
                 positional,
                 named,
@@ -292,7 +296,7 @@ impl Type {
     pub fn settled(&self) -> bool {
         match self {
             Type::Meta(_) | Type::Numeric(Refinement::Var(_)) => false,
-            Type::Var(_) | Type::Numeric(_) | Type::Bool | Type::String | Type::Dynamic => true,
+            Type::Var(_) | Type::Numeric(_) | Type::Bool | Type::String | Type::Erroneous => true,
             Type::Function {
                 positional,
                 named,
@@ -320,7 +324,7 @@ impl Type {
                 Some(solution) => solution.apply(subst),
                 None => self.clone(),
             },
-            Type::Var(_) | Type::Numeric(_) | Type::Bool | Type::String | Type::Dynamic => {
+            Type::Var(_) | Type::Numeric(_) | Type::Bool | Type::String | Type::Erroneous => {
                 self.clone()
             }
             Type::Function {
@@ -363,7 +367,7 @@ impl Type {
                     }
                 }
             },
-            Type::Var(_) | Type::Numeric(_) | Type::Bool | Type::String | Type::Dynamic => {}
+            Type::Var(_) | Type::Numeric(_) | Type::Bool | Type::String | Type::Erroneous => {}
             Type::Function {
                 positional,
                 named,
@@ -414,7 +418,7 @@ impl Type {
                     solution.free_refinements(subst, acc);
                 }
             }
-            Type::Var(_) | Type::Numeric(_) | Type::Bool | Type::String | Type::Dynamic => {}
+            Type::Var(_) | Type::Numeric(_) | Type::Bool | Type::String | Type::Erroneous => {}
             Type::Function {
                 positional,
                 named,
@@ -461,7 +465,7 @@ impl Type {
                 Some(solution) => solution.contains_var(var, subst),
                 None => false,
             },
-            Type::Numeric(_) | Type::Bool | Type::String | Type::Dynamic => false,
+            Type::Numeric(_) | Type::Bool | Type::String | Type::Erroneous => false,
             Type::Function {
                 positional,
                 named,
@@ -491,7 +495,7 @@ impl Type {
                 Some(replacement) => replacement.clone(),
                 None => self.clone(),
             },
-            Type::Meta(_) | Type::Numeric(_) | Type::Bool | Type::String | Type::Dynamic => {
+            Type::Meta(_) | Type::Numeric(_) | Type::Bool | Type::String | Type::Erroneous => {
                 self.clone()
             }
             Type::Function {
@@ -548,7 +552,7 @@ impl Type {
                 Some(replacement) => replacement.clone(),
                 None => self.clone(),
             },
-            Type::Var(_) | Type::Numeric(_) | Type::Bool | Type::String | Type::Dynamic => {
+            Type::Var(_) | Type::Numeric(_) | Type::Bool | Type::String | Type::Erroneous => {
                 self.clone()
             }
             Type::Function {
@@ -619,7 +623,7 @@ impl Names {
                     self.metas.push(*id);
                 }
             }
-            Type::Numeric(_) | Type::Bool | Type::String | Type::Dynamic => {}
+            Type::Numeric(_) | Type::Bool | Type::String | Type::Erroneous => {}
             Type::Function {
                 positional,
                 named,
@@ -677,7 +681,7 @@ fn fmt_type(ty: &Type, names: &Names, f: &mut fmt::Formatter<'_>, nested: bool) 
         Type::Numeric(Refinement::Var(_)) => write!(f, "number"),
         Type::Bool => write!(f, "bool"),
         Type::String => write!(f, "string"),
-        Type::Dynamic => write!(f, "dynamic"),
+        Type::Erroneous => write!(f, "erroneous"),
         Type::Function {
             positional,
             named,
