@@ -744,19 +744,20 @@ mod tests {
         // The default is evaluated once, when the function value is
         // created — not at each of the three calls.
         let expr = parse_program::<u32, _>(
-            "let f = fn(x, y = debug(1)) => x, _ = f(1), _ = f(2) in f(3)",
+            "let f = fn(x, y = 1 | debug(\"once\")) => x, _ = f(1), _ = f(2) in f(3)",
             (),
         )
         .unwrap();
         let evaluated = evaluate(resolve, &bindings, expr).unwrap();
         assert_eq!(format!("{}", evaluated), "3");
-        assert_eq!(printed.borrow().as_slice(), ["debug: [1]"]);
+        assert_eq!(printed.borrow().as_slice(), ["[DEBUG] once: 1"]);
 
         // Even a function that is never applied evaluates its defaults.
         printed.borrow_mut().clear();
-        let expr = parse_program::<u32, _>("let f = fn(x, y = debug(1)) => x in 0", ()).unwrap();
+        let expr = parse_program::<u32, _>("let f = fn(x, y = 1 | debug(\"once\")) => x in 0", ())
+            .unwrap();
         evaluate(resolve, &bindings, expr).unwrap();
-        assert_eq!(printed.borrow().as_slice(), ["debug: [1]"]);
+        assert_eq!(printed.borrow().as_slice(), ["[DEBUG] once: 1"]);
     }
 
     #[test]

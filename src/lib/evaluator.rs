@@ -1050,7 +1050,7 @@ mod tests {
     #[test]
     fn programs_see_the_prelude_without_any_open() {
         let (set, _) = ProgramSet::from_source(
-            "#{level_db=0}\n_ = debug(\"level\", 0.7) * sine(440, 0) | fin(0.1);\n".to_string(),
+            "#{level_db=0}\n_ = (0.7 | debug(\"level\")) * sine(440, 0) | fin(0.1);\n".to_string(),
             PathBuf::new(),
         )
         .expect("test source should parse");

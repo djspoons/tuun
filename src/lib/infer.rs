@@ -4573,8 +4573,6 @@ mod tests {
         // Unconstrained parameters defer: the base pass records contracts
         // instead of judging ⊤, and the tabulated conjuncts judge per atom.
         assert_clean("let f = fn(x) => x + 1 in f(time)");
-        // Dynamic passes without imposing or cascading.
-        assert_clean("debug(1) + 1");
     }
 
     // A position where some conjunct's domain is non-numeric or unknown imposes

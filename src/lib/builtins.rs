@@ -1100,19 +1100,14 @@ where
     })
 }
 
-/// Builds the `debug` built-in: applied, it renders its arguments as a line
-/// `debug: [a, b, ...]`, hands the line to `print`, and evaluates to its last
-/// argument (or an empty list when given none).
-///
-/// Passing the last value through lets a call wrap any sub-expression without
-/// changing what it evaluates to; earlier arguments can serve as labels.
-/// `print` supplies the caller's logging sink (terminal, browser console, ...).
+/// Builds the `debug` built-in, which renders its argument using the supplied
+/// `print` function.
 ///
 /// # Example
 /// ```tuun
-/// sine(debug("freq", freq), 0)   // logs `debug: [freq, 440]`, plays sine(freq, 0)
+/// sine(440 | debug("freq"), 0)   // logs `[DEBUG] freq: 440`, plays sine(440, 0)
 /// ```
-pub fn debug<M, S>(print: impl Fn(&str) + 'static) -> SourceExpr<M, S>
+pub fn debug<M, S>(print: impl Fn(&str) + Clone + 'static) -> SourceExpr<M, S>
 where
     M: Display + 'static,
     S: 'static,
@@ -1120,13 +1115,26 @@ where
     SourceExpr::from(Expr::BuiltIn {
         name: "debug".to_string(),
         function: BuiltInFn(Rc::new(move |mut arguments: Vec<Expr<M, S>>| {
-            let rendered = arguments
-                .iter()
-                .map(|argument| argument.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            print(&format!("debug: [{}]", rendered));
-            Ok(arguments.pop().unwrap_or(Expr::List(Vec::new())))
+            if arguments.len() != 1 {
+                return Err(Error::internal_here("Expected one argument for debug"));
+            }
+            let label = match arguments.remove(0) {
+                Expr::String(label) => label,
+                _ => {
+                    return Err(Error::internal_here("Expected a string argument to debug"));
+                }
+            };
+            let print = print.clone();
+            Ok(BuiltIn {
+                name: format!("debug({})", label),
+                function: BuiltInFn(Rc::new(move |mut arguments: Vec<Expr<M, S>>| {
+                    if arguments.len() != 1 {
+                        return Err(Error::internal_here("Expected one argument"));
+                    }
+                    print(&format!("[DEBUG] {}: {}", label, arguments[0].to_string()));
+                    Ok(arguments.pop().unwrap())
+                })),
+            })
         })),
     })
 }
@@ -1218,15 +1226,13 @@ mod tests {
             panic!("debug should build a BuiltIn");
         };
 
-        // Logs all arguments, evaluates to the last.
-        let result = function.0(vec![Expr::String("freq".to_string()), Expr::float(440.0)]);
+        let func = function.0(vec![Expr::String("freq".to_string())]);
+        let result = match func.unwrap() {
+            BuiltIn { function, .. } => function.0(vec![Expr::float(440.0)]),
+            _ => panic!("debug applied to label should be a BuiltIn"),
+        };
         assert_eq!(format!("{}", result.clone().unwrap()), "440");
-        assert_eq!(printed.borrow().as_slice(), ["debug: [freq, 440]"]);
-
-        // No arguments: logs an empty list and evaluates to one.
-        let result = function.0(vec![]);
-        assert_eq!(format!("{}", result.clone().unwrap()), "[]");
-        assert_eq!(printed.borrow().last().unwrap(), "debug: []");
+        assert_eq!(printed.borrow().as_slice(), ["[DEBUG] freq: 440"]);
     }
 
     #[test]

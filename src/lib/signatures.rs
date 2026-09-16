@@ -196,8 +196,11 @@ pub fn signature(name: &str) -> Option<Type> {
         // Added by the native prelude rather than `add_bindings`. The mark
         // id is hard-checked integral (and >= 1) at runtime.
         "mark" => Type::function(vec![Type::int()], waveform_filter()),
-        // Variadic and heterogeneous; returns its last argument.
-        "debug" => Type::Dynamic,
+        // Takes a string and returns an identity function.
+        "debug" => Type::function(
+            vec![Type::String],
+            Type::Forall(vec![0], Box::new(Type::function(vec![a()], a()))),
+        ),
         _ => return None,
     };
     Some(ty)
