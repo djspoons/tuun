@@ -3,8 +3,8 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use std::sync::mpsc;
 
 use tuun::builtins;
+use tuun::environment;
 use tuun::eval;
-use tuun::evaluator;
 use tuun::expr;
 use tuun::generator;
 use tuun::parser;
@@ -94,13 +94,13 @@ fn bench_marks(c: &mut Criterion) {
         b.iter(|| {
             const SAMPLE_RATE: u32 = 44100;
             let (tx, _rx) = mpsc::channel();
-            let evaluator =
-                evaluator::Evaluator::new(SAMPLE_RATE, 120, std::path::PathBuf::from("./lib"));
+            let environment =
+                environment::Environment::new(SAMPLE_RATE, 120, std::path::PathBuf::from("./lib"));
             let player = player::Player::new(120, 4, tx.clone(), tx);
             let mut generator = generator::Generator::new(SAMPLE_RATE);
             let mut ws = Vec::new();
             for _ in 0..40 {
-                ws.push(player.beats_waveform(&evaluator));
+                ws.push(player.beats_waveform(&environment));
             }
             let w = ws
                 .into_iter()

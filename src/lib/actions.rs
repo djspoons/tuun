@@ -9,7 +9,7 @@ use std::ops::Range;
 use std::time::Instant;
 
 use crate::diagnostics::{self, Diagnostic, Source};
-use crate::evaluator;
+use crate::environment;
 use crate::expr;
 use crate::ids::{MarkId, WaveformId, WaveformSelector};
 use crate::keys;
@@ -153,9 +153,10 @@ impl AppState {
 pub struct Context<'a> {
     pub status: &'a tracker::Status<WaveformId, MarkId>,
     pub now: Instant,
-    /// Evaluation environment (prelude, module cache) — used by
-    /// `Action::Complete` to find the names in scope.
-    pub evaluator: &'a evaluator::Evaluator,
+    /// The environment programs are checked and evaluated in (prelude,
+    /// module cache) — used by `Action::Complete` to find the names in
+    /// scope.
+    pub environment: &'a environment::Environment,
     /// True when the backing file has changed on disk since the program set
     /// last read or wrote it. Editing gestures refuse while stale so in-app
     /// changes can't pile up against external ones.
@@ -1006,7 +1007,7 @@ fn apply_complete(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
     // new cycle.
     let fragment = before[fragment_start..].to_string();
     let context = match ctx
-        .evaluator
+        .environment
         .program_context(&state.programs, state.active_program_index)
     {
         Ok(context) => context,
@@ -1125,7 +1126,7 @@ fn apply_show_type(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
     };
     let name = text[token.clone()].to_string();
     match ctx
-        .evaluator
+        .environment
         .type_at(&state.programs, state.active_program_index, token.start)
     {
         Some(ty) => vec![Effect::ShowMessage(format!("{} : {}", name, ty))],
@@ -1148,7 +1149,7 @@ fn apply_parameter_hint(state: &mut AppState, ctx: &Context, cursor: usize) -> V
     }
     let qualifier = projection_qualifier(head, name_start);
     let context = match ctx
-        .evaluator
+        .environment
         .program_context(&state.programs, state.active_program_index)
     {
         Ok(context) => context,
@@ -1630,7 +1631,7 @@ mod tests {
         status
     }
 
-    /// Applies `action` against `status`, timestamped `now`. The evaluator
+    /// Applies `action` against `status`, timestamped `now`. The environment
     /// has the standard prelude but no library root, so `open`s of anything
     /// but the prelude fail to resolve.
     fn apply_with_status(
@@ -1639,11 +1640,11 @@ mod tests {
         now: Instant,
         action: Action,
     ) -> Vec<Effect> {
-        let evaluator = evaluator::Evaluator::new(48000, 120, std::path::PathBuf::new());
+        let environment = environment::Environment::new(48000, 120, std::path::PathBuf::new());
         let ctx = Context {
             status,
             now,
-            evaluator: &evaluator,
+            environment: &environment,
             source_stale: false,
         };
         apply(state, &ctx, action)
@@ -1657,12 +1658,12 @@ mod tests {
 
     /// Applies `action` with the backing file flagged as changed on disk.
     fn apply_with_stale_source(state: &mut AppState, action: Action) -> Vec<Effect> {
-        let evaluator = evaluator::Evaluator::new(48000, 120, std::path::PathBuf::new());
+        let environment = environment::Environment::new(48000, 120, std::path::PathBuf::new());
         let status = empty_status();
         let ctx = Context {
             status: &status,
             now: Instant::now(),
-            evaluator: &evaluator,
+            environment: &environment,
             source_stale: true,
         };
         apply(state, &ctx, action)
@@ -2209,18 +2210,18 @@ mod tests {
         .clone()
     }
 
-    /// Applies `action` with an evaluator resolving modules under `root`.
+    /// Applies `action` with an environment resolving modules under `root`.
     fn apply_with_library_root(
         state: &mut AppState,
         root: std::path::PathBuf,
         action: Action,
     ) -> Vec<Effect> {
-        let evaluator = evaluator::Evaluator::new(48000, 120, root);
+        let environment = environment::Environment::new(48000, 120, root);
         let status = empty_status();
         let ctx = Context {
             status: &status,
             now: Instant::now(),
-            evaluator: &evaluator,
+            environment: &environment,
             source_stale: false,
         };
         apply(state, &ctx, action)

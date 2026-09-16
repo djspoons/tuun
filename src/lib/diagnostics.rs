@@ -16,7 +16,7 @@ use crate::expr;
 /// Identifies which of the app's texts a span's byte range indexes.
 ///
 /// Passed to the parser when parsing each kind of text, and matched by
-/// `Evaluator::diagnose` to resolve an error's range against that same
+/// `Environment::diagnose` to resolve an error's range against that same
 /// text.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Source {
@@ -24,7 +24,7 @@ pub enum Source {
     Program,
     /// The backing source file the program set was loaded from.
     File,
-    /// The module at this index in the evaluator's module table.
+    /// The module at this index in the environment's module table.
     Module(u32),
 }
 
@@ -51,7 +51,7 @@ impl Severity {
 /// A user-visible error or warning with its source position resolved, where
 /// known.
 ///
-/// Produced from an `expr::Error` at the evaluator boundary. Only errors
+/// Produced from an `expr::Error` by `Environment::diagnose`. Only errors
 /// from `open`ed modules carry a file (relative to the library root);
 /// errors in the program being evaluated render as a bare `line:col`,
 /// matching the editor's own display.

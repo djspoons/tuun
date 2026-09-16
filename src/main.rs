@@ -13,7 +13,7 @@ use sdl2::ttf::Sdl2TtfContext;
 use tuun::actions;
 use tuun::diagnostics;
 use tuun::effects;
-use tuun::evaluator;
+use tuun::environment;
 use tuun::generator;
 use tuun::launchkey;
 use tuun::metric;
@@ -61,8 +61,8 @@ struct Args {
     #[arg(long, default_value = "./lib/v0")]
     library_root: path::PathBuf,
     /// What type-checker findings become: errors or warnings.
-    #[arg(long, default_value_t = evaluator::CheckMode::Errors)]
-    check: evaluator::CheckMode,
+    #[arg(long, default_value_t = environment::CheckMode::Errors)]
+    check: environment::CheckMode,
     input_file: String,
     #[arg(short = 'O', long, default_value = ".")]
     output_dir: String, // Captures waveforms to the specified directory
@@ -115,9 +115,9 @@ pub fn main() {
         // Parse and send commands to play all of the waveforms. There is
         // no precompute thread in batch mode, so both Player routes go
         // straight to the tracker.
-        let mut evaluator =
-            evaluator::Evaluator::new(args.sample_rate, args.tempo, args.library_root.clone());
-        evaluator.set_check_mode(args.check);
+        let mut environment =
+            environment::Environment::new(args.sample_rate, args.tempo, args.library_root.clone());
+        environment.set_check_mode(args.check);
         let player = player::Player::new(
             args.tempo,
             args.beats_per_measure,
@@ -136,7 +136,7 @@ pub fn main() {
             );
             match state
                 .programs
-                .evaluate_and_record(&evaluator, program_index)
+                .evaluate_and_record(&environment, program_index)
             {
                 Ok(warnings) => {
                     for warning in &warnings {
@@ -256,11 +256,11 @@ pub fn main() {
         tx
     };
 
-    // One evaluation environment and one tracker-facing player for the
-    // whole UI session; both end up owned by the effect runner.
-    let mut evaluator =
-        evaluator::Evaluator::new(args.sample_rate, args.tempo, args.library_root.clone());
-    evaluator.set_check_mode(args.check);
+    // One environment and one tracker-facing player for the whole UI
+    // session; both end up owned by the effect runner.
+    let mut environment =
+        environment::Environment::new(args.sample_rate, args.tempo, args.library_root.clone());
+    environment.set_check_mode(args.check);
     let player = player::Player::new(
         args.tempo,
         args.beats_per_measure,
@@ -269,7 +269,7 @@ pub fn main() {
     );
 
     // Start the beats!
-    player.start_beats(&evaluator, &status_receiver);
+    player.start_beats(&environment, &status_receiver);
 
     // Copy initial values for each slider for all programs
     let mut last_slider_values: HashMap<(WaveformSelector, String), f32> = HashMap::new();
@@ -391,7 +391,7 @@ pub fn main() {
         sdl2_input::InputHandler::new(launchkey.is_err(), renderer.width, renderer.height);
 
     let mut launchkey = launchkey.ok();
-    let mut effect_runner = effects::EffectRunner::new(player, evaluator, slider_sender.clone());
+    let mut effect_runner = effects::EffectRunner::new(player, environment, slider_sender.clone());
 
     let mut status = tracker::Status {
         buffer_start: Instant::now(),

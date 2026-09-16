@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use crate::actions::{self, AppState, Effect};
 use crate::diagnostics;
-use crate::evaluator;
+use crate::environment;
 use crate::expr;
 use crate::ids::{MarkId, WaveformId, WaveformSelector};
 use crate::keys::Keys;
@@ -67,19 +67,19 @@ pub struct World<'a> {
 
 pub struct EffectRunner {
     player: player::Player,
-    evaluator: evaluator::Evaluator,
+    environment: environment::Environment,
     slider_sender: mpsc::Sender<SliderEvent>,
 }
 
 impl EffectRunner {
     pub fn new(
         player: player::Player,
-        evaluator: evaluator::Evaluator,
+        environment: environment::Environment,
         slider_sender: mpsc::Sender<SliderEvent>,
     ) -> Self {
         Self {
             player,
-            evaluator,
+            environment,
             slider_sender,
         }
     }
@@ -104,7 +104,7 @@ impl EffectRunner {
         let ctx = actions::Context {
             status: world.status,
             now: Instant::now(),
-            evaluator: &self.evaluator,
+            environment: &self.environment,
             source_stale: state.programs.disk_changed(),
         };
         let mut all_effects = Vec::new();
@@ -223,7 +223,7 @@ impl EffectRunner {
             } => {
                 match state
                     .programs
-                    .evaluate_and_record(&self.evaluator, program_index)
+                    .evaluate_and_record(&self.environment, program_index)
                 {
                     Ok(warnings) => {
                         if let Some(mode) = mode_on_success {
@@ -287,7 +287,7 @@ impl EffectRunner {
                     }
                     if state
                         .programs
-                        .evaluate_and_record(&self.evaluator, i)
+                        .evaluate_and_record(&self.environment, i)
                         .is_err()
                     {
                         failed.push(state.programs.display_name(i));
@@ -344,7 +344,7 @@ impl EffectRunner {
                     expr::SourceExpr::float(velocity as f32 / 127.0),
                 ];
                 match self
-                    .evaluator
+                    .environment
                     .apply_note_function(&keys.function, args, program.sliders())
                 {
                     Ok((mut note_on, note_off)) => {
@@ -373,7 +373,8 @@ impl EffectRunner {
                         self.player.play_note(key, note_on, program.level_db());
                     }
                     Err(error) => {
-                        let diagnostic = self.evaluator.diagnose(&error, &state.programs, keys.id);
+                        let diagnostic =
+                            self.environment.diagnose(&error, &state.programs, keys.id);
                         state.message = diagnostics::error_message(&[diagnostic]);
                     }
                 }
@@ -565,8 +566,8 @@ mod tests {
         let (fast_sender, fast_receiver) = mpsc::channel();
         let (slider_sender, _slider_receiver) = mpsc::channel();
         let player = player::Player::new(90, 4, precompute_sender, fast_sender);
-        let evaluator = evaluator::Evaluator::new(44100, 90, std::path::PathBuf::new());
-        let mut runner = EffectRunner::new(player, evaluator, slider_sender);
+        let environment = environment::Environment::new(44100, 90, std::path::PathBuf::new());
+        let mut runner = EffectRunner::new(player, environment, slider_sender);
 
         let mut state = AppState::from_source(
             "#{sliders=[\"vol:0.5:0:1\"], keys}\nk = fn(note, vel) => (vol, vol);".to_string(),
@@ -638,8 +639,8 @@ mod tests {
         let (fast_sender, fast_receiver) = mpsc::channel();
         let (slider_sender, _slider_receiver) = mpsc::channel();
         let player = player::Player::new(90, 4, precompute_sender, fast_sender);
-        let evaluator = evaluator::Evaluator::new(44100, 90, std::path::PathBuf::new());
-        let mut runner = EffectRunner::new(player, evaluator, slider_sender);
+        let environment = environment::Environment::new(44100, 90, std::path::PathBuf::new());
+        let mut runner = EffectRunner::new(player, environment, slider_sender);
 
         let path =
             std::env::temp_dir().join(format!("tuun_reload_runner_{}.tuun", std::process::id()));
@@ -699,8 +700,8 @@ mod tests {
         let (fast_sender, fast_receiver) = mpsc::channel();
         let (slider_sender, _slider_receiver) = mpsc::channel();
         let player = player::Player::new(90, 4, precompute_sender, fast_sender);
-        let evaluator = evaluator::Evaluator::new(44100, 90, std::path::PathBuf::new());
-        let mut runner = EffectRunner::new(player, evaluator, slider_sender);
+        let environment = environment::Environment::new(44100, 90, std::path::PathBuf::new());
+        let mut runner = EffectRunner::new(player, environment, slider_sender);
 
         // An empty input path can't be re-read: the reload must not touch
         // playback or programs.
@@ -727,8 +728,8 @@ mod tests {
         let (fast_sender, fast_receiver) = mpsc::channel();
         let (slider_sender, _slider_receiver) = mpsc::channel();
         let player = player::Player::new(90, 4, precompute_sender, fast_sender);
-        let evaluator = evaluator::Evaluator::new(44100, 90, std::path::PathBuf::new());
-        let mut runner = EffectRunner::new(player, evaluator, slider_sender);
+        let environment = environment::Environment::new(44100, 90, std::path::PathBuf::new());
+        let mut runner = EffectRunner::new(player, environment, slider_sender);
 
         let mut state = AppState::from_source(
             "#{level_db=0}\n_ = 1 | fin(time - 1);\n".to_string(),
@@ -840,8 +841,8 @@ mod tests {
         let (fast_sender, _fast_receiver) = mpsc::channel();
         let (slider_sender, slider_receiver) = mpsc::channel();
         let player = player::Player::new(90, 4, precompute_sender, fast_sender);
-        let evaluator = evaluator::Evaluator::new(44100, 90, std::path::PathBuf::new());
-        let mut runner = EffectRunner::new(player, evaluator, slider_sender);
+        let environment = environment::Environment::new(44100, 90, std::path::PathBuf::new());
+        let mut runner = EffectRunner::new(player, environment, slider_sender);
 
         let mut state = AppState::from_source(
             "#{sliders=[\"vol:0.5:0:1\"], keys}\nk = fn(note, vel) => (vol, vol);".to_string(),

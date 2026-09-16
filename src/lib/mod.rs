@@ -20,7 +20,7 @@ pub mod diagnostics;
 #[cfg(feature = "native")]
 pub mod effects;
 #[cfg(feature = "native")]
-pub mod evaluator;
+pub mod environment;
 #[cfg(feature = "native")]
 pub mod ids;
 #[cfg(feature = "native")]

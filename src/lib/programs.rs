@@ -8,7 +8,7 @@ use std::path;
 use std::time;
 
 use crate::diagnostics::{Diagnostic, Severity, Source};
-use crate::evaluator::Evaluator;
+use crate::environment::Environment;
 use crate::expr;
 use crate::ids::MarkId;
 use crate::parser;
@@ -775,7 +775,7 @@ impl ProgramSet {
 
     /// Evaluates the program at `index` and records the result on the
     /// program. The type checker runs in either case: on success its
-    /// warnings (possibly empty; see [`Evaluator::check_program`]) are the
+    /// warnings (possibly empty; see [`Environment::check_program`]) are the
     /// `Ok` value, and on failure they are appended after the evaluation
     /// diagnostics in the `Err` value, so both views of a problem show side
     /// by side (a failure drops any previous result: even though editing
@@ -783,7 +783,7 @@ impl ProgramSet {
     /// rather than this program's own text).
     pub fn evaluate_and_record(
         &mut self,
-        evaluator: &Evaluator,
+        environment: &Environment,
         index: usize,
     ) -> Result<Vec<Diagnostic>, Vec<Diagnostic>> {
         // An empty program is a deletion, not a parse error: clear the cache
@@ -796,7 +796,7 @@ impl ProgramSet {
         // The checker runs first, and error-severity findings gate: evaluation
         // is not attempted. Warning-severity findings report and evaluation
         // proceeds leading any evaluation errors.
-        let findings = evaluator.check_program(self, index);
+        let findings = environment.check_program(self, index);
         if findings
             .iter()
             .any(|finding| finding.severity == Severity::Error)
@@ -804,7 +804,7 @@ impl ProgramSet {
             self.programs[index].evaluated = None;
             return Err(findings);
         }
-        match evaluator.evaluate_program(self, index) {
+        match environment.evaluate_program(self, index) {
             Ok(evaluated) => {
                 self.programs[index].evaluated = Some(evaluated);
                 Ok(findings)
@@ -1405,8 +1405,8 @@ mod tests {
             PathBuf::new(),
         )
         .expect("test source should parse");
-        let evaluator = Evaluator::new(8000, 90, PathBuf::new());
-        set.evaluate_and_record(&evaluator, 0)
+        let environment = Environment::new(8000, 90, PathBuf::new());
+        set.evaluate_and_record(&environment, 0)
             .expect("test program should evaluate");
         let Some(Evaluated::Waveform {
             sequence: Some(sequence),
@@ -2219,11 +2219,11 @@ kick = pulse(60);"
     #[test]
     fn evaluating_an_empty_program_succeeds_and_clears_caches() {
         // Clearing a program's text must not surface a parse error from the
-        // evaluator — an empty program is a deletion in progress.
+        // environment — an empty program is a deletion in progress.
         let mut state = state_from("#{level_db=0}\nkick = pulse(60);");
         state.program_mut(0).unwrap().set_text("  ".to_string());
-        let evaluator = Evaluator::new(44100, 90, std::path::PathBuf::new());
-        assert!(state.evaluate_and_record(&evaluator, 0).is_ok());
+        let environment = Environment::new(44100, 90, std::path::PathBuf::new());
+        assert!(state.evaluate_and_record(&environment, 0).is_ok());
         assert!(state.programs()[0].waveform().is_none());
         assert!(state.programs()[0].keys_instrument().is_none());
     }

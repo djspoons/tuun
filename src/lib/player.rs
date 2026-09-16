@@ -10,7 +10,7 @@ use std::sync::mpsc;
 use std::time;
 
 use crate::diagnostics::Source;
-use crate::evaluator::Evaluator;
+use crate::environment::Environment;
 use crate::expr;
 use crate::ids::{MarkId, WaveformId, WaveformSelector};
 use crate::optimizer;
@@ -333,14 +333,14 @@ impl Player {
     /// Beats waveform is scheduled so the second can start a measure later.
     pub fn start_beats(
         &self,
-        evaluator: &Evaluator,
+        environment: &Environment,
         status_receiver: &mpsc::Receiver<tracker::Status<WaveformId, MarkId>>,
     ) {
         // Play the odd Beats waveform starting immediately and repeating every two measures
         self.precompute_sender
             .send(tracker::Command::Play {
                 id: WaveformId::Beats(false),
-                waveform: self.beats_waveform(evaluator),
+                waveform: self.beats_waveform(environment),
                 start: None,
                 repeat_every: Some(
                     duration_from_beats(self.tempo, self.beats_per_measure as u64) * 2,
@@ -357,7 +357,7 @@ impl Player {
                         self.precompute_sender
                             .send(tracker::Command::Play {
                                 id: WaveformId::Beats(true),
-                                waveform: self.beats_waveform(evaluator),
+                                waveform: self.beats_waveform(environment),
                                 start: Some(mark.start + mark.duration),
                                 repeat_every: Some(
                                     duration_from_beats(self.tempo, self.beats_per_measure as u64)
@@ -375,7 +375,7 @@ impl Player {
     /// Builds the per-measure beats waveform — a sequence of `mark`-tagged
     /// short silences, one per beat — used to keep timing visible to the
     /// rest of the runtime.
-    pub fn beats_waveform(&self, evaluator: &Evaluator) -> waveform::Waveform<MarkId> {
+    pub fn beats_waveform(&self, environment: &Environment) -> waveform::Waveform<MarkId> {
         let seconds_per_beat = duration_from_beats(self.tempo, 1);
         let mut ws = Vec::new();
         for i in 0..self.beats_per_measure {
@@ -389,7 +389,7 @@ impl Player {
         let source = format!("<[{}]>", ws.join(", "));
         let bindings: Vec<expr::SourceBinding<MarkId, Source>> =
             vec![expr::Binding::Open(vec!["__prelude".to_string()]).into()];
-        match evaluator
+        match environment
             .evaluate_source(&source, &bindings)
             .map(|s| s.expr)
         {
@@ -528,8 +528,8 @@ mod tests {
             ProgramSet::from_source(source.to_string(), std::path::PathBuf::new())
                 .expect("test source should parse");
         assert!(message.is_empty(), "{}", message);
-        let evaluator = Evaluator::new(8000, 90, std::path::PathBuf::new());
-        set.evaluate_and_record(&evaluator, 0)
+        let environment = Environment::new(8000, 90, std::path::PathBuf::new());
+        set.evaluate_and_record(&environment, 0)
             .expect("test program should evaluate");
         assert!(set.program(0).unwrap().sequence().is_some());
         set
