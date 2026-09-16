@@ -72,6 +72,10 @@ pub struct Wasm {
     waveform: Option<generator::Waveform<MarkId>>,
     last_slider_values: HashMap<String, f32>,
     buffer_duration: Duration,
+    /// Module export types and findings, carried between installs. The
+    /// embedded modules never change within an instance, so entries stay
+    /// valid for its whole life.
+    module_types: infer::ModuleCache<Source>,
 }
 
 /// Builds a `Definition` binding for `id = expr`.
@@ -161,6 +165,7 @@ impl Wasm {
             waveform: None,
             last_slider_values: HashMap::new(),
             buffer_duration: Duration::from_secs_f32(128.0 / sample_rate as f32),
+            module_types: infer::ModuleCache::default(),
         })
     }
 
@@ -258,6 +263,7 @@ impl Wasm {
             &bindings,
             &parsed_expr,
             Some(infer::Expectation::Playable),
+            &mut self.module_types,
         );
         if !findings.is_empty() {
             let rendered: Vec<String> = findings

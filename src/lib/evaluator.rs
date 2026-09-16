@@ -5,7 +5,7 @@
 //! directives. Everything takes `&self`; the module cache hides behind a
 //! `RefCell`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fs;
 use std::path;
@@ -150,6 +150,21 @@ pub struct Evaluator {
     /// Path and latest source for each assigned module id (index = id).
     /// Ids are stable across mtime reloads of the same module.
     module_info: RefCell<Vec<ModuleInfo>>,
+    /// Module export types and findings, carried between checks so an
+    /// unchanged module is typed once per session, not once per check.
+    ///
+    /// The cache keys on the parsed bindings slice, so a re-parsed module
+    /// misses on its own; what the key cannot see is a cached module whose
+    /// types were derived from a *dependency* that has since reloaded. The
+    /// generation counter covers that: any reload bumps it, and a check that
+    /// observes a bump clears the whole cache rather than tracking
+    /// dependencies (library edits are rare next to program edits).
+    module_types: RefCell<infer::ModuleCache<Source>>,
+    /// Bumped by [`Evaluator::resolve`] whenever a module file is read or
+    /// re-read from disk.
+    modules_generation: Cell<u64>,
+    /// The generation `module_types` was last known consistent with.
+    checked_generation: Cell<u64>,
 }
 
 impl Evaluator {
@@ -186,6 +201,9 @@ impl Evaluator {
             library_root,
             modules: RefCell::new(HashMap::new()),
             module_info: RefCell::new(Vec::new()),
+            module_types: RefCell::new(infer::ModuleCache::default()),
+            modules_generation: Cell::new(0),
+            checked_generation: Cell::new(0),
         }
     }
 
@@ -275,6 +293,10 @@ impl Evaluator {
                 bindings: leaked,
             },
         );
+        // Anything typed against this module's previous text is now stale;
+        // the type cache watches this counter (see `module_types`).
+        self.modules_generation
+            .set(self.modules_generation.get() + 1);
         Ok(leaked)
     }
 
@@ -380,12 +402,38 @@ impl Evaluator {
         };
         let start = time::Instant::now();
         print!("Checking programs... ");
-        let errors = infer::check_program(
-            |path| self.resolve(path),
-            &bindings,
-            &expr,
-            Some(expectation),
-        );
+        // A reload observed since the last check may have invalidated cached
+        // dependents, so start clean. Reloads are lazy — `resolve` stats per
+        // lookup — so a library edit can also surface *mid-check*, after a
+        // dependent was already served from the cache; when that happens the
+        // first pass's answers may be stale, and one clean re-run settles it.
+        // An empty cache cannot have served anything stale, which also keeps
+        // the very first check (whose initial loads all bump the counter)
+        // from running twice.
+        let errors = loop {
+            let generation = self.modules_generation.get();
+            if self.checked_generation.get() != generation {
+                self.module_types.borrow_mut().clear();
+                self.checked_generation.set(generation);
+            }
+            let could_be_stale = !self.module_types.borrow().is_empty();
+            let errors = infer::check_program(
+                |path| self.resolve(path),
+                &bindings,
+                &expr,
+                Some(expectation),
+                &mut self.module_types.borrow_mut(),
+            );
+            if self.modules_generation.get() != generation && could_be_stale {
+                continue;
+            }
+            // Accepted: whatever the cache now holds was built from the
+            // slices this run was served, so it is consistent with the
+            // current generation even when loads during the run bumped it
+            // (the first check's initial loads, in particular).
+            self.checked_generation.set(self.modules_generation.get());
+            break errors;
+        };
         println!(
             "{} total errors in {:.3}s",
             errors.len(),
@@ -422,12 +470,21 @@ impl Evaluator {
             ProgramKind::Waveform => infer::Expectation::Playable,
             ProgramKind::Keys => infer::Expectation::NoteFunction,
         };
+        // Stale-generation handling mirrors `check_program`'s clear; the
+        // mid-run re-run does not: a probe misled by a mid-run reload
+        // resolves itself on the next probe or check.
+        let generation = self.modules_generation.get();
+        if self.checked_generation.get() != generation {
+            self.module_types.borrow_mut().clear();
+            self.checked_generation.set(generation);
+        }
         infer::type_at(
             |path| self.resolve(path),
             &bindings,
             &expr,
             Some(expectation),
             offset,
+            &mut self.module_types.borrow_mut(),
         )
     }
 
@@ -653,7 +710,49 @@ impl Evaluator {
 mod tests {
     use super::*;
     use crate::player::substitute_current_slider_values;
+    use std::fs;
     use std::path::PathBuf;
+
+    /// The module type cache follows a module file's edits: a check after
+    /// the file changes reports against the new text, and one more check
+    /// with nothing changed repeats it (served from the refilled cache).
+    #[test]
+    fn module_type_cache_invalidates_on_reload() {
+        let root =
+            std::env::temp_dir().join(format!("tuun-module-cache-test-{}", std::process::id()));
+        fs::create_dir_all(&root).expect("create temp library root");
+        let module = root.join("m.tuun");
+        fs::write(&module, "v = 440;\n").expect("write module");
+        let (set, warning) = ProgramSet::from_source(
+            "open m;\n#{level_db=0}\nw = sine(v, 0);\n".to_string(),
+            PathBuf::from("song.tuun"),
+        )
+        .expect("test source should parse");
+        assert_eq!(warning, "");
+        let evaluator = Evaluator::new(44100, 90, root.clone());
+
+        let diagnostics = evaluator.check_program(&set, 0);
+        assert_eq!(diagnostics.len(), 0, "got {:?}", diagnostics);
+        assert!(!evaluator.module_types.borrow().is_empty());
+
+        // The rewrite bumps the file's mtime, so the next check re-parses
+        // the module, clears the type cache, and reports against the new
+        // text — `v` is a string now, and `sine` rejects it.
+        fs::write(&module, "v = \"s\";\n").expect("rewrite module");
+        let diagnostics = evaluator.check_program(&set, 0);
+        assert_eq!(diagnostics.len(), 1, "got {:?}", diagnostics);
+        assert_eq!(
+            diagnostics[0].to_string(),
+            "1:6: expected waveform, found string"
+        );
+
+        // Unchanged on disk: the cache serves the module and the finding
+        // repeats.
+        let diagnostics = evaluator.check_program(&set, 0);
+        assert_eq!(diagnostics.len(), 1, "got {:?}", diagnostics);
+
+        fs::remove_dir_all(&root).ok();
+    }
 
     /// Walks `waveform` and collects the `Const` value under every
     /// `Marked(Slider(label), …)` node.

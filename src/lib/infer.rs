@@ -21,6 +21,10 @@
 //! is actually applied to (rule AT-Lam2). Because the parser desugars `let x =
 //! e in b` into `(fn(x) => b)(e)`, the generalization step gives `let` bindings
 //! HM-style polymorphism without a dedicated rule (paper §2.3 and §3.2, T-Let).
+//! One exception to this, however: a lambda literal passed to an expression
+//! with a (possibly quantified) function type (but *not* an intersection type)
+//! is checked *after* the other argument types are inferred and the function is
+//! checked; see [`Infer::check_deferred`].
 //!
 //! At an abstraction, Freeman and Pfenning's ABS rule is used and the function
 //! body is checked under each of the numeric atoms (see [`Infer::tabulate`]).
@@ -86,6 +90,7 @@
 //   fn(x) => fn(y) => (x != y)
 
 use std::collections::HashMap;
+use std::mem;
 use std::rc::Rc;
 
 use crate::expr::{Binding, Error, Expr, Pattern, SourceBinding, SourceExpr, Span};
@@ -97,6 +102,7 @@ use crate::waveform;
 ///
 /// Mirrors the run-time kind check that evaluation performs on program
 /// results, so the checker can reject a mismatch before evaluation.
+#[derive(Clone, Copy)]
 pub enum Expectation {
     /// The program must produce a waveform or a seq.
     Playable,
@@ -106,15 +112,20 @@ pub enum Expectation {
 }
 
 /// Checks `expr` under `bindings`, resolving `open`/`use` through `resolve`,
-/// and returns the errors found.
+/// and returns the errors found: findings from the modules the context
+/// build reached (each module's own, once per check), then the program's.
 ///
 /// The signature mirrors [`crate::eval::evaluate`]; `resolve` should behave
-/// identically to the resolver evaluation uses.
+/// identically to the resolver evaluation uses. `cache` carries module
+/// export types and findings between checks; pass a fresh
+/// [`ModuleCache::default`] for a one-shot check. The caller owns its
+/// invalidation (see [`ModuleCache`]).
 pub fn check_program<'a, M, S, F>(
     resolve: F,
     bindings: &'a [SourceBinding<M, S>],
     expr: &SourceExpr<M, S>,
     expectation: Option<Expectation>,
+    cache: &mut ModuleCache<S>,
 ) -> Vec<Error<S>>
 where
     F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
@@ -123,7 +134,7 @@ where
     let mut checker = Infer::new();
     let mut context = Vec::new();
     let mut memo = HashMap::new();
-    checker.build_context(&resolve, bindings, &mut context, &mut memo);
+    checker.build_context(&resolve, bindings, &mut context, &mut memo, cache);
     match expectation {
         None => {
             checker.infer(&mut context, &mut Vec::new(), expr);
@@ -147,7 +158,9 @@ where
             checker.subtype_check(&ty, &expected, &expr.span);
         }
     }
-    checker.errors
+    let mut errors = mem::take(&mut checker.module_findings);
+    errors.append(&mut checker.errors);
+    errors
 }
 
 /// Returns the type of the identifier covering `offset` in `expr`, rendered
@@ -171,6 +184,7 @@ pub fn type_at<'a, M, S, F>(
     expr: &SourceExpr<M, S>,
     expectation: Option<Expectation>,
     offset: usize,
+    cache: &mut ModuleCache<S>,
 ) -> Option<String>
 where
     F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
@@ -182,7 +196,7 @@ where
     // The probe is armed only after the context is built: the modules typed
     // there carry offsets into their own sources, which the probe cannot
     // tell from this one's.
-    checker.build_context(&resolve, bindings, &mut context, &mut memo);
+    checker.build_context(&resolve, bindings, &mut context, &mut memo, cache);
     checker.probe = Some(offset);
     let mut psi = match expectation {
         Some(Expectation::NoteFunction) => vec![Frame {
@@ -353,6 +367,11 @@ struct Infer<S> {
     /// so failed attempts roll back by popping (see `mark`/`rollback`).
     journal: Vec<Undo>,
     errors: Vec<Error<S>>,
+    /// Findings from the modules the context build typed or replayed from
+    /// the caller's [`ModuleCache`], kept apart from `errors` so each
+    /// module's own findings can be cached and reported once per run.
+    /// Spliced ahead of `errors` when a check returns.
+    module_findings: Vec<Error<S>>,
     /// The offset a [`type_at`] query is asking about, once inference has
     /// reached the text the offset indexes into. `None` for a plain check,
     /// and while building the context — the modules typed there carry
@@ -414,6 +433,48 @@ fn module_key<M, S>(module: &[SourceBinding<M, S>]) -> ModuleKey {
     (module.as_ptr() as usize, module.len())
 }
 
+/// Export types and findings for modules already checked this session, owned
+/// by the caller and threaded through [`check_program`] and [`type_at`] so an
+/// unchanged module is typed once per session rather than once per check.
+///
+/// An entry is keyed by the module's resolved bindings slice, so a caller
+/// that re-parses a changed module (allocating a new slice) misses here
+/// automatically. Staleness through *dependencies* — a cached module whose
+/// types were derived from another module that has since been re-parsed — is
+/// invisible to the key; the caller must [`clear`](ModuleCache::clear) the
+/// cache when any module reloads.
+pub struct ModuleCache<S> {
+    entries: HashMap<ModuleKey, CachedModule<S>>,
+}
+
+/// One module's exports and its own findings, portable across checker runs:
+/// exports are stored resolved through the substitution and cached only when
+/// settled, so they reference no solver state.
+struct CachedModule<S> {
+    exports: Vec<(String, ContextEntry)>,
+    findings: Vec<Error<S>>,
+}
+
+impl<S> Default for ModuleCache<S> {
+    fn default() -> ModuleCache<S> {
+        ModuleCache {
+            entries: HashMap::new(),
+        }
+    }
+}
+
+impl<S> ModuleCache<S> {
+    /// Discards every entry.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Whether no module has been cached.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 impl<S: Clone> Infer<S> {
     fn new() -> Infer<S> {
         Infer {
@@ -422,6 +483,7 @@ impl<S: Clone> Infer<S> {
             refs: Vec::new(),
             journal: Vec::new(),
             errors: Vec::new(),
+            module_findings: Vec::new(),
             conflict: None,
             probe: None,
             probed: None,
@@ -3554,6 +3616,7 @@ impl<S: Clone> Infer<S> {
         bindings: &'a [SourceBinding<M, S>],
         context: &mut TypeContext,
         memo: &mut ModuleMemo,
+        cache: &mut ModuleCache<S>,
     ) -> Vec<(String, ContextEntry)>
     where
         F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
@@ -3563,8 +3626,14 @@ impl<S: Clone> Infer<S> {
             match &source_binding.binding {
                 Binding::Open(path) => match resolve(path) {
                     Ok(module) => {
-                        let exports =
-                            self.module_exports(resolve, module, memo, path, &source_binding.span);
+                        let exports = self.module_exports(
+                            resolve,
+                            module,
+                            memo,
+                            cache,
+                            path,
+                            &source_binding.span,
+                        );
                         context.extend(exports);
                     }
                     Err(error) => {
@@ -3599,8 +3668,14 @@ impl<S: Clone> Infer<S> {
                             continue;
                         }
                     };
-                    let exports =
-                        self.module_exports(resolve, module, memo, path, &source_binding.span);
+                    let exports = self.module_exports(
+                        resolve,
+                        module,
+                        memo,
+                        cache,
+                        path,
+                        &source_binding.span,
+                    );
                     // The module type holds plain types; a re-exported
                     // built-in is fixed at its default signature.
                     let members = dedup_last_wins(exports)
@@ -3640,14 +3715,20 @@ impl<S: Clone> Infer<S> {
 
     /// Returns the exports of `module`, typing it in a fresh context.
     ///
-    /// Memoized per bindings slice so a module opened many times (the
-    /// prelude, in particular) is typed once per check. Sound because
-    /// exports are generalized and thus closed under the substitution.
+    /// Memoized twice over. Per run (`memo`), so a module opened many times
+    /// (the prelude, in particular) is typed once per check and its findings
+    /// report once per check. Per session (`cache`), so an unchanged module
+    /// is not re-typed by every check: a hit replays the module's cached
+    /// findings and hands back its exports. Sound because exports are
+    /// generalized and thus closed under the substitution; they are cached
+    /// resolved through it, and only when settled, so a cache entry carries
+    /// no solver state. A module left unsettled is typed per run instead.
     fn module_exports<'a, M, F>(
         &mut self,
         resolve: &F,
         module: &'a [SourceBinding<M, S>],
         memo: &mut ModuleMemo,
+        cache: &mut ModuleCache<S>,
         path: &[String],
         span: &Option<Span<S>>,
     ) -> Vec<(String, ContextEntry)>
@@ -3667,9 +3748,45 @@ impl<S: Clone> Infer<S> {
             }
             None => {}
         }
+        if let Some(cached) = cache.entries.get(&key) {
+            self.module_findings.extend(cached.findings.iter().cloned());
+            memo.insert(key, Some(cached.exports.clone()));
+            return cached.exports.clone();
+        }
         memo.insert(key, None);
+        // The module's findings are collected apart from the enclosing
+        // buffer: nested modules capture theirs the same way before control
+        // returns here, so what this swap sees is the module's own, and the
+        // whole batch reports through `module_findings` exactly once per
+        // run. Errors *about* the module — an unresolvable path, the cycle
+        // above — stay in the opener's buffer, at the opener's span.
+        let enclosing = mem::take(&mut self.errors);
         let mut module_context = Vec::new();
-        let exports = self.build_context(resolve, module, &mut module_context, memo);
+        let exports = self.build_context(resolve, module, &mut module_context, memo, cache);
+        let findings = mem::replace(&mut self.errors, enclosing);
+        let exports: Vec<(String, ContextEntry)> = exports
+            .into_iter()
+            .map(|(name, entry)| {
+                let entry = match entry {
+                    ContextEntry::Ty(ty, _) => bound(ty.apply(&self.subst)),
+                    builtin => builtin,
+                };
+                (name, entry)
+            })
+            .collect();
+        let portable = exports
+            .iter()
+            .all(|(_, entry)| !matches!(entry, ContextEntry::Ty(_, false)));
+        if portable {
+            cache.entries.insert(
+                key,
+                CachedModule {
+                    exports: exports.clone(),
+                    findings: findings.clone(),
+                },
+            );
+        }
+        self.module_findings.extend(findings);
         memo.insert(key, Some(exports.clone()));
         exports
     }
@@ -3828,6 +3945,7 @@ mod tests {
             &bindings,
             &expr,
             expectation,
+            &mut ModuleCache::default(),
         )
     }
 
@@ -4561,6 +4679,7 @@ mod tests {
             &bindings,
             &expr,
             None,
+            &mut ModuleCache::default(),
         );
         assert_eq!(
             messages(&errors),
@@ -4635,12 +4754,12 @@ mod tests {
         // `alias` is exported by `a` (bound there through `a`'s own open of
         // `b`); using it as a float checks.
         let expr = parse_program::<u32, _>("alias * 2", ()).unwrap();
-        let errors = check_program(resolve, &bindings, &expr, None);
+        let errors = check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default());
         assert!(errors.is_empty(), "got {:?}", messages(&errors));
 
         // `two` is not re-exported through `a`, so it errors as unbound.
         let expr = parse_program::<u32, _>("two", ()).unwrap();
-        let errors = check_program(resolve, &bindings, &expr, None);
+        let errors = check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default());
         assert_eq!(messages(&errors), ["unbound variable 'two'"]);
     }
 
@@ -4663,16 +4782,16 @@ mod tests {
         bindings.extend(uses);
 
         let expr = parse_program::<u32, _>("b.two + 1", ()).unwrap();
-        let errors = check_program(resolve, &bindings, &expr, None);
+        let errors = check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default());
         assert!(errors.is_empty(), "got {:?}", messages(&errors));
 
         let expr = parse_program::<u32, _>("b.three", ()).unwrap();
-        let errors = check_program(resolve, &bindings, &expr, None);
+        let errors = check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default());
         assert_eq!(messages(&errors), ["Module has no binding 'three'"]);
 
         // Projecting from a non-module errors statically too.
         let expr = parse_program::<u32, _>("let x = 1 in x.y", ()).unwrap();
-        let errors = check_program(resolve, &bindings, &expr, None);
+        let errors = check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default());
         assert_eq!(
             messages(&errors),
             ["cannot project 'y' from a value of type int"]
@@ -4682,7 +4801,7 @@ mod tests {
         // unknown is rejected rather than trusted. This is the one shape
         // the rule costs: a function over modules.
         let expr = parse_program::<u32, _>("let f = fn(q) => q.two in f(b)", ()).unwrap();
-        let errors = check_program(resolve, &bindings, &expr, None);
+        let errors = check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default());
         assert_eq!(
             messages(&errors),
             ["cannot project 'two' from a value of unknown type"]
@@ -4706,7 +4825,8 @@ mod tests {
             ("let (u, v) = (b, b) in u.two", None),
         ] {
             let expr = parse_program::<u32, _>(text, ()).unwrap();
-            let errors = check_program(resolve, &bindings, &expr, None);
+            let errors =
+                check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default());
             match expected {
                 None => assert!(errors.is_empty(), "{}: got {:?}", text, messages(&errors)),
                 Some(message) => assert_eq!(messages(&errors), [message], "for {}", text),
@@ -4932,6 +5052,7 @@ mod tests {
                 bindings,
                 &expr,
                 None,
+                &mut ModuleCache::default(),
             )
             .is_empty();
             let evaluated = eval::evaluate(
@@ -4962,6 +5083,7 @@ mod tests {
                 bindings,
                 &mut context,
                 &mut memo,
+                &mut ModuleCache::default(),
             );
             // (name to bind, call text, source id, declared result sort)
             let mut applied: Vec<(String, String, u32, Option<Sort>)> = Vec::new();
@@ -5025,6 +5147,7 @@ mod tests {
                 &extended,
                 &expr,
                 None,
+                &mut ModuleCache::default(),
             );
             let flagged: Vec<u32> = errors.iter().filter_map(|error| error.source()).collect();
             // Classifies one call by evaluating it alone against the
@@ -5415,7 +5538,10 @@ mod tests {
         for _ in 0..count {
             let text = generated(&mut rng);
             let accepted = match parse_program::<u32, _>(&text, 0u32) {
-                Ok(expr) => check_program(resolve, &bindings, &expr, None).is_empty(),
+                Ok(expr) => {
+                    check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default())
+                        .is_empty()
+                }
                 Err(_) => continue,
             };
             hash ^= u64::from(accepted);
@@ -5473,7 +5599,7 @@ mod tests {
                 continue;
             };
             let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                check_program(resolve, &bindings, &expr, None)
+                check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default())
             }));
             let Ok(errors) = checked else {
                 found += 1;
@@ -5491,7 +5617,13 @@ mod tests {
             let mut checker: Infer<u32> = Infer::new();
             let mut context = Vec::new();
             let mut memo = HashMap::new();
-            checker.build_context(&resolve, &bindings, &mut context, &mut memo);
+            checker.build_context(
+                &resolve,
+                &bindings,
+                &mut context,
+                &mut memo,
+                &mut ModuleCache::default(),
+            );
             let ty = checker.infer(&mut context, &mut Vec::new(), &expr);
             let declared = match checker.resolve_refinements(&ty.apply(&checker.subst), 0) {
                 Type::Numeric(Refinement::Ground(sort)) => Some(sort),
@@ -5562,7 +5694,7 @@ mod tests {
                 continue;
             };
             let Ok(errors) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                check_program(resolve, &bindings, &expr, None)
+                check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default())
             })) else {
                 continue;
             };
@@ -5612,7 +5744,13 @@ mod tests {
         for _ in 0..rounds {
             let start = std::time::Instant::now();
             for (_, _, bindings) in parsed.iter() {
-                std::hint::black_box(check_program(resolve, bindings, &expr, None));
+                std::hint::black_box(check_program(
+                    resolve,
+                    bindings,
+                    &expr,
+                    None,
+                    &mut ModuleCache::default(),
+                ));
             }
             let elapsed = start.elapsed().as_secs_f64() * 1000.0;
             best = best.min(elapsed);
@@ -5626,6 +5764,172 @@ mod tests {
         );
     }
 
+    /// Times repeated checks of the embedded library with a shared
+    /// [`ModuleCache`] (run with `--ignored --nocapture`) — the session-warm
+    /// counterpart of [`library_timing`].
+    #[test]
+    #[ignore]
+    fn library_timing_warm() {
+        let rounds: usize = std::env::var("ROUNDS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20);
+        let prelude = test_prelude::<u32>();
+        let parsed = parsed_library();
+        let resolve = |p: &[String]| library_resolve(&prelude, &parsed, p);
+        let expr = parse_program::<u32, _>("0", 9999).unwrap();
+        let mut cache = ModuleCache::default();
+        let mut best = f64::MAX;
+        let mut total = 0.0;
+        for round in 0..rounds {
+            let start = std::time::Instant::now();
+            for (_, _, bindings) in parsed.iter() {
+                std::hint::black_box(check_program(resolve, bindings, &expr, None, &mut cache));
+            }
+            let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+            if round == 0 {
+                println!("TIMING cold first round {:.2}ms", elapsed);
+                continue;
+            }
+            best = best.min(elapsed);
+            total += elapsed;
+        }
+        println!(
+            "TIMING warm best {:.2}ms  mean {:.2}ms  over {} rounds",
+            best,
+            total / (rounds - 1) as f64,
+            rounds - 1
+        );
+    }
+
+    // Cached module exports carry no solver state: resolved through the
+    // substitution they are settled — no metas, no refinement variables —
+    // and closed — no rigid variable outside its own Forall. The insert
+    // guard in `module_exports` skips what is unsettled, so a failure here
+    // means the guard and this property have drifted apart.
+    #[test]
+    fn cached_module_exports_are_settled_and_closed() {
+        fn free_vars(ty: &Type, bound: &mut Vec<u32>, free: &mut Vec<u32>) {
+            match ty {
+                Type::Var(id) => {
+                    if !bound.contains(id) && !free.contains(id) {
+                        free.push(*id);
+                    }
+                }
+                Type::Forall(vars, body) => {
+                    let depth = bound.len();
+                    bound.extend(vars);
+                    free_vars(body, bound, free);
+                    bound.truncate(depth);
+                }
+                Type::Function {
+                    positional,
+                    named,
+                    result,
+                } => {
+                    for p in positional.iter() {
+                        free_vars(p, bound, free);
+                    }
+                    for (_, p) in named.iter() {
+                        free_vars(p, bound, free);
+                    }
+                    free_vars(result, bound, free);
+                }
+                Type::And(types) => {
+                    for t in types.iter() {
+                        free_vars(t, bound, free);
+                    }
+                }
+                Type::Tuple(types) => {
+                    for t in types {
+                        free_vars(t, bound, free);
+                    }
+                }
+                Type::List(item) => free_vars(item, bound, free),
+                Type::Module(entries) => {
+                    for (_, t) in entries {
+                        free_vars(t, bound, free);
+                    }
+                }
+                Type::Meta(_) | Type::Numeric(_) | Type::Bool | Type::String | Type::Dynamic => {}
+            }
+        }
+        let prelude = test_prelude::<u32>();
+        let parsed = parsed_library();
+        let expr = parse_program::<u32, _>("0", 9999).unwrap();
+        let mut cache = ModuleCache::default();
+        // Open every module from a root so each one's exports land in the
+        // cache, leaves included. A fresh resolve closure per call lets each
+        // call site pick its own lifetime for the loop-local bindings.
+        for (path, _, _) in parsed.iter() {
+            let segments: Vec<String> = path.split('.').map(str::to_string).collect();
+            let bindings: Vec<SourceBinding<u32, u32>> = vec![
+                Binding::Open(vec!["__prelude".to_string()]).into(),
+                Binding::Open(segments).into(),
+            ];
+            check_program(
+                &|p: &[String]| library_resolve(&prelude, &parsed, p),
+                &bindings,
+                &expr,
+                None,
+                &mut cache,
+            );
+        }
+        assert!(!cache.is_empty());
+        for cached in cache.entries.values() {
+            for (name, entry) in &cached.exports {
+                let ContextEntry::Ty(ty, settled) = entry else {
+                    continue;
+                };
+                assert!(ty.settled(), "unsettled cached export {}: {:?}", name, ty);
+                assert!(*settled, "cached export {} flagged unsettled", name);
+                let (mut bound, mut free) = (Vec::new(), Vec::new());
+                free_vars(ty, &mut bound, &mut free);
+                assert!(
+                    free.is_empty(),
+                    "cached export {} has free vars {:?}: {:?}",
+                    name,
+                    free,
+                    ty
+                );
+            }
+        }
+    }
+
+    // A cached module reports the same findings on every check: cold, warm,
+    // and fresh-cache runs are indistinguishable to the caller.
+    #[test]
+    fn cached_module_checks_repeat_their_findings() {
+        let prelude = test_prelude::<()>();
+        let (mut bad, errors) =
+            parse_module::<u32, _>("broken = seq(0)(1) + seq(0)(2);", ()).unwrap();
+        assert!(errors.is_empty());
+        bad.insert(0, Binding::Open(vec!["__prelude".to_string()]).into());
+        let (mut good, errors) = parse_module::<u32, _>("two = 2;", ()).unwrap();
+        assert!(errors.is_empty());
+        good.insert(0, Binding::Open(vec!["__prelude".to_string()]).into());
+        let resolve = |path: &[String]| match path.join(".").as_str() {
+            "__prelude" => Ok(prelude.as_slice()),
+            "bad" => Ok(bad.as_slice()),
+            "good" => Ok(good.as_slice()),
+            other => Err(Error::types_here(format!("no module {}", other))),
+        };
+        let bindings: Vec<SourceBinding<u32, ()>> = vec![
+            Binding::Open(vec!["__prelude".to_string()]).into(),
+            Binding::Open(vec!["bad".to_string()]).into(),
+            Binding::Open(vec!["good".to_string()]).into(),
+        ];
+        let expr = parse_program::<u32, _>("two + 1", ()).unwrap();
+        let mut cache = ModuleCache::default();
+        let first = check_program(resolve, &bindings, &expr, None, &mut cache);
+        assert!(!cache.is_empty());
+        let second = check_program(resolve, &bindings, &expr, None, &mut cache);
+        assert_eq!(messages(&first), ["cannot combine two seqs with +"]);
+        assert_eq!(messages(&first), messages(&second));
+        let cold = check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default());
+        assert_eq!(messages(&cold), messages(&second));
+    }
+
     /// Prints the checker's findings over the embedded library (run with
     /// `--ignored --nocapture`).
     #[test]
@@ -5636,7 +5940,8 @@ mod tests {
         let resolve = |p: &[String]| library_resolve(&prelude, &parsed, p);
         let expr = parse_program::<u32, _>("0", 9999).unwrap();
         for (index, (path, content, bindings)) in parsed.iter().enumerate() {
-            let errors = check_program(&resolve, bindings, &expr, None);
+            let errors =
+                check_program(&resolve, bindings, &expr, None, &mut ModuleCache::default());
             let own: Vec<String> = errors
                 .iter()
                 .filter(|error| error.source() == Some(index as u32))
@@ -5807,7 +6112,7 @@ mod tests {
         let expr = parse_program::<u32, _>("0", 9999).unwrap();
         let resolve =
             |path: &[String]| Err(Error::eval_here(format!("no module {}", path.join("."))));
-        let errors = check_program(resolve, &bindings, &expr, None);
+        let errors = check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default());
         assert!(
             errors
                 .iter()
@@ -5839,7 +6144,7 @@ mod tests {
         // must not let one stand in for the other.
         let (bindings, _) = parse_module::<u32, _>("use whole;\nuse prefix;\n", 9998u32).unwrap();
         let expr = parse_program::<u32, _>("(whole.y, prefix.x)", 9999).unwrap();
-        let errors = check_program(resolve, &bindings, &expr, None);
+        let errors = check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default());
         assert!(
             errors.is_empty(),
             "each module should keep its own exports, got {:?}",
@@ -5847,7 +6152,7 @@ mod tests {
         );
         // And the name the prefix does not export is still absent from it.
         let expr = parse_program::<u32, _>("prefix.y", 9999).unwrap();
-        let errors = check_program(resolve, &bindings, &expr, None);
+        let errors = check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default());
         assert!(
             errors.iter().any(|error| error.message().contains("y")),
             "expected the prefix to lack 'y', got {:?}",
@@ -5868,7 +6173,7 @@ mod tests {
             other => Err(Error::eval_here(format!("no module {}", other))),
         };
         let expr = parse_program::<u32, _>("0", 9999).unwrap();
-        let errors = check_program(resolve, &a, &expr, None);
+        let errors = check_program(resolve, &a, &expr, None, &mut ModuleCache::default());
         let messages: Vec<&str> = errors.iter().map(|error| error.message()).collect();
         assert!(
             messages.iter().any(|m| m.contains("is opened from itself")),
@@ -6040,7 +6345,9 @@ mod tests {
             let Ok(expr) = parse_program::<u32, _>(&text, 0u32) else {
                 continue;
             };
-            if !check_program(resolve, &bindings, &expr, None).is_empty() {
+            if !check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default())
+                .is_empty()
+            {
                 continue;
             }
             clean += 1;
@@ -6050,7 +6357,13 @@ mod tests {
             let mut checker: Infer<u32> = Infer::new();
             let mut context = Vec::new();
             let mut memo = HashMap::new();
-            checker.build_context(&resolve, &bindings, &mut context, &mut memo);
+            checker.build_context(
+                &resolve,
+                &bindings,
+                &mut context,
+                &mut memo,
+                &mut ModuleCache::default(),
+            );
             let ty = checker.infer(&mut context, &mut Vec::new(), &expr);
             let declared = match checker.resolve_refinements(&ty.apply(&checker.subst), 0) {
                 Type::Numeric(Refinement::Ground(sort)) => Some(sort),
@@ -6118,6 +6431,7 @@ mod tests {
             &bindings,
             &mut context,
             &mut memo,
+            &mut ModuleCache::default(),
         );
         let ty = checker.infer(&mut context, &mut Vec::new(), &expr);
         match checker.resolve_refinements(&ty.apply(&checker.subst), 0) {
@@ -6179,7 +6493,8 @@ mod tests {
         let expr = parse_program::<u32, _>("0", 9999).unwrap();
         let mut report: Vec<String> = Vec::new();
         for (index, (path, content, bindings)) in parsed.iter().enumerate() {
-            let errors = check_program(&resolve, bindings, &expr, None);
+            let errors =
+                check_program(&resolve, bindings, &expr, None, &mut ModuleCache::default());
             for error in &errors {
                 if error.source() == Some(index as u32) {
                     report.push(format!("{}: {}", path, error.display_with_source(content)));

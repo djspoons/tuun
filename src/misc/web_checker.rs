@@ -221,6 +221,7 @@ fn check_block(
     block: &str,
     prelude: &Bindings,
     modules: &HashMap<String, Bindings>,
+    module_types: &mut infer::ModuleCache<Source>,
 ) -> CheckResult {
     let description = extract_attr(block, "description").unwrap_or("");
 
@@ -345,6 +346,7 @@ fn check_block(
         &bindings,
         &expr,
         Some(infer::Expectation::Playable),
+        module_types,
     );
     if !findings.is_empty() {
         let rendered: Vec<String> = findings
@@ -398,6 +400,7 @@ fn check_file(
     file: &str,
     prelude: &Bindings,
     modules: &HashMap<String, Bindings>,
+    module_types: &mut infer::ModuleCache<Source>,
 ) -> (usize, usize) {
     let input = match fs::read_to_string(file) {
         Ok(s) => s,
@@ -414,7 +417,7 @@ fn check_file(
     for (line, block) in &blocks {
         found += 1;
         let label = extract_attr(block, "description").unwrap_or("");
-        match check_block(block, prelude, modules) {
+        match check_block(block, prelude, modules, module_types) {
             CheckResult::Ok => println!("  {}:{} [ok] \"{}\"", file, line, label),
             CheckResult::Skip(msg) => {
                 println!("  {}:{} [skip] \"{}\" ({})", file, line, label, msg)
@@ -443,12 +446,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let prelude = load_prelude();
     let modules = load_modules();
+    // The embedded modules never change while the tool runs, so one type
+    // cache serves every block of every file.
+    let mut module_types = infer::ModuleCache::default();
 
     let mut total_found = 0;
     let mut total_failed = 0;
 
     for file in &args.input_files {
-        let (found, failed) = check_file(file, &prelude, &modules);
+        let (found, failed) = check_file(file, &prelude, &modules, &mut module_types);
         total_found += found;
         total_failed += failed;
     }
