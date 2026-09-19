@@ -148,13 +148,16 @@ where
     generator: generator::Generator<'a>,
     sample_rate: u32,
     captured_output_dir: path::PathBuf,
-    captured_date_format: String,
+    captured_file_prefix: String,
     command_receiver: mpsc::Receiver<Command<I, M>>,
     status_sender: mpsc::Sender<Status<I, M>>,
 
     // Persistent generation state
     active_waveforms: Vec<ActiveWaveform<I, M>>,
     pending_waveforms: Vec<PendingWaveform<I, M>>, // sorted by start time
+    // Distinguishes the files captured during one run, which share a prefix, and which share a
+    // file stem too whenever concurrent voices of one program capture at once.
+    next_capture_serial: u64,
     // Command state
     send_current_buffer: bool,
 }
@@ -164,10 +167,15 @@ where
     I: Id,
     M: Clone + Send + Debug + PartialEq + fmt::Display,
 {
+    /// Returns a new tracker that implements `audio::AudioCallback` and
+    /// processes commands from `command_receiver`.
+    ///
+    /// Each captured file is named from `captured_file_prefix`, the capture's
+    /// own file stem, and a serial number.
     pub fn new(
         sample_rate: u32,
         captured_output_dir: path::PathBuf,
-        captured_date_format: String,
+        captured_file_prefix: String,
         command_receiver: mpsc::Receiver<Command<I, M>>,
         status_sender: mpsc::Sender<Status<I, M>>,
     ) -> Tracker<'a, I, M> {
@@ -175,19 +183,24 @@ where
             generator: generator::Generator::new(sample_rate),
             sample_rate,
             captured_output_dir,
-            captured_date_format,
+            captured_file_prefix,
             command_receiver,
             status_sender,
 
             active_waveforms: Vec::new(),
             pending_waveforms: Vec::new(),
+            next_capture_serial: 0,
 
             send_current_buffer: false,
         }
     }
 
+    /// Opens a WAV writer for every `Captured` waveform in the tree, keyed by its file stem.
+    ///
+    /// Each writer is given a file of its own, so that separate calls write separate files even
+    /// when their stems collide.
     fn process_captured<S>(
-        &self,
+        &mut self,
         waveform: &waveform::Waveform<M, S>,
         out: &mut HashMap<String, hound::WavWriter<BufWriter<std::fs::File>>>,
     ) {
@@ -242,8 +255,11 @@ where
                     // TODO in theory we could check for this earlier
                     panic!("Captured waveform with duplicate file stem: {}", file_stem);
                 }
-                let datetime = chrono::Local::now().format(&self.captured_date_format);
-                let file_name = format!("{}{}.wav", &file_stem, &datetime);
+                let file_name = format!(
+                    "{}_{}_{}.wav",
+                    self.captured_file_prefix, file_stem, self.next_capture_serial
+                );
+                self.next_capture_serial += 1;
                 let path = self.captured_output_dir.join(file_name);
                 let file = std::fs::File::create(path).expect("Failed to create file");
                 let spec = WavSpec {
@@ -906,5 +922,50 @@ mod tests {
         assert!(status.has_active_mark(now, &only, &MarkId::TopLevel));
         let other = WaveformSelector::Only(WaveformId::Key(61));
         assert!(!status.has_active_mark(now, &other, &MarkId::TopLevel));
+    }
+
+    #[test]
+    fn concurrent_captures_sharing_a_stem_write_separate_files() {
+        let dir =
+            std::env::temp_dir().join(format!("tuun_concurrent_captures_{}", std::process::id()));
+        _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let (command_sender, command_receiver) = mpsc::channel();
+        let (status_sender, _status_receiver) = mpsc::channel();
+        let mut tracker = Tracker::new(
+            8000,
+            dir.clone(),
+            "tuun_run".to_string(),
+            command_receiver,
+            status_sender,
+        );
+
+        let captured = |value| waveform::Waveform::Captured {
+            file_stem: "shared".to_string(),
+            waveform: Box::new(marked(MarkId::TopLevel, value)),
+        };
+        command_sender
+            .send(play(WaveformId::Program(0), captured(1.0)))
+            .unwrap();
+        command_sender
+            .send(play(WaveformId::Program(0), captured(2.0)))
+            .unwrap();
+
+        let mut out = vec![0.0f32; 64];
+        tracker.callback(&mut out);
+        assert_eq!(out[0], 3.0, "both voices should sound");
+
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            names,
+            ["tuun_run_shared_0.wav", "tuun_run_shared_1.wav"],
+            "each voice should write its own file, named from the prefix, stem, and serial"
+        );
     }
 }

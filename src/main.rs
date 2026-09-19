@@ -41,8 +41,10 @@ struct Args {
     sample_rate: u32,
     #[arg(long, default_value_t = 1024)]
     buffer_size: u16,
-    // Date format to use when saving captured waveforms
-    #[arg(long, default_value = "_%Y-%m-%d_%H-%M-%S")]
+    // Formats the prefix shared by the name of every waveform captured during a run. Applied
+    // once, at startup. Two runs starting within the same second share a prefix and overwrite
+    // each other's captures, so include something like a process id when launching in a loop.
+    #[arg(long, default_value = "tuun_%Y-%m-%d_%H-%M-%S")]
     date_format: String,
     #[arg(long,
         num_args(0..=1), // Allows --flag or --flag=value
@@ -70,6 +72,7 @@ struct Args {
 
 pub fn main() {
     let args = Args::parse();
+    let captured_file_prefix = chrono::Local::now().format(&args.date_format).to_string();
 
     let (status_sender, status_receiver) = mpsc::channel();
     let (command_sender, command_receiver) = mpsc::channel();
@@ -102,7 +105,7 @@ pub fn main() {
         let mut tracker = tracker::Tracker::<WaveformId, MarkId>::new(
             args.sample_rate,
             args.output_dir.clone().into(),
-            args.date_format.clone(),
+            captured_file_prefix.clone(),
             command_receiver,
             status_sender,
         );
@@ -193,7 +196,7 @@ pub fn main() {
             tracker::Tracker::<WaveformId, MarkId>::new(
                 args.sample_rate,
                 args.output_dir.clone().into(),
-                args.date_format.clone(),
+                captured_file_prefix.clone(),
                 command_receiver,
                 status_sender,
             )
