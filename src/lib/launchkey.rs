@@ -105,6 +105,8 @@ pub enum Event {
     },
 
     PadFunctionDown,
+    /// The button marked ">" beside the top row of pads.
+    LaunchDown,
 }
 
 #[derive(Debug, Error)]
@@ -148,6 +150,10 @@ const PAD_MODE_CC: u8 = 29; // 0x1D
 const PAD_MODE_DAW_VALUE: u8 = 2;
 
 const PAD_FUNCTION_OFFSET: u8 = 105;
+
+/// The button marked ">" beside the top row of pads. Its LED is set by sending
+/// the same CC back on channel 0, as for `PAD_FUNCTION_OFFSET`.
+const LAUNCH_CC: u8 = 104;
 
 const DAW_MODE_DISPLAY_TARGET: u8 = 34;
 
@@ -307,6 +313,16 @@ impl Launchkey {
             channel: 0.into(),
             message: MidiMessage::Controller {
                 controller: PAD_FUNCTION_OFFSET.into(),
+                value: (color as u8).into(),
+            },
+        });
+    }
+
+    pub fn set_launch_color(&mut self, color: Color) {
+        self.send_event(LiveEvent::Midi {
+            channel: 0.into(),
+            message: MidiMessage::Controller {
+                controller: LAUNCH_CC.into(),
                 value: (color as u8).into(),
             },
         });
@@ -504,6 +520,8 @@ impl DAWState {
                         // Other buttons
                         (PAD_FUNCTION_OFFSET, 127) => Some(Event::PadFunctionDown),
                         (PAD_FUNCTION_OFFSET, 0) => None,
+                        (LAUNCH_CC, 127) => Some(Event::LaunchDown),
+                        (LAUNCH_CC, 0) => None,
 
                         _ => {
                             println!(
@@ -548,6 +566,10 @@ impl DAWState {
                     } else {
                         None
                     }
+                }
+                MidiMessage::Aftertouch { .. } => {
+                    // Don't print anything for now since these are pretty noisy
+                    None
                 }
                 _ => {
                     println!("Ignoring message {:?} on channel {}", message, channel);

@@ -92,6 +92,27 @@ impl DawPadMode {
     }
 }
 
+/// How a press of a clip-launcher top pad relates to the program's playback.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LaunchMode {
+    /// A press starts the program when it is silent and stops it when it is
+    /// sounding.
+    Toggle,
+    /// A press always starts another voice and never stops one, so repeated
+    /// presses layer.
+    Trigger,
+}
+
+impl LaunchMode {
+    /// Human-readable label for this mode.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            LaunchMode::Toggle => "Toggle",
+            LaunchMode::Trigger => "Trigger",
+        }
+    }
+}
+
 /// Internal state of the application. The reducer takes `&mut AppState` and mutates it in
 /// place; `main` keeps a single instance for the lifetime of the program.
 pub struct AppState {
@@ -101,6 +122,9 @@ pub struct AppState {
     pub mode: Mode,
     pub keys: Option<keys::Keys>,
     pub repeat_after_measures: Option<u32>,
+    /// How a clip-launcher top pad press relates to playback. Kept across
+    /// changes of `daw_pad_mode`.
+    pub launch_mode: LaunchMode,
     /// Active behavior for the DAW pad.
     pub daw_pad_mode: DawPadMode,
     /// The measure the sequencer pad grid is showing: page 0 = beats [1, 5),
@@ -133,6 +157,7 @@ impl AppState {
             mode: Mode::Select,
             keys: None,
             repeat_after_measures: None,
+            launch_mode: LaunchMode::Toggle,
             daw_pad_mode: DawPadMode::ClipLauncher,
             sequencer_page: 0,
             should_exit: false,
@@ -185,6 +210,10 @@ pub enum Action {
     /// Stop the program if it's playing; otherwise play it immediately. Does
     /// nothing if the program isn't a waveform.
     ToggleProgramPlayback(usize),
+    /// Start another voice of the program immediately, whether or not it is
+    /// already sounding. Does nothing if the program is the installed keys
+    /// instrument or isn't a waveform.
+    StartProgramVoice(usize),
     /// Remove the program's pending playback if there is one; otherwise queue
     /// it to play at the beginning of next measure (repeating per the app-wide
     /// default). Does nothing if the program isn't a waveform.
@@ -313,6 +342,9 @@ pub enum Action {
     },
     /// Toggle the default repeat (cycle None -> Some(1) -> Some(2) -> None).
     CycleRepeatAfterMeasures,
+    /// Switch the clip launcher's top pads between `LaunchMode::Toggle` and
+    /// `LaunchMode::Trigger`.
+    ToggleLaunchMode,
 
     // --- program-related I/O and other effects ---
     ShowMessage(String),
@@ -438,6 +470,13 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             ) {
                 stop_program_effects(state, ctx, i)
             } else if state.keys.as_ref().is_some_and(|k| k.id == i) {
+                vec![]
+            } else {
+                play_program_effects(i, false, None)
+            }
+        }
+        Action::StartProgramVoice(i) => {
+            if state.keys.as_ref().is_some_and(|k| k.id == i) {
                 vec![]
             } else {
                 play_program_effects(i, false, None)
@@ -732,6 +771,17 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
                 Some(_) => (None, Effect::ShowMessage("No repeats".to_string())),
             };
             vec![effect]
+        }
+
+        Action::ToggleLaunchMode => {
+            state.launch_mode = match state.launch_mode {
+                LaunchMode::Toggle => LaunchMode::Trigger,
+                LaunchMode::Trigger => LaunchMode::Toggle,
+            };
+            vec![Effect::ShowMessage(format!(
+                "Launch mode: {}",
+                state.launch_mode.display_name()
+            ))]
         }
 
         Action::ShowMessage(message) => vec![Effect::ShowMessage(message)],
@@ -2695,6 +2745,49 @@ _ = saw(220);";
             "expected StopProgram, got {:?}",
             effects
         );
+    }
+
+    /// Where `ToggleProgramPlayback` would stop, `StartProgramVoice` layers.
+    #[test]
+    fn start_program_voice_plays_even_when_already_active() {
+        let mut state = test_state();
+        let now = Instant::now();
+        let status = status_with_mark(now - Duration::from_secs(1));
+        let effects = apply_with_status(&mut state, &status, now, Action::StartProgramVoice(0));
+        assert!(
+            matches!(
+                effects[0],
+                Effect::PlayProgram {
+                    program_index: 0,
+                    start_at_next_measure: false,
+                    repeat_after_measures: None,
+                }
+            ),
+            "expected an immediate, non-repeating PlayProgram, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn start_program_voice_leaves_the_keys_instrument_alone() {
+        let mut state = test_state();
+        install_test_keys(&mut state);
+        let effects = apply_with_empty_status(&mut state, Action::StartProgramVoice(0));
+        assert!(
+            effects.is_empty(),
+            "expected no effects for the keys instrument, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn toggle_launch_mode_flips_between_toggle_and_trigger() {
+        let mut state = test_state();
+        assert_eq!(state.launch_mode, LaunchMode::Toggle);
+        apply_with_empty_status(&mut state, Action::ToggleLaunchMode);
+        assert_eq!(state.launch_mode, LaunchMode::Trigger);
+        apply_with_empty_status(&mut state, Action::ToggleLaunchMode);
+        assert_eq!(state.launch_mode, LaunchMode::Toggle);
     }
 
     #[test]

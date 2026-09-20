@@ -78,7 +78,10 @@ pub fn classify(
             actions::DawPadMode::ClipLauncher => {
                 let program_index = bank_start + *index as usize;
                 programs.get(program_index)?;
-                Some(vec![Action::ToggleProgramPlayback(program_index)])
+                Some(vec![match state.launch_mode {
+                    actions::LaunchMode::Toggle => Action::ToggleProgramPlayback(program_index),
+                    actions::LaunchMode::Trigger => Action::StartProgramVoice(program_index),
+                }])
             }
             // Top row does nothing in the keys-installer mode.
             actions::DawPadMode::KeysInstaller => Some(vec![]),
@@ -106,6 +109,7 @@ pub fn classify(
             }]),
         },
         Event::PadFunctionDown => Some(vec![Action::CycleRepeatAfterMeasures]),
+        Event::LaunchDown => Some(vec![Action::ToggleLaunchMode]),
 
         Event::NoteOn { key, velocity } => Some(vec![Action::NoteOn {
             key: *key,
@@ -122,7 +126,8 @@ pub fn classify(
 
 /// Pushes the current app state out to the Launchkey hardware: pad colors
 /// for active/pending program waveforms and the installed-keys program,
-/// plus the pad-function button color reflecting `repeat_after_measures`.
+/// plus the pad-function button color reflecting `repeat_after_measures`
+/// and the ">" button color reflecting `launch_mode`.
 ///
 /// `status` and the controller handle stay as separate args — they don't
 /// live on `AppState`.
@@ -147,6 +152,11 @@ pub fn update_launchkey_state(
             println!("unexpected repeat_after_measures: {:?}", i);
         }
     }
+
+    launchkey.set_launch_color(match state.launch_mode {
+        actions::LaunchMode::Trigger => launchkey::Color::White,
+        actions::LaunchMode::Toggle => launchkey::Color::Gray,
+    });
 
     let now = Instant::now();
     let (_current_beat, current_beat_start, current_beat_duration) =
@@ -431,6 +441,52 @@ mod tests {
         .expect("test source should parse");
         state.daw_pad_mode = daw_pad_mode;
         state
+    }
+
+    #[test]
+    fn classify_clip_launcher_top_pad_toggles_by_default() {
+        let state = test_state(DawPadMode::ClipLauncher);
+        assert_eq!(state.launch_mode, actions::LaunchMode::Toggle);
+        let actions = classify(&launchkey::Event::DAWTopPadDown { index: 0 }, &state)
+            .expect("top pads classify in the clip launcher");
+        assert!(
+            matches!(actions[0], Action::ToggleProgramPlayback(0)),
+            "expected ToggleProgramPlayback, got {:?}",
+            actions
+        );
+    }
+
+    #[test]
+    fn classify_clip_launcher_top_pad_starts_a_voice_in_trigger_mode() {
+        let mut state = test_state(DawPadMode::ClipLauncher);
+        state.launch_mode = actions::LaunchMode::Trigger;
+        let actions = classify(&launchkey::Event::DAWTopPadDown { index: 0 }, &state)
+            .expect("top pads classify in the clip launcher");
+        assert!(
+            matches!(actions[0], Action::StartProgramVoice(0)),
+            "expected StartProgramVoice, got {:?}",
+            actions
+        );
+    }
+
+    /// The ">" button flips the launch mode from any pad sub-mode.
+    #[test]
+    fn classify_launch_button_toggles_in_every_sub_mode() {
+        for daw_pad_mode in [
+            DawPadMode::ClipLauncher,
+            DawPadMode::KeysInstaller,
+            DawPadMode::Sequencer,
+        ] {
+            let state = test_state(daw_pad_mode);
+            let actions = classify(&launchkey::Event::LaunchDown, &state)
+                .expect("the launch-mode button always classifies");
+            assert!(
+                matches!(actions[0], Action::ToggleLaunchMode),
+                "expected ToggleLaunchMode in {:?}, got {:?}",
+                daw_pad_mode,
+                actions
+            );
+        }
     }
 
     #[test]
