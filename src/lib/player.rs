@@ -14,7 +14,7 @@ use crate::environment::Environment;
 use crate::expr;
 use crate::ids::{MarkId, WaveformId, WaveformSelector};
 use crate::optimizer;
-use crate::programs::{ProgramSet, ProgramSliders};
+use crate::programs::ProgramSet;
 use crate::sequencer;
 use crate::slider;
 use crate::tracker;
@@ -28,27 +28,29 @@ pub fn db_to_amplitude(db: f32) -> f32 {
     10.0_f32.powf(db / 20.0)
 }
 
-/// Substitutes each slider's current value into every `Marked { id:
-/// Slider(label), … }` node in `waveform`.
+/// Substitutes every slider's current value into the matching `Marked { id:
+/// Slider { .. }, … }` nodes of `waveform`.
 ///
-/// Returns the per-slider `(label, value)` pairs so callers that need to seed
-/// the slider worker's `last_slider_values` map (e.g., for a fresh
-/// `WaveformId::Key`) can build their own keyed map without re-denormalizing.
+/// Sliders of every program in `set` are applied, not just those of the program
+/// the waveform came from.
 pub fn substitute_current_slider_values(
     waveform: &mut waveform::Waveform<MarkId>,
-    sliders: &ProgramSliders,
-) -> Vec<(String, f32)> {
-    let mut values = Vec::with_capacity(sliders.configs().len());
-    for (config, &normalized) in sliders.configs().iter().zip(sliders.normalized_values()) {
-        let value = slider::denormalize(&config.function, normalized).unwrap_or(0.0);
-        values.push((config.label.clone(), value));
-        waveform::substitute(
-            waveform,
-            &MarkId::Slider(config.label.clone()),
-            &waveform::Waveform::Const(value),
-        );
+    set: &ProgramSet,
+) {
+    for (program_index, program) in set.programs().iter().enumerate() {
+        let sliders = program.sliders();
+        for (config, &normalized) in sliders.configs().iter().zip(sliders.normalized_values()) {
+            let value = slider::denormalize(&config.function, normalized).unwrap_or(0.0);
+            waveform::substitute(
+                waveform,
+                &MarkId::Slider {
+                    program: program_index,
+                    label: config.label.clone(),
+                },
+                &waveform::Waveform::Const(value),
+            );
+        }
     }
-    values
 }
 
 pub struct Player {
@@ -110,7 +112,7 @@ impl Player {
         let mut waveform = program.waveform().cloned()?;
         // Substitute the program's current slider positions before handing
         // the waveform to the tracker (since the cached ones may be old).
-        substitute_current_slider_values(&mut waveform, program.sliders());
+        substitute_current_slider_values(&mut waveform, set);
         if start_at_next_measure {
             &self.precompute_sender
         } else {
@@ -163,7 +165,7 @@ impl Player {
             time::Instant::now()
         };
         let mut step = sequence.step_waveform.clone();
-        substitute_current_slider_values(&mut step, program.sliders());
+        substitute_current_slider_values(&mut step, set);
         let sender = if start_at_next_measure {
             &self.precompute_sender
         } else {
@@ -266,7 +268,7 @@ impl Player {
             }),
         };
         let mut step = sequence.step_waveform.clone();
-        substitute_current_slider_values(&mut step, program.sliders());
+        substitute_current_slider_values(&mut step, set);
         let _ = self.fast_sender.send(tracker::Command::Play {
             id: WaveformId::Step {
                 program: program_index,

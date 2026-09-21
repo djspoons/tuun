@@ -317,10 +317,12 @@ fn check_block(
     for path in uses {
         bindings.push(expr::Binding::Use(path).into());
     }
+    // A web component hosts one expression with one slider set, so the mark's
+    // program qualifier has nothing to distinguish and any value will do.
     slider::append_slider_bindings(
         &slider_configs,
         &vec![0.0; slider_configs.len()],
-        ids::MarkId::Slider,
+        |label| ids::MarkId::Slider { program: 0, label },
         &mut bindings,
     );
 

@@ -21,14 +21,13 @@ use tuun::midi_input;
 use tuun::player;
 use tuun::renderer;
 use tuun::sdl2_input;
-use tuun::slider;
 use tuun::tracker;
 use tuun::waveform;
 
 use metric::Metric;
 use renderer::Renderer;
 use tracker::Command;
-use tuun::ids::{MarkId, WaveformId, WaveformSelector};
+use tuun::ids::{MarkId, WaveformId};
 
 #[derive(ClapParser, Debug)]
 #[command(version, about, long_about = None)]
@@ -274,22 +273,9 @@ pub fn main() {
     // Start the beats!
     player.start_beats(&environment, &status_receiver);
 
-    // Copy initial values for each slider for all programs
-    let mut last_slider_values: HashMap<(WaveformSelector, String), f32> = HashMap::new();
-    for (program_index, program) in state.programs.programs().iter().enumerate() {
-        for (j, config) in program.sliders().configs().iter().enumerate() {
-            let value =
-                slider::denormalize(&config.function, program.sliders().normalized_values()[j])
-                    .unwrap_or(0.0);
-            last_slider_values.insert(
-                (
-                    WaveformSelector::ProgramVoices(program_index),
-                    config.label.clone(),
-                ),
-                value,
-            );
-        }
-    }
+    // Seed each slider's ramp baseline where the slider currently sits, so its
+    // first move ramps instead of stepping to the target.
+    let last_slider_values = effects::slider_values(&state.programs);
     // Spawn a thread that batches slider updates, sending them approximately once per audio buffer
     let buffer_duration =
         Duration::from_secs_f32(args.buffer_size as f32 / args.sample_rate as f32);
@@ -298,30 +284,22 @@ pub fn main() {
     thread::spawn(move || {
         let mut last_slider_values = last_slider_values;
         loop {
-            let mut pending: HashMap<(WaveformSelector, String), f32> = HashMap::new();
+            let mut pending: HashMap<MarkId, f32> = HashMap::new();
             let deadline;
 
             // Idle: block until the first slider update event arrives.
             loop {
                 use effects::SliderEvent;
                 match slider_receiver.recv() {
-                    Ok(SliderEvent::UpdateSlider {
-                        selector,
-                        slider,
-                        value,
-                    }) => {
-                        pending.insert((selector, slider), value);
+                    Ok(SliderEvent::UpdateSlider { mark, value }) => {
+                        pending.insert(mark, value);
                         deadline = Instant::now() + buffer_duration;
                         break;
                     }
-                    Ok(SliderEvent::SetInitialValues(values)) => {
-                        // This occurs when the set of programs is reloaded.
+                    Ok(SliderEvent::SetBaselines(values)) => {
+                        // The program set was reloaded: the slots the old
+                        // baselines name may now hold different bindings.
                         last_slider_values = values;
-                    }
-                    Ok(SliderEvent::UpdateInitialValues(values)) => {
-                        values.into_iter().for_each(|(k, v)| {
-                            last_slider_values.insert(k, v);
-                        });
                     }
                     Err(_) => return, // channel closed, exit thread
                 };
@@ -331,27 +309,16 @@ pub fn main() {
             loop {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
+                    // XXX is this check necessary?
                     break;
                 }
                 use effects::SliderEvent;
                 match slider_receiver.recv_timeout(remaining) {
-                    Ok(SliderEvent::UpdateSlider {
-                        selector,
-                        slider,
-                        value,
-                    }) => {
-                        pending.insert((selector, slider), value);
+                    Ok(SliderEvent::UpdateSlider { mark, value }) => {
+                        pending.insert(mark, value);
                     }
-                    Ok(SliderEvent::SetInitialValues(values)) => {
-                        // What to do with these new values for waveforms that are playing? Especially ones
-                        // where the sliders are moving? Maybe think of something better in the future once
-                        // we understand better happens to currently playing waveforms.
+                    Ok(SliderEvent::SetBaselines(values)) => {
                         last_slider_values = values;
-                    }
-                    Ok(SliderEvent::UpdateInitialValues(values)) => {
-                        values.into_iter().for_each(|(k, v)| {
-                            last_slider_values.insert(k, v);
-                        });
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => break,
                     Err(mpsc::RecvTimeoutError::Disconnected) => return,

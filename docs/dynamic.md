@@ -32,8 +32,16 @@ Q:0.707:0.1:1.1
 In the native app, sliders are written as annotations that appear on the lines just before the binding that they annotate.
 ```
 #{sliders=["Q:0.707:0.1:1.1"]}
-_ = square(220) | rbj.lpf(Q, 2000)
+_ = square(220) | rbj.lpf(Q, 2000);
 ```
+Each annotation defines exactly one slider. If that slider appears in the definition of a binding that itself is used in other programs, all of those programs will see the same slider value.
+```
+#{level_db=0,sliders=["vibrato:0:1:10"]}
+wave = triangle(220 + $vibrato);
+#{level_db=0}
+_ = wave | rbj.lpf(0.707, 2000); // vibrato is controlled by the slider above
+```
+
 If a MIDI controller is detected, sliders are mapped to encoders or faders. If no MIDI controller is detected, the first two sliders are mapped to the x- and y-axis of the mouse position.
 
 In the web component, sliders are configured using an HTML attribute.

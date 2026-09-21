@@ -405,15 +405,11 @@ pub enum Effect {
     /// no waveform was stored.
     PlayNoteOff { key: u8 },
 
-    /// Push a slider value change for the selected waveforms into the slider
-    /// pipeline. The downstream worker thread coalesces these per quantum and
-    /// sends `Command::Modify` to the tracker with a ramp from the previous
-    /// value, so the running waveforms actually pick up the new slider value.
-    UpdateSlider {
-        selector: WaveformSelector,
-        slider: String,
-        value: f32,
-    },
+    /// Push a slider value change into the slider pipeline. The downstream
+    /// worker thread coalesces these per quantum and sends `Command::Modify` to
+    /// the tracker with a ramp from the previous value, so every sounding voice
+    /// that embeds `mark` picks up the new value.
+    UpdateSlider { mark: MarkId, value: f32 },
 
     // --- launchkey hardware ---
     /// Update the controller's encoder display text.
@@ -1571,22 +1567,12 @@ fn apply_slider(
     let actual_value = change.value;
 
     let mut effects = vec![Effect::UpdateSlider {
-        selector: WaveformSelector::ProgramVoices(program_index),
-        slider: label.clone(),
+        mark: MarkId::Slider {
+            program: program_index,
+            label: label.clone(),
+        },
         value: actual_value,
     }];
-
-    // If the keys were installed from this program, also propagate the new
-    // slider value to every key waveform.
-    if let Some(keys) = state.keys.as_mut()
-        && keys.id == program_index
-    {
-        effects.push(Effect::UpdateSlider {
-            selector: WaveformSelector::AllKeys,
-            slider: label.clone(),
-            value: actual_value,
-        });
-    }
 
     let formatted_value = programs::format_sig_digits(actual_value, 3);
 
@@ -2692,8 +2678,11 @@ _ = saw(220);";
         });
     }
 
+    /// A slider move emits exactly one update, addressed by a mark that
+    /// names the declaring program. The single update is what reaches key
+    /// voices too — no separate mirror onto the keys family.
     #[test]
-    fn slider_change_on_keys_program_propagates_to_active_keys() {
+    fn slider_change_emits_one_update_keyed_by_the_declaring_program() {
         let mut state = AppState::from_source(
             "#{sliders=[\"vol:0.5:0:1\"]}\nk = fn(note, vel) => (vol, vol);".to_string(),
             std::path::PathBuf::new(),
@@ -2708,29 +2697,21 @@ _ = saw(220);";
                 normalized: 0.8,
             },
         );
-        // The program's own voice family gets the update...
+        let updates: Vec<_> = effects
+            .iter()
+            .filter(|e| matches!(e, Effect::UpdateSlider { .. }))
+            .collect();
+        assert_eq!(updates.len(), 1, "got {:?}", effects);
         assert!(
-            effects.iter().any(|e| matches!(
-                e,
+            matches!(
+                updates[0],
                 Effect::UpdateSlider {
-                    selector: WaveformSelector::ProgramVoices(0),
+                    mark: MarkId::Slider { program: 0, label },
                     ..
-                }
-            )),
-            "expected a ProgramVoices UpdateSlider, got {:?}",
-            effects
-        );
-        // ...and so does every key waveform of the installed instrument.
-        assert!(
-            effects.iter().any(|e| matches!(
-                e,
-                Effect::UpdateSlider {
-                    selector: WaveformSelector::AllKeys,
-                    ..
-                }
-            )),
-            "expected an AllKeys UpdateSlider, got {:?}",
-            effects
+                } if label == "vol"
+            ),
+            "got {:?}",
+            updates[0]
         );
     }
 

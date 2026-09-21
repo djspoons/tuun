@@ -5,6 +5,7 @@
 
 use std::fmt;
 
+use crate::programs;
 use crate::tracker;
 
 // TODO: rename Program as Clip? Or make Clip a type of program?
@@ -67,10 +68,14 @@ impl tracker::Id for WaveformId {
     type Selector = WaveformSelector;
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum MarkId {
     TopLevel, // a mark for the whole Program
-    Slider(String),
+    /// One slider, qualified by the program slot whose binding declares it.
+    Slider {
+        program: usize,
+        label: String,
+    },
     Amplitude,  // use to set top-level amplitude
     Terminator, // used to stop programs
     UserDefined(u32),
@@ -83,7 +88,14 @@ impl fmt::Display for MarkId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             MarkId::TopLevel => write!(f, "top-level"),
-            MarkId::Slider(name) => write!(f, "slider({:?})", name),
+            MarkId::Slider { program, label } => {
+                write!(
+                    f,
+                    "slider({}, {:?})",
+                    programs::bank_address(*program),
+                    label
+                )
+            }
             MarkId::Amplitude => write!(f, "amplitude"),
             MarkId::Terminator => write!(f, "terminator"),
             MarkId::UserDefined(id) => write!(f, "{:?}", id),

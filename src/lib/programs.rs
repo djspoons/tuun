@@ -19,6 +19,23 @@ use crate::waveform;
 pub const PROGRAMS_PER_BANK: usize = 8;
 pub const NUM_PROGRAM_BANKS: usize = 8;
 
+/// Returns the bank-relative address of the slot at `index`, such as `"B:3"`.
+///
+/// The letter is the bank (A..H) and the digit is the 1-based position within
+/// that bank — the digit the performer types to select the slot.
+///
+/// # Example
+///
+/// ```
+/// use tuun::programs::bank_address;
+/// assert_eq!(bank_address(9), "B:2");
+/// ```
+pub fn bank_address(index: usize) -> String {
+    let bank = index / PROGRAMS_PER_BANK;
+    let slot_in_bank = (index % PROGRAMS_PER_BANK) + 1;
+    format!("{}:{}", (b'A' + bank as u8) as char, slot_in_bank)
+}
+
 /// The sliders attached to a program: source-level configs plus the
 /// current normalized position of each.
 ///
@@ -716,45 +733,102 @@ impl ProgramSet {
         if self.programs.get(index).is_none() {
             return String::new();
         }
-        let bank = index / PROGRAMS_PER_BANK;
-        let slot_in_bank = (index % PROGRAMS_PER_BANK) + 1;
-        let bank_letter = (b'A' + bank as u8) as char;
+        let address = bank_address(index);
         let name = self.name(index);
         if name.is_empty() {
-            format!("{}:{}", bank_letter, slot_in_bank)
+            address
         } else {
-            format!("{}:{} ({})", bank_letter, slot_in_bank, name)
+            format!("{} ({})", address, name)
         }
     }
 
     /// Returns the bindings to evaluate the program at `index` under: the
-    /// file-level bindings preceding it (bindings after it are ignored),
-    /// with anonymous `_` definitions filtered out, plus a binding for each
-    /// of the program's sliders at its current value.
+    /// file-level bindings preceding it (bindings after it are ignored), with
+    /// anonymous `_` definitions filtered out and each remaining definition's
+    /// own sliders bound around its body, plus a binding for each of this
+    /// program's sliders at its current value.
     pub fn evaluation_bindings(&self, index: usize) -> Vec<expr::SourceBinding<MarkId, Source>> {
         let program = &self.programs[index];
-        let mut bindings: Vec<expr::SourceBinding<MarkId, Source>> =
-            self.bindings[..program.binding_index].to_vec();
-        // TODO this is a pretty big hack but there's an interesting question
-        // about what sliders in *other* bindings mean. To avoid answering that
-        // for the moment, just assume that only "_" bindings have sliders and
-        // that they can't be used so we can safely filter them out here. I
-        // think the right answer is that we should bind sliders uniquely in
-        // each binding... or at least those that have slots? (Otherwise, how
-        // can you modify the slider value?)
-        bindings.retain(|b| match &b.binding {
-            expr::Binding::Definition(p, _) => {
-                !matches!(p, expr::Pattern::Identifier(v) if v == "_")
+        let mut bindings: Vec<expr::SourceBinding<MarkId, Source>> = Vec::new();
+        for (binding_index, source_binding) in
+            self.bindings[..program.binding_index].iter().enumerate()
+        {
+            // Anonymous definitions are unreferenceable, so evaluating them
+            // here would be wasted work — and a broken one would poison every
+            // later program's context.
+            let expr::Binding::Definition(pattern, body) = &source_binding.binding else {
+                bindings.push(source_binding.clone());
+                continue;
+            };
+            if matches!(pattern, expr::Pattern::Identifier(v) if v == "_") {
+                continue;
             }
-            _ => true,
-        });
+            bindings.push(expr::SourceBinding {
+                binding: expr::Binding::Definition(
+                    pattern.clone(),
+                    self.bind_own_sliders(binding_index, body.clone()),
+                ),
+                annotations: source_binding.annotations.clone(),
+                span: source_binding.span.clone(),
+            });
+        }
+        // Appended last, so a program's own sliders are never in scope while
+        // its predecessors are evaluated.
         slider::append_slider_bindings(
             program.sliders.configs(),
             program.sliders.normalized_values(),
-            MarkId::Slider,
+            |label| MarkId::Slider {
+                program: index,
+                label,
+            },
             &mut bindings,
         );
         bindings
+    }
+
+    /// Returns `body` with the sliders declared on the binding at
+    /// `binding_index` bound around it at their current values, or `body`
+    /// unchanged when that binding declares none.
+    fn bind_own_sliders(
+        &self,
+        binding_index: usize,
+        body: expr::SourceExpr<MarkId, Source>,
+    ) -> expr::SourceExpr<MarkId, Source> {
+        // Padding slots carry `binding_index == self.bindings.len()`, which is
+        // past every real binding, so they never match.
+        let Some(program_index) = self
+            .programs
+            .iter()
+            .position(|p| p.binding_index == binding_index)
+        else {
+            return body;
+        };
+        let sliders = &self.programs[program_index].sliders;
+        let mut wrapped = body;
+        // Innermost first, so the printed form reads in declaration order.
+        for (config, &normalized) in sliders
+            .configs()
+            .iter()
+            .zip(sliders.normalized_values())
+            .rev()
+        {
+            let value = slider::denormalize(&config.function, normalized).unwrap_or(0.0);
+            let marked = expr::SourceExpr::from(expr::Expr::Waveform(waveform::Waveform::Marked {
+                id: MarkId::Slider {
+                    program: program_index,
+                    label: config.label.clone(),
+                },
+                waveform: Box::new(waveform::Waveform::Const(value)),
+            }));
+            wrapped = expr::SourceExpr::application(
+                expr::SourceExpr::function(
+                    vec![expr::Pattern::Identifier(config.label.clone())],
+                    wrapped,
+                ),
+                vec![marked],
+            );
+        }
+        wrapped
     }
 
     /// Returns the backing source text the program set was loaded from.
@@ -1551,6 +1625,133 @@ mod tests {
         assert!(program.undo(0).is_none());
     }
 
+    /// Returns the name each binding of `bindings` binds, for the `Definition`s
+    /// among them.
+    fn binding_names(bindings: &[expr::SourceBinding<MarkId, Source>]) -> Vec<String> {
+        bindings
+            .iter()
+            .filter_map(|b| match &b.binding {
+                expr::Binding::Definition(expr::Pattern::Identifier(name), _) => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Returns the `(name, mark)` pair of each `name = Marked(mark, …)` binding
+    /// in `bindings` — the shape [`slider::append_slider_bindings`] returns for
+    /// a program's own sliders. A preceding binding's sliders are bound inside
+    /// its body rather than at the top level, so they do not appear here.
+    fn own_slider_marks(bindings: &[expr::SourceBinding<MarkId, Source>]) -> Vec<(String, MarkId)> {
+        bindings
+            .iter()
+            .filter_map(|b| match &b.binding {
+                expr::Binding::Definition(
+                    expr::Pattern::Identifier(name),
+                    expr::SourceExpr {
+                        expr: expr::Expr::Waveform(waveform::Waveform::Marked { id, .. }),
+                        ..
+                    },
+                ) => Some((name.clone(), id.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A slider's name reaches the right-hand side of the binding that declares
+    /// it and nowhere else: a later program neither sees it among its bindings
+    /// nor can name it.
+    #[test]
+    fn a_slider_name_is_invisible_outside_its_declaring_binding() {
+        let source = "\
+#{sliders=[\"mix:0.5:0:1\"]}
+m = mix;
+#{level_db=0}
+later = mix;";
+        let mut set = state_from(source);
+        // `m` is in scope for the later program; the slider it declares is not
+        // a binding of its own.
+        assert_eq!(binding_names(&set.evaluation_bindings(1)), vec!["m"]);
+
+        let environment = Environment::new(8000, 90, PathBuf::new());
+        // The declaring binding still evaluates — the name is in scope for its
+        // own right-hand side.
+        set.evaluate_and_record(&environment, 0)
+            .expect("the declaring binding sees its own slider");
+        let diagnostics = set
+            .evaluate_and_record(&environment, 1)
+            .expect_err("`mix` belongs to the binding that declares it");
+        // Located in the later program's own text, not in the file.
+        assert_eq!(diagnostics.len(), 1, "got {:?}", diagnostics);
+        assert_eq!(diagnostics[0].to_string(), "1:1: unbound variable 'mix'");
+        assert_eq!(diagnostics[0].program_range, Some(0..3));
+    }
+
+    /// Same-labelled sliders declared on different bindings create distinct
+    /// marks, each qualified by its own program slot.
+    #[test]
+    fn same_labelled_sliders_on_different_programs_stay_distinct() {
+        let source = "\
+#{sliders=[\"cents:1:-10:10\"]}
+a = cents;
+#{sliders=[\"cents:2:-10:10\"]}
+b = cents;";
+        let set = state_from(source);
+        let marked = |program| {
+            (
+                "cents".to_string(),
+                MarkId::Slider {
+                    program,
+                    label: "cents".to_string(),
+                },
+            )
+        };
+        assert_eq!(
+            own_slider_marks(&set.evaluation_bindings(0)),
+            vec![marked(0)]
+        );
+        assert_eq!(
+            own_slider_marks(&set.evaluation_bindings(1)),
+            vec![marked(1)]
+        );
+    }
+
+    /// A named binding carrying `sliders=` used to leave its label free in
+    /// every later program's scope, so each failed with `Variable 'mix' not
+    /// found in context`. Now the binding evaluates to a value carrying the
+    /// mark, and that value is what later programs see.
+    #[test]
+    fn a_named_slider_binding_is_in_scope_for_later_programs_as_its_value() {
+        let source = "\
+#{sliders=[\"mix:0.5:0:1\"]}
+m = mix;
+#{level_db=0}
+later = m;";
+        let set = state_from(source);
+        let environment = Environment::new(8000, 90, PathBuf::new());
+        let context = environment
+            .program_context(&set, 1)
+            .expect("a preceding slider binding must not break later programs");
+        let (_, value) = context
+            .iter()
+            .rev()
+            .find(|(name, _)| name == "m")
+            .expect("`m` is in scope for the later program");
+        let expr::Expr::Waveform(waveform::Waveform::Marked { id, waveform }) = &value.expr else {
+            panic!(
+                "expected `m` to evaluate to a marked waveform, got {}",
+                value
+            );
+        };
+        assert_eq!(
+            *id,
+            MarkId::Slider {
+                program: 0,
+                label: "mix".to_string()
+            }
+        );
+        assert_eq!(**waveform, waveform::Waveform::Const(0.5));
+    }
+
     #[test]
     fn evaluation_bindings_filters_anonymous_and_appends_sliders() {
         let source = "\
@@ -1560,14 +1761,7 @@ _ = pulse(60);
 #{sliders=[\"vol:0.5:0:1\"]}
 tone = saw(220);";
         let set = state_from(source);
-        let names: Vec<String> = set
-            .evaluation_bindings(1)
-            .iter()
-            .filter_map(|b| match &b.binding {
-                expr::Binding::Definition(expr::Pattern::Identifier(name), _) => Some(name.clone()),
-                _ => None,
-            })
-            .collect();
+        let names = binding_names(&set.evaluation_bindings(1));
         // `pi` precedes the program and survives; the anonymous `_` slot-1
         // definition is filtered; the program's own slider is appended.
         assert_eq!(names, vec!["pi".to_string(), "vol".to_string()]);

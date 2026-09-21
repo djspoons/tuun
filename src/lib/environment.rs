@@ -21,9 +21,8 @@ use crate::ids::MarkId;
 use crate::infer;
 use crate::optimizer;
 use crate::parser;
-use crate::programs::{Evaluated, ProgramKind, ProgramSet, ProgramSliders};
+use crate::programs::{Evaluated, ProgramKind, ProgramSet};
 use crate::sequencer;
-use crate::slider;
 use crate::waveform;
 
 /// The `mark(N)` built-in: wraps a waveform in a `MarkId::UserDefined`
@@ -628,11 +627,10 @@ impl Environment {
             expr::Expr::Function { .. } | expr::Expr::BuiltIn { .. } => match kind {
                 ProgramKind::Keys => {
                     // Sanity check: actually invoke with dummy args.
-                    // TODO use a waveform for velocity
+                    // TODO use a non-constant waveform for velocity
                     match self.apply_note_function(
                         &expr,
                         vec![expr::SourceExpr::float(60.0), expr::SourceExpr::float(0.7)],
-                        set.programs()[index].sliders(),
                     ) {
                         Ok(_) => Ok(Evaluated::KeysInstrument(expr)),
                         Err(error) => Err(vec![self.diagnose(&error, set, index)]),
@@ -690,27 +688,15 @@ impl Environment {
     /// pair of (note-on, note-off) waveforms as a result. Both returned
     /// waveforms are optimized.
     ///
-    /// The expressions `expr` and `arguments` should be closed except for references
-    /// to `sliders`, which are bound at their current values.
-    ///
-    /// Errors keep any span the evaluation produced (e.g. an unbound variable
-    /// in the function's body), so they can be diagnosed against the program
-    /// the function came from.
+    /// Both `expr` and `arguments` must be closed.
     pub fn apply_note_function(
         &self,
         expr: &expr::SourceExpr<MarkId, Source>,
         arguments: Vec<expr::SourceExpr<MarkId, Source>>,
-        sliders: &ProgramSliders,
     ) -> Result<(waveform::Waveform<MarkId>, waveform::Waveform<MarkId>), expr::Error<Source>> {
         use expr::Expr::{Tuple, Waveform};
         let expr = expr::SourceExpr::application(expr.clone(), arguments);
-        let mut bindings = vec![];
-        slider::append_slider_bindings(
-            sliders.configs(),
-            sliders.normalized_values(),
-            MarkId::Slider,
-            &mut bindings,
-        );
+        let bindings = vec![];
         let resolve = |_: &[String]| {
             Err(expr::Error::eval_here(
                 "Didn't expect to resolve in apply_note_function".to_string(),
@@ -881,16 +867,25 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
+    /// The mark of the slider labelled `label` declared on the program at
+    /// `program`.
+    fn slider_mark(program: usize, label: &str) -> MarkId {
+        MarkId::Slider {
+            program,
+            label: label.to_string(),
+        }
+    }
+
     /// Walks `waveform` and collects the `Const` value under every
-    /// `Marked(Slider(label), …)` node.
-    fn slider_mark_values(waveform: &waveform::Waveform<MarkId>, found: &mut Vec<(String, f32)>) {
+    /// `Marked(Slider { .. }, …)` node, as (mark, value) pairs.
+    fn slider_mark_values(waveform: &waveform::Waveform<MarkId>, found: &mut Vec<(MarkId, f32)>) {
         use waveform::Waveform;
         match waveform {
             Waveform::Marked { id, waveform } => {
-                if let MarkId::Slider(label) = id
+                if matches!(id, MarkId::Slider { .. })
                     && let Waveform::Const(v) = **waveform
                 {
-                    found.push((label.clone(), v));
+                    found.push((id.clone(), v));
                 }
                 slider_mark_values(waveform, found);
             }
@@ -926,15 +921,12 @@ mod tests {
         // A note played at the initial slider position carries vol = 0.5.
         let args = vec![expr::SourceExpr::float(60.0), expr::SourceExpr::float(0.5)];
         let (mut note_on, _note_off) = environment
-            .apply_note_function(&function, args.clone(), set.programs()[0].sliders())
+            .apply_note_function(&function, args.clone())
             .expect("note function should apply");
-        // The marks must survive the optimization apply_note_function
-        // performs for substitution and live updates to work.
-        let seeded = substitute_current_slider_values(&mut note_on, set.programs()[0].sliders());
-        assert_eq!(seeded, vec![("vol".to_string(), 0.5)]);
+        substitute_current_slider_values(&mut note_on, &set);
         let mut marks = Vec::new();
         slider_mark_values(&note_on, &mut marks);
-        assert_eq!(marks, vec![("vol".to_string(), 0.5)]);
+        assert_eq!(marks, vec![(slider_mark(0, "vol"), 0.5)]);
 
         // Move the slider; the next note carries the new value.
         set.program_mut(0)
@@ -942,13 +934,12 @@ mod tests {
             .set_slider_normalized(0, 1.0)
             .expect("program has a vol slider");
         let (mut note_on, _note_off) = environment
-            .apply_note_function(&function, args, set.programs()[0].sliders())
+            .apply_note_function(&function, args)
             .expect("note function should apply");
-        let seeded = substitute_current_slider_values(&mut note_on, set.programs()[0].sliders());
-        assert_eq!(seeded, vec![("vol".to_string(), 1.0)]);
+        substitute_current_slider_values(&mut note_on, &set);
         let mut marks = Vec::new();
         slider_mark_values(&note_on, &mut marks);
-        assert_eq!(marks, vec![("vol".to_string(), 1.0)]);
+        assert_eq!(marks, vec![(slider_mark(0, "vol"), 1.0)]);
     }
 
     #[test]
@@ -976,14 +967,13 @@ mod tests {
 
         let args = vec![expr::SourceExpr::float(60.0), expr::SourceExpr::float(0.5)];
         let (mut note_on, _note_off) = environment
-            .apply_note_function(&function, args, set.programs()[0].sliders())
+            .apply_note_function(&function, args)
             .expect("note function should apply");
-        let seeded = substitute_current_slider_values(&mut note_on, set.programs()[0].sliders());
-        assert_eq!(seeded, vec![("vol".to_string(), 1.0)]);
+        substitute_current_slider_values(&mut note_on, &set);
         let mut marks = Vec::new();
         slider_mark_values(&note_on, &mut marks);
         assert!(
-            marks.contains(&("vol".to_string(), 1.0)),
+            marks.contains(&(slider_mark(0, "vol"), 1.0)),
             "expected a surviving vol mark at 1.0, got {:?}",
             marks
         );
