@@ -211,8 +211,9 @@ pub enum Action {
     /// nothing if the program isn't a waveform.
     ToggleProgramPlayback(usize),
     /// Start another voice of the program immediately, whether or not it is
-    /// already sounding. Does nothing if the program is the installed keys
-    /// instrument or isn't a waveform.
+    /// already sounding. A sequenceable program's voice is one hit of the
+    /// waveform its pattern is built from, not the pattern. Does nothing if
+    /// the program is the installed keys instrument or isn't a waveform.
     StartProgramVoice(usize),
     /// Remove the program's pending playback if there is one; otherwise queue
     /// it to play at the beginning of next measure (repeating per the app-wide
@@ -363,6 +364,10 @@ pub enum Effect {
         start_at_next_measure: bool,
         repeat_after_measures: Option<u32>,
     },
+    /// Send a Play command for one immediate, non-repeating voice of the
+    /// program at `program_index` — one hit of a sequenceable program's
+    /// pattern waveform, or any other program's whole waveform.
+    PlayProgramVoice(usize),
     /// Send a "stop" ramp for the program waveform.
     StopProgram(usize),
     /// Cancel the program's queued playback from the next cycle boundary
@@ -475,7 +480,7 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             if state.keys.as_ref().is_some_and(|k| k.id == i) {
                 vec![]
             } else {
-                play_program_effects(i, false, None)
+                vec![Effect::PlayProgramVoice(i), Effect::UpdateSource(i)]
             }
         }
         Action::ToggleProgramPendingPlayback(i) => {
@@ -2736,15 +2741,23 @@ _ = saw(220);";
         let status = status_with_mark(now - Duration::from_secs(1));
         let effects = apply_with_status(&mut state, &status, now, Action::StartProgramVoice(0));
         assert!(
-            matches!(
-                effects[0],
-                Effect::PlayProgram {
-                    program_index: 0,
-                    start_at_next_measure: false,
-                    repeat_after_measures: None,
-                }
-            ),
-            "expected an immediate, non-repeating PlayProgram, got {:?}",
+            matches!(effects[0], Effect::PlayProgramVoice(0)),
+            "expected PlayProgramVoice, got {:?}",
+            effects
+        );
+    }
+
+    /// A trigger launches one voice, never the decomposed pattern that
+    /// `PlayProgram` would launch for a sequenceable program.
+    #[test]
+    fn start_program_voice_never_launches_a_pattern() {
+        let mut state = test_state();
+        let effects = apply_with_empty_status(&mut state, Action::StartProgramVoice(0));
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::PlayProgram { .. })),
+            "expected no PlayProgram, got {:?}",
             effects
         );
     }

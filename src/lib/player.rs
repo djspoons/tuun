@@ -129,6 +129,41 @@ impl Player {
         Some(message)
     }
 
+    /// Plays a single voice of the program at `program_index` immediately,
+    /// once, under `WaveformId::Program(program_index)`, so that repeated
+    /// calls layer independent voices. Returns the user-visible message, or
+    /// `None` when the program's text didn't evaluate to a waveform (or the
+    /// index is out of range) and nothing was played.
+    ///
+    /// For a sequenceable program the voice is the waveform its pattern is
+    /// built from — one hit, not the pattern; every other program's voice is
+    /// its whole waveform.
+    ///
+    /// # Example
+    ///
+    /// A program reading `on_beats(kick, [1, 2, 3, 4])` plays `kick` once,
+    /// where [`Player::play_program_steps`] would play all four beats.
+    pub fn play_program_voice(&self, set: &ProgramSet, program_index: usize) -> Option<String> {
+        let program = set.program(program_index)?;
+        let display_name = set.display_name(program_index);
+        // A sequenceable program's own waveform is the whole pattern, so the
+        // single voice has to come from the decomposed sequence instead.
+        let mut waveform = match program.sequence() {
+            Some(sequence) => sequence.step_waveform.clone(),
+            None => program.waveform().cloned()?,
+        };
+        substitute_current_slider_values(&mut waveform, set);
+        self.fast_sender
+            .send(tracker::Command::Play {
+                id: WaveformId::Program(program_index),
+                waveform: build_top_level_waveform(waveform, program.level_db()),
+                start: None,
+                repeat_every: None,
+            })
+            .unwrap();
+        Some(format!("Playing voice of {}", display_name))
+    }
+
     /// Plays the sequenceable program at `program_index` decomposed: one
     /// scheduled, independently repeating `WaveformId::Step` per listed
     /// beat, plus a silent anchor step carrying the `TopLevel` mark.
@@ -263,6 +298,9 @@ impl Player {
         };
         let repeat_every = match (cycle_start, next_cycle_start) {
             (Some(cycle), Some(next_cycle)) => Some(next_cycle - cycle),
+            // A running anchor with nothing queued behind it is a one-shot
+            // family; the step must not outlive it.
+            (Some(_), None) => None,
             _ => default_repeat_measures.map(|measures| {
                 duration_from_beats(self.tempo, (measures * self.beats_per_measure) as u64)
             }),
@@ -617,6 +655,62 @@ mod tests {
         assert!(format!("{}", anchor.1).contains("top-level"));
     }
 
+    /// A sequenceable program's voice is one hit, not the pattern — where
+    /// `play_program_steps` sends one entry per listed beat plus an anchor.
+    #[test]
+    fn play_program_voice_plays_one_hit_of_a_sequenceable_program() {
+        let set = sequenced_set();
+        let (player, _precompute_receiver, fast_receiver) = test_player();
+
+        let message = player.play_program_voice(&set, 0);
+        assert!(message.is_some());
+
+        let commands: Vec<_> = fast_receiver.try_iter().collect();
+        assert_eq!(commands.len(), 1, "a voice is one entry, not a pattern");
+        let tracker::Command::Play {
+            id,
+            waveform,
+            start,
+            repeat_every,
+        } = &commands[0]
+        else {
+            panic!("expected a Play command");
+        };
+        // Under the program's own id, so it can't collide with the grid
+        // steps a launched pattern uses.
+        assert_eq!(*id, WaveformId::Program(0));
+        assert_eq!(*start, None, "a voice starts immediately");
+        assert_eq!(*repeat_every, None, "a voice plays once");
+        assert!(format!("{}", waveform).contains("top-level"));
+    }
+
+    #[test]
+    fn play_program_voice_plays_the_whole_waveform_when_not_sequenceable() {
+        let source = "#{level_db=0}\n_ = 1 | fin(time - 1);\n";
+        let (mut set, message) =
+            ProgramSet::from_source(source.to_string(), std::path::PathBuf::new())
+                .expect("test source should parse");
+        assert!(message.is_empty(), "{}", message);
+        let environment = Environment::new(8000, 90, std::path::PathBuf::new());
+        set.evaluate_and_record(&environment, 0)
+            .expect("test program should evaluate");
+        assert!(set.program(0).unwrap().sequence().is_none());
+
+        let (player, _precompute_receiver, fast_receiver) = test_player();
+        assert!(player.play_program_voice(&set, 0).is_some());
+
+        let commands: Vec<_> = fast_receiver.try_iter().collect();
+        assert_eq!(commands.len(), 1);
+        let tracker::Command::Play {
+            id, repeat_every, ..
+        } = &commands[0]
+        else {
+            panic!("expected a Play command");
+        };
+        assert_eq!(*id, WaveformId::Program(0));
+        assert_eq!(*repeat_every, None);
+    }
+
     #[test]
     fn play_step_schedules_this_cycle_when_sixteenth_is_ahead() {
         let set = sequenced_set();
@@ -689,5 +783,40 @@ mod tests {
         let message = player.play_step(&set, 0, 0, &status, None);
         assert!(message.unwrap().contains("passed"));
         assert!(fast_receiver.try_iter().next().is_none());
+    }
+
+    /// An anchor that is running with nothing queued behind it is a one-shot
+    /// family, so the step must not outlive it — not even when the app-wide
+    /// default repeat is set.
+    #[test]
+    fn play_step_does_not_repeat_into_a_one_shot_family() {
+        let set = sequenced_set();
+        let (player, _precompute_receiver, fast_receiver) = test_player();
+
+        let now = Instant::now();
+        let cycle = now - Duration::from_millis(100);
+        let mut status = empty_status();
+        status.marks = vec![anchor_mark(0, cycle)];
+
+        // Sixteenth 8 is beat 3, two beats into the cycle — still ahead, so
+        // the step does sound; only its repeat is at issue.
+        let message = player.play_step(&set, 0, 8, &status, Some(1));
+        assert!(message.is_none());
+
+        let commands: Vec<_> = fast_receiver.try_iter().collect();
+        assert_eq!(commands.len(), 1);
+        let tracker::Command::Play {
+            start,
+            repeat_every,
+            ..
+        } = &commands[0]
+        else {
+            panic!("expected a Play command");
+        };
+        assert_eq!(start.unwrap(), cycle + duration_from_beats_f32(90, 2.0));
+        assert_eq!(
+            *repeat_every, None,
+            "the step outlived the one-shot family it was scheduled into"
+        );
     }
 }

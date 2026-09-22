@@ -31,6 +31,10 @@
 
 ## Rust Style
 
+### Code Aesthetics
+
+Prefer simple, straightforward, and short implementations whenever possible. This is a quickly evolving project: easily understood code allows us to iterate quickly. Only optimize when necessary to avoid audible effects or human-perceivable latency. 
+
 ### Imports
 - Bring crate-internal dependencies into scope with `use crate::<module>` (or `use crate::<module>::{self, Item}`) at the top of the file, then write `module::item` or `Item` at use sites. Do *not* write inline `crate::...` paths in signatures or bodies — the `use` block should read as the file's complete dependency list.
 - The same applies inside `#[cfg(test)]` modules: add `use crate::...` lines to the test module rather than writing inline paths.

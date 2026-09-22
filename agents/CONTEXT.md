@@ -23,7 +23,7 @@ An expression that evaluates to a waveform, occupying one numbered slot. The uni
 _Avoid_: patch, clip, track, preset, sound
 
 **Voice**:
-One sounding instance of a program's waveform. A single program may have several voices sounding at once.
+One sounding instance of a program's waveform. A single program may have several voices sounding at once. A sequenceable program's voice is one hit of the waveform its pattern is built from, not the pattern — launching the pattern plays a voice per listed beat.
 _Avoid_: instance, playback, note
 
 **Mark**:

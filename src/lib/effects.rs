@@ -163,6 +163,14 @@ impl EffectRunner {
                     state.message = message;
                 }
             }
+            Effect::PlayProgramVoice(program_index) => {
+                if let Some(message) = self
+                    .player
+                    .play_program_voice(&state.programs, program_index)
+                {
+                    state.message = message;
+                }
+            }
             Effect::PlaySequencerStep {
                 program_index,
                 sixteenth,
