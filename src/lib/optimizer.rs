@@ -65,6 +65,8 @@ where
                 // TODO for longer Fixed, replace with * Fixed(vec![1.0; v.len()])?
                 Time(_) => Fixed(vec![], ()),
                 length => match optimize(*waveform) {
+                    // Truncating an empty waveform leaves it empty.
+                    Fixed(v, _) if v.is_empty() => Fixed(vec![], ()),
                     // Nested Fin's
                     Fin {
                         length: inner_length,
@@ -276,7 +278,7 @@ where
                 (_, Fixed(b, _)) if b.is_empty() => Fixed(vec![], ()),
                 (a, Const(1.0)) => a,
                 // If a is infinite, then we can replace multiplication of zero with zero
-                //(a, Const(0.0)) => Const(0.0)
+                (Time(_) | Noise, Const(0.0)) => Const(0.0),
                 (Const(a), Const(b)) => Const(Operator::Multiply.apply(a, b)),
                 (Fixed(a, _), Const(b)) => Fixed(
                     a.into_iter()
@@ -398,8 +400,8 @@ where
             match (optimize(*a), optimize(*b)) {
                 (Fixed(a, _), _) if a.is_empty() => Fixed(vec![], ()),
                 (_, Fixed(b, _)) if b.is_empty() => Fixed(vec![], ()),
-                // TODO could do other infinite waveforms below
-                (Const(_), Const(0.0)) => Const(1.0),
+                // An infinite waveform to the zeroth power is the constant 1
+                (Time(_) | Noise, Const(0.0)) => Const(1.0),
                 (a, Const(1.0)) => a,
                 (Const(a), Const(b)) => Const(Operator::Power.apply(a, b)),
                 (Fixed(a, _), Const(b)) => Fixed(
@@ -456,6 +458,32 @@ where
 mod tests {
     use super::*;
     use Waveform::*;
+
+    #[test]
+    fn fin_of_an_empty_waveform_is_empty() {
+        let fin: Waveform<(), ()> = Fin {
+            length: Box::new(BinaryPointOp(
+                Operator::Subtract,
+                Box::new(Time(())),
+                Box::new(Const(1.0)),
+            )),
+            waveform: Box::new(Fixed(vec![], ())),
+        };
+        assert_eq!(optimize(fin), Fixed(vec![], ()));
+    }
+
+    #[test]
+    fn power_of_zero_folds_only_for_infinite_bases() {
+        let infinite: Waveform<(), ()> =
+            BinaryPointOp(Operator::Power, Box::new(Time(())), Box::new(Const(0.0)));
+        assert_eq!(optimize(infinite), Const(1.0));
+        let finite: Waveform<(), ()> = BinaryPointOp(
+            Operator::Power,
+            Box::new(Fixed(vec![2.0, 3.0], ())),
+            Box::new(Const(0.0)),
+        );
+        assert_eq!(optimize(finite), Fixed(vec![1.0, 1.0], ()));
+    }
 
     #[test]
     fn test_optimize() {

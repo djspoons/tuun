@@ -137,22 +137,16 @@ where
     S: Clone + Debug,
 {
     match (optimizer::first_root(&a), optimizer::first_root(&b)) {
-        (Some(a_root), Some(b_root)) => {
-            let b = optimizer::optimize(Waveform::BinaryPointOp(
-                Operator::Multiply,
-                Box::new(Waveform::BinaryPointOp(
-                    Operator::Add,
-                    Box::new(a_root),
-                    Box::new(b_root),
-                )),
-                Box::new(Waveform::Const(-1.0)),
-            ));
-            Ok(Expr::Waveform(Waveform::BinaryPointOp(
+        // The sum's root is the sum of the roots: `Time - (a + b)`.
+        (Some(a_root), Some(b_root)) => Ok(Expr::Waveform(Waveform::BinaryPointOp(
+            Operator::Subtract,
+            Box::new(Waveform::Time(())),
+            Box::new(Waveform::BinaryPointOp(
                 Operator::Add,
-                Box::new(Waveform::Time(())),
-                Box::new(b),
-            )))
-        }
+                Box::new(a_root),
+                Box::new(b_root),
+            )),
+        ))),
         (a_root, b_root) => Err(Error::internal_here(format!(
             "Cannot add offsets that are not linear functions of Time, got {:?} and {:?} for {:?} and {:?}",
             a_root, b_root, a, b
@@ -1204,5 +1198,40 @@ mod tests {
             List(exprs),
         ]);
         assert_eq!(format!("{}", result.clone().unwrap()), "10");
+    }
+
+    #[test]
+    fn test_followed_by_sums_seq_offsets() {
+        fn seq(seconds: f32) -> Expr<u32, ()> {
+            Seq {
+                offset: boxed(Expr::Waveform(Waveform::BinaryPointOp(
+                    Operator::Subtract,
+                    Box::new(Waveform::Time(())),
+                    Box::new(Waveform::Const(seconds)),
+                ))),
+                waveform: boxed(Expr::float(1.0)),
+            }
+        }
+        fn offset_root(expr: Expr<u32, ()>) -> Option<Waveform<u32>> {
+            let Seq { offset, .. } = expr else {
+                panic!("seq \\ seq should be a seq");
+            };
+            let Expr::Waveform(offset) = offset.expr else {
+                panic!("offset should be a waveform");
+            };
+            optimizer::first_root(&offset)
+        }
+        // The combined offset is left unoptimized; the next `\` still reads
+        // its root off, so a chain stays flat.
+        let two = followed_by(vec![seq(1.0), seq(2.0)]).unwrap();
+        assert_eq!(offset_root(two.clone()), Some(Waveform::Const(3.0)));
+        let three = followed_by(vec![two, seq(4.0)]).unwrap();
+        assert_eq!(offset_root(three), Some(Waveform::Const(7.0)));
+    }
+
+    #[test]
+    fn test_chord_of_nothing_is_the_empty_waveform() {
+        let result = chord::<u32, ()>(vec![List(vec![])]).unwrap();
+        assert!(matches!(result, Expr::Waveform(Waveform::Fixed(v, ())) if v.is_empty()));
     }
 }
