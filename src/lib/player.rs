@@ -142,7 +142,7 @@ impl Player {
     /// # Example
     ///
     /// A program reading `on_beats(kick, [1, 2, 3, 4])` plays `kick` once,
-    /// where [`Player::play_program_steps`] would play all four beats.
+    /// where [`Player::play_program_steps`] would play all four steps.
     pub fn play_program_voice(&self, set: &ProgramSet, program_index: usize) -> Option<String> {
         let program = set.program(program_index)?;
         let display_name = set.display_name(program_index);
@@ -166,7 +166,7 @@ impl Player {
 
     /// Plays the sequenceable program at `program_index` decomposed: one
     /// scheduled, independently repeating `WaveformId::Step` per listed
-    /// beat, plus a silent anchor step carrying the `TopLevel` mark.
+    /// step, plus a silent anchor step carrying the `TopLevel` mark.
     /// Returns the user-visible message, or `None` when the program's text
     /// didn't evaluate to a sequenceable waveform and nothing was played.
     ///
@@ -206,15 +206,15 @@ impl Player {
         } else {
             &self.fast_sender
         };
-        for &beat in &sequence.beats {
+        for &step_beat in &sequence.steps {
             sender
                 .send(tracker::Command::Play {
                     id: WaveformId::Step {
                         program: program_index,
-                        sixteenth: sequencer::sixteenth_for_beat(beat),
+                        sixteenth: sequencer::sixteenth_for_beat(step_beat),
                     },
                     waveform: build_leveled_waveform(step.clone(), program.level_db()),
-                    start: Some(base + duration_from_beats_f32(self.tempo, beat - 1.0)),
+                    start: Some(base + duration_from_beats_f32(self.tempo, step_beat - 1.0)),
                     repeat_every,
                 })
                 .unwrap();
@@ -223,10 +223,10 @@ impl Player {
         // for as long as its steps do.
         let pattern_beats =
             sequence
-                .beats
+                .steps
                 .iter()
-                .fold(self.beats_per_measure as f32, |acc, &beat| {
-                    let measures = ((beat - 0.75) / self.beats_per_measure as f32).ceil();
+                .fold(self.beats_per_measure as f32, |acc, &step_beat| {
+                    let measures = ((step_beat - 0.75) / self.beats_per_measure as f32).ceil();
                     acc.max(measures * self.beats_per_measure as f32)
                 });
         sender
@@ -558,8 +558,8 @@ mod tests {
         }
     }
 
-    /// Builds a program set whose program 0 is sequenceable with beats
-    /// [1, 2.5], evaluated so its sequence is available.
+    /// Builds a program set whose program 0 is sequenceable with steps on
+    /// beats [1, 2.5], evaluated so its sequence is available.
     fn sequenced_set() -> ProgramSet {
         let source = "on_beats = fn(w, bs) => w;\n\
                       #{level_db=0}\n\
@@ -599,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn play_program_steps_sends_one_play_per_beat_plus_anchor() {
+    fn play_program_steps_sends_one_play_per_step_plus_anchor() {
         let set = sequenced_set();
         let (player, _precompute_receiver, fast_receiver) = test_player();
 
@@ -622,16 +622,16 @@ mod tests {
         assert_eq!(plays.len(), 3);
 
         let one_measure = duration_from_beats(90, 4);
-        let (beat_1, beat_2_5, anchor) = (&plays[0], &plays[1], &plays[2]);
+        let (step_on_1, step_on_2_5, anchor) = (&plays[0], &plays[1], &plays[2]);
         assert_eq!(
-            *beat_1.0,
+            *step_on_1.0,
             WaveformId::Step {
                 program: 0,
                 sixteenth: 0
             }
         );
         assert_eq!(
-            *beat_2_5.0,
+            *step_on_2_5.0,
             WaveformId::Step {
                 program: 0,
                 sixteenth: 6
@@ -645,18 +645,21 @@ mod tests {
             }
         );
         // Steps are offset from the anchored cycle start by their beats.
-        assert_eq!(beat_1.2, anchor.2);
-        assert_eq!(beat_2_5.2 - beat_1.2, duration_from_beats_f32(90, 1.5));
+        assert_eq!(step_on_1.2, anchor.2);
+        assert_eq!(
+            step_on_2_5.2 - step_on_1.2,
+            duration_from_beats_f32(90, 1.5)
+        );
         // All entries share the loop period.
         assert!(plays.iter().all(|p| p.3 == one_measure));
         // Only the anchor carries the TopLevel mark.
-        assert!(!format!("{}", beat_1.1).contains("top-level"));
-        assert!(!format!("{}", beat_2_5.1).contains("top-level"));
+        assert!(!format!("{}", step_on_1.1).contains("top-level"));
+        assert!(!format!("{}", step_on_2_5.1).contains("top-level"));
         assert!(format!("{}", anchor.1).contains("top-level"));
     }
 
     /// A sequenceable program's voice is one hit, not the pattern — where
-    /// `play_program_steps` sends one entry per listed beat plus an anchor.
+    /// `play_program_steps` sends one entry per listed step plus an anchor.
     #[test]
     fn play_program_voice_plays_one_hit_of_a_sequenceable_program() {
         let set = sequenced_set();

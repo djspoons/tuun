@@ -660,7 +660,7 @@ impl Environment {
             let step_waveform =
                 self.evaluate_program_waveform_expr(set, index, &shape.waveform_expr)?;
             Some(sequencer::Sequence {
-                beats: shape.beats.iter().map(|(beat, _)| *beat).collect(),
+                steps: shape.steps.iter().map(|(beat, _)| *beat).collect(),
                 step_waveform,
             })
         });

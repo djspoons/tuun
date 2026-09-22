@@ -1,9 +1,10 @@
 //! Analysis and text editing of step-sequenceable programs.
 //!
 //! A program is sequenceable when its body is a single top-level call
-//! `on_beats(w, [b1, b2, ...])` whose beat list holds only float literals.
-//! The pad grid addresses the measure in sixteenths (quarter-beats):
-//! sixteenth `k` is beat `1 + k/4`, and covers the window `[b, b + 0.25)`.
+//! `on_beats(w, [b1, b2, ...])` whose step list holds only float literals.
+//! Each step is the beat of the measure it plays on. The pad grid addresses
+//! the measure in sixteenths (quarter-beats): sixteenth `k` is beat
+//! `1 + k/4`, and covers the window `[b, b + 0.25)`.
 
 use std::ops::Range;
 
@@ -13,7 +14,7 @@ use crate::ids::MarkId;
 use crate::parser;
 use crate::waveform;
 
-/// Beat-comparison tolerance for classifying a literal as on-grid.
+/// Beat-comparison tolerance for classifying a step as on-grid.
 const EPS: f32 = 1e-3;
 
 /// Sixteenths shown by the 16-pad grid at once: one (4 beat) measure per page.
@@ -26,11 +27,11 @@ pub const SIXTEENTHS_PER_PAGE: u8 = 16;
 pub const MAX_PAGE: u8 = 8;
 
 /// The decomposed form of a sequenceable program: what the sequencer plays
-/// one tracker entry per beat from.
+/// one tracker entry per step from.
 #[derive(Debug, Clone)]
 pub struct Sequence {
-    /// The listed beats, in source order.
-    pub beats: Vec<f32>,
+    /// The listed steps, each the beat it plays on, in source order.
+    pub steps: Vec<f32>,
     /// The waveform argument `w`, evaluated in the program's context and
     /// optimized; slider values and the level wrap are applied per play.
     pub step_waveform: waveform::Waveform<MarkId>,
@@ -40,28 +41,28 @@ pub struct Sequence {
 pub struct SequenceShape {
     /// The waveform argument `w`, unevaluated.
     pub waveform_expr: SourceExpr<MarkId, Source>,
-    /// The byte range of the beat-list literal, brackets included.
+    /// The byte range of the step-list literal, brackets included.
     pub list_range: Range<usize>,
-    /// Each beat literal with its byte range, in source order.
-    pub beats: Vec<(f32, Range<usize>)>,
+    /// Each step's beat literal with its byte range, in source order.
+    pub steps: Vec<(f32, Range<usize>)>,
 }
 
 /// The display state of one sixteenth of the grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SixteenthState {
-    /// No beat in this sixteenth's window.
+    /// No step in this sixteenth's window.
     Empty,
-    /// A beat sits exactly on this sixteenth.
+    /// A step sits exactly on this sixteenth.
     OnGrid,
-    /// Only off-grid beats sit inside this sixteenth's window.
+    /// Only off-grid steps sit inside this sixteenth's window.
     OffGridOnly,
 }
 
 /// The result of toggling a sixteenth in a sequenceable program's text.
 pub struct ToggleEdit {
     pub new_text: String,
-    /// True when the toggle added a beat; false when it removed the
-    /// sixteenth's beats.
+    /// True when the toggle added a step; false when it removed the
+    /// sixteenth's steps.
     pub turned_on: bool,
     /// The sixteenth's grid beat, for user-facing messages.
     pub beat: f32,
@@ -78,7 +79,7 @@ pub fn sixteenth_beat(sixteenth: u8) -> f32 {
 
 /// Returns the sixteenth whose window contains `beat`.
 ///
-/// Clamped to `u8::MAX - 1` so a listed beat can never collide with the
+/// Clamped to `u8::MAX - 1` so a listed step can never collide with the
 /// anchor sentinel.
 pub fn sixteenth_for_beat(beat: f32) -> u8 {
     ((beat - 1.0) * 4.0)
@@ -92,15 +93,15 @@ fn in_window(beat: f32, sixteenth: u8) -> bool {
     beat >= b && beat < b + 0.25
 }
 
-/// Returns the display state of a sixteenth given a program's beat list.
-pub fn sixteenth_state(beats: &[f32], sixteenth: u8) -> SixteenthState {
+/// Returns the display state of a sixteenth given a program's step list.
+pub fn sixteenth_state(steps: &[f32], sixteenth: u8) -> SixteenthState {
     let b = sixteenth_beat(sixteenth);
     let mut in_range = false;
-    for &beat in beats {
-        if (beat - b).abs() <= EPS {
+    for &step in steps {
+        if (step - b).abs() <= EPS {
             return SixteenthState::OnGrid;
         }
-        in_range |= in_window(beat, sixteenth);
+        in_range |= in_window(step, sixteenth);
     }
     if in_range {
         SixteenthState::OffGridOnly
@@ -111,7 +112,7 @@ pub fn sixteenth_state(beats: &[f32], sixteenth: u8) -> SixteenthState {
 
 /// Returns the sequenceable shape of a program's text, or `None` when the
 /// text doesn't parse or isn't a single top-level `on_beats` call with a
-/// literal beat list.
+/// literal step list.
 pub fn analyze(text: &str) -> Option<SequenceShape> {
     let expr = parser::parse_program::<MarkId, _>(text, Source::Program).ok()?;
     let Expr::Application {
@@ -136,19 +137,19 @@ pub fn analyze(text: &str) -> Option<SequenceShape> {
     let Expr::List(elements) = list.expr else {
         return None;
     };
-    let mut beats = Vec::with_capacity(elements.len());
+    let mut steps = Vec::with_capacity(elements.len());
     for element in elements {
         let value = element.expr.as_const_float()?;
-        beats.push((value, element.span.as_ref()?.range.clone()));
+        steps.push((value, element.span.as_ref()?.range.clone()));
     }
     Some(SequenceShape {
         waveform_expr,
         list_range,
-        beats,
+        steps,
     })
 }
 
-/// Toggles a sixteenth in the beat-list text: removes every beat in its
+/// Toggles a sixteenth in the step-list text: removes every step in its
 /// window when any is present, otherwise inserts the sixteenth's grid beat
 /// at its sorted position.
 ///
@@ -156,17 +157,17 @@ pub fn analyze(text: &str) -> Option<SequenceShape> {
 /// is preserved byte for byte.
 pub fn toggle_sixteenth_text(text: &str, shape: &SequenceShape, sixteenth: u8) -> ToggleEdit {
     let beat = sixteenth_beat(sixteenth);
-    let matched: Vec<usize> = (0..shape.beats.len())
-        .filter(|&i| in_window(shape.beats[i].0, sixteenth))
+    let matched: Vec<usize> = (0..shape.steps.len())
+        .filter(|&i| in_window(shape.steps[i].0, sixteenth))
         .collect();
 
     let mut new_text = text.to_string();
     if matched.is_empty() {
         // Insert at the sorted position, formatted minimally ("3", "2.5").
         let formatted = format!("{}", beat);
-        let (insert_at, insertion) = match shape.beats.iter().find(|(value, _)| *value > beat) {
+        let (insert_at, insertion) = match shape.steps.iter().find(|(value, _)| *value > beat) {
             Some((_, range)) => (range.start, format!("{}, ", formatted)),
-            None => match shape.beats.last() {
+            None => match shape.steps.last() {
                 Some((_, range)) => (range.end, format!(", {}", formatted)),
                 None => (shape.list_range.start + 1, formatted),
             },
@@ -181,9 +182,9 @@ pub fn toggle_sixteenth_text(text: &str, shape: &SequenceShape, sixteenth: u8) -
         };
     }
 
-    // Remove maximal runs of consecutive matched elements, each with one
+    // Remove maximal runs of consecutive matched steps, each with one
     // adjoining separator, so ranges never overlap even when a window holds
-    // several beats.
+    // several steps.
     let mut removals: Vec<Range<usize>> = Vec::new();
     let mut run_start = 0;
     while run_start < matched.len() {
@@ -192,15 +193,15 @@ pub fn toggle_sixteenth_text(text: &str, shape: &SequenceShape, sixteenth: u8) -
             run_end += 1;
         }
         let (first, last) = (matched[run_start], matched[run_end]);
-        let range = if last + 1 < shape.beats.len() {
+        let range = if last + 1 < shape.steps.len() {
             // A kept successor follows: consume the run's trailing separator.
-            shape.beats[first].1.start..shape.beats[last + 1].1.start
+            shape.steps[first].1.start..shape.steps[last + 1].1.start
         } else if first > 0 {
             // The run ends the list: consume the leading separator instead.
-            shape.beats[first - 1].1.end..shape.beats[last].1.end
+            shape.steps[first - 1].1.end..shape.steps[last].1.end
         } else {
             // The run is the whole list.
-            shape.beats[first].1.start..shape.beats[last].1.end
+            shape.steps[first].1.start..shape.steps[last].1.end
         };
         removals.push(range);
         run_start = run_end + 1;
@@ -228,17 +229,17 @@ mod tests {
         analyze(text).expect("text should be sequenceable")
     }
 
-    fn beats(text: &str) -> Vec<f32> {
-        shape(text).beats.iter().map(|(b, _)| *b).collect()
+    fn steps(text: &str) -> Vec<f32> {
+        shape(text).steps.iter().map(|(b, _)| *b).collect()
     }
 
     #[test]
     fn analyze_accepts_on_beats_with_literal_list() {
         let text = "on_beats(0.5 * b | unseq(), [1, 2.5, 4.75])";
         let shape = shape(text);
-        assert_eq!(beats(text), vec![1.0, 2.5, 4.75]);
+        assert_eq!(steps(text), vec![1.0, 2.5, 4.75]);
         assert_eq!(&text[shape.list_range.clone()], "[1, 2.5, 4.75]");
-        assert_eq!(&text[shape.beats[1].1.clone()], "2.5");
+        assert_eq!(&text[shape.steps[1].1.clone()], "2.5");
     }
 
     #[test]
@@ -248,7 +249,7 @@ mod tests {
     }
 
     #[test]
-    fn analyze_rejects_non_literal_beats() {
+    fn analyze_rejects_non_literal_steps() {
         assert!(analyze("on_beats(b, [1, x])").is_none());
         assert!(analyze("on_beats(b, [1, 2 + 1])").is_none());
         assert!(analyze("on_beats(b, bs)").is_none());
@@ -300,7 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn toggle_removes_single_matching_beat() {
+    fn toggle_removes_single_matching_step() {
         let text = "on_beats(b, [1, 2.5, 3])";
         let edit = toggle_sixteenth_text(text, &shape(text), 6);
         assert_eq!(edit.new_text, "on_beats(b, [1, 3])");
@@ -309,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn toggle_removes_first_and_last_beats_cleanly() {
+    fn toggle_removes_first_and_last_steps_cleanly() {
         let text = "on_beats(b, [1, 3])";
         let first = toggle_sixteenth_text(text, &shape(text), 0);
         assert_eq!(first.new_text, "on_beats(b, [3])");
@@ -321,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn toggle_removes_every_beat_in_sixteenth_window() {
+    fn toggle_removes_every_step_in_sixteenth_window() {
         // 2, 2.1, and 2.2 all live in sixteenth 4's window [2, 2.25).
         let text = "on_beats(b, [1, 2, 2.1, 2.2, 3])";
         let edit = toggle_sixteenth_text(text, &shape(text), 4);
@@ -336,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn toggle_preserves_out_of_measure_beats() {
+    fn toggle_preserves_out_of_measure_steps() {
         let text = "on_beats(b, [1, 5.5])";
         let edit = toggle_sixteenth_text(text, &shape(text), 0);
         assert_eq!(edit.new_text, "on_beats(b, [5.5])");
@@ -357,9 +358,9 @@ mod tests {
 
     #[test]
     fn sixteenth_state_reports_off_grid_dim() {
-        let beats = [1.0, 2.1];
-        assert_eq!(sixteenth_state(&beats, 0), SixteenthState::OnGrid);
-        assert_eq!(sixteenth_state(&beats, 4), SixteenthState::OffGridOnly);
-        assert_eq!(sixteenth_state(&beats, 8), SixteenthState::Empty);
+        let steps = [1.0, 2.1];
+        assert_eq!(sixteenth_state(&steps, 0), SixteenthState::OnGrid);
+        assert_eq!(sixteenth_state(&steps, 4), SixteenthState::OffGridOnly);
+        assert_eq!(sixteenth_state(&steps, 8), SixteenthState::Empty);
     }
 }

@@ -136,7 +136,7 @@ impl EffectRunner {
                 repeat_after_measures,
             } => {
                 // A sequenceable program always plays decomposed — one
-                // tracker entry per beat — so the sequencer can edit its
+                // tracker entry per step — so the sequencer can edit its
                 // steps live.
                 let sequenced = state
                     .programs

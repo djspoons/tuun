@@ -1489,7 +1489,7 @@ mod tests {
         else {
             panic!("expected a waveform with an attached sequence");
         };
-        assert_eq!(sequence.beats, vec![1.0, 2.5]);
+        assert_eq!(sequence.steps, vec![1.0, 2.5]);
     }
 
     #[test]

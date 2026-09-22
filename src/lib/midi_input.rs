@@ -352,14 +352,14 @@ fn update_pads_sequencer(
     current_beat_duration: std::time::Duration,
 ) {
     let program = state.active_program();
-    let beats: Option<Vec<f32>> = program
+    let steps: Option<Vec<f32>> = program
         .sequence()
-        .map(|sequence| sequence.beats.clone())
+        .map(|sequence| sequence.steps.clone())
         .or_else(|| {
             // A program that was edited (but not yet re-evaluated) or that
             // isn't playable can still show its pattern from the text.
             sequencer::analyze(program.text())
-                .map(|shape| shape.beats.iter().map(|(beat, _)| *beat).collect())
+                .map(|shape| shape.steps.iter().map(|(beat, _)| *beat).collect())
         });
 
     // The playhead only shows while the step family is sounding: its
@@ -390,9 +390,9 @@ fn update_pads_sequencer(
     let page_base = state.sequencer_page * sequencer::SIXTEENTHS_PER_PAGE;
     for pad in 0..(2 * PROGRAMS_PER_BANK as u8) {
         let sixteenth = page_base + pad;
-        let color = match &beats {
+        let color = match &steps {
             None => (0, 0, 0),
-            Some(beats) => match sequencer::sixteenth_state(beats, sixteenth) {
+            Some(steps) => match sequencer::sixteenth_state(steps, sixteenth) {
                 sequencer::SixteenthState::Empty => (0, 0, 0),
                 sequencer::SixteenthState::OnGrid => program_pad_color(program),
                 sequencer::SixteenthState::OffGridOnly => {

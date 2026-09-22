@@ -223,7 +223,7 @@ pub enum Action {
     /// (repeating per the app-wide default). Does nothing if playback is
     /// already pending or the program isn't a waveform.
     EnqueuePendingPlayback(usize),
-    /// Toggle the given sixteenth of the active program's `on_beats` beat
+    /// Toggle the given sixteenth of the active program's `on_beats` step
     /// list, in the source text and — when the program is live — on the
     /// tracker.
     ToggleSequencerStep {
@@ -864,7 +864,7 @@ fn apply_select_program(state: &mut AppState, i: usize) -> Vec<Effect> {
     effects
 }
 
-/// Toggles a sixteenth of the active program's beat list: rewrites the list
+/// Toggles a sixteenth of the active program's step list: rewrites the list
 /// literal in the program's text, re-evaluates and persists it, and — when the
 /// program is playing — schedules or removes that one step so the change sounds
 /// as soon as possible.
@@ -2882,9 +2882,9 @@ _ = saw(220);";
         );
     }
 
-    /// Builds a state whose program 0 is a sequenceable on_beats call over
-    /// beats [1, 2.5], with on_beats stubbed so evaluation succeeds with
-    /// just the prelude.
+    /// Builds a state whose program 0 is a sequenceable on_beats call with
+    /// steps on beats [1, 2.5], with on_beats stubbed so evaluation succeeds
+    /// with just the prelude.
     fn sequencer_state() -> AppState {
         AppState::from_source(
             "on_beats = fn(w, bs) => w;\n\
@@ -2913,7 +2913,7 @@ _ = saw(220);";
     }
 
     #[test]
-    fn toggle_sequencer_step_inserts_beat_and_emits_evaluate_then_update_source() {
+    fn toggle_sequencer_step_inserts_step_and_emits_evaluate_then_update_source() {
         let mut state = sequencer_state();
         let effects =
             apply_with_empty_status(&mut state, Action::ToggleSequencerStep { sixteenth: 8 });
@@ -2940,7 +2940,7 @@ _ = saw(220);";
     }
 
     #[test]
-    fn toggle_sequencer_step_off_removes_off_grid_beats_in_window() {
+    fn toggle_sequencer_step_off_removes_off_grid_steps_in_window() {
         let mut state = AppState::from_source(
             "on_beats = fn(w, bs) => w;\n\
              #{level_db=0}\n\
@@ -3183,7 +3183,7 @@ _ = saw(220);";
     }
 
     #[test]
-    fn toggle_on_a_later_page_edits_later_beats() {
+    fn toggle_on_a_later_page_edits_later_steps() {
         let mut state = sequencer_state();
         // Sixteenth 16 is beat 5, the first pad of page 1.
         apply_with_empty_status(&mut state, Action::ToggleSequencerStep { sixteenth: 16 });

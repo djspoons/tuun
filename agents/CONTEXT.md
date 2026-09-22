@@ -23,8 +23,12 @@ An expression that evaluates to a waveform, occupying one numbered slot. The uni
 _Avoid_: patch, clip, track, preset, sound
 
 **Voice**:
-One sounding instance of a program's waveform. A single program may have several voices sounding at once. A sequenceable program's voice is one hit of the waveform its pattern is built from, not the pattern — launching the pattern plays a voice per listed beat.
+One sounding instance of a program's waveform. A single program may have several voices sounding at once. A sequenceable program's voice is one hit of the waveform its pattern is built from, not the pattern — launching the pattern plays a voice per listed step.
 _Avoid_: instance, playback, note
+
+**Step**:
+One element of a sequenceable program's `on_beats` list. Its value is the beat of the measure it plays on, so `on_beats(w, [1, 2.5])` has two steps, not two beats.
+_Avoid_: beat, element, hit, note
 
 **Mark**:
 A labelled point inside a waveform that can later be substituted — how a sound is stopped, and how a live slider value reaches it.
