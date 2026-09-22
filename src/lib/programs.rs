@@ -1472,9 +1472,9 @@ mod tests {
     #[test]
     fn evaluate_and_record_attaches_sequence_to_waveform_programs() {
         let (mut set, _) = ProgramSet::from_source(
-            "on_beats = fn(w, bs) => w;\n\
+            "on_beats = fn(w) => fn(bs) => w;\n\
              #{level_db=0}\n\
-             _ = on_beats(1 | fin(time - 1), [1, 2.5]);\n"
+             _ = [1, 2.5] | on_beats(1 | fin(time - 1));\n"
                 .to_string(),
             PathBuf::new(),
         )

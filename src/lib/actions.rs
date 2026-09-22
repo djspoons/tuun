@@ -746,7 +746,7 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
                     && sequencer::analyze(state.active_program().text()).is_none()
                 {
                     format!(
-                        "{}: {} is not on_beats(w, [beats])",
+                        "{}: {} is not [steps] | on_beats(w)",
                         label,
                         state.programs.display_name(state.active_program_index)
                     )
@@ -885,7 +885,7 @@ fn apply_toggle_sequencer_step(state: &mut AppState, ctx: &Context, sixteenth: u
     };
     let Some(shape) = sequencer::analyze(program.text()) else {
         return vec![Effect::ShowMessage(format!(
-            "{} is not sequenceable (expected on_beats(w, [beats]))",
+            "{} is not sequenceable (expected [steps] | on_beats(w))",
             display_name
         ))];
     };
@@ -2882,14 +2882,14 @@ _ = saw(220);";
         );
     }
 
-    /// Builds a state whose program 0 is a sequenceable on_beats call with
-    /// steps on beats [1, 2.5], with on_beats stubbed so evaluation succeeds
-    /// with just the prelude.
+    /// Builds a state whose program 0 is sequenceable with steps on beats [1,
+    /// 2.5], with on_beats stubbed so evaluation succeeds with just the
+    /// prelude.
     fn sequencer_state() -> AppState {
         AppState::from_source(
-            "on_beats = fn(w, bs) => w;\n\
+            "on_beats = fn(w) => fn(bs) => w;\n\
              #{level_db=0}\n\
-             _ = on_beats(1 | fin(time - 1), [1, 2.5]);\n"
+             _ = [1, 2.5] | on_beats(1 | fin(time - 1));\n"
                 .to_string(),
             std::path::PathBuf::new(),
         )
@@ -2919,7 +2919,7 @@ _ = saw(220);";
             apply_with_empty_status(&mut state, Action::ToggleSequencerStep { sixteenth: 8 });
         assert_eq!(
             state.active_program().text(),
-            "on_beats(1 | fin(time - 1), [1, 2.5, 3])"
+            "[1, 2.5, 3] | on_beats(1 | fin(time - 1))"
         );
         assert!(matches!(
             effects[0],
@@ -2942,9 +2942,9 @@ _ = saw(220);";
     #[test]
     fn toggle_sequencer_step_off_removes_off_grid_steps_in_window() {
         let mut state = AppState::from_source(
-            "on_beats = fn(w, bs) => w;\n\
+            "on_beats = fn(w) => fn(bs) => w;\n\
              #{level_db=0}\n\
-             _ = on_beats(1 | fin(time - 1), [1, 2.1, 2.2, 3]);\n"
+             _ = [1, 2.1, 2.2, 3] | on_beats(1 | fin(time - 1));\n"
                 .to_string(),
             std::path::PathBuf::new(),
         )
@@ -2953,7 +2953,7 @@ _ = saw(220);";
             apply_with_empty_status(&mut state, Action::ToggleSequencerStep { sixteenth: 4 });
         assert_eq!(
             state.active_program().text(),
-            "on_beats(1 | fin(time - 1), [1, 3])"
+            "[1, 3] | on_beats(1 | fin(time - 1))"
         );
         assert!(
             effects
@@ -3001,7 +3001,7 @@ _ = saw(220);";
         );
         assert_eq!(
             state.active_program().text(),
-            "on_beats(1 | fin(time - 1), [2.5])"
+            "[2.5] | on_beats(1 | fin(time - 1))"
         );
         assert!(
             matches!(
@@ -3189,7 +3189,7 @@ _ = saw(220);";
         apply_with_empty_status(&mut state, Action::ToggleSequencerStep { sixteenth: 16 });
         assert_eq!(
             state.active_program().text(),
-            "on_beats(1 | fin(time - 1), [1, 2.5, 5])"
+            "[1, 2.5, 5] | on_beats(1 | fin(time - 1))"
         );
     }
 

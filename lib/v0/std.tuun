@@ -134,8 +134,8 @@ i = fn(key) => fn(inst) => fn(dur) => {map(amp(0.4), minor_triad(key)(fn(freq) =
 
 // Plays the given waveform `w` on the beats in `bs`, starting at 1. Beats
 // should be non-decreasing and `w` should *not* be a sequence-able waveform.
-// For example: on_beats(bass(Q) | unseq(), [1, 2, 3, 4])
-on_beats = fn(w, bs) => let
+// For example: [1, 2, 3, 4] | on_beats(bass(Q) | unseq())
+on_beats = fn(w) => fn(bs) => let
     f = fn((current_beat, prev, acc), play_at_beat) =>
         if
           play_at_beat < current_beat

@@ -27,7 +27,7 @@ One sounding instance of a program's waveform. A single program may have several
 _Avoid_: instance, playback, note
 
 **Step**:
-One element of a sequenceable program's `on_beats` list. Its value is the beat of the measure it plays on, so `on_beats(w, [1, 2.5])` has two steps, not two beats.
+One element of a sequenceable program's `on_beats` list. Its value is the beat of the measure it plays on, so `[1, 2.5] | on_beats(w)` has two steps, not two beats.
 _Avoid_: beat, element, hit, note
 
 **Mark**:

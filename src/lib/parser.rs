@@ -1877,17 +1877,17 @@ synth = saw(220);";
 
     #[test]
     fn test_replace_at_list_literal() {
-        let mut source = String::from("on_beats(b, [0, 1, 2, 3])");
+        let mut source = String::from("[0, 1, 2, 3] | on_beats(b)");
         let mut root = parse_program_unstamped::<u32>(&source).unwrap();
         let list_span = find_first_list_span(&root).expect("should find a list");
 
         replace_at(&mut root, list_span, "[0, 2]", &mut source).unwrap();
 
         // Source updated by the splice; AST re-parsed against the new source.
-        assert_eq!(source, "on_beats(b, [0, 2])");
+        assert_eq!(source, "[0, 2] | on_beats(b)");
         // The freshly-parsed root has spans into the new source, so
         // print_preserving round-trips the edited file.
-        assert_eq!(print_preserving(&root, &source), "on_beats(b, [0, 2])");
+        assert_eq!(print_preserving(&root, &source), "[0, 2] | on_beats(b)");
     }
 
     #[test]

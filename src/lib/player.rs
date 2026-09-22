@@ -141,7 +141,7 @@ impl Player {
     ///
     /// # Example
     ///
-    /// A program reading `on_beats(kick, [1, 2, 3, 4])` plays `kick` once,
+    /// A program reading `[1, 2, 3, 4] | on_beats(kick)` plays `kick` once,
     /// where [`Player::play_program_steps`] would play all four steps.
     pub fn play_program_voice(&self, set: &ProgramSet, program_index: usize) -> Option<String> {
         let program = set.program(program_index)?;
@@ -561,9 +561,9 @@ mod tests {
     /// Builds a program set whose program 0 is sequenceable with steps on
     /// beats [1, 2.5], evaluated so its sequence is available.
     fn sequenced_set() -> ProgramSet {
-        let source = "on_beats = fn(w, bs) => w;\n\
+        let source = "on_beats = fn(w) => fn(bs) => w;\n\
                       #{level_db=0}\n\
-                      _ = on_beats(1 | fin(time - 1), [1, 2.5]);\n";
+                      _ = [1, 2.5] | on_beats(1 | fin(time - 1));\n";
         let (mut set, message) =
             ProgramSet::from_source(source.to_string(), std::path::PathBuf::new())
                 .expect("test source should parse");

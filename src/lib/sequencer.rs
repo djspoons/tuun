@@ -1,7 +1,7 @@
 //! Analysis and text editing of step-sequenceable programs.
 //!
-//! A program is sequenceable when its body is a single top-level call
-//! `on_beats(w, [b1, b2, ...])` whose step list holds only float literals.
+//! A program is sequenceable when its body is a single top-level pipe
+//! `[b1, b2, ...] | on_beats(w)` whose step list holds only float literals.
 //! Each step is the beat of the measure it plays on. The pad grid addresses
 //! the measure in sixteenths (quarter-beats): sixteenth `k` is beat
 //! `1 + k/4`, and covers the window `[b, b + 0.25)`.
@@ -110,11 +110,12 @@ pub fn sixteenth_state(steps: &[f32], sixteenth: u8) -> SixteenthState {
     }
 }
 
-/// Returns the sequenceable shape of a program's text, or `None` when the
-/// text doesn't parse or isn't a single top-level `on_beats` call with a
-/// literal step list.
+/// Returns the sequenceable shape of a program's text, or `None` when the text
+/// doesn't parse or isn't a single top-level `[b1, b2, ...] | on_beats(w)` call
+/// with a literal step list.
 pub fn analyze(text: &str) -> Option<SequenceShape> {
     let expr = parser::parse_program::<MarkId, _>(text, Source::Program).ok()?;
+    // The pipe notation `bs | on_beats(w)` parses as the application `on_beats(w)(bs)`.
     let Expr::Application {
         function,
         positional,
@@ -123,16 +124,28 @@ pub fn analyze(text: &str) -> Option<SequenceShape> {
     else {
         return None;
     };
-    if !named.is_empty() || positional.len() != 2 {
+    if !named.is_empty() || positional.len() != 1 {
         return None;
     }
-    match &function.expr {
+    let Expr::Application {
+        function: on_beats,
+        positional: inner_positional,
+        named: inner_named,
+    } = function.expr
+    else {
+        return None;
+    };
+    if !inner_named.is_empty() || inner_positional.len() != 1 {
+        return None;
+    }
+    match &on_beats.expr {
         Expr::Variable(name) if name == "on_beats" => {}
         _ => return None,
     }
     let mut positional = positional;
     let list = positional.pop().expect("length checked above");
-    let waveform_expr = positional.pop().expect("length checked above");
+    let mut inner_positional = inner_positional;
+    let waveform_expr = inner_positional.pop().expect("length checked above");
     let list_range = list.span.as_ref()?.range.clone();
     let Expr::List(elements) = list.expr else {
         return None;
@@ -235,7 +248,7 @@ mod tests {
 
     #[test]
     fn analyze_accepts_on_beats_with_literal_list() {
-        let text = "on_beats(0.5 * b | unseq(), [1, 2.5, 4.75])";
+        let text = "[1, 2.5, 4.75] | on_beats(0.5 * b | unseq())";
         let shape = shape(text);
         assert_eq!(steps(text), vec![1.0, 2.5, 4.75]);
         assert_eq!(&text[shape.list_range.clone()], "[1, 2.5, 4.75]");
@@ -244,22 +257,27 @@ mod tests {
 
     #[test]
     fn analyze_rejects_piped_or_wrapped_body() {
-        assert!(analyze("on_beats(b, [1]) | mark(1)").is_none());
-        assert!(analyze("1 + on_beats(b, [1])").is_none());
+        assert!(analyze("[1] | on_beats(b) | mark(1)").is_none());
+        assert!(analyze("1 + ([1] | on_beats(b))").is_none());
     }
 
     #[test]
     fn analyze_rejects_non_literal_steps() {
-        assert!(analyze("on_beats(b, [1, x])").is_none());
-        assert!(analyze("on_beats(b, [1, 2 + 1])").is_none());
-        assert!(analyze("on_beats(b, bs)").is_none());
+        assert!(analyze("[1, x] | on_beats(b)").is_none());
+        assert!(analyze("[1, 2 + 1] | on_beats(b)").is_none());
+        assert!(analyze("bs | on_beats(b)").is_none());
     }
 
     #[test]
     fn analyze_rejects_other_functions() {
-        assert!(analyze("off_beats(b, [1])").is_none());
+        assert!(analyze("[1] | off_beats(b)").is_none());
         assert!(analyze("b | fin(1)").is_none());
         assert!(analyze("(").is_none());
+    }
+
+    #[test]
+    fn analyze_rejects_uncurried_call() {
+        assert!(analyze("on_beats(b, [1, 2.5])").is_none());
     }
 
     #[test]
@@ -278,9 +296,9 @@ mod tests {
 
     #[test]
     fn toggle_inserts_at_sorted_position() {
-        let text = "on_beats(b, [1, 3])";
+        let text = "[1, 3] | on_beats(b)";
         let edit = toggle_sixteenth_text(text, &shape(text), 6);
-        assert_eq!(edit.new_text, "on_beats(b, [1, 2.5, 3])");
+        assert_eq!(edit.new_text, "[1, 2.5, 3] | on_beats(b)");
         assert!(edit.turned_on);
         assert_eq!(edit.beat, 2.5);
         assert_eq!(edit.delta, 5);
@@ -288,71 +306,71 @@ mod tests {
 
     #[test]
     fn toggle_appends_after_last() {
-        let text = "on_beats(b, [1, 3])";
+        let text = "[1, 3] | on_beats(b)";
         let edit = toggle_sixteenth_text(text, &shape(text), 12);
-        assert_eq!(edit.new_text, "on_beats(b, [1, 3, 4])");
+        assert_eq!(edit.new_text, "[1, 3, 4] | on_beats(b)");
     }
 
     #[test]
     fn toggle_into_empty_list() {
-        let text = "on_beats(b, [])";
+        let text = "[] | on_beats(b)";
         let edit = toggle_sixteenth_text(text, &shape(text), 0);
-        assert_eq!(edit.new_text, "on_beats(b, [1])");
+        assert_eq!(edit.new_text, "[1] | on_beats(b)");
     }
 
     #[test]
     fn toggle_removes_single_matching_step() {
-        let text = "on_beats(b, [1, 2.5, 3])";
+        let text = "[1, 2.5, 3] | on_beats(b)";
         let edit = toggle_sixteenth_text(text, &shape(text), 6);
-        assert_eq!(edit.new_text, "on_beats(b, [1, 3])");
+        assert_eq!(edit.new_text, "[1, 3] | on_beats(b)");
         assert!(!edit.turned_on);
         assert_eq!(edit.delta, -5);
     }
 
     #[test]
     fn toggle_removes_first_and_last_steps_cleanly() {
-        let text = "on_beats(b, [1, 3])";
+        let text = "[1, 3] | on_beats(b)";
         let first = toggle_sixteenth_text(text, &shape(text), 0);
-        assert_eq!(first.new_text, "on_beats(b, [3])");
+        assert_eq!(first.new_text, "[3] | on_beats(b)");
         let last = toggle_sixteenth_text(text, &shape(text), 8);
-        assert_eq!(last.new_text, "on_beats(b, [1])");
-        let text = "on_beats(b, [1])";
+        assert_eq!(last.new_text, "[1] | on_beats(b)");
+        let text = "[1] | on_beats(b)";
         let only = toggle_sixteenth_text(text, &shape(text), 0);
-        assert_eq!(only.new_text, "on_beats(b, [])");
+        assert_eq!(only.new_text, "[] | on_beats(b)");
     }
 
     #[test]
     fn toggle_removes_every_step_in_sixteenth_window() {
         // 2, 2.1, and 2.2 all live in sixteenth 4's window [2, 2.25).
-        let text = "on_beats(b, [1, 2, 2.1, 2.2, 3])";
+        let text = "[1, 2, 2.1, 2.2, 3] | on_beats(b)";
         let edit = toggle_sixteenth_text(text, &shape(text), 4);
-        assert_eq!(edit.new_text, "on_beats(b, [1, 3])");
+        assert_eq!(edit.new_text, "[1, 3] | on_beats(b)");
     }
 
     #[test]
     fn toggle_removes_a_whole_trailing_run() {
-        let text = "on_beats(b, [1, 2, 2.1])";
+        let text = "[1, 2, 2.1] | on_beats(b)";
         let edit = toggle_sixteenth_text(text, &shape(text), 4);
-        assert_eq!(edit.new_text, "on_beats(b, [1])");
+        assert_eq!(edit.new_text, "[1] | on_beats(b)");
     }
 
     #[test]
     fn toggle_preserves_out_of_measure_steps() {
-        let text = "on_beats(b, [1, 5.5])";
+        let text = "[1, 5.5] | on_beats(b)";
         let edit = toggle_sixteenth_text(text, &shape(text), 0);
-        assert_eq!(edit.new_text, "on_beats(b, [5.5])");
+        assert_eq!(edit.new_text, "[5.5] | on_beats(b)");
     }
 
     #[test]
     fn beat_formatting_is_minimal() {
-        let text = "on_beats(b, [])";
+        let text = "[] | on_beats(b)";
         assert_eq!(
             toggle_sixteenth_text(text, &shape(text), 8).new_text,
-            "on_beats(b, [3])"
+            "[3] | on_beats(b)"
         );
         assert_eq!(
             toggle_sixteenth_text(text, &shape(text), 15).new_text,
-            "on_beats(b, [4.75])"
+            "[4.75] | on_beats(b)"
         );
     }
 

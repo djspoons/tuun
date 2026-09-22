@@ -217,7 +217,7 @@ kick = drums.tuned_kick_drum(100);
 
 // Four on the floor
 #{level_db=-2.0}
-_ = on_beats(kick, [1, 2, 3, 4]);
+_ = [1, 2, 3, 4] | on_beats(kick);
 ```
 <!-- 
 ```
