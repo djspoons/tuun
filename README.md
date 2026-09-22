@@ -38,18 +38,19 @@ For help running the native Tuun application:
 cargo run --bin tuun -- --help
 ```
 
-Tuun reads specifications both from files and in the user interface. Files supplied with the `--context_file` (or `-C`) flag should be bindings of the form `var = expr` separated by commas. Files supplied with the `--program_file` (or `-P`) flag should be expressions (one per line) that evaluate to waveforms. Specifications supplied the `--program` (or `-p`) should also be expressions that evaluate to waveforms. All of these flags can be supplied multiple times. 
-
+Tuun reads and writes programs from `.tuun` files, which contain lists of bindings. Bindings with annotations will be visible in the user interface.
 ```
-cargo run --bin tuun -- -C context.tuun -p '$440 * Qw'
+echo 'open std;\n#{level_db=0}\n_ = $440 * Qw;' > test.tuun
+cargo run --bin tuun -- test.tuun
 ```
 
 Or for a slightly more complex example:
 
 ```
-cargo run --bin tuun -- -C context.tuun -p 'let h = harmonica(Q, 440) in <[h, h, h, h]>' -p 'pulse((X + 1) * 0.5, Y * 440) * 0.1'
+echo 'open std;\n#{level_db=0,sliders=["X:0.5:0:1","Y:0.5:0:1"]}\n_ = pulse(X, Y * 440) * 0.5;' > test.tuun
+cargo run --bin tuun -- test.tuun
 ```
-Try playing the second program, holding the option key, and moving your mouse to the left and right.
+In this case, try holding the option key, and moving your mouse around.
 
 
 ### Keyboard Navigation
@@ -57,30 +58,62 @@ Try playing the second program, holding the option key, and moving your mouse to
 Once Tuun has started, use the following keys to navigate and edit.
 
 In "select" mode (when a solid triangle appears at the left-hand side):
-* enter - switch to "edit" mode for the current program
-* cmd + enter - evaluate current program and play the resulting waveform at the beginning of the next measure and every measure afterward
-* shift + cmd + enter - evaluate current program and play the resulting waveform at the beginning of the next measure and every _other_ measure afterward
-* escape - stop playback of future iterations of the current waveform
-* cmd + escape - immediate stop playback of the current waveform
-* (hold) option - switch to "slider" mode
-* R - **reload** all context files
-* L - **load** all program files (and overwrite the current programs)
-* S - **save** all programs to a file
-* D - evaluate the current program and **dump** the waveform to stdout
-* number - select the program with the given number
-* down - select the next program
-* up - select the previous program
+* Enter - switch to "edit" mode for the current program
+* Cmd + Enter - play the current program's waveform at the beginning of the next measure and every measure afterward
+* Shift + Cmd + Enter - play the current program's waveform at the beginning of the next measure and every _other_ measure afterward
+* Escape - stop playback of future iterations of the current waveform
+* Cmd + Escape - immediately stop playback of the current waveform
+* (hold) Option - switch to "slider" mode
+* K - enter **keys** mode
+* Shift + D - evaluate the current program and **dump** the result to stdout
+* Shift + K - install the current program as the keys instrument
+* 1 to 8 - select the program with the given number
+* Down - select the next program
+* Up - select the previous program
+* Right - select the next program bank
+* Left - select the previous program bank
+* Cmd + R - stop playback and **reload** all source files
 
 In "edit" mode (when the current program is rendered in white):
-* enter - evaluate the current program and play the resulting waveform at the beginning of the next measure
-* cmd + enter - evaluate current program and play the resulting waveform at the beginning of the next measure and every measure afterward
-* shift + cmd + enter - evaluate current program and play the resulting waveform at the beginning of the next measure and every _other_ measure afterward
-* escape - switch to "select" mode
+* Enter - play the current program's waveform at the beginning of the next measure
+* Cmd + Enter - play the current program's waveform at the beginning of the next measure and every measure afterward
+* Shift + Cmd + Enter - play the current program's waveform at the beginning of the next measure and every _other_ measure afterward
+* Cntl + H - display the inferred type of the identifier at the cursor
+* Escape - switch to "select" mode
 
 In "slider" mode (slider marks at top and left turn green):
-* move mouse (or track-pad) left and right - adjust "X" slider
-* move mouse (or track-pad) up and down - adjust "Y" slider
-* (release) option - return to "select" mode
+* Move mouse (or track-pad) left and right - adjust "X" slider
+* Move mouse (or track-pad) up and down - adjust "Y" slider
+* (release) Option - return to "select" mode
+
+In "keys" mode:
+* Bottom two rows of keys (Z to /, S to ;) behave as the keys on MIDI keyboard
+* Escape - return to "select" mode
+
+### MIDI Integration
+
+Tuun provides a limited MIDI integration, specifically for the Novation Launchkey keyboard controller.
+
+* Keys play the currently installed keys instrument
+
+* Track navigation buttons select the previous or next program; with "Shift" they select the previous or next program bank
+
+* Encoders support the following two modes. (Use "Shift" to change modes.)
+  * Plugin mode: encoders control the first eight sliders of the current program
+  * Mixer mode: encoders control the levels of the eight programs in the current program bank
+
+* Pads only support DAW mode; there are three DAW "sub-modes." (Use "Shift" + "DAW" to rotate through them.) In the first two sub-modes, the eight columns of pads map to the eight programs in the current program bank. 
+  * "Clip launcher" mode
+    * Top row pads play the given waveform immediately
+      * "Scene" (`>`) button to the right toggles between "Toggle" (start or stop playback) and "Trigger" (always start playback)
+        * For sequenced waveforms, "Trigger" mode only plays one step instead of the whole sequence
+    * Bottom row pads play the given waveform at the start of the next measure and optionally repeat every measure or every _other_ measure afterward
+      * "Function" button to the right switches through different repeating behaviors.
+  * "Keys installer" mode: bottom row pads install the given program as a keys instrument (top row pads do nothing)
+  * Sequencer mode: for sequenced programs (for example, those that use `on_beats`), each pad maps to a sixteenth note and controls playback of the waveform at that point in time
+    * Arrow buttons to the left of the pads scroll from beats 1-4 to beats 5-8 and so on
+
+* "Play" button starts the current waveform at the beginning of the next measure with the same repeating behavior as the bottom pads in "clip launcher" mode
 
 ## WebAssembly
 

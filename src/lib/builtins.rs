@@ -959,10 +959,7 @@ where
     Ok({
         match &arguments[..] {
             [List(exprs)] => {
-                let mut result = Waveform::Fin {
-                    length: Box::new(Waveform::Const(0.0)),
-                    waveform: Box::new(Waveform::Const(0.0)),
-                };
+                let mut result = Waveform::Fixed(vec![], ());
                 for expr in exprs.iter().rev() {
                     let waveform: Box<Waveform<M>> = match &expr.expr {
                         Expr::Waveform(waveform) => Box::new(waveform.clone()),
