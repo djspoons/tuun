@@ -140,7 +140,7 @@ where
                 // Add yields the shorter of the two inputs.
                 (Fixed(a, _), _) if a.is_empty() => Fixed(vec![], ()),
                 (_, Fixed(b, _)) if b.is_empty() => Fixed(vec![], ()),
-                (Const(a), Const(b)) => Const(a + b),
+                (Const(a), Const(b)) => Const(Operator::Add.apply(a, b)),
                 // Adding 0 is identity (because Add truncates to shorter, and Const is infinite)
                 (a, Const(0.0)) => a,
                 // Commute (moving constants to the right)
@@ -196,7 +196,7 @@ where
                 // Merge yields the longer of the two inputs.
                 (Fixed(a, _), b) if a.is_empty() => b,
                 (a, Fixed(b, _)) if b.is_empty() => a,
-                (Const(a), Const(b)) => Const(a + b),
+                (Const(a), Const(b)) => Const(Operator::Merge.apply(a, b)),
                 // Merging 0 is the identity if the left-hand side is infinite
                 // TODO could check for other infinite waveforms
                 (a @ (Time(_) | Noise), Const(0.0)) => a,
@@ -277,8 +277,13 @@ where
                 (a, Const(1.0)) => a,
                 // If a is infinite, then we can replace multiplication of zero with zero
                 //(a, Const(0.0)) => Const(0.0)
-                (Const(a), Const(b)) => Const(a * b),
-                (Fixed(a, _), Const(b)) => Fixed(a.into_iter().map(|x| x * b).collect(), ()),
+                (Const(a), Const(b)) => Const(Operator::Multiply.apply(a, b)),
+                (Fixed(a, _), Const(b)) => Fixed(
+                    a.into_iter()
+                        .map(|x| Operator::Multiply.apply(x, b))
+                        .collect(),
+                    (),
+                ),
                 // Commute (moving constants to the right)
                 (Const(a), b) => optimize(BinaryPointOp(
                     Operator::Multiply,
@@ -348,11 +353,13 @@ where
         BinaryPointOp(Operator::Divide, a, b) => {
             match (optimize(*a), optimize(*b)) {
                 (_, Fixed(b, _)) if b.is_empty() => Fixed(vec![], ()),
-                // Prefer multiplication
+                (Const(a), Const(b)) => Const(Operator::Divide.apply(a, b)),
+                // Prefer multiplication by the reciprocal (zero when dividing
+                // by zero, matching `Operator::Divide`).
                 (a, Const(b)) => optimize(BinaryPointOp(
                     Operator::Multiply,
                     Box::new(a),
-                    Box::new(Const(1.0 / b)),
+                    Box::new(Const(Operator::Divide.apply(1.0, b))),
                 )),
                 // ((a / b) / c) == (a / (b * c))
                 (BinaryPointOp(Operator::Divide, a, b), c) => BinaryPointOp(
@@ -394,8 +401,11 @@ where
                 // TODO could do other infinite waveforms below
                 (Const(_), Const(0.0)) => Const(1.0),
                 (a, Const(1.0)) => a,
-                (Const(a), Const(b)) => Const(a.powf(b)),
-                (Fixed(a, _), Const(b)) => Fixed(a.into_iter().map(|x| x.powf(b)).collect(), ()),
+                (Const(a), Const(b)) => Const(Operator::Power.apply(a, b)),
+                (Fixed(a, _), Const(b)) => Fixed(
+                    a.into_iter().map(|x| Operator::Power.apply(x, b)).collect(),
+                    (),
+                ),
                 (a, b) => BinaryPointOp(Operator::Power, Box::new(a), Box::new(b)),
             }
         }

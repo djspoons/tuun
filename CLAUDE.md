@@ -11,6 +11,7 @@
   - For other code, that sentence can also omit the verb ("The state of the waveform...").
 - After a blank comment line, doc comments may continue with a more detailed explanation if necessary.
 - When a short example is possible, an Example section should include that example.
+  - Rust examples should be executable doctests whenever possible: an untagged fenced code block with `use tuun::...` imports and an `assert!`/`assert_eq!`, which `cargo test` compiles and runs. Reserve a ```` ```text ```` or ```` ```tuun ```` fence for tuun-language snippets and for output that cannot run (e.g. examples needing audio hardware or files).
 - Doc comments should *not* describe previous versions of the code or changes that have occurred since previous versions of the code.
 - Doc comments should *not* describe implementation details of the function; these comments should go inside the function.
 - Doc comments should describe only the item being documented — its behavior, inputs, outputs, and preconditions — *not* the behavior of its callers or of other parts of the codebase. Describing callers inverts the dependency: a later change to the caller would require an edit to this comment, and that edit will be missed.

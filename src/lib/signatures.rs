@@ -70,13 +70,14 @@ pub fn signature(name: &str) -> Option<Type> {
         "+" | "*" | "&" => binary_arithmetic(true),
         "/" | "pow" => binary_arithmetic(false),
         // Unary and binary conjuncts in one intersection; selection matches the
-        // call's arity. Unary minus preserves integrality; there is no unary
-        // seq conjunct (`unary_op` has no `Seq` arm).
+        // call's arity. Unary minus is multiplication by -1, so it preserves
+        // integrality and threads a seq.
         "-" => {
             let unary = vec![
                 Type::function(vec![Type::int()], Type::int()),
                 Type::function(vec![Type::float()], Type::float()),
                 Type::function(vec![Type::waveform()], Type::non_const_wave()),
+                Type::function(vec![Type::seq()], Type::seq()),
             ];
             let Type::And(binary) = binary_arithmetic(true) else {
                 unreachable!("binary_arithmetic returns an intersection");

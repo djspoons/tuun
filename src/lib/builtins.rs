@@ -8,48 +8,13 @@ use crate::optimizer;
 use crate::waveform::{Operator, Waveform};
 use Expr::{Bool, BuiltIn, List, Seq};
 
-type WaveformBinOp<M> = fn(Box<Waveform<M>>, Box<Waveform<M>>) -> Waveform<M>;
-
 type BuiltinFn<M, S> = fn(Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>;
-
-fn unary_op<M, S>(
-    mut arguments: Vec<Expr<M, S>>,
-    name: String,
-    float_op: fn(f32) -> f32,
-    waveform_op: fn(Box<Waveform<M>>) -> Waveform<M>,
-) -> Result<Expr<M, S>, Error<S>>
-where
-    M: Debug,
-    S: Debug,
-{
-    Ok({
-        if arguments.len() != 1 {
-            return Err(Error::internal_here(format!(
-                "Expected one argument for {}",
-                name
-            )));
-        }
-        match arguments.remove(0) {
-            // A constant folds eagerly, so arithmetic on constants stays
-            // constant (see `Expr::as_const_float`).
-            Expr::Waveform(Waveform::Const(a)) => Expr::float(float_op(a)),
-            Expr::Waveform(a) => Expr::Waveform(waveform_op(Box::new(a))),
-            a => {
-                return Err(Error::internal_here(format!(
-                    "Invalid argument for {}: {:?}",
-                    name, a
-                )));
-            }
-        }
-    })
-}
 
 // TODO maybe use Display instead of Debug for errors?
 fn binary_op<M, S>(
     mut arguments: Vec<Expr<M, S>>,
     name: String,
-    fold: fn(f32, f32) -> f32,
-    waveform_op: WaveformBinOp<M>,
+    op: Operator,
 ) -> Result<Expr<M, S>, Error<S>>
 where
     M: Debug,
@@ -58,7 +23,7 @@ where
     Ok({
         fn make_seq<M, S>(
             offset: Box<SourceExpr<M, S>>,
-            waveform_op: WaveformBinOp<M>,
+            op: Operator,
             a: Waveform<M>,
             b: Waveform<M>,
         ) -> Expr<M, S>
@@ -67,7 +32,11 @@ where
         {
             Seq {
                 offset,
-                waveform: boxed(Expr::Waveform(waveform_op(Box::new(a), Box::new(b)))),
+                waveform: boxed(Expr::Waveform(Waveform::BinaryPointOp(
+                    op,
+                    Box::new(a),
+                    Box::new(b),
+                ))),
             }
         }
 
@@ -80,14 +49,14 @@ where
         let (x, y) = (arguments.remove(0), arguments.remove(0));
         // Two constants fold eagerly, so arithmetic on constants stays constant.
         if let (Some(a), Some(b)) = (x.as_const_float(), y.as_const_float()) {
-            return Ok(Expr::float(fold(a, b)));
+            return Ok(Expr::float(op.apply(a, b)));
         }
         match (x, y) {
             (Expr::Waveform(a), Expr::Waveform(b)) => {
-                Expr::Waveform(waveform_op(Box::new(a), Box::new(b)))
+                Expr::Waveform(Waveform::BinaryPointOp(op, Box::new(a), Box::new(b)))
             }
             (Seq { offset, waveform }, Expr::Waveform(b)) => match waveform.expr {
-                Expr::Waveform(a) => make_seq(offset, waveform_op, a, b),
+                Expr::Waveform(a) => make_seq(offset, op, a, b),
                 expr => {
                     return Err(Error::internal_here(format!(
                         "Invalid argument to seq in {}: {:?}",
@@ -96,7 +65,7 @@ where
                 }
             },
             (Expr::Waveform(a), Seq { offset, waveform }) => match waveform.expr {
-                Expr::Waveform(b) => make_seq(offset, waveform_op, a, b),
+                Expr::Waveform(b) => make_seq(offset, op, a, b),
                 expr => {
                     return Err(Error::internal_here(format!(
                         "Invalid argument to seq in {}: {:?}",
@@ -119,33 +88,21 @@ where
     M: Debug,
     S: Debug,
 {
-    binary_op(arguments, "+".to_string(), std::ops::Add::add, |a, b| {
-        Waveform::BinaryPointOp(Operator::Add, a, b)
-    })
+    binary_op(arguments, "+".to_string(), Operator::Add)
 }
 
-pub fn minus<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
+pub fn minus<M, S>(mut arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
     M: Debug,
     S: Debug,
 {
+    // Unary minus is multiplication by -1, so it folds and threads seqs the
+    // same way.
     if arguments.len() == 1 {
-        return unary_op(
-            arguments,
-            "-".to_string(),
-            |a| -a,
-            |waveform| {
-                Waveform::BinaryPointOp(
-                    Operator::Multiply,
-                    Box::new(Waveform::Const(-1.0)),
-                    waveform,
-                )
-            },
-        );
+        arguments.insert(0, Expr::float(-1.0));
+        return binary_op(arguments, "-".to_string(), Operator::Multiply);
     }
-    binary_op(arguments, "-".to_string(), std::ops::Sub::sub, |a, b| {
-        Waveform::BinaryPointOp(Operator::Subtract, a, b)
-    })
+    binary_op(arguments, "-".to_string(), Operator::Subtract)
 }
 
 pub fn times<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
@@ -153,9 +110,7 @@ where
     M: Debug,
     S: Debug,
 {
-    binary_op(arguments, "*".to_string(), std::ops::Mul::mul, |a, b| {
-        Waveform::BinaryPointOp(Operator::Multiply, a, b)
-    })
+    binary_op(arguments, "*".to_string(), Operator::Multiply)
 }
 
 pub fn divide<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
@@ -163,9 +118,7 @@ where
     M: Debug,
     S: Debug,
 {
-    binary_op(arguments, "/".to_string(), std::ops::Div::div, |a, b| {
-        Waveform::BinaryPointOp(Operator::Divide, a, b)
-    })
+    binary_op(arguments, "/".to_string(), Operator::Divide)
 }
 
 pub fn merge<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
@@ -173,9 +126,7 @@ where
     M: Debug,
     S: Debug,
 {
-    binary_op(arguments, "&".to_string(), std::ops::Add::add, |a, b| {
-        Waveform::BinaryPointOp(Operator::Merge, a, b)
-    })
+    binary_op(arguments, "&".to_string(), Operator::Merge)
 }
 
 // Given waveforms that represent offsets (and assuming offset waveforms are of the form
@@ -299,9 +250,7 @@ where
     M: Debug,
     S: Debug,
 {
-    binary_op(arguments, "pow".to_string(), f32::powf, |a, b| {
-        Waveform::BinaryPointOp(Operator::Power, a, b)
-    })
+    binary_op(arguments, "pow".to_string(), Operator::Power)
 }
 
 pub fn log<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
@@ -361,11 +310,6 @@ where
         // Like the waveform, Sine, the first argument is frequency in radians per
         // second, and the second is phase in radians.
         match &arguments[..] {
-            // A zero-frequency sine of a constant phase folds to a constant.
-            [
-                Expr::Waveform(Waveform::Const(frequency)),
-                Expr::Waveform(Waveform::Const(phase)),
-            ] if *frequency == 0.0 => Expr::float(phase.sin()),
             [Expr::Waveform(freq), Expr::Waveform(phase)] => Expr::Waveform(Waveform::Sine {
                 frequency: Box::new(freq.clone()),
                 phase: Box::new(phase.clone()),

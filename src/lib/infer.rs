@@ -4173,6 +4173,7 @@ mod tests {
         // Arithmetic threads a seq operand through (`binary_op`'s seq
         // conjuncts), so seq-ness survives to the following `\`.
         assert_clean("(seq(0)(sine(440, 0)) * 0.5) \\ 1");
+        assert_clean("(-seq(0)(sine(440, 0))) \\ 1");
     }
 
     // Runtime errors the refinement lattice makes visible: arms the
@@ -4181,9 +4182,6 @@ mod tests {
     fn refinement_true_positives() {
         // `binary_op` has no (Seq, Seq) arm.
         assert_errors("seq(0)(1) + seq(0)(2)", &["cannot combine two seqs with +"]);
-        // `unary_op` has no Seq arm; the error pinpoints the argument
-        // with the union of the domains the table does accept.
-        assert_errors("-seq(0)(1)", &["expected waveform, found seq"]);
         // `reset`'s trigger accepts constants and waveforms, not seqs.
         assert_errors("reset(seq(0)(1), 1)", &["expected waveform, found seq"]);
         // `unfold`'s count is hard-checked integral at runtime.
@@ -4191,9 +4189,7 @@ mod tests {
         // `nth`'s index is hard-checked integral at runtime.
         assert_errors("nth(2.5, [1, 2, 3])", &["expected int, found float"]);
         // Contravariant contract flow: `exp` requires constants, and the
-        // list supplies a definite waveform. (`sine(440, 0)` would pass
-        // here: its type is the whole waveform class, because the
-        // zero-frequency fold can produce a constant.)
+        // list supplies a definite waveform.
         assert_errors("map(exp, [time])", &["expected [float], found [waveform]"]);
         // Comparisons are scalar-only at runtime.
         assert_errors("time < 1", &["expected float, found waveform"]);

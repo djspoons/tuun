@@ -1,7 +1,7 @@
 use std::fmt;
 use std::fmt::{Debug, Display};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Operator {
     /// Computes the sum of two samples.
     Add,
@@ -24,6 +24,35 @@ impl Operator {
     /// result is truncated to the shorter input.
     pub fn extends_to_longer(&self) -> bool {
         matches!(self, Operator::Merge)
+    }
+
+    /// Returns the operator applied to one pair of samples.
+    ///
+    /// Note that division is total and returns 0.0 when the right-hand side is
+    /// 0.0.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tuun::waveform::Operator;
+    ///
+    /// assert_eq!(Operator::Power.apply(2.0, 3.0), 8.0);
+    /// assert_eq!(Operator::Divide.apply(1.0, 0.0), 0.0);
+    /// ```
+    pub fn apply(&self, a: f32, b: f32) -> f32 {
+        match self {
+            Operator::Add | Operator::Merge => a + b,
+            Operator::Subtract => a - b,
+            Operator::Multiply => a * b,
+            Operator::Divide => {
+                if b == 0.0 {
+                    0.0
+                } else {
+                    a / b
+                }
+            }
+            Operator::Power => a.powf(b),
+        }
     }
 }
 
