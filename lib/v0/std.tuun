@@ -19,6 +19,8 @@ sinh = fn(x) => (exp(x) - exp(-x)) / 2;
 
 // `sin` is shorthand for sine with no angular frequency.
 sin = fn(phase) => sine(0, phase);
+// `cos` is a quarter turn ahead of `sin`.
+cos = fn(phase) => sine(0, phase + pi / 2);
 // `$` computes a sine wave at the given frequency in hertz (which must be a float or waveform).
 $ = fn(freq_hz) => sine(2*pi * freq_hz, 0);
 // `sawtooth` computes a sawtooth wave at the given frequency in hertz.

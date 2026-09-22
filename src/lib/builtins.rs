@@ -320,29 +320,6 @@ where
     })
 }
 
-// TODO: can this be moved to std?
-pub fn cos<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
-where
-    M: Debug + Clone,
-    S: Clone + Debug,
-{
-    Ok({
-        match &arguments[..] {
-            [Expr::Waveform(Waveform::Const(value))] => Expr::float(value.cos()),
-            [Expr::Waveform(a)] => Expr::Waveform(Waveform::Sine {
-                frequency: Box::new(Waveform::Const(0.0)),
-                phase: Box::new(Waveform::BinaryPointOp(
-                    Operator::Add,
-                    Box::new(a.clone()),
-                    Box::new(Waveform::Const(std::f32::consts::FRAC_PI_2)),
-                )),
-                state: (),
-            }),
-            _ => return Err(Error::internal_here("Invalid argument for cos")),
-        }
-    })
-}
-
 pub fn round<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
     M: Debug,
@@ -1123,7 +1100,6 @@ where
         ("sqrt", sqrt),
         ("exp", exp),
         ("sine", sine),
-        ("cos", cos),
         ("round", round),
         ("map", map),
         ("reduce", reduce),

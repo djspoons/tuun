@@ -3970,6 +3970,27 @@ mod tests {
             Pattern::Identifier("debug".to_string()),
             builtins::debug(|_| {}),
         ));
+        // std's `cos = fn(phase) => sine(0, phase + pi / 2)`: the tests lean
+        // on it as a definition-bound arrow over waveforms.
+        prelude.push(SourceBinding::definition(
+            Pattern::Identifier("cos".to_string()),
+            SourceExpr::function(
+                vec![Pattern::Identifier("phase".to_string())],
+                SourceExpr::application(
+                    SourceExpr::variable("sine".to_string()),
+                    vec![
+                        SourceExpr::float(0.0),
+                        SourceExpr::application(
+                            SourceExpr::variable("+".to_string()),
+                            vec![
+                                SourceExpr::variable("phase".to_string()),
+                                SourceExpr::float(std::f32::consts::FRAC_PI_2),
+                            ],
+                        ),
+                    ],
+                ),
+            ),
+        ));
         prelude
     }
 
