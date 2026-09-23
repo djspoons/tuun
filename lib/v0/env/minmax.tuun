@@ -4,6 +4,8 @@ open std;
 
 ADS = fn(attack_dur, decay_dur, sustain_level) =>
   let
+    // Enforce a minimum attack duration (and avoid divide-by-zero)
+    attack_dur = max(attack_dur, 10/sample_rate),
     attack = linear(0.0, 1/attack_dur),
     decay_slope = (sustain_level-1)/decay_dur,
     decay = linear(1-attack_dur*decay_slope, decay_slope),
@@ -13,6 +15,8 @@ ADS = fn(attack_dur, decay_dur, sustain_level) =>
 
 ADSR = fn(attack_dur, decay_dur, sustain_level, sustain_dur, release_dur) =>
   let
+    // Enforce a minimum attack duration (and avoid divide-by-zero)
+    attack_dur = max(attack_dur, 10/sample_rate),
     attack = linear(0.0, 1/attack_dur),
     decay_slope = (sustain_level-1)/decay_dur,
     decay = linear(1-attack_dur*decay_slope, decay_slope),
