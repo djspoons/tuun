@@ -457,17 +457,60 @@ impl EffectRunner {
                 }
             }
 
-            Effect::DumpActiveWaveform => {
-                let program_index = state.active_program_index;
+            Effect::PrintEvaluatedProgram(program_index) => {
                 let display_name = state.programs.display_name(program_index);
-                let program = state.active_program();
-                if let Some(waveform) = program.waveform() {
-                    println!("Waveform definition for program {}:", display_name);
-                    println!("{:#?}", waveform);
-                    state.message = "Dumped waveform to console".to_string();
-                } else {
-                    println!("No waveform associated with program {}:", display_name);
-                    state.message = "No waveform associated with current program".to_string();
+                let evaluated = state
+                    .programs
+                    .program(program_index)
+                    .and_then(|program| program.evaluated());
+                match evaluated {
+                    Some(programs::Evaluated::KeysInstrument(function)) => {
+                        // The lambda itself is noisy to print, so show what it
+                        // computes for one sample note instead.
+
+                        // TODO this is sort of a lot of work just for some
+                        // mediocre debugging, but printing `function` isn't
+                        // great either (either Debug or Display).
+                        const SAMPLE_KEY: f32 = 60.0; // middle C
+                        const SAMPLE_VELOCITY: f32 = 0.7;
+                        let args = vec![
+                            expr::SourceExpr::float(SAMPLE_KEY),
+                            expr::SourceExpr::float(SAMPLE_VELOCITY),
+                        ];
+                        match self.environment.apply_note_function(function, args) {
+                            Ok((note_on, note_off)) => {
+                                println!(
+                                    "Keys instrument of program {} applied at key {}, velocity {}:",
+                                    display_name, SAMPLE_KEY, SAMPLE_VELOCITY
+                                );
+                                println!("note on: {:#?}", note_on);
+                                println!("note off: {:#?}", note_off);
+                                state.message =
+                                    format!("Printed program {} to console", display_name);
+                            }
+                            Err(error) => {
+                                println!("Keys instrument of program {}:", display_name);
+                                println!("{}", function);
+                                let diagnostic = self.environment.diagnose(
+                                    &error,
+                                    &state.programs,
+                                    program_index,
+                                );
+                                let message = diagnostics::error_message(&[diagnostic]);
+                                println!("Applying it at a sample note failed: {}", message);
+                                state.message = message;
+                            }
+                        }
+                    }
+                    Some(evaluated) => {
+                        println!("Evaluated form of program {}:", display_name);
+                        println!("{:#?}", evaluated);
+                        state.message = format!("Printed program {} to console", display_name);
+                    }
+                    None => {
+                        println!("Program {} has no evaluated form", display_name);
+                        state.message = format!("Program {} has no evaluated form", display_name);
+                    }
                 }
             }
             Effect::Exit => {
@@ -719,6 +762,48 @@ mod tests {
         assert!(
             state.message.starts_with("Reloaded"),
             "got: {}",
+            state.message
+        );
+    }
+
+    #[test]
+    fn print_evaluated_program_applies_a_keys_instrument() {
+        let (precompute_sender, _precompute_receiver) = mpsc::channel();
+        let (fast_sender, _fast_receiver) = mpsc::channel();
+        let (slider_sender, _slider_receiver) = mpsc::channel();
+        let player = player::Player::new(90, 4, precompute_sender, fast_sender);
+        let environment = environment::Environment::new(44100, 90, std::path::PathBuf::new());
+        let mut runner = EffectRunner::new(player, environment, slider_sender);
+
+        let mut state = AppState::from_source(
+            "#{keys}\nk = fn(note, vel) => (note, vel);".to_string(),
+            std::path::PathBuf::new(),
+        )
+        .expect("test source should parse");
+        let status = empty_status();
+        let mut world = World {
+            launchkey: None,
+            status: &status,
+        };
+        runner.run_one(
+            &mut state,
+            &mut world,
+            Effect::EvaluateProgram {
+                program_index: 0,
+                mode_on_success: None,
+                mode_on_failure: None,
+            },
+        );
+        assert!(
+            state.programs.programs()[0].keys_instrument().is_some(),
+            "program should evaluate to a keys instrument: {}",
+            state.message
+        );
+
+        runner.run_one(&mut state, &mut world, Effect::PrintEvaluatedProgram(0));
+        assert!(
+            state.message.starts_with("Printed program"),
+            "the sample note application should succeed, got: {}",
             state.message
         );
     }

@@ -298,7 +298,9 @@ impl InputHandler {
         use actions::Action;
         match state.mode {
             Mode::Select => match text {
-                "D" => Some(vec![Action::DumpActiveWaveform]),
+                "D" => Some(vec![Action::PrintEvaluatedProgram(
+                    state.active_program_index,
+                )]),
                 // Install/uninstall the active program as the keys instrument
                 "K" => Some(vec![Action::ToggleInstalledKeys(
                     state.active_program_index,

@@ -65,7 +65,7 @@ In "select" mode (when a solid triangle appears at the left-hand side):
 * Cmd + Escape - immediately stop playback of the current waveform
 * (hold) Option - switch to "slider" mode
 * K - enter **keys** mode
-* Shift + D - evaluate the current program and **dump** the result to stdout
+* Shift + D - print the current program's evaluated form to stdout
 * Shift + K - install the current program as the keys instrument
 * 1 to 8 - select the program with the given number
 * Down - select the next program

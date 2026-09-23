@@ -349,7 +349,11 @@ pub enum Action {
 
     // --- program-related I/O and other effects ---
     ShowMessage(String),
-    DumpActiveWaveform,
+    /// Print the evaluated waveform of the program at the given index.
+    ///
+    /// For keys instruments, use an arbitrary note and velocity to generate an
+    /// example waveform.
+    PrintEvaluatedProgram(usize),
     Exit,
 }
 
@@ -443,8 +447,12 @@ pub enum Effect {
     ReloadSource,
     /// User-visible status message.
     ShowMessage(String),
-    /// Print the waveform of the active program.
-    DumpActiveWaveform,
+    /// Print the evaluated waveform of the program at the given index to
+    /// stdout.
+    ///
+    /// For keys instruments, use an arbitrary note and velocity to generate an
+    /// example waveform.
+    PrintEvaluatedProgram(usize),
     /// Sets `state.should_exit = true`.
     Exit,
 }
@@ -786,7 +794,9 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
         }
 
         Action::ShowMessage(message) => vec![Effect::ShowMessage(message)],
-        Action::DumpActiveWaveform => vec![Effect::DumpActiveWaveform],
+        Action::PrintEvaluatedProgram(program_index) => {
+            vec![Effect::PrintEvaluatedProgram(program_index)]
+        }
         Action::Exit => vec![
             Effect::UpdateSource(state.active_program_index),
             Effect::Exit,
