@@ -411,6 +411,9 @@ where
                 (a, b) => BinaryPointOp(Operator::Power, Box::new(a), Box::new(b)),
             }
         }
+        // TODO if the waveform has constants, they can be pulled out; also
+        // nested resets with the same trigger. Consider a naive version of the
+        // triangle wave as an example
         Reset {
             trigger,
             waveform,

@@ -31,11 +31,18 @@ sawtooth = fn(freq_hz) => (reset($freq_hz, -freq_hz * time) + 0.5) * 2;
 square = fn(freq_hz) => alt($freq_hz, 1, -1);
 // `triangle` computes a triangle wave at the given frequency in hertz.
 triangle = fn(freq_hz) => let
-    t = $freq_hz,
+    t = $(2*freq_hz),
     slope = 4 * freq_hz,
-    a = time * slope - 1,
-    b = time * -slope + 3
-  in alt(t, reset(t, a), reset(t, b));
+    a = reset(t, time * slope),
+    b = reset(t, time * -slope + 2),
+  in sign($freq_hz) * reset(t, alt(t, a, b));
+// TODOs for triangle:
+//   * Changing frequency quickly can get the different waveforms out of sync
+//   * Can we optimize this automatically? e.g.,
+//    t = $(2*freq_hz),
+//    slope = 4 * freq_hz,
+//  in sign($freq_hz) * reset(t, time * slope * sign(t) + alt(t, 0, 2)); 
+
 // Pulse computes a pulse wave with the given width. `width` should be a number (or waveform)
 // between 0.0 and 1.0, where 0.0 is a square wave (i.e., 50% duty cycle). If width isn't constant;
 // then this is a PWM oscillator.
