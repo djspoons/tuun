@@ -5934,7 +5934,7 @@ mod tests {
                 Binding::Open(segments).into(),
             ];
             check_program(
-                &|p: &[String]| library_resolve(&prelude, &parsed, p),
+                |p: &[String]| library_resolve(&prelude, &parsed, p),
                 &bindings,
                 &expr,
                 None,
@@ -6087,8 +6087,7 @@ mod tests {
         let resolve = |p: &[String]| library_resolve(&prelude, &parsed, p);
         let expr = parse_program::<u32, _>("0", 9999).unwrap();
         for (index, (path, content, bindings)) in parsed.iter().enumerate() {
-            let errors =
-                check_program(&resolve, bindings, &expr, None, &mut ModuleCache::default());
+            let errors = check_program(resolve, bindings, &expr, None, &mut ModuleCache::default());
             let own: Vec<String> = errors
                 .iter()
                 .filter(|error| error.source() == Some(index as u32))
@@ -6647,8 +6646,7 @@ mod tests {
         let expr = parse_program::<u32, _>("0", 9999).unwrap();
         let mut report: Vec<String> = Vec::new();
         for (index, (path, content, bindings)) in parsed.iter().enumerate() {
-            let errors =
-                check_program(&resolve, bindings, &expr, None, &mut ModuleCache::default());
+            let errors = check_program(resolve, bindings, &expr, None, &mut ModuleCache::default());
             for error in &errors {
                 if error.source() == Some(index as u32) {
                     report.push(format!("{}: {}", path, error.display_with_source(content)));

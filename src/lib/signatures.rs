@@ -224,14 +224,14 @@ mod tests {
         let mut bindings: Vec<SourceBinding<u32, ()>> = Vec::new();
         builtins::add_bindings(&mut bindings);
         for binding in &bindings {
-            if let Binding::Definition(_, expr) = &binding.binding {
-                if let Expr::BuiltIn { name, .. } = &expr.expr {
-                    assert!(
-                        signature(name).is_some(),
-                        "built-in \"{}\" has no signature",
-                        name
-                    );
-                }
+            if let Binding::Definition(_, expr) = &binding.binding
+                && let Expr::BuiltIn { name, .. } = &expr.expr
+            {
+                assert!(
+                    signature(name).is_some(),
+                    "built-in \"{}\" has no signature",
+                    name
+                );
             }
         }
     }

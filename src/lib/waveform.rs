@@ -441,7 +441,7 @@ where
     match waveform {
         Marked { id, waveform } => {
             if *id == *mark_id {
-                *waveform = Box::new(new_waveform.clone());
+                **waveform = new_waveform.clone();
             } else {
                 substitute(waveform, mark_id, new_waveform);
             }

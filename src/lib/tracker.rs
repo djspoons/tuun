@@ -714,11 +714,14 @@ mod tests {
 
     use super::*;
 
-    fn test_tracker() -> (
+    /// A tracker under test with its command sender and status receiver.
+    type TestTracker = (
         Tracker<'static, WaveformId, MarkId>,
         mpsc::Sender<Command<WaveformId, MarkId>>,
         mpsc::Receiver<Status<WaveformId, MarkId>>,
-    ) {
+    );
+
+    fn test_tracker() -> TestTracker {
         let (command_sender, command_receiver) = mpsc::channel();
         let (status_sender, status_receiver) = mpsc::channel();
         let tracker = Tracker::new(

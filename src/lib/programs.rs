@@ -311,7 +311,7 @@ impl Program {
             } else {
                 println!(
                     "Found source expression without span or invalid span: {:?}",
-                    &sb
+                    sb
                 );
                 None
             }

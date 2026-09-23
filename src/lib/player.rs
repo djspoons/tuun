@@ -575,11 +575,10 @@ mod tests {
         set
     }
 
-    fn test_player() -> (
-        Player,
-        mpsc::Receiver<tracker::Command<WaveformId, MarkId>>,
-        mpsc::Receiver<tracker::Command<WaveformId, MarkId>>,
-    ) {
+    /// A receiver for the commands a test player sends to the tracker.
+    type CommandReceiver = mpsc::Receiver<tracker::Command<WaveformId, MarkId>>;
+
+    fn test_player() -> (Player, CommandReceiver, CommandReceiver) {
         let (precompute_sender, precompute_receiver) = mpsc::channel();
         let (fast_sender, fast_receiver) = mpsc::channel();
         let player = Player::new(90, 4, precompute_sender, fast_sender);

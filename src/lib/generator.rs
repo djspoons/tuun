@@ -875,19 +875,19 @@ impl<'a> Generator<'a> {
             if let Waveform::Fixed(_, _) = waveform {
                 println!(
                     "No need to precompute output for {} (already Fixed)",
-                    &waveform
+                    waveform
                 );
                 return waveform;
             }
             if let Waveform::Const(_) = waveform {
                 println!(
                     "Skipping pre-computation for {} (constant waveform)",
-                    &waveform
+                    waveform
                 );
                 return waveform;
             }
 
-            println!("Precomputing output for {}", &waveform);
+            println!("Precomputing output for {}", waveform);
             // Choose a `max` which is long enough to generate any reasonable
             // waveform.
             let max_len = 2_usize.pow(28);
@@ -1049,7 +1049,7 @@ impl<'a> Generator<'a> {
                     (length, Npc(Dynamic, waveform)) => {
                         println!(
                             "Cannot precompute Fin because inner waveform is dynamic: {}",
-                            &waveform
+                            waveform
                         );
                         Npc(
                             Dynamic,
@@ -1062,7 +1062,7 @@ impl<'a> Generator<'a> {
                     (Npc(Dynamic, length), waveform) => {
                         println!(
                             "Cannot precompute Fin because length waveform is dynamic: {}",
-                            &length
+                            length
                         );
                         Npc(
                             Dynamic,
@@ -1586,9 +1586,8 @@ mod tests {
             }),
             negative_waveform: Box::new(Const(-1.0)),
         };
-        match g.precompute(w) {
-            Fixed(_, _) => panic!("an alt with a dynamic branch must not precompute to Fixed"),
-            _ => (),
+        if let Fixed(_, _) = g.precompute(w) {
+            panic!("an alt with a dynamic branch must not precompute to Fixed")
         }
     }
 
@@ -1695,9 +1694,8 @@ mod tests {
             Box::new(Const(3.0)),
             (),
         );
-        match g.precompute(w) {
-            Fixed(_, _) => panic!("append with an infinite tail must not precompute to Fixed"),
-            _ => (),
+        if let Fixed(_, _) = g.precompute(w) {
+            panic!("append with an infinite tail must not precompute to Fixed")
         }
     }
 
@@ -1881,9 +1879,8 @@ mod tests {
             Box::new(Fixed(vec![1.0, 2.0], ())),
             Box::new(Const(10.0)),
         );
-        match g.precompute(w) {
-            Fixed(_, _) => panic!("merge with an infinite side must not precompute to Fixed"),
-            _ => (),
+        if let Fixed(_, _) = g.precompute(w) {
+            panic!("merge with an infinite side must not precompute to Fixed")
         }
     }
 

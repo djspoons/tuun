@@ -233,7 +233,7 @@ pub fn main() {
                             // TODO probably precompute should happen on another thread
                             let mut generator = generator::Generator::new(sample_rate);
                             waveform = waveform::remove_state(generator.precompute(waveform));
-                            println!("precompute returned: {}", &waveform);
+                            println!("precompute returned: {}", waveform);
                         }
 
                         play_command_sender
