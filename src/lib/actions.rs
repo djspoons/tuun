@@ -820,8 +820,11 @@ fn play_program_effects(
     ]
 }
 
-/// Returns the effects that stop the given program, or nothing if it isn't
-/// currently playing.
+/// Returns the effects that stop the given program and persist its source,
+/// or nothing if it isn't currently playing.
+///
+/// `UpdateSource` runs last so that a failed save's error message isn't
+/// overwritten by the "Stopped program" status.
 fn stop_program_effects(state: &AppState, ctx: &Context, i: usize) -> Vec<Effect> {
     if !ctx.status.has_active_mark(
         ctx.now,
@@ -836,11 +839,15 @@ fn stop_program_effects(state: &AppState, ctx: &Context, i: usize) -> Vec<Effect
             "Stopped program {}",
             state.programs.display_name(i)
         )),
+        Effect::UpdateSource(i),
     ]
 }
 
-/// Returns the effects that remove the given program's pending playback, or
-/// nothing if no playback is pending.
+/// Returns the effects that remove the given program's pending playback and
+/// persist its source, or nothing if no playback is pending.
+///
+/// `UpdateSource` runs last so that a failed save's error message isn't
+/// overwritten by the "Removed pending" status.
 fn remove_pending_effects(state: &AppState, ctx: &Context, i: usize) -> Vec<Effect> {
     if !ctx.status.has_pending_mark(
         ctx.now,
@@ -855,6 +862,7 @@ fn remove_pending_effects(state: &AppState, ctx: &Context, i: usize) -> Vec<Effe
             "Removed pending waveform for program {}",
             state.programs.display_name(i)
         )),
+        Effect::UpdateSource(i),
     ]
 }
 
@@ -2857,6 +2865,28 @@ _ = saw(220);";
                 }
             ),
             "expected a queued PlayProgram with the default repeat, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn stop_and_remove_pending_persist_source() {
+        let mut state = test_state();
+        let now = Instant::now();
+        // A mark starting in the past is active: StopProgram applies.
+        let status = status_with_mark(now - Duration::from_secs(1));
+        let effects = apply_with_status(&mut state, &status, now, Action::StopProgram(0));
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::UpdateSource(0))),
+            "expected UpdateSource, got {:?}",
+            effects
+        );
+        // A mark starting in the future is pending: RemovePendingProgram applies.
+        let status = status_with_mark(now + Duration::from_secs(1));
+        let effects = apply_with_status(&mut state, &status, now, Action::RemovePendingProgram(0));
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::UpdateSource(0))),
+            "expected UpdateSource, got {:?}",
             effects
         );
     }
