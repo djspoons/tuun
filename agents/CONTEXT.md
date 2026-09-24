@@ -22,6 +22,10 @@ _Avoid_: variable, assignment, declaration
 An expression that evaluates to a waveform, occupying one numbered slot. The unit a performer selects, edits, and plays.
 _Avoid_: patch, clip, track, preset, sound
 
+**Keys instrument**:
+A function from a key and a velocity to a pair of waveforms: the note-on that sounds while the key is held and the note-off that replaces it on release.
+_Avoid_: synth, patch, instrument
+
 **Voice**:
 One sounding instance of a program's waveform. A single program may have several voices sounding at once. A sequenceable program's voice is one hit of the waveform its pattern is built from, not the pattern — launching the pattern plays a voice per listed step.
 _Avoid_: instance, playback, note
@@ -43,6 +47,10 @@ The recording of a sounding waveform to a WAV file as it plays.
 _Avoid_: record, export, bounce
 
 ### The program set
+
+**Keys program**:
+A program annotated `#{keys}` that evaluates to a keys instrument. A file may hold several.
+_Avoid_: instrument program, keys patch
 
 **Bank**:
 A group of eight program slots. Eight banks, A through H, hold 64 programs.
@@ -70,9 +78,9 @@ _Avoid_: note, pad
 Playback scheduled to begin at a future moment in time (often a measure boundary), not yet sounding.
 _Avoid_: queued, armed, scheduled, cued
 
-**Keys instrument**:
-The single program bound to the piano keys, sounding one voice per held key.
-_Avoid_: synth, patch, instrument
+**Installed keys instrument**:
+The one keys instrument that sounds when MIDI note-on and note-off events arrive, one voice per held key. Taken from a keys program; at most one is installed at a time.
+_Avoid_: the keys, current keys, active instrument
 
 ### Modes
 
