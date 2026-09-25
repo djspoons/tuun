@@ -66,10 +66,6 @@ pub struct ToggleEdit {
     pub turned_on: bool,
     /// The sixteenth's grid beat, for user-facing messages.
     pub beat: f32,
-    /// Start of the edited region, for shifting a cursor sitting after it.
-    pub edit_start: usize,
-    /// Signed byte-length change of the text.
-    pub delta: isize,
 }
 
 /// Returns the grid beat addressed by a sixteenth (sixteenth 0 = beat 1).
@@ -190,8 +186,6 @@ pub fn toggle_sixteenth_text(text: &str, shape: &SequenceShape, sixteenth: u8) -
             new_text,
             turned_on: true,
             beat,
-            edit_start: insert_at,
-            delta: insertion.len() as isize,
         };
     }
 
@@ -219,18 +213,13 @@ pub fn toggle_sixteenth_text(text: &str, shape: &SequenceShape, sixteenth: u8) -
         removals.push(range);
         run_start = run_end + 1;
     }
-    let edit_start = removals[0].start;
-    let mut delta = 0isize;
     for range in removals.into_iter().rev() {
-        delta -= range.len() as isize;
         new_text.replace_range(range, "");
     }
     ToggleEdit {
         new_text,
         turned_on: false,
         beat,
-        edit_start,
-        delta,
     }
 }
 
@@ -301,7 +290,6 @@ mod tests {
         assert_eq!(edit.new_text, "[1, 2.5, 3] | on_beats(b)");
         assert!(edit.turned_on);
         assert_eq!(edit.beat, 2.5);
-        assert_eq!(edit.delta, 5);
     }
 
     #[test]
@@ -324,7 +312,6 @@ mod tests {
         let edit = toggle_sixteenth_text(text, &shape(text), 6);
         assert_eq!(edit.new_text, "[1, 3] | on_beats(b)");
         assert!(!edit.turned_on);
-        assert_eq!(edit.delta, -5);
     }
 
     #[test]

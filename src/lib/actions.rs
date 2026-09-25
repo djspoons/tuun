@@ -254,9 +254,12 @@ pub enum Action {
     EnterEditMode,
     /// Parse and evaluate the current program, updating its state and the
     /// source file. On success, return to Select mode; otherwise set the mode
-    /// to `mode_on_failure`.
+    /// to `mode_on_failure`. With `play`, then play the program from the next
+    /// measure, repeating every `repeat_after_measures` if given.
     EvaluateAndLeaveEditMode {
         mode_on_failure: Mode,
+        play: bool,
+        repeat_after_measures: Option<u32>,
     },
     EnterSelectMode,
     EnterMoveSlidersMode,
@@ -463,6 +466,9 @@ pub enum Effect {
 /// `state` and `ctx`. Effects whose outcome depends on I/O (evaluating a
 /// program, splicing source, playing notes) mutate state in the runner instead.
 pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect> {
+    if refused_by_ownership(state, ctx.status, ctx.now, &action) {
+        return vec![];
+    }
     match action {
         Action::PlayProgram {
             program_index,
@@ -592,15 +598,24 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             };
             effects
         }
-        Action::EvaluateAndLeaveEditMode { mode_on_failure } => {
-            vec![
+        Action::EvaluateAndLeaveEditMode {
+            mode_on_failure,
+            play,
+            repeat_after_measures,
+        } => {
+            let i = state.active_program_index;
+            let mut effects = vec![
                 Effect::EvaluateProgram {
-                    program_index: state.active_program_index,
+                    program_index: i,
                     mode_on_success: Some(Mode::Select),
                     mode_on_failure: Some(mode_on_failure),
                 },
-                Effect::UpdateSource(state.active_program_index),
-            ]
+                Effect::UpdateSource(i),
+            ];
+            if play {
+                effects.extend(play_program_effects(i, true, repeat_after_measures));
+            }
+            effects
         }
         Action::EnterSelectMode => {
             state.mode = Mode::Select;
@@ -621,7 +636,6 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             vec![Effect::ShowMessage("Piano keys enabled".to_string())]
         }
 
-        // TODO we shouldn't change active programs during an edit
         Action::SelectProgram(i) => apply_select_program(state, i),
         Action::AdvanceProgram(delta) => {
             let len = state.programs.programs().len() as i32;
@@ -805,6 +819,54 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
     }
 }
 
+/// Returns whether the editor mode owns the active program.
+///
+/// While it does, changes that would affect or depend on the active
+/// program's text are refused.
+fn owns_active_program(state: &AppState) -> bool {
+    matches!(state.mode, Mode::Edit { .. })
+}
+
+/// Returns whether `action` is refused, silently, because the editor mode owns
+/// the active program.
+///
+/// Stopping the owned program's playback, removing its pending playback, or
+/// uninstalling it as the keys instrument are allowed: they act on an
+/// already-evaluated waveform or instrument.
+pub fn refused_by_ownership(
+    state: &AppState,
+    status: &tracker::Status<WaveformId, MarkId>,
+    now: Instant,
+    action: &Action,
+) -> bool {
+    if !owns_active_program(state) {
+        return false;
+    }
+    let owned = state.active_program_index;
+    let voices = WaveformSelector::ProgramVoices(owned);
+    match *action {
+        Action::SelectProgram(_)
+        | Action::AdvanceProgram(_)
+        | Action::EnterEditMode
+        | Action::ToggleSequencerStep { .. } => true,
+        // Refused only when it would install; uninstalling drops an
+        // already-evaluated instrument.
+        Action::ToggleInstalledKeys(i) => {
+            i == owned && !state.keys.as_ref().is_some_and(|k| k.id == owned)
+        }
+        Action::PlayProgram { program_index, .. } => program_index == owned,
+        Action::StartProgramVoice(i) | Action::EnqueuePendingPlayback(i) => i == owned,
+        // The toggles are refused only when they would start or queue.
+        Action::ToggleProgramPlayback(i) => {
+            i == owned && !status.has_active_mark(now, &voices, &MarkId::TopLevel)
+        }
+        Action::ToggleProgramPendingPlayback(i) => {
+            i == owned && !status.has_pending_mark(now, &voices, &MarkId::TopLevel)
+        }
+        _ => false,
+    }
+}
+
 /// Returns the effects that play the given program and persist its source.
 fn play_program_effects(
     program_index: usize,
@@ -916,23 +978,6 @@ fn apply_toggle_sequencer_step(state: &mut AppState, ctx: &Context, sixteenth: u
         .expect("program existed above");
     program.set_text(edit.new_text);
     program.close_insert_run();
-    // The text changed under any Edit session on this program: shift a
-    // cursor sitting at or after the edited range and drop a stale
-    // completion cycle.
-    if let Mode::Edit {
-        cursor_position,
-        completion,
-        ..
-    } = &mut state.mode
-    {
-        if *cursor_position >= edit.edit_start {
-            *cursor_position = cursor_position
-                .saturating_add_signed(edit.delta)
-                .max(edit.edit_start);
-        }
-        *completion = None;
-    }
-    refresh_edit_errors(state);
 
     let anchor = WaveformSelector::Only(WaveformId::Step {
         program: i,
@@ -3076,41 +3121,6 @@ _ = saw(220);";
     }
 
     #[test]
-    fn toggle_shifts_edit_cursor_after_edit_range() {
-        let mut state = sequencer_state();
-        let end = state.active_program().text().len();
-        state.mode = Mode::Edit {
-            cursor_position: end,
-            errors: vec![],
-            completion: None,
-        };
-        apply_with_empty_status(&mut state, Action::ToggleSequencerStep { sixteenth: 8 });
-        let Mode::Edit {
-            cursor_position, ..
-        } = state.mode
-        else {
-            panic!("expected to stay in Edit mode");
-        };
-        // ", 3" was inserted before the cursor.
-        assert_eq!(cursor_position, end + 3);
-
-        // A cursor before the edited range stays put.
-        state.mode = Mode::Edit {
-            cursor_position: 0,
-            errors: vec![],
-            completion: None,
-        };
-        apply_with_empty_status(&mut state, Action::ToggleSequencerStep { sixteenth: 8 });
-        let Mode::Edit {
-            cursor_position, ..
-        } = state.mode
-        else {
-            panic!("expected to stay in Edit mode");
-        };
-        assert_eq!(cursor_position, 0);
-    }
-
-    #[test]
     fn toggle_on_non_sequenceable_program_only_shows_message() {
         let mut state = AppState::from_source(
             "#{level_db=0}\n_ = 1 | fin(time - 1);\n".to_string(),
@@ -3248,5 +3258,194 @@ _ = saw(220);";
         assert_eq!(state.daw_pad_mode, DawPadMode::Sequencer);
         apply_with_empty_status(&mut state, cycle());
         assert_eq!(state.daw_pad_mode, DawPadMode::ClipLauncher);
+    }
+
+    /// Builds a state with two programs, `a` in slot 1 and `b` in slot 2,
+    /// editing slot 1.
+    fn editing_state() -> AppState {
+        let mut state = AppState::from_source(
+            "#{level_db=0}\na = sine(440);\n#{level_db=0}\nb = sine(220);\n".to_string(),
+            std::path::PathBuf::new(),
+        )
+        .expect("test source should parse");
+        state.mode = Mode::Edit {
+            cursor_position: state.active_program().text().len(),
+            errors: vec![],
+            completion: None,
+        };
+        state
+    }
+
+    #[test]
+    fn owned_program_stays_active_while_editing() {
+        let mut state = editing_state();
+        for action in [Action::SelectProgram(1), Action::AdvanceProgram(1)] {
+            let effects = apply_with_empty_status(&mut state, action);
+            assert!(effects.is_empty(), "expected no effects, got {:?}", effects);
+            assert_eq!(state.active_program_index, 0);
+        }
+    }
+
+    #[test]
+    fn owned_program_cannot_start_or_queue_while_editing() {
+        let mut state = editing_state();
+        for action in [
+            Action::PlayProgram {
+                program_index: 0,
+                start_at_next_measure: true,
+                repeat_after_measures: None,
+            },
+            Action::StartProgramVoice(0),
+            Action::EnqueuePendingPlayback(0),
+            Action::ToggleProgramPlayback(0),
+            Action::ToggleProgramPendingPlayback(0),
+        ] {
+            let effects = apply_with_empty_status(&mut state, action);
+            assert!(effects.is_empty(), "expected no effects, got {:?}", effects);
+        }
+    }
+
+    #[test]
+    fn owned_program_can_stop_and_unqueue_while_editing() {
+        let mut state = editing_state();
+        let now = Instant::now();
+        let active = status_with_mark(now - Duration::from_millis(100));
+        for action in [Action::StopProgram(0), Action::ToggleProgramPlayback(0)] {
+            let effects = apply_with_status(&mut state, &active, now, action);
+            assert!(
+                matches!(effects[0], Effect::StopProgram(0)),
+                "expected StopProgram, got {:?}",
+                effects
+            );
+        }
+        let pending = status_with_mark(now + Duration::from_millis(100));
+        for action in [
+            Action::RemovePendingProgram(0),
+            Action::ToggleProgramPendingPlayback(0),
+        ] {
+            let effects = apply_with_status(&mut state, &pending, now, action);
+            assert!(
+                matches!(effects[0], Effect::RemovePendingProgram(0)),
+                "expected RemovePendingProgram, got {:?}",
+                effects
+            );
+        }
+    }
+
+    #[test]
+    fn other_programs_play_while_editing() {
+        let mut state = editing_state();
+        for action in [
+            Action::PlayProgram {
+                program_index: 1,
+                start_at_next_measure: true,
+                repeat_after_measures: None,
+            },
+            Action::ToggleProgramPlayback(1),
+            Action::EnqueuePendingPlayback(1),
+        ] {
+            let effects = apply_with_empty_status(&mut state, action);
+            assert!(
+                matches!(
+                    effects[0],
+                    Effect::PlayProgram {
+                        program_index: 1,
+                        ..
+                    }
+                ),
+                "expected PlayProgram, got {:?}",
+                effects
+            );
+        }
+        let effects = apply_with_empty_status(&mut state, Action::StartProgramVoice(1));
+        assert!(
+            matches!(effects[0], Effect::PlayProgramVoice(1)),
+            "expected PlayProgramVoice, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn owned_program_text_and_keys_are_refused_while_editing() {
+        let mut state = editing_state();
+        state.mode = Mode::Edit {
+            cursor_position: 0,
+            errors: vec![],
+            completion: None,
+        };
+        let text_before = state.active_program().text().to_string();
+        for action in [
+            Action::EnterEditMode,
+            Action::ToggleSequencerStep { sixteenth: 0 },
+            Action::ToggleInstalledKeys(0),
+        ] {
+            let effects = apply_with_empty_status(&mut state, action);
+            assert!(effects.is_empty(), "expected no effects, got {:?}", effects);
+        }
+        assert_eq!(state.active_program().text(), text_before);
+        assert!(matches!(
+            state.mode,
+            Mode::Edit {
+                cursor_position: 0,
+                ..
+            }
+        ));
+
+        let effects = apply_with_empty_status(&mut state, Action::ToggleInstalledKeys(1));
+        assert!(
+            matches!(effects[0], Effect::InstallKeys(1)),
+            "expected InstallKeys, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn leaving_edit_mode_can_play_the_owned_program() {
+        let mut state = editing_state();
+        let effects = apply_with_empty_status(
+            &mut state,
+            Action::EvaluateAndLeaveEditMode {
+                mode_on_failure: Mode::Select,
+                play: true,
+                repeat_after_measures: Some(2),
+            },
+        );
+        let evaluate = effects.iter().position(|e| {
+            matches!(
+                e,
+                Effect::EvaluateProgram {
+                    program_index: 0,
+                    ..
+                }
+            )
+        });
+        let play = effects.iter().position(|e| {
+            matches!(
+                e,
+                Effect::PlayProgram {
+                    program_index: 0,
+                    start_at_next_measure: true,
+                    repeat_after_measures: Some(2),
+                }
+            )
+        });
+        assert!(
+            matches!((evaluate, play), (Some(e), Some(p)) if e < p),
+            "expected EvaluateProgram then PlayProgram, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn owned_program_keys_can_be_uninstalled_while_editing() {
+        let mut state = editing_state();
+        install_test_keys(&mut state);
+        let effects = apply_with_empty_status(&mut state, Action::ToggleInstalledKeys(0));
+        assert!(state.keys.is_none());
+        assert!(
+            matches!(&effects[1], Effect::ShowMessage(m) if m == "Uninstalled keys"),
+            "expected the uninstall message, got {:?}",
+            effects
+        );
     }
 }

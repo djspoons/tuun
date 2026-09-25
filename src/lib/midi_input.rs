@@ -182,6 +182,7 @@ pub fn update_launchkey_state(
         actions::DawPadMode::KeysInstaller => {
             update_pads_keys_installer(
                 state,
+                status,
                 launchkey,
                 now,
                 current_beat_start,
@@ -222,6 +223,22 @@ fn pulsed(
     (dim(color.0), dim(color.1), dim(color.2))
 }
 
+/// Returns whether pressing the pad that sends `event` would be refused because
+/// the editor mode owns the active program.
+fn pad_refused(
+    state: &actions::AppState,
+    status: &tracker::Status<WaveformId, MarkId>,
+    now: Instant,
+    event: &launchkey::Event,
+) -> bool {
+    classify(event, state).is_some_and(|actions| {
+        !actions.is_empty()
+            && actions
+                .iter()
+                .all(|action| actions::refused_by_ownership(state, status, now, action))
+    })
+}
+
 fn update_pads_clip_launcher(
     state: &actions::AppState,
     status: &tracker::Status<WaveformId, MarkId>,
@@ -256,7 +273,14 @@ fn update_pads_clip_launcher(
         } else if is_installed_keys {
             // If it's the installed keys program, don't color the top pad (unless it's playing).
             launchkey.set_daw_top_pad_color(i as u8, 0, 0, 0);
-        } else if program.waveform().is_some() {
+        } else if program.waveform().is_some()
+            && !pad_refused(
+                state,
+                status,
+                now,
+                &launchkey::Event::DAWTopPadDown { index: i as u8 },
+            )
+        {
             launchkey.set_daw_top_pad_color(i as u8, red, green, blue);
         } else {
             // empty
@@ -278,7 +302,14 @@ fn update_pads_clip_launcher(
                 current_beat_duration,
             );
             launchkey.set_daw_bottom_pad_color(i as u8, r, g, b);
-        } else if program.waveform().is_some() {
+        } else if program.waveform().is_some()
+            && !pad_refused(
+                state,
+                status,
+                now,
+                &launchkey::Event::DAWBottomPadDown { index: i as u8 },
+            )
+        {
             launchkey.set_daw_bottom_pad_color(i as u8, red, green, blue);
         } else {
             // empty
@@ -290,6 +321,7 @@ fn update_pads_clip_launcher(
 /// Updates the controller state for keys-installer mode.
 fn update_pads_keys_installer(
     state: &actions::AppState,
+    status: &tracker::Status<WaveformId, MarkId>,
     launchkey: &mut launchkey::Launchkey,
     now: Instant,
     current_beat_start: Instant,
@@ -320,6 +352,15 @@ fn update_pads_keys_installer(
                 current_beat_duration,
             );
             launchkey.set_daw_bottom_pad_color(i as u8, r, g, b);
+            continue;
+        }
+        if pad_refused(
+            state,
+            status,
+            now,
+            &launchkey::Event::DAWBottomPadDown { index: i as u8 },
+        ) {
+            launchkey.set_daw_bottom_pad_color(i as u8, 0, 0, 0);
             continue;
         }
         match program.kind() {

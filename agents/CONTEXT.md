@@ -43,16 +43,16 @@ A complete musical unit of notes, expressed as MIDI parameters and timing: a bea
 _Avoid_: loop, clip, pattern, sequence, list
 
 **Take**:
-The notes gathered by the recorder from arming to the end boundary. A take is written as a phrase or discarded.
+The notes gathered by the recorder from arming until the boundary margin before the end boundary. A take is written as a phrase or discarded.
 _Avoid_: recording, buffer, phrase
 
 **Record**:
 Writing what was played on the keys, as a phrase, into the selected slot.
 _Avoid_: capture, sample, loop
 
-**Early-hit window**:
-The eighth of a beat before a measure boundary in which a key struck early counts as struck on that boundary.
-_Avoid_: pre-roll, anticipation window, grace period, tolerance
+**Boundary margin**:
+The eighth of a beat on either side of a measure boundary within which the recorder treats what happens as happening on the boundary. A key struck in the margin before a take's start counts as struck on it; a Record or Stop press in the margin after a boundary counts as pressed on it; a take closes one margin before its end boundary, and a key still held then counts as released on the boundary. A recorded note is never shorter than one margin.
+_Avoid_: early-hit window, pre-roll, anticipation window, grace period, tolerance
 
 **Mark**:
 A labelled point inside a waveform that can later be substituted — how a sound is stopped, and how a live slider value reaches it.
@@ -123,8 +123,12 @@ What the sixteen pads currently do: Clip Launcher, Keys Installer, or Sequencer.
 _Avoid_: DAW mode, pad mode
 
 **Editor mode**:
-What the computer keyboard currently does: Select, Edit, Move Sliders, or Keys.
+What the computer keyboard currently does: Select, Edit, Move Sliders, Keys, or Record.
 _Avoid_: mode
+
+**Owned program**:
+The active program while Edit mode or Record mode holds it. Changes that would affect or depend on its text are refused, including changing which program is active and starting or queueing its playback; stopping it, removing its pending playback, uninstalling it as the keys instrument, sliders, level, and other programs' playback stay free.
+_Avoid_: locked, busy, frozen
 
 **Launch mode**:
 How a top-pad press relates to playback — Toggle or Trigger. A setting of the Clip Launcher that is independent of which program is selected.

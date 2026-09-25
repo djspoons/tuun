@@ -193,6 +193,8 @@ impl InputHandler {
                     // Plain Escape returns to Select mode.
                     Some(vec![Action::EvaluateAndLeaveEditMode {
                         mode_on_failure: Mode::Select,
+                        play: false,
+                        repeat_after_measures: None,
                     }])
                 }
             }
@@ -207,16 +209,11 @@ impl InputHandler {
                 // Either way, ask the runner to drop us into Select on
                 // success or stay in Edit with the error on parse
                 // failure.
-                Some(vec![
-                    Action::EvaluateAndLeaveEditMode {
-                        mode_on_failure: mode.clone(),
-                    },
-                    Action::PlayProgram {
-                        program_index: active_program_index,
-                        start_at_next_measure: true,
-                        repeat_after_measures: repeat,
-                    },
-                ])
+                Some(vec![Action::EvaluateAndLeaveEditMode {
+                    mode_on_failure: mode.clone(),
+                    play: true,
+                    repeat_after_measures: repeat,
+                }])
             }
             // Char- and line-level ops on Ctrl, word-level ops on Cmd
             // (mirroring emacs's Ctrl/Meta split).
@@ -548,9 +545,8 @@ mod tests {
 
     #[test]
     fn edit_mode_return_asks_runner_to_return_to_select_on_success() {
-        // Return in Edit mode emits two actions: `EvaluateAndLeaveEditMode`
-        // followed by `PlayProgram`. The classifier's job is just to set up
-        // both.
+        // Return in Edit mode leaves Edit mode and plays, once, in a single
+        // action.
         let handler = InputHandler::new(false, 800, 600);
         let state = test_state(Mode::Edit {
             cursor_position: 4,
@@ -560,23 +556,18 @@ mod tests {
         let actions = handler
             .classify_keydown(Some(Scancode::Return), Mod::NOMOD, false, &state)
             .expect("Return in Edit mode should produce actions");
-        assert_eq!(actions.len(), 2);
-        assert!(
-            matches!(actions[0], Action::EvaluateAndLeaveEditMode { .. }),
-            "expected EvaluateAndLeaveEditMode, got {:?}",
-            actions[0]
-        );
+        assert_eq!(actions.len(), 1);
         assert!(
             matches!(
-                actions[1],
-                Action::PlayProgram {
-                    program_index: 0,
-                    start_at_next_measure: true,
+                actions[0],
+                Action::EvaluateAndLeaveEditMode {
+                    play: true,
                     repeat_after_measures: None,
+                    ..
                 }
             ),
-            "expected PlayProgram, got {:?}",
-            actions[1]
+            "expected EvaluateAndLeaveEditMode with play, got {:?}",
+            actions[0]
         );
     }
 }
