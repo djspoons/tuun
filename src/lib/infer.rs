@@ -55,13 +55,15 @@
 //! Tuun also extends these approaches with multi-parameter functions and
 //! optional named parameters. Each Ψ entry is a [`Frame`] holding a whole
 //! call's argument types (positional and named) rather than a single type.
-//! Function abstractions must consider refinements of *all* parameters, so the
-//! enumeration is exponential in their number: [Infer::tabulate] uses fixed
-//! budget, giving up precision, and eventually the intersection itself, rather
-//! than exceeding it. Intersections are used to record the relationship between
-//! the refinements of default parameter types and result types: when a
-//! parameter is omitted at an application, its sort is fixed by the default
-//! value.
+//! Function abstractions must consider refinements of every numeric leaf a
+//! parameter carries ([`Infer::read_leaves`]) so the enumeration is exponential
+//! in their number: [Infer::tabulate] uses fixed budget, giving up precision,
+//! and eventually the intersection itself, rather than exceeding it.
+//! Intersections are used to record the relationship between the refinements of
+//! default parameter types and result types: when a parameter is omitted at an
+//! application, its sort is fixed by the default value.
+//!
+//! TODO This enumerating of parameter leaves causes a 5-10x slowdown in checking some or all of the library.
 //!
 //! Though tuun does not include recursive functions, recursive built-ins like
 //! `reduce` require a limited form of abstract interpretation akin to Freeman
@@ -262,12 +264,12 @@ fn bound(ty: Type) -> ContextEntry {
 type TypeContext = Vec<(String, ContextEntry)>;
 
 /// The most atom vectors `tabulate` will enumerate on the full four-atom
-/// basis: 4^4, covering functions of up to four numeric parameters. Past this
+/// basis: 4^4, covering functions of up to four numeric leaves. Past this
 /// the coarse basis takes over, trading the int/float distinctions for room.
 const MAX_FULL_VECTORS: usize = 512;
 
 /// The most atom vectors `tabulate` will enumerate on the coarse unseq/seq
-/// basis: 2^12, covering functions of up to twelve numeric parameters.
+/// basis: 2^12, covering functions of up to twelve numeric leaves.
 ///
 /// Larger than the full basis's budget for two reasons. This is the last basis
 /// there is, so what lies past it is not a coarser table but no table at all —
@@ -1006,29 +1008,110 @@ impl<S: Clone> Infer<S> {
         if parameters.len() != positional.len() || named_parameters.len() != named.len() {
             return Some(1);
         }
-        let numeric: Vec<bool> = parameters
+        let leaves: Vec<usize> = parameters
             .iter()
-            .map(|parameter| matches!(self.resolved(parameter), Type::Numeric(_)))
+            .map(|parameter| self.read_leaves(parameter))
             .collect();
-        let named_numeric: Vec<bool> = named_parameters
+        let named_leaves: Vec<usize> = named_parameters
             .iter()
-            .map(|(_, parameter)| matches!(self.resolved(parameter), Type::Numeric(_)))
+            .map(|(_, parameter)| self.named_leaves(parameter))
             .collect();
-        Self::level_vectors(atoms, &numeric, &named_numeric)?
+        Self::level_vectors(atoms, &leaves, &named_leaves)?
             .checked_mul(self.spine_vectors(body, &result, atoms)?)
     }
 
-    /// The vectors one lambda enumerates: one choice per numeric positional
-    /// parameter, and one more than that per named parameter, which may also
-    /// be omitted.
-    fn level_vectors(atoms: &[Sort], numeric: &[bool], named_numeric: &[bool]) -> Option<usize> {
-        let positional = numeric.iter().filter(|numeric| **numeric).count();
-        let mut vectors = atoms.len().checked_pow(u32::try_from(positional).ok()?)?;
-        for numeric in named_numeric {
-            let radix = if *numeric { atoms.len() + 1 } else { 2 };
-            vectors = vectors.checked_mul(radix)?;
+    /// The vectors one lambda enumerates: one atom per numeric leaf of each
+    /// positional parameter, and one choice more per named parameter, which
+    /// may also be omitted.
+    fn level_vectors(atoms: &[Sort], leaves: &[usize], named_leaves: &[usize]) -> Option<usize> {
+        let choices = |leaves: usize| atoms.len().checked_pow(u32::try_from(leaves).ok()?);
+        let mut vectors = 1usize;
+        for leaves in leaves {
+            vectors = vectors.checked_mul(choices(*leaves)?)?;
+        }
+        for leaves in named_leaves {
+            vectors = vectors.checked_mul(choices(*leaves)?.checked_add(1)?)?;
         }
         Some(vectors)
+    }
+
+    /// The atoms `choice` assigns to `leaves` leaves: one digit of `choice`
+    /// in base `atoms.len()` per leaf.
+    fn leaf_atoms(atoms: &[Sort], leaves: usize, mut choice: usize) -> Vec<Sort> {
+        (0..leaves)
+            .map(|_| {
+                let atom = atoms[choice % atoms.len()];
+                choice /= atoms.len();
+                atom
+            })
+            .collect()
+    }
+
+    /// Counts the numeric leaves of a parameter type that tabulation
+    /// enumerates: the type itself, the items of a tuple, and the result of
+    /// a function, recursively.
+    ///
+    /// A function's own parameters are not read: the body supplies those,
+    /// and what it supplies is recorded as contracts at its calls.
+    ///
+    /// TODO A list's items are read positions too, and enumerating them
+    /// would type `fn(xs) => nth(0, xs) + 1` per element sort. They are left
+    /// out for cost: nearly every library helper takes a list, and each
+    /// vector re-tabulates the lambdas in its body, so the library check
+    /// grew thirtyfold with them in.
+    ///
+    /// # Example
+    ///
+    /// `(int, float)` has two leaves, and so has `(int) -> (waveform, seq)`,
+    /// both in its result.
+    fn read_leaves(&self, ty: &Type) -> usize {
+        match self.resolve(ty) {
+            Type::Numeric(_) => 1,
+            Type::Tuple(items) => items.iter().map(|item| self.read_leaves(item)).sum(),
+            Type::Function { result, .. } => self.read_leaves(&result),
+            _ => 0,
+        }
+    }
+
+    /// Counts the leaves of a named parameter that tabulation enumerates: one
+    /// when the parameter is numeric, none otherwise.
+    ///
+    /// Unlike a positional parameter's, a named parameter's type is the
+    /// default's own when the default is compound
+    /// ([`Infer::default_parameter`]), not a shape the body settled, so its
+    /// inner leaves say nothing about what a supplied argument must be; a
+    /// supplied conjunct takes a fresh unknown there instead.
+    fn named_leaves(&self, ty: &Type) -> usize {
+        usize::from(matches!(self.resolved(ty), Type::Numeric(_)))
+    }
+
+    /// Returns a parameter's type for one conjunct: each leaf `read_leaves`
+    /// counts takes the next of `atoms`, in the same order, and every other
+    /// leaf is a fresh meta for the conjunct's body to solve.
+    fn pin(&mut self, ty: &Type, atoms: &mut impl Iterator<Item = Sort>) -> Type {
+        match self.resolve(ty) {
+            Type::Numeric(_) => Type::ground(atoms.next().expect("one atom per leaf")),
+            Type::Tuple(items) => {
+                let mut pinned = Vec::with_capacity(items.len());
+                for item in &items {
+                    pinned.push(self.pin(item, atoms));
+                }
+                Type::Tuple(pinned)
+            }
+            Type::Function {
+                positional,
+                named,
+                result,
+            } => Type::Function {
+                positional: positional.iter().map(|_| self.fresh_meta()).collect(),
+                named: named
+                    .iter()
+                    .map(|(name, _)| (name.clone(), self.fresh_meta()))
+                    .collect(),
+                result: Rc::new(self.pin(&result, atoms)),
+            },
+            _ => self.fresh_meta(),
+        }
     }
 
     /// Reports a function with more numeric parameters than tabulation can
@@ -1054,12 +1137,14 @@ impl<S: Clone> Infer<S> {
         self.error(message, span);
     }
 
-    /// Tabulates a definition-bound function over its numeric parameters —
-    /// Freeman and Pfenning §4: the principal refinement type of a definition
-    /// is a finite intersection of arrows, found by re-checking the body at
-    /// each point of the finite refinement lattice, here each vector of atoms
-    /// over the numeric parameters (positional and named alike). Non-numeric
-    /// parameters ride along as fresh unknowns (solved per conjunct by the
+    /// Tabulates a definition-bound function over the numeric leaves of its
+    /// parameters — Freeman and Pfenning §4: the principal refinement type of
+    /// a definition is a finite intersection of arrows, found by re-checking
+    /// the body at each point of the finite refinement lattice, here each
+    /// vector of atoms over the leaves ([`Infer::read_leaves`]: a numeric
+    /// parameter, the numeric items of a tuple or list, the numeric result of
+    /// a function, positional and named alike). Everything else in a
+    /// parameter rides along as fresh unknowns (solved per conjunct by the
     /// body, quantified by the caller's generalization), and a non-numeric
     /// named parameter's default flows in as a guarantee, as in the base pass.
     /// A vector whose body check errors contributes no conjunct (the function
@@ -1086,6 +1171,9 @@ impl<S: Clone> Infer<S> {
     /// This is what makes parameter contracts *relational* rather than
     /// per-position: `fn(a, b) => a + b` gets no `(seq, seq)` conjunct, so a
     /// two-seq call errors even though each position separately admits a seq.
+    /// Leaves inside a parameter get the same treatment: `fn((a, b)) => a + b`
+    /// has no conjunct at `(seq, seq)` either, and `fn(f) => f(1) + 1` none
+    /// whose `f` returns a seq.
     fn tabulate<M>(
         &mut self,
         context: &mut TypeContext,
@@ -1115,26 +1203,24 @@ impl<S: Clone> Infer<S> {
         if parameters.len() != positional.len() || named_parameters.len() != named.len() {
             return None;
         }
-        let numeric: Vec<bool> = parameters
+        let leaves: Vec<usize> = parameters
             .iter()
-            .map(|parameter| matches!(self.resolved(parameter), Type::Numeric(_)))
+            .map(|parameter| self.read_leaves(parameter))
             .collect();
-        let named_numeric: Vec<bool> = named_parameters
+        let named_leaves: Vec<usize> = named_parameters
             .iter()
-            .map(|(_, parameter)| matches!(self.resolved(parameter), Type::Numeric(_)))
+            .map(|(_, parameter)| self.named_leaves(parameter))
             .collect();
         // Every named parameter is worth a table even when nothing is numeric,
         // because a call may always omit one: the omitted conjunct is where the
         // body is checked at the default's own type, and the supplied conjunct
         // is where it is checked at whatever the caller brings.
-        let tabulated = numeric
-            .iter()
-            .chain(&named_numeric)
-            .filter(|numeric| **numeric)
-            .count();
-        if tabulated == 0 && named.is_empty() {
+        if leaves.iter().chain(&named_leaves).sum::<usize>() == 0 && named.is_empty() {
             return None;
         }
+        // Metas allocated from here on belong to one conjunct each, which is
+        // what lets `merge_conjuncts` match them up to renaming.
+        let floor = self.supply;
         // The atom basis is chosen once for a whole curried spine and passed
         // down, because an inner lambda is re-tabulated once per outer
         // vector: the spine costs the *product* of its levels. Choosing per
@@ -1156,7 +1242,7 @@ impl<S: Clone> Infer<S> {
                 }
             },
         };
-        let vectors = Self::level_vectors(atoms, &numeric, &named_numeric)?;
+        let vectors = Self::level_vectors(atoms, &leaves, &named_leaves)?;
         // `spine_basis` bounded the product across the whole spine, and this
         // level is one of its factors, so a level past the budget means the
         // count it bounded was not this one: a parameter that resolves to a
@@ -1203,34 +1289,40 @@ impl<S: Clone> Infer<S> {
             let errors = self.errors.len();
             let mark = self.mark();
             let depth = context.len();
+            // The vector is a mixed-radix number: each parameter takes one
+            // digit, worth an atom per leaf, and a named parameter one value
+            // more for the call that omits it.
             let mut stride = 1usize;
-            let mut domains = Vec::with_capacity(positional.len());
-            for (pattern, numeric) in positional.iter().zip(&numeric) {
-                if *numeric {
-                    let atom = atoms[(index / stride) % atoms.len()];
-                    stride *= atoms.len();
-                    self.bind_pattern(context, pattern, Type::ground(atom), &expr.span, false);
-                    domains.push(Type::ground(atom));
-                } else {
-                    domains.push(self.pattern_param_type(context, pattern));
-                }
-            }
-            let mut named_domains = Vec::with_capacity(named.len());
-            for (((name, _), numeric), default_ty) in
-                named.iter().zip(&named_numeric).zip(&default_types)
-            {
-                let radix = if *numeric { atoms.len() + 1 } else { 2 };
+            let mut digit = |leaves: usize, omittable: bool| {
+                let radix = atoms.len().pow(u32::try_from(leaves).expect("counted"))
+                    + usize::from(omittable);
                 let choice = (index / stride) % radix;
                 stride *= radix;
+                choice
+            };
+            let mut domains = Vec::with_capacity(positional.len());
+            for (position, pattern) in positional.iter().enumerate() {
+                let choice = digit(leaves[position], false);
+                let mut digits = Self::leaf_atoms(atoms, leaves[position], choice).into_iter();
+                let pinned = self.pin(&parameters[position], &mut digits);
+                self.bind_pattern(context, pattern, pinned.clone(), &expr.span, false);
+                domains.push(pinned);
+            }
+            let mut named_domains = Vec::with_capacity(named.len());
+            for (position, (name, _)) in named.iter().enumerate() {
+                let choice = digit(named_leaves[position], true);
                 // The last choice is the omitted one: the parameter takes the
                 // value a call that leaves it out would get, so the body is
                 // checked at the default's own type. Leaving the name off the
                 // conjunct is what tells selection the conjunct is for such a
                 // call — see `named_matches`.
-                let omitted = choice == radix - 1;
+                let supplied = atoms
+                    .len()
+                    .pow(u32::try_from(named_leaves[position]).expect("counted"));
+                let omitted = choice == supplied;
                 let parameter = if omitted {
-                    default_ty.clone()
-                } else if *numeric {
+                    default_types[position].clone()
+                } else if named_leaves[position] == 1 {
                     Type::ground(atoms[choice])
                 } else {
                     // The default does not constrain a supplied argument: this
@@ -1299,7 +1391,7 @@ impl<S: Clone> Infer<S> {
                 self.error(message, &default.span);
             }
         }
-        Some(Type::intersection(merge_conjuncts(conjuncts)))
+        Some(Type::intersection(merge_conjuncts(conjuncts, floor)))
     }
 
     /// Unifies two types, solving metas by equality — Xie and Oliveira's Fig.
@@ -3169,9 +3261,9 @@ impl<S: Clone> Infer<S> {
     /// or guarantees already arrived), or the body's selections would summarize
     /// over every admitted sort where the fallback's table keeps the options
     /// apart. Inside a function-typed domain the body only calls: arguments
-    /// flow *into* its parameters, and neither path enumerates through its
-    /// result, so unsolved refinements are no worse there — only a meta, a type
-    /// with no shape yet, falls back.
+    /// flow *into* its parameters and its result is judged as any call's is,
+    /// so unsolved refinements are no worse there — only a meta, a type with
+    /// no shape yet, falls back.
     fn domain_ready(&self, ty: &Type, reads: bool) -> bool {
         match ty {
             Type::Meta(_) => false,
@@ -3834,16 +3926,16 @@ impl<S: Clone> Infer<S> {
     }
 }
 
-/// Coalesces tabulated conjuncts: two conjuncts that differ at just one numeric
-/// domain position and agree on the result merge into one conjunct with the
-/// union domain there — e.g. `({I}) -> float ∧ ({NonInt}) -> float` becomes
-/// `(float) -> float`. Purely a simplification: selection reads the merged
-/// table the same way, and displays stay legible.
-fn merge_conjuncts(mut conjuncts: Vec<Type>) -> Vec<Type> {
+/// Merges the conjuncts of a tabulated function wherever a pair agrees up to
+/// one numeric leaf of a domain, repeating until nothing more merges.
+///
+/// Metas numbered above `floor` were allocated during the tabulation, one
+/// conjunct each, and match up to a consistent renaming.
+fn merge_conjuncts(mut conjuncts: Vec<Type>, floor: u32) -> Vec<Type> {
     'restart: loop {
         for i in 0..conjuncts.len() {
             for j in (i + 1)..conjuncts.len() {
-                if let Some(merged) = merge_pair(&conjuncts[i], &conjuncts[j]) {
+                if let Some(merged) = merge_pair(&conjuncts[i], &conjuncts[j], floor) {
                     conjuncts[i] = merged;
                     conjuncts.remove(j);
                     continue 'restart;
@@ -3854,9 +3946,15 @@ fn merge_conjuncts(mut conjuncts: Vec<Type>) -> Vec<Type> {
     }
 }
 
-/// Returns the union of conjuncts `a` and `b` when they agree everywhere except
-/// at most one numeric ground domain position (positional or named).
-fn merge_pair(a: &Type, b: &Type) -> Option<Type> {
+/// Returns the union of conjuncts `a` and `b` when they agree everywhere
+/// except at most one numeric ground leaf of a domain (positional or named,
+/// at any depth), which takes the union of the two sorts. Metas above
+/// `floor` are compared up to renaming.
+///
+/// Sound because a runtime value inhabits one atom: whichever of the two
+/// leaf sorts an argument turns out to be, the conjunct that took it gave
+/// the same result.
+fn merge_pair(a: &Type, b: &Type, floor: u32) -> Option<Type> {
     let (
         Type::Function {
             positional: positional_a,
@@ -3872,52 +3970,129 @@ fn merge_pair(a: &Type, b: &Type) -> Option<Type> {
     else {
         return None;
     };
-    if positional_a.len() != positional_b.len()
-        || named_a.len() != named_b.len()
-        || result_a != result_b
-    {
+    if positional_a.len() != positional_b.len() || named_a.len() != named_b.len() {
         return None;
     }
-    if named_a
-        .iter()
-        .zip(named_b.iter())
-        .any(|((name_a, _), (name_b, _))| name_a != name_b)
-    {
-        return None;
-    }
-    let mut merged = positional_a.to_vec();
-    let mut merged_named = named_a.to_vec();
-    let mut differences = 0;
-    let union = |x: &Type, y: &Type, differences: &mut i32| -> Option<Option<Type>> {
-        if x == y {
-            return Some(None);
-        }
-        let (Type::Numeric(Refinement::Ground(sort_x)), Type::Numeric(Refinement::Ground(sort_y))) =
-            (x, y)
-        else {
-            return None;
-        };
-        *differences += 1;
-        if *differences > 1 {
-            return None;
-        }
-        Some(Some(Type::ground(sort_x.union(*sort_y))))
+    let mut merger = Merger {
+        floor,
+        forward: HashMap::new(),
+        backward: HashMap::new(),
+        differences: 0,
     };
-    for (position, (x, y)) in positional_a.iter().zip(positional_b.iter()).enumerate() {
-        if let Some(unioned) = union(x, y, &mut differences)? {
-            merged[position] = unioned;
-        }
+    let mut positional = Vec::with_capacity(positional_a.len());
+    for (x, y) in positional_a.iter().zip(positional_b.iter()) {
+        positional.push(merger.merge(x, y, true)?);
     }
-    for (position, ((_, x), (_, y))) in named_a.iter().zip(named_b.iter()).enumerate() {
-        if let Some(unioned) = union(x, y, &mut differences)? {
-            merged_named[position].1 = unioned;
+    let mut named = Vec::with_capacity(named_a.len());
+    for ((name_a, x), (name_b, y)) in named_a.iter().zip(named_b.iter()) {
+        if name_a != name_b {
+            return None;
         }
+        named.push((name_a.clone(), merger.merge(x, y, true)?));
     }
+    let result = merger.merge(result_a, result_b, false)?;
     Some(Type::Function {
-        positional: merged.into(),
-        named: merged_named.into(),
-        result: result_a.clone(),
+        positional: positional.into(),
+        named: named.into(),
+        result: Rc::new(result),
     })
+}
+
+/// The state of one [`merge_pair`]: the meta renaming found so far, in both
+/// directions so it stays a bijection, and the leaf differences allowed.
+struct Merger {
+    floor: u32,
+    forward: HashMap<u32, u32>,
+    backward: HashMap<u32, u32>,
+    differences: usize,
+}
+
+impl Merger {
+    /// Whether metas `x` and `y` correspond: identical below the floor, and
+    /// consistently renamed above it.
+    fn metas(&mut self, x: u32, y: u32) -> bool {
+        if x <= self.floor || y <= self.floor {
+            return x == y;
+        }
+        match (self.forward.get(&x), self.backward.get(&y)) {
+            (None, None) => {
+                self.forward.insert(x, y);
+                self.backward.insert(y, x);
+                true
+            }
+            (Some(to), Some(from)) => *to == y && *from == x,
+            _ => false,
+        }
+    }
+
+    /// Merges `x` and `y` structurally, allowing one differing ground leaf
+    /// where `domain` holds — under a conjunct's parameters, however deep,
+    /// but not under its result.
+    fn merge(&mut self, x: &Type, y: &Type, domain: bool) -> Option<Type> {
+        match (x, y) {
+            (Type::Meta(x), Type::Meta(y)) => self.metas(*x, *y).then_some(Type::Meta(*x)),
+            (
+                Type::Numeric(Refinement::Ground(sort_x)),
+                Type::Numeric(Refinement::Ground(sort_y)),
+            ) => {
+                if sort_x == sort_y {
+                    return Some(x.clone());
+                }
+                self.differences += 1;
+                (domain && self.differences <= 1).then(|| Type::ground(sort_x.union(*sort_y)))
+            }
+            (Type::Tuple(xs), Type::Tuple(ys)) if xs.len() == ys.len() => {
+                let mut items = Vec::with_capacity(xs.len());
+                for (x, y) in xs.iter().zip(ys) {
+                    items.push(self.merge(x, y, domain)?);
+                }
+                Some(Type::Tuple(items))
+            }
+            (Type::List(x), Type::List(y)) => Some(Type::List(Box::new(self.merge(x, y, domain)?))),
+            (
+                Type::Function {
+                    positional: positional_x,
+                    named: named_x,
+                    result: result_x,
+                },
+                Type::Function {
+                    positional: positional_y,
+                    named: named_y,
+                    result: result_y,
+                },
+            ) if positional_x.len() == positional_y.len() && named_x.len() == named_y.len() => {
+                let mut positional = Vec::with_capacity(positional_x.len());
+                for (x, y) in positional_x.iter().zip(positional_y.iter()) {
+                    positional.push(self.merge(x, y, domain)?);
+                }
+                let mut named = Vec::with_capacity(named_x.len());
+                for ((name_x, x), (name_y, y)) in named_x.iter().zip(named_y.iter()) {
+                    if name_x != name_y {
+                        return None;
+                    }
+                    named.push((name_x.clone(), self.merge(x, y, domain)?));
+                }
+                let result = self.merge(result_x, result_y, domain)?;
+                Some(Type::Function {
+                    positional: positional.into(),
+                    named: named.into(),
+                    result: Rc::new(result),
+                })
+            }
+            (Type::And(xs), Type::And(ys)) if xs.len() == ys.len() => {
+                let mut conjuncts = Vec::with_capacity(xs.len());
+                for (x, y) in xs.iter().zip(ys.iter()) {
+                    conjuncts.push(self.merge(x, y, domain)?);
+                }
+                Some(Type::And(conjuncts.into()))
+            }
+            (Type::Forall(vars_x, body_x), Type::Forall(vars_y, body_y)) if vars_x == vars_y => {
+                let body = self.merge(body_x, body_y, domain)?;
+                Some(Type::Forall(vars_x.clone(), Box::new(body)))
+            }
+            _ => (x == y).then(|| x.clone()),
+        }
+    }
 }
 
 /// Returns `entries` with duplicate names collapsed so each name appears
@@ -4285,6 +4460,48 @@ mod tests {
         assert_errors(
             "let pick = fn(n, xs) => nth(n, xs) in pick(0.5, [1, 2])",
             &["expected int, found float"],
+        );
+    }
+
+    // Leaves inside a parameter tabulate too — the fields of a tuple and the
+    // result of a function-typed parameter — where a summary would have
+    // joined them: `time - a` is a waveform *or* a seq when `a` may be
+    // either, and `seq` takes only the former.
+    #[test]
+    fn tabulated_leaves() {
+        // A tuple field, bound by the parameter's pattern or destructured in
+        // the body.
+        assert_clean("let f = fn((a, b)) => seq(time - a)(b) in f((1, 2))");
+        assert_clean("let g = fn(p) => let (a, b) = p in seq(time - a)(b) in g((1, 2))");
+        // The conjuncts where `a` is a seq fail, so a seq field is turned
+        // away at the call.
+        assert_errors(
+            "let f = fn((a, b)) => seq(time - a)(b) in f((seq(0)(1), 2))",
+            &["expected (waveform, waveform), found (seq, int)"],
+        );
+        // A function parameter's result.
+        assert_clean("let k = fn(f) => seq(time - f(1))(1) in k(fn(x) => x * 2)");
+        assert_errors(
+            "let k = fn(f) => seq(time - f(1))(1) in k(fn(x) => seq(0)(x))",
+            &["expected waveform, found seq"],
+        );
+        // The phrase helper's shape: notes mixed through an instrument
+        // parameter. The conjunct where the instrument returns a seq fails
+        // at the mix and is dropped, and the rest merge over the result's
+        // sorts, so an instrument whose result may be a constant or a
+        // waveform still fits.
+        let chord = "let chord = fn(inst) => fn(ns) => \
+                     {map(fn((n, d)) => inst(n) | fin(d), ns)} in ";
+        assert_clean(&format!("{}[(60, 1)] | chord(fn(n) => sine(n, 0))", chord));
+        assert_errors(
+            &format!("{}[(60, 1)] | chord(fn(n) => seq(0)(n))", chord),
+            &["expected waveform, found seq"],
+        );
+        // A list's items are not enumerated (see `read_leaves`): the element
+        // is summarized as it was.
+        assert_errors(
+            "let h = fn(xs) => seq(time - nth(0, xs))(1) in h([1])",
+            &["expected waveform, found waveform or seq"],
         );
     }
 
@@ -6130,45 +6347,41 @@ mod tests {
     fn a_chord_rejects_an_instrument_it_cannot_mix() {
         // std's chord helpers in miniature — scale each note of a triad, mix
         // the result, place it in time — written without the `unseq()` those
-        // helpers carry, which is the shape the checker must reject.
+        // helpers carry.
         //
         // `{...}` mixes waveforms, so an instrument handing back a seq makes
-        // the mix fail at run time. Nothing here says which of `amp`'s
-        // conjuncts the mapped element takes, so it summarizes to everything
-        // `amp` covers and the mix rejects it. Two details are load-bearing and
-        // the gap does not show without either: the triad must be tabulated, so
-        // that selecting a conjunct with an unsolved element takes the coverage
-        // join, and the `| seq(time - dur)` tail must be present, so that every
-        // conjunct of the innermost lambda fails and the unions base-pass
-        // summary is what reports.
+        // the mix fail at run time. Nothing in the body says what `inst`
+        // returns, so tabulation enumerates it: the conjunct where it returns
+        // a seq fails at the mix and is dropped, the definition is clean, and
+        // the call that passes such an instrument is what errors.
         let parts = "let amp = fn(a) => fn(w) => a * w in \
                      let triad = fn(root) => fn(fw) => [fw(root), fw(root + 4), fw(root + 7)] in ";
-        assert_errors(
-            &format!(
-                "{}fn(key) => fn(inst) => fn(dur) => \
-                 {{map(amp(0.4), triad(key)(fn(freq) => inst(dur, freq)))}} | seq(time - dur)",
-                parts
-            ),
-            &["expected waveform, found waveform or seq"],
-        );
-        // The body they have now says what the mix needs before the
-        // element's sort is chosen, and tabulates instead.
-        assert_clean(&format!(
-            "{}fn(key) => fn(inst) => fn(dur) => \
-             {{map(amp(0.4), triad(key)(fn(freq) => inst(dur, freq) | unseq()))}} | seq(time - dur)",
+        let chord = format!(
+            "{}let chord = fn(key) => fn(inst) => fn(dur) => \
+             {{map(amp(0.4), triad(key)(fn(freq) => inst(dur, freq)))}} | seq(time - dur) in ",
             parts
-        ));
-        // And it still turns away an instrument that does not return a seq,
-        // which would fail in `unseq` instead.
+        );
+        assert_clean(&format!("{}chord", chord));
+        assert_clean(&format!("{}chord(60)(fn(d, f) => f * time)(1)", chord));
         assert_errors(
-            &format!(
-                "{}let chord = fn(key) => fn(inst) => fn(dur) => \
-                 {{map(amp(0.4), triad(key)(fn(freq) => inst(dur, freq) | unseq()))}} | seq(time - dur) \
-                 in chord(60)(fn(d, f) => f * time)(1)",
-                parts
-            ),
+            &format!("{}chord(60)(fn(d, f) => seq(0)(f))(1)", chord),
+            &["expected (numeric, int) -> waveform, found ('a, waveform) -> seq"],
+        );
+        // With the `unseq()` the helpers carry, the body says what the mix
+        // needs before the element's sort is chosen, and the definition
+        // takes only an instrument that returns a seq...
+        let chord = format!(
+            "{}let chord = fn(key) => fn(inst) => fn(dur) => \
+             {{map(amp(0.4), triad(key)(fn(freq) => inst(dur, freq) | unseq()))}} | seq(time - dur) in ",
+            parts
+        );
+        assert_clean(&format!("{}chord", chord));
+        // ...turning away one that does not, which would fail in `unseq`
+        // instead.
+        assert_errors(
+            &format!("{}chord(60)(fn(d, f) => f * time)(1)", chord),
             &[
-                "expected (numeric, int) -> seq, found ('a, int) -> waveform ∧ ('b, float) -> waveform ∧ ('c, waveform) -> waveform ∧ ('d, seq) -> seq",
+                "expected (numeric, int) -> seq, found ('a, waveform) -> waveform ∧ ('b, seq) -> seq",
             ],
         );
     }
