@@ -1,4 +1,5 @@
 use std::sync::mpsc;
+use std::time::Instant;
 
 use midir::{Ignore, MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
 use midly::MidiMessage;
@@ -54,12 +55,16 @@ struct MIDIState {
 
 #[derive(Debug)]
 pub enum Event {
+    /// A key pressed on the keys input, stamped when the message arrived.
     NoteOn {
         key: u8,
         velocity: u8,
+        stamp: Instant,
     },
+    /// A key released on the keys input, stamped when the message arrived.
     NoteOff {
         key: u8,
+        stamp: Instant,
     },
 
     NextTrackDown,
@@ -70,6 +75,8 @@ pub enum Event {
     PlayDown,
     /// The transport "stop" button.
     StopDown,
+    /// The transport "record" button.
+    RecordDown,
     /// The pad-navigation up arrow (left of the pads).
     PadPageUpDown,
     /// The pad-navigation down arrow (left of the pads).
@@ -494,6 +501,8 @@ impl DAWState {
                         (115, 0) => None,
                         (116, 127) => Some(Event::StopDown),
                         (116, 0) => None,
+                        (117, 127) => Some(Event::RecordDown),
+                        (117, 0) => None,
 
                         // Encoders in Relative output mode: each event
                         // on CC 55h-5Ch (85-92) carries `64 + delta`
@@ -586,7 +595,10 @@ impl DAWState {
 
 impl MIDIState {
     fn handle_message(&mut self, _stamp: u64, message: &[u8], _info: &mut ()) {
-        if let Some(event) = self.decode(message) {
+        // Stamp on arrival rather than converting midir's own stamp: the
+        // recorder compares note times against `Instant`s from the tracker.
+        let stamp = Instant::now();
+        if let Some(event) = self.decode(message, stamp) {
             match self.sender.send(event) {
                 Ok(()) => (),
                 Err(e) => {
@@ -596,7 +608,7 @@ impl MIDIState {
         }
     }
 
-    fn decode(&mut self, message: &[u8]) -> Option<Event> {
+    fn decode(&mut self, message: &[u8], stamp: Instant) -> Option<Event> {
         let event = LiveEvent::parse(message).unwrap();
         //println!("Got event on MIDI: {:?}", event);
         match event {
@@ -604,9 +616,15 @@ impl MIDIState {
                 MidiMessage::NoteOn { key, vel } if vel > 0 => Some(Event::NoteOn {
                     key: key.into(),
                     velocity: vel.into(),
+                    stamp,
                 }),
-                MidiMessage::NoteOn { key, vel } if vel == 0 => {
-                    Some(Event::NoteOff { key: key.into() })
+                // A note-on with velocity zero is a note-off by convention; the
+                // release velocity of a real note-off is ignored.
+                MidiMessage::NoteOn { key, .. } | MidiMessage::NoteOff { key, .. } => {
+                    Some(Event::NoteOff {
+                        key: key.into(),
+                        stamp,
+                    })
                 }
                 _ => {
                     println!("Ignoring message {:?} on channel {}", message, channel);
@@ -1160,5 +1178,59 @@ impl Color {
             Color::Honey => "Honey",
             Color::Copper => "Copper",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn midi_state() -> MIDIState {
+        let (sender, _receiver) = mpsc::channel();
+        MIDIState { sender }
+    }
+
+    fn daw_state() -> DAWState {
+        let (sender, _receiver) = mpsc::channel();
+        DAWState {
+            encoder_mode: EncoderMode::Plugin,
+            pad_mode: PadMode::DAW,
+            sender,
+        }
+    }
+
+    #[test]
+    fn note_messages_carry_their_stamp() {
+        let stamp = Instant::now();
+        let event = midi_state().decode(&[0x90, 60, 100], stamp);
+        assert!(
+            matches!(event, Some(Event::NoteOn { key: 60, velocity: 100, stamp: s }) if s == stamp),
+            "expected a stamped NoteOn, got {:?}",
+            event
+        );
+    }
+
+    #[test]
+    fn real_note_off_and_zero_velocity_note_on_both_release() {
+        let stamp = Instant::now();
+        for message in [[0x80, 60, 64], [0x90, 60, 0]] {
+            let event = midi_state().decode(&message, stamp);
+            assert!(
+                matches!(event, Some(Event::NoteOff { key: 60, stamp: s }) if s == stamp),
+                "expected a stamped NoteOff for {:02X?}, got {:?}",
+                message,
+                event
+            );
+        }
+    }
+
+    #[test]
+    fn record_button_press_decodes_and_release_is_ignored() {
+        let mut state = daw_state();
+        assert!(matches!(
+            state.decode(&[0xB0, 117, 127]),
+            Some(Event::RecordDown)
+        ));
+        assert!(state.decode(&[0xB0, 117, 0]).is_none());
     }
 }

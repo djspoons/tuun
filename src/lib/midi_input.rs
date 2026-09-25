@@ -57,12 +57,9 @@ pub fn classify(
             Some(vec![Action::AdvanceProgram(-(PROGRAMS_PER_BANK as i32))])
         }
 
-        // Transport buttons act on the active program like the clip launcher's
-        // bottom pads: play queues at the next measure, stop removes the queued
-        // playback (which for a looping program ends the loop after the current
-        // cycle).
-        Event::PlayDown => Some(vec![Action::EnqueuePendingPlayback(active_program_index)]),
-        Event::StopDown => Some(vec![Action::RemovePendingProgram(active_program_index)]),
+        Event::RecordDown => Some(vec![Action::Transport(actions::Transport::Record)]),
+        Event::PlayDown => Some(vec![Action::Transport(actions::Transport::Play)]),
+        Event::StopDown => Some(vec![Action::Transport(actions::Transport::Stop)]),
 
         // The pad-navigation arrows page the sequencer grid through the
         // pattern's measures: down moves toward later beats.
@@ -111,11 +108,19 @@ pub fn classify(
         Event::PadFunctionDown => Some(vec![Action::CycleRepeatAfterMeasures]),
         Event::LaunchDown => Some(vec![Action::ToggleLaunchMode]),
 
-        Event::NoteOn { key, velocity } => Some(vec![Action::NoteOn {
+        Event::NoteOn {
+            key,
+            velocity,
+            stamp,
+        } => Some(vec![Action::NoteOn {
             key: *key,
             velocity: *velocity,
+            stamp: *stamp,
         }]),
-        Event::NoteOff { key } => Some(vec![Action::NoteOff { key: *key }]),
+        Event::NoteOff { key, stamp } => Some(vec![Action::NoteOff {
+            key: *key,
+            stamp: *stamp,
+        }]),
 
         Event::PadModeChanged { previous, current } => Some(vec![Action::PadModeChanged {
             previous: *previous,
@@ -470,7 +475,7 @@ fn update_pads_sequencer(
 
 #[cfg(test)]
 mod tests {
-    use crate::actions::{Action, AppState, DawPadMode};
+    use crate::actions::{Action, AppState, DawPadMode, Transport};
 
     use super::*;
 
@@ -579,14 +584,21 @@ mod tests {
     }
 
     #[test]
-    fn classify_transport_buttons_target_active_program() {
+    fn classify_transport_buttons_press_the_transport() {
         let state = test_state(DawPadMode::ClipLauncher);
-        let actions =
-            classify(&launchkey::Event::PlayDown, &state).expect("play button classifies");
-        assert!(matches!(actions[0], Action::EnqueuePendingPlayback(0)));
-        let actions =
-            classify(&launchkey::Event::StopDown, &state).expect("stop button classifies");
-        assert!(matches!(actions[0], Action::RemovePendingProgram(0)));
+        for (event, transport) in [
+            (launchkey::Event::RecordDown, Transport::Record),
+            (launchkey::Event::PlayDown, Transport::Play),
+            (launchkey::Event::StopDown, Transport::Stop),
+        ] {
+            let actions = classify(&event, &state).expect("transport button classifies");
+            assert!(
+                matches!(actions[0], Action::Transport(t) if t == transport),
+                "expected Transport({:?}), got {:?}",
+                transport,
+                actions
+            );
+        }
     }
 
     #[test]

@@ -188,6 +188,14 @@ pub struct Context<'a> {
     pub source_stale: bool,
 }
 
+/// A transport buttons on the controller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    Record,
+    Play,
+    Stop,
+}
+
 /// Things that can happen, emitted by handlers as pure data.
 #[derive(Debug)]
 pub enum Action {
@@ -219,10 +227,11 @@ pub enum Action {
     /// it to play at the beginning of next measure (repeating per the app-wide
     /// default). Does nothing if the program isn't a waveform.
     ToggleProgramPendingPlayback(usize),
-    /// Queue the program to play at the beginning of the next measure
-    /// (repeating per the app-wide default). Does nothing if playback is
-    /// already pending or the program isn't a waveform.
-    EnqueuePendingPlayback(usize),
+    /// Press a transport button. Play queues the active program to play at
+    /// the beginning of the next measure (repeating per the app-wide
+    /// default) unless its playback is already pending; Stop removes the
+    /// active program's pending playback; Record does nothing.
+    Transport(Transport),
     /// Toggle the given sixteenth of the active program's `on_beats` step
     /// list, in the source text and — when the program is live — on the
     /// tracker.
@@ -240,12 +249,18 @@ pub enum Action {
     /// Install the program at the given index as the keys instrument. If the
     /// program at the given index is already installed, uninstall it.
     ToggleInstalledKeys(usize),
+    /// Press a key on the keys instrument. `stamp` is when the press was
+    /// received.
     NoteOn {
         key: u8,
         velocity: u8,
+        stamp: Instant,
     },
+    /// Release a key on the keys instrument. `stamp` is when the release was
+    /// received.
     NoteOff {
         key: u8,
+        stamp: Instant,
     },
 
     // --- mode transitions ---
@@ -511,7 +526,8 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             }
         }
 
-        Action::EnqueuePendingPlayback(i) => {
+        Action::Transport(Transport::Play) => {
+            let i = state.active_program_index;
             if ctx.status.has_pending_mark(
                 ctx.now,
                 &WaveformSelector::ProgramVoices(i),
@@ -523,6 +539,10 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
                 play_program_effects(i, true, state.repeat_after_measures)
             }
         }
+        Action::Transport(Transport::Stop) => {
+            remove_pending_effects(state, ctx, state.active_program_index)
+        }
+        Action::Transport(Transport::Record) => vec![],
 
         Action::ToggleSequencerStep { sixteenth } => {
             apply_toggle_sequencer_step(state, ctx, sixteenth)
@@ -549,14 +569,14 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
         }
 
         Action::ToggleInstalledKeys(i) => apply_install_keys(state, i),
-        Action::NoteOn { key, velocity } => {
+        Action::NoteOn { key, velocity, .. } => {
             if state.keys.is_some() {
                 vec![Effect::PlayNoteOn { key, velocity }]
             } else {
                 vec![]
             }
         }
-        Action::NoteOff { key } => vec![Effect::PlayNoteOff { key }],
+        Action::NoteOff { key, .. } => vec![Effect::PlayNoteOff { key }],
 
         Action::EnterEditMode => {
             // Editing on top of external changes would set up a conflict the
@@ -855,7 +875,8 @@ pub fn refused_by_ownership(
             i == owned && !state.keys.as_ref().is_some_and(|k| k.id == owned)
         }
         Action::PlayProgram { program_index, .. } => program_index == owned,
-        Action::StartProgramVoice(i) | Action::EnqueuePendingPlayback(i) => i == owned,
+        Action::StartProgramVoice(i) => i == owned,
+        Action::Transport(Transport::Play) => true,
         // The toggles are refused only when they would start or queue.
         Action::ToggleProgramPlayback(i) => {
             i == owned && !status.has_active_mark(now, &voices, &MarkId::TopLevel)
@@ -3140,10 +3161,10 @@ _ = saw(220);";
     }
 
     #[test]
-    fn enqueue_pending_playback_queues_at_next_measure() {
+    fn transport_play_queues_active_program_at_next_measure() {
         let mut state = test_state();
         state.repeat_after_measures = Some(2);
-        let effects = apply_with_empty_status(&mut state, Action::EnqueuePendingPlayback(0));
+        let effects = apply_with_empty_status(&mut state, Action::Transport(Transport::Play));
         assert!(
             matches!(
                 effects[0],
@@ -3159,13 +3180,35 @@ _ = saw(220);";
     }
 
     #[test]
-    fn enqueue_pending_playback_noops_when_already_pending() {
+    fn transport_play_noops_when_already_pending() {
         let mut state = test_state();
         let now = Instant::now();
         let status = status_with_mark(now + Duration::from_secs(1));
         let effects =
-            apply_with_status(&mut state, &status, now, Action::EnqueuePendingPlayback(0));
+            apply_with_status(&mut state, &status, now, Action::Transport(Transport::Play));
         assert!(effects.is_empty(), "expected no effects, got {:?}", effects);
+    }
+
+    #[test]
+    fn transport_stop_removes_active_program_pending_playback() {
+        let mut state = test_state();
+        let now = Instant::now();
+        let status = status_with_mark(now + Duration::from_secs(1));
+        let effects =
+            apply_with_status(&mut state, &status, now, Action::Transport(Transport::Stop));
+        assert!(
+            matches!(effects[0], Effect::RemovePendingProgram(0)),
+            "expected RemovePendingProgram, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn transport_record_does_nothing() {
+        let mut state = test_state();
+        let effects = apply_with_empty_status(&mut state, Action::Transport(Transport::Record));
+        assert!(effects.is_empty(), "expected no effects, got {:?}", effects);
+        assert!(matches!(state.mode, Mode::Select));
     }
 
     #[test]
@@ -3296,7 +3339,7 @@ _ = saw(220);";
                 repeat_after_measures: None,
             },
             Action::StartProgramVoice(0),
-            Action::EnqueuePendingPlayback(0),
+            Action::Transport(Transport::Play),
             Action::ToggleProgramPlayback(0),
             Action::ToggleProgramPendingPlayback(0),
         ] {
@@ -3321,6 +3364,7 @@ _ = saw(220);";
         let pending = status_with_mark(now + Duration::from_millis(100));
         for action in [
             Action::RemovePendingProgram(0),
+            Action::Transport(Transport::Stop),
             Action::ToggleProgramPendingPlayback(0),
         ] {
             let effects = apply_with_status(&mut state, &pending, now, action);
@@ -3342,7 +3386,6 @@ _ = saw(220);";
                 repeat_after_measures: None,
             },
             Action::ToggleProgramPlayback(1),
-            Action::EnqueuePendingPlayback(1),
         ] {
             let effects = apply_with_empty_status(&mut state, action);
             assert!(

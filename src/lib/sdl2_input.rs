@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use crate::actions;
 use crate::actions::Mode;
 use crate::programs::{PROGRAMS_PER_BANK, Program};
@@ -131,9 +133,11 @@ impl InputHandler {
             if let Some(sc) = scancode
                 && let Some(midi_note) = scancode_to_midi_note(sc)
             {
+                // Stamped at poll, so up to one main-loop pass late.
                 return Some(vec![Action::NoteOn {
                     key: midi_note,
                     velocity: 64, // computer keyboard has no velocity; pick mf
+                    stamp: Instant::now(),
                 }]);
             }
             return Some(vec![]);
@@ -276,7 +280,10 @@ impl InputHandler {
         if let Some(sc) = scancode
             && let Some(midi_note) = scancode_to_midi_note(sc)
         {
-            return Some(vec![Action::NoteOff { key: midi_note }]);
+            return Some(vec![Action::NoteOff {
+                key: midi_note,
+                stamp: Instant::now(),
+            }]);
         }
         match (mode, scancode) {
             (Mode::MoveSliders, Some(Scancode::LAlt) | Some(Scancode::RAlt)) => {
@@ -348,7 +355,8 @@ mod tests {
                 actions[0],
                 Action::NoteOn {
                     key: 60,
-                    velocity: 64
+                    velocity: 64,
+                    ..
                 }
             ),
             "expected NoteOn(C4=60), got {:?}",
@@ -423,7 +431,7 @@ mod tests {
             .classify_keyup(Some(Scancode::Z), &state.mode)
             .expect("Z keyup should be classified");
         assert!(
-            matches!(actions[0], Action::NoteOff { key: 60 }),
+            matches!(actions[0], Action::NoteOff { key: 60, .. }),
             "expected NoteOff(60), got {:?}",
             actions[0]
         );
