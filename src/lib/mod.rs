@@ -34,6 +34,8 @@ pub mod player;
 #[cfg(feature = "native")]
 pub mod programs;
 #[cfg(feature = "native")]
+pub mod recorder;
+#[cfg(feature = "native")]
 pub mod renderer;
 #[cfg(feature = "native")]
 pub mod sdl2_input;
