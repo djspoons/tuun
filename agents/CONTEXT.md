@@ -34,6 +34,26 @@ _Avoid_: instance, playback, note
 One element of a sequenceable program's `on_beats` list. Its value is the beat of the measure it plays on, so `[1, 2.5] | on_beats(w)` has two steps, not two beats.
 _Avoid_: beat, element, hit, note
 
+**Note**:
+One element of a phrase: a beat, a key, a velocity and a duration, what one key press and its release produce. Not the voice that sounds it, and not a step.
+_Avoid_: event, hit, tuple, voice
+
+**Phrase**:
+A complete musical unit of notes, expressed as MIDI parameters and timing: a beat, a key, a velocity and a duration for each. What recording produces; a program plays one by passing it through a keys instrument.
+_Avoid_: loop, clip, pattern, sequence, list
+
+**Take**:
+The notes gathered by the recorder from arming to the end boundary. A take is written as a phrase or discarded.
+_Avoid_: recording, buffer, phrase
+
+**Record**:
+Writing what was played on the keys, as a phrase, into the selected slot.
+_Avoid_: capture, sample, loop
+
+**Early-hit window**:
+The eighth of a beat before a measure boundary in which a key struck early counts as struck on that boundary.
+_Avoid_: pre-roll, anticipation window, grace period, tolerance
+
 **Mark**:
 A labelled point inside a waveform that can later be substituted — how a sound is stopped, and how a live slider value reaches it.
 _Avoid_: tag, label, handle
@@ -43,7 +63,7 @@ A single value, declared on a binding, that can be changed while sound is playin
 _Avoid_: parameter, knob, control
 
 **Capture**:
-The recording of a sounding waveform to a WAV file as it plays.
+Saving a sounding waveform to a WAV file as it plays. Not Record, which writes notes as text.
 _Avoid_: record, export, bounce
 
 ### The program set
@@ -75,8 +95,12 @@ One of the Launchkey's piano keys.
 _Avoid_: note, pad
 
 **Pending playback**:
-Playback scheduled to begin at a future moment in time (often a measure boundary), not yet sounding.
+Playback scheduled to begin at a future moment in time (often a measure boundary), not yet sounding. Not armed, which is the recorder waiting for its start boundary.
 _Avoid_: queued, armed, scheduled, cued
+
+**Repeat**:
+The app-wide setting for whether a launched program plays again after one measure, after two, or not at all.
+_Avoid_: loop, looping, cycle
 
 **Installed keys instrument**:
 The one keys instrument that sounds when MIDI note-on and note-off events arrive, one voice per held key. Taken from a keys program; at most one is installed at a time.

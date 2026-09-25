@@ -621,6 +621,7 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             vec![Effect::ShowMessage("Piano keys enabled".to_string())]
         }
 
+        // TODO we shouldn't change active programs during an edit
         Action::SelectProgram(i) => apply_select_program(state, i),
         Action::AdvanceProgram(delta) => {
             let len = state.programs.programs().len() as i32;
