@@ -942,15 +942,9 @@ fn level_edit(
     match parsed_span {
         Some(span) => Some((span, body)),
         None => {
-            // Fall back to inserting a fresh `#{level_db=…}` line at the
-            // binding's start when no `Level` annotation exists in source yet.
-            let pos = binding
-                .span
-                .as_ref()
-                .expect("parsed binding has span")
-                .range
-                .start;
-            Some(insert_annotation_line(pos, &body, source))
+            // Fall back to inserting a fresh `level_db=…` annotation when no
+            // `Level` annotation exists in source yet.
+            Some(insert_annotation_edit(binding, &body, source))
         }
     }
 }
@@ -973,11 +967,72 @@ fn insert_annotation_line(pos: usize, body: &str, source: &str) -> (Range<usize>
     (pos..pos, format!("{}#{{{}}}{}", prefix, body, suffix))
 }
 
+/// Builds the edit that adds the annotation `body` to `binding`.
+///
+/// The annotation is prepended to the binding's first `#{…}` set, or, when the
+/// binding has no annotations, written as a fresh `#{…}` line just above its
+/// pattern (below any leading comments).
+fn insert_annotation_edit(
+    binding: &expr::SourceBinding<MarkId, Source>,
+    body: &str,
+    source: &str,
+) -> (Range<usize>, String) {
+    if let Some(first) = binding.annotations.first().and_then(|a| a.span.as_ref()) {
+        let pos = first.range.start;
+        return (pos..pos, format!("{}, ", body));
+    }
+    // No annotations: skip the leading trivia to the pattern.
+    let mut pos = binding
+        .span
+        .as_ref()
+        .expect("parsed binding has span")
+        .range
+        .start;
+    loop {
+        let rest = source[pos..].trim_start();
+        pos = source.len() - rest.len();
+        if !rest.starts_with("//") {
+            return insert_annotation_line(pos, body, source);
+        }
+        pos += rest.find('\n').unwrap_or(rest.len());
+    }
+}
+
+/// Returns the offset of the newline that ends the line containing `pos`, when
+/// the rest of that line is blank or a `//` comment.
+///
+/// Returns `None` when other code follows `pos` on its line or the line has no
+/// newline.
+fn trivia_line_end(pos: usize, source: &str) -> Option<usize> {
+    let rest = &source[pos..];
+    let len = rest.find('\n')?;
+    let line = rest[..len].trim_start();
+    (line.is_empty() || line.starts_with("//")).then_some(pos + len)
+}
+
+/// Returns the offset where a binding inserted after `pred` begins: just past
+/// `pred`'s `;`, or past the end of its line when only blank space or a
+/// comment follows it there.
+///
+/// Returns 0 when `pred` is `None`.
+fn insertion_point(pred: Option<&expr::SourceBinding<MarkId, Source>>, source: &str) -> usize {
+    let Some(pred) = pred else {
+        return 0;
+    };
+    let end = pred
+        .span
+        .as_ref()
+        .expect("parsed binding has span")
+        .range
+        .end;
+    trivia_line_end(end, source).map_or(end, |newline| newline + 1)
+}
+
 /// Builds the edit that sets `binding`'s `skip_slots` annotation to `new_skip`,
 /// or `None` when the source already encodes that value.
 ///
-/// Replaces the existing annotation in place, inserts a fresh `#{skip_slots=…}`
-/// line when none exists, or removes the annotation entirely when `new_skip` is
+/// Replaces the existing annotation in place, adds `skip_slots=…` when none
+/// exists, or removes the annotation entirely when `new_skip` is
 /// 0 — swapping in `level_db=…` instead when `skip_slots` is the binding's only
 /// annotation, so the binding stays a UI program.
 fn skip_slots_edit(
@@ -1001,15 +1056,7 @@ fn skip_slots_edit(
             Some((span, format!("{}", expr::Annotation::Level(level_db))))
         }
         Some(span) => Some(remove_annotation_edit(span, source)),
-        None if new_skip > 0 => {
-            let pos = binding
-                .span
-                .as_ref()
-                .expect("parsed binding has span")
-                .range
-                .start;
-            Some(insert_annotation_line(pos, &body, source))
-        }
+        None if new_skip > 0 => Some(insert_annotation_edit(binding, &body, source)),
         // No annotation and no skip needed.
         None => None,
     }
@@ -1150,19 +1197,22 @@ fn parsed_normalized_value(function: &expr::SliderFunction) -> f32 {
 }
 
 impl ProgramSet {
-    /// Splices the given program's edited `text` back into `self.source`, persists
-    /// every program's changed state as annotation edits, re-parses the file to
-    /// refresh `self.bindings`, realigns each program's `span`/`binding_index`
-    /// via the position walk, and writes the new source to `self.input_path`.
+    /// Splices the given program's edited `text` back into `self.source`,
+    /// persists every program's changed state as annotation edits, re-parses
+    /// the file to refresh `self.bindings`, realigns each program's
+    /// `span`/`binding_index` via the position walk, and writes the new source
+    /// to `self.input_path`.
     ///
     /// Programs with no source binding (padding slots) are treated as
     /// brand-new: a fresh `Definition` is inserted between its source-order
     /// neighbors with a `#{skip_slots=…, level_db=…}` annotation, and the
     /// following program's `skip_slots` is decremented to keep its absolute
-    /// slot stable. Existing programs are spliced in place — except when the
-    /// edited text is empty (or whitespace-only), which deletes the binding
-    /// (annotations included) from source and grows the following program's
-    /// `skip_slots` to compensate.
+    /// slot stable. The new binding goes just past its predecessor's line (so
+    /// comments above the next binding stay with it), with a blank line on each
+    /// side and a newline after it. Existing programs are spliced in place —
+    /// except when the edited text is empty (or whitespace-only), which deletes
+    /// the binding (annotations included) from source and grows the following
+    /// program's `skip_slots` to compensate.
     ///
     /// Returns a user-visible warning message if any step failed; in that case
     /// `self.bindings`, `self.source`, and the file on disk are all left
@@ -1199,6 +1249,7 @@ impl ProgramSet {
         // Applying in reverse-position order keeps each remaining edit's span
         // valid.
         let mut edits: Vec<(Range<usize>, String)> = Vec::new();
+        let mut new_binding_edit: Option<(Range<usize>, String)> = None;
         if is_new {
             if edited_text.trim().is_empty() {
                 // Padding slot still empty after edit — nothing to do.
@@ -1239,32 +1290,32 @@ impl ProgramSet {
                 .map(|a| format!("{}", a))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let anchor = match next {
-                Some((_, next_binding_index)) => {
-                    self.bindings[next_binding_index]
-                        .span
-                        .as_ref()
-                        .expect("parsed binding has span")
-                        .range
-                        .start
-                }
-                None => self.source.len(),
+            // The new binding follows the binding just before its successor
+            // (or the last non-trivia binding), sitting with the code rather
+            // than the comments, with a blank line on each side.
+            let pred_index = match next {
+                Some((_, next_binding_index)) => next_binding_index.checked_sub(1),
+                None => self
+                    .bindings
+                    .iter()
+                    .rposition(|b| !matches!(b.binding, expr::Binding::Empty)),
             };
-            let bytes = self.source.as_bytes();
-            let prefix = if anchor == 0 || bytes.get(anchor - 1) == Some(&b'\n') {
+            let anchor = insertion_point(pred_index.map(|i| &self.bindings[i]), &self.source);
+            let prefix = match anchor.checked_sub(1).map(|i| self.source.as_bytes()[i]) {
+                None => "",
+                Some(b'\n') => "\n",
+                Some(_) => "\n\n",
+            };
+            let rest = &self.source[anchor..];
+            let suffix = if rest.is_empty() || rest.starts_with('\n') {
                 ""
             } else {
                 "\n"
             };
-            let suffix = if anchor == self.source.len() || bytes.get(anchor) == Some(&b'\n') {
-                ""
-            } else {
-                "\n"
-            };
-            let new_binding = format!(
-                "{}#{{{}}}\n_ = {};{}",
-                prefix, anno_body, edited_text, suffix
-            );
+            new_binding_edit = Some((
+                anchor..anchor,
+                format!("{prefix}#{{{anno_body}}}\n_ = {edited_text};\n{suffix}"),
+            ));
 
             // If there's a UI program after the insertion point, its
             // `skip_slots` needs to compensate for the new program's slot
@@ -1281,19 +1332,26 @@ impl ProgramSet {
                     edits.push(edit);
                 }
             }
-
-            edits.push((anchor..anchor, new_binding));
         } else if is_deletion {
             // Clearing an existing program deletes its whole binding —
             // leading trivia, annotations, definition, and terminating
             // `;` — and grows the following UI program's `skip_slots` so
             // every later program keeps its slot.
+            //
+            // When the predecessor's line ends in a comment, that comment is
+            // part of this binding's leading trivia but belongs to the
+            // predecessor, so the deletion starts at its line's newline.
             let binding_span = self.bindings[binding_index]
                 .span
                 .clone()
                 .expect("parsed binding has span")
                 .range;
-            edits.push((binding_span, String::new()));
+            let start = if binding_index > 0 {
+                trivia_line_end(binding_span.start, &self.source).unwrap_or(binding_span.start)
+            } else {
+                binding_span.start
+            };
+            edits.push((start..binding_span.end, String::new()));
 
             let positions = walk_ui_positions(&self.bindings, self.source.len());
             let prev_pos: Option<usize> = positions
@@ -1338,6 +1396,11 @@ impl ProgramSet {
                 edits.extend(annotation_edits(program, binding, &self.source));
             }
         }
+
+        // Pushed last so that, among edits at the same offset (an annotation
+        // line inserted above the successor), it is applied last by the stable
+        // sort and so lands first in the text.
+        edits.extend(new_binding_edit);
 
         let mut new_source = self.source.clone();
         edits.sort_by_key(|(span, _)| cmp::Reverse(span.start));
@@ -1885,8 +1948,10 @@ kick = pulse(60);";
             "\
 #{level_db=0}
 kick = pulse(60);
+
 #{skip_slots=3, level_db=0}
-_ = saw(440);"
+_ = saw(440);
+"
         );
         // The new binding is now part of the bindings vec, and the
         // slot 5 program has a real span/text.
@@ -1935,8 +2000,8 @@ kick = pulse(60);"
     #[test]
     fn changed_level_db_inserts_fresh_annotation_when_none_exists() {
         // No `level_db=…` in source but the binding is still a UI program (has
-        // `color=…`). Add a new `#{level_db=…}` line just before the binding,
-        // preserving the existing annotation block and the pre-binding comment.
+        // `color=…`). Prepend `level_db=…` to the existing annotation set,
+        // leaving the pre-binding comment alone.
         let source = "\
 // header comment
 #{color=rgb(255,0,0)}
@@ -1950,9 +2015,8 @@ kick = pulse(60);";
         assert_eq!(
             state.source,
             "\
-#{level_db=-3}
 // header comment
-#{color=rgb(255,0,0)}
+#{level_db=-3, color=rgb(255,0,0)}
 kick = pulse(60);"
         );
     }
@@ -2052,8 +2116,10 @@ kick = pulse(60);";
             "\
 #{level_db=0}
 kick = pulse(60);
+
 #{skip_slots=3, level_db=-2.5}
-_ = saw(440);"
+_ = saw(440);
+"
         );
     }
 
@@ -2169,8 +2235,10 @@ synth = saw(220);";
             "\
 #{level_db=0}
 kick = pulse(60);
+
 #{skip_slots=1, level_db=0}
 _ = saw(330);
+
 #{skip_slots=1, level_db=0}
 synth = saw(220);"
         );
@@ -2201,8 +2269,10 @@ synth = saw(220);";
             "\
 #{level_db=0}
 kick = pulse(60);
+
 #{level_db=0}
 _ = saw(330);
+
 #{level_db=0}
 synth = saw(220);"
         );
@@ -2230,8 +2300,10 @@ synth = saw(220);";
             "\
 #{level_db=0}
 kick = pulse(60);
+
 #{level_db=0}
 _ = saw(330);
+
 #{level_db=0}
 synth = saw(220);"
         );
@@ -2260,8 +2332,10 @@ synth = saw(220);";
             "\
 #{level_db=0}
 kick = pulse(60);
+
 #{level_db=0}
 _ = saw(330);
+
 #{level_db=0}
 synth = saw(220);"
         );
@@ -2293,8 +2367,7 @@ synth = saw(220);";
             "\
 #{level_db=0}
 kick = pulse(60);
-#{skip_slots=1}
-#{level_db=0}
+#{skip_slots=1, level_db=0}
 synth = saw(220);"
         );
         assert!(state.programs()[1].is_empty());
@@ -2443,10 +2516,178 @@ synth = saw(220);";
             "\
 #{skip_slots=1, level_db=0}
 _ = saw(110);
+
 #{skip_slots=1, level_db=0}
 synth = saw(220);"
         );
         assert_eq!(state.programs()[1].text(), "saw(110)");
         assert_eq!(state.programs()[3].text(), "saw(220)");
+    }
+
+    // ------------------------------------------------------------
+    // Splice: whitespace around an inserted binding.
+    // ------------------------------------------------------------
+
+    /// A file with a gap of two empty slots (A:3, A:4) between `kick` and
+    /// `bass`, with comments above `kb` and `bass`.
+    const GAPPED: &str = "\
+// The keyboard.
+#{level_db=-6,keys}
+kb = saw(110);
+
+#{level_db=0}
+kick = pulse(60);
+
+// Bass line, two slots down.
+#{skip_slots=2, level_db=-3}
+bass = saw(55);
+";
+
+    /// Records `text` into the padding slot at `index` with an undo point, as
+    /// a recorded phrase would be, and returns the source after the insert.
+    fn insert_with_undo_point(state: &mut ProgramSet, index: usize, text: &str) -> String {
+        let program = state.program_mut(index).unwrap();
+        program.record_edit(0);
+        program.set_text(text.to_string());
+        state.splice(index).unwrap();
+        state.source.clone()
+    }
+
+    /// Undoes the last edit to the program at `index`, commits it, and returns
+    /// the source.
+    fn undo_and_commit(state: &mut ProgramSet, index: usize) -> String {
+        state.program_mut(index).unwrap().undo(0).unwrap();
+        state.splice(index).unwrap();
+        state.source.clone()
+    }
+
+    #[test]
+    fn inserted_binding_sits_with_the_code_and_undo_restores_the_file() {
+        let mut state = state_from(GAPPED);
+        state.program_mut(2).unwrap().set_level_db(-6.0);
+        let inserted = insert_with_undo_point(&mut state, 2, "saw(220)");
+        assert_eq!(
+            inserted,
+            "\
+// The keyboard.
+#{level_db=-6,keys}
+kb = saw(110);
+
+#{level_db=0}
+kick = pulse(60);
+
+#{level_db=-6}
+_ = saw(220);
+
+// Bass line, two slots down.
+#{skip_slots=1, level_db=-3}
+bass = saw(55);
+"
+        );
+        assert_eq!(state.programs()[2].text(), "saw(220)");
+        assert_eq!(state.programs()[4].text(), "saw(55)");
+        assert_eq!(undo_and_commit(&mut state, 2), GAPPED);
+    }
+
+    #[test]
+    fn undo_at_the_end_of_a_gap_restores_the_file() {
+        // At the end of a gap the successor loses its `skip_slots`; undo puts
+        // it back at the front of the successor's annotation set.
+        let mut state = state_from(GAPPED);
+        let inserted = insert_with_undo_point(&mut state, 3, "saw(220)");
+        assert_eq!(
+            inserted,
+            "\
+// The keyboard.
+#{level_db=-6,keys}
+kb = saw(110);
+
+#{level_db=0}
+kick = pulse(60);
+
+#{skip_slots=1, level_db=0}
+_ = saw(220);
+
+// Bass line, two slots down.
+#{level_db=-3}
+bass = saw(55);
+"
+        );
+        assert_eq!(undo_and_commit(&mut state, 3), GAPPED);
+        assert_eq!(state.programs()[4].text(), "saw(55)");
+    }
+
+    #[test]
+    fn inserted_binding_goes_before_a_trailing_comment() {
+        let source = "\
+#{level_db=0}
+kick = pulse(60);
+
+// TODO more programs here.
+";
+        let mut state = state_from(source);
+        let inserted = insert_with_undo_point(&mut state, 1, "saw(220)");
+        assert_eq!(
+            inserted,
+            "\
+#{level_db=0}
+kick = pulse(60);
+
+#{level_db=0}
+_ = saw(220);
+
+// TODO more programs here.
+"
+        );
+        assert_eq!(undo_and_commit(&mut state, 1), source);
+    }
+
+    #[test]
+    fn inserted_binding_leaves_a_same_line_comment_on_its_line() {
+        let source = "\
+#{level_db=0}
+kick = pulse(60); // four on the floor
+#{skip_slots=1, level_db=0}
+bass = saw(55);";
+        let mut state = state_from(source);
+        let inserted = insert_with_undo_point(&mut state, 1, "saw(220)");
+        assert_eq!(
+            inserted,
+            "\
+#{level_db=0}
+kick = pulse(60); // four on the floor
+
+#{level_db=0}
+_ = saw(220);
+
+#{level_db=0}
+bass = saw(55);"
+        );
+        assert_eq!(state.programs()[2].text(), "saw(55)");
+        // The inserted blank lines stay: the original had none to restore.
+        assert_eq!(
+            undo_and_commit(&mut state, 1),
+            "\
+#{level_db=0}
+kick = pulse(60); // four on the floor
+
+#{skip_slots=1, level_db=0}
+bass = saw(55);"
+        );
+    }
+
+    #[test]
+    fn inserted_binding_into_a_file_without_bindings_starts_it() {
+        let mut state = state_from("");
+        assert_eq!(
+            insert_with_undo_point(&mut state, 0, "saw(220)"),
+            "#{level_db=0}\n_ = saw(220);\n"
+        );
+
+        let mut state = state_from("// Notes.\n");
+        assert_eq!(
+            insert_with_undo_point(&mut state, 0, "saw(220)"),
+            "#{level_db=0}\n_ = saw(220);\n\n// Notes.\n"
+        );
     }
 }
