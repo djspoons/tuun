@@ -120,6 +120,7 @@ impl EffectRunner {
             environment: &self.environment,
             source_stale: state.programs.disk_changed(),
             tempo: self.player.tempo(),
+            beats_per_measure: self.player.beats_per_measure(),
         };
         let mut all_effects = Vec::new();
         for action in actions {
@@ -133,7 +134,7 @@ impl EffectRunner {
         match effect {
             Effect::PlayProgram {
                 program_index,
-                start_at_next_measure,
+                start,
                 repeat_after_measures,
             } => {
                 // A sequenceable program always plays decomposed — one
@@ -148,7 +149,7 @@ impl EffectRunner {
                         &state.programs,
                         program_index,
                         world.status,
-                        start_at_next_measure,
+                        start,
                         repeat_after_measures,
                     )
                 } else {
@@ -156,11 +157,13 @@ impl EffectRunner {
                         &state.programs,
                         program_index,
                         world.status,
-                        start_at_next_measure,
+                        start,
                         repeat_after_measures,
                     )
                 };
-                if let Some(message) = message {
+                if let Some(message) = message
+                    && !matches!(start, player::Start::At(_))
+                {
                     state.message = message;
                 }
             }
@@ -980,6 +983,60 @@ mod tests {
         assert_eq!(last_slider_values.get(&key), Some(&0.5));
     }
 
+    /// A play from an instant goes straight to the tracker with that start,
+    /// repeating per the given measures, and leaves the message alone.
+    #[test]
+    fn a_play_at_an_instant_takes_the_fast_route_silently() {
+        let (precompute_sender, precompute_receiver) = mpsc::channel();
+        let (fast_sender, fast_receiver) = mpsc::channel();
+        let (slider_sender, _slider_receiver) = mpsc::channel();
+        let player = player::Player::new(60, 4, precompute_sender, fast_sender);
+        let environment = environment::Environment::new(44100, 60, std::path::PathBuf::new());
+        let mut runner = EffectRunner::new(player, environment, slider_sender);
+        let mut state = AppState::from_source(
+            "#{level_db=0}\n_ = 1 | fin(time - 1);\n".to_string(),
+            std::path::PathBuf::new(),
+        )
+        .expect("test source should parse");
+        state.message = "Recorded 1 note into A:1".to_string();
+        let status = empty_status();
+        let mut world = World {
+            launchkey: None,
+            status: &status,
+        };
+        let at = Instant::now() - std::time::Duration::from_millis(50);
+        runner.run_all(
+            &mut state,
+            &mut world,
+            vec![
+                Effect::EvaluateProgram {
+                    program_index: 0,
+                    mode_on_success: None,
+                    mode_on_failure: None,
+                },
+                Effect::PlayProgram {
+                    program_index: 0,
+                    start: player::Start::At(at),
+                    repeat_after_measures: Some(1),
+                },
+            ],
+        );
+
+        assert!(precompute_receiver.try_recv().is_err());
+        let Ok(tracker::Command::Play {
+            id: WaveformId::Program(0),
+            start,
+            repeat_every,
+            ..
+        }) = fast_receiver.try_recv()
+        else {
+            panic!("expected a Play on the fast route");
+        };
+        assert_eq!(start, Some(at));
+        assert_eq!(repeat_every, Some(std::time::Duration::from_secs(4)));
+        assert_eq!(state.message, "Recorded 1 note into A:1");
+    }
+
     /// A slider declared on one binding reaches a sounding voice of another
     /// program: the consumer embeds the declaring program's mark, and the
     /// move addresses exactly that mark on every voice.
@@ -1018,7 +1075,7 @@ mod tests {
             &mut world,
             Effect::PlayProgram {
                 program_index: 1,
-                start_at_next_measure: false,
+                start: player::Start::Now,
                 repeat_after_measures: None,
             },
         );

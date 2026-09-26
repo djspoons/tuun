@@ -148,7 +148,13 @@ pub fn main() {
                         .waveform()
                         .is_some()
                     {
-                        player.play_program(&state.programs, program_index, &status, false, None);
+                        player.play_program(
+                            &state.programs,
+                            program_index,
+                            &status,
+                            player::Start::Now,
+                            None,
+                        );
                     } else {
                         println!("Program {} did not evaluate to a waveform", display_name);
                     }
@@ -206,15 +212,6 @@ pub fn main() {
     // Spin up the precompute thread that sits in front of the tracker as the
     // Player's `precompute_sender` route. The thread pre-computes
     // `Command::Play` and passes everything else through unchanged.
-    //
-    // What goes through this sender: playback scheduled at the next measure
-    // (the Beats waveforms and Player::play_program with
-    // start_at_next_measure), where the latency is hidden.
-    //
-    // What bypasses entirely this sender (the Player's `fast_sender` plus
-    // direct `command_sender` clones): immediate playback, note-on/off, stop
-    // ramps, Modify / RemovePending, and the slider thread's ramps — everywhere
-    // latency matters.
     let precomputing_command_sender = {
         let play_command_sender = command_sender.clone();
         let (tx, play_receiver) = mpsc::channel();

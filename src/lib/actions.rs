@@ -205,6 +205,8 @@ pub struct Context<'a> {
     pub source_stale: bool,
     /// The tempo in beats per minute.
     pub tempo: u32,
+    /// The number of beats in a measure.
+    pub beats_per_measure: u32,
 }
 
 /// A transport buttons on the controller.
@@ -407,10 +409,11 @@ pub enum Action {
 #[derive(Debug)]
 pub enum Effect {
     // --- tracker commands ---
-    /// Send a Play command for the program at `program_index`.
+    /// Send a Play command for the program at `program_index`, starting where
+    /// `start` says, and post the play text unless the start is an instant.
     PlayProgram {
         program_index: usize,
-        start_at_next_measure: bool,
+        start: player::Start,
         repeat_after_measures: Option<u32>,
     },
     /// Send a Play command for one immediate, non-repeating voice of the
@@ -520,7 +523,15 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             program_index,
             start_at_next_measure,
             repeat_after_measures,
-        } => play_program_effects(program_index, start_at_next_measure, repeat_after_measures),
+        } => play_program_effects(
+            program_index,
+            if start_at_next_measure {
+                player::Start::NextMeasure
+            } else {
+                player::Start::Now
+            },
+            repeat_after_measures,
+        ),
         Action::StopProgram(i) => stop_program_effects(state, ctx, i),
         Action::RemovePendingProgram(i) => remove_pending_effects(state, ctx, i),
         Action::ToggleProgramPlayback(i) => {
@@ -533,7 +544,7 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             } else if state.keys.as_ref().is_some_and(|k| k.id == i) {
                 vec![]
             } else {
-                play_program_effects(i, false, None)
+                play_program_effects(i, player::Start::Now, None)
             }
         }
         Action::StartProgramVoice(i) => {
@@ -553,7 +564,7 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             } else if state.keys.as_ref().is_some_and(|k| k.id == i) {
                 vec![]
             } else {
-                play_program_effects(i, true, state.repeat_after_measures)
+                play_program_effects(i, player::Start::NextMeasure, state.repeat_after_measures)
             }
         }
 
@@ -665,7 +676,11 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
                 Effect::UpdateSource(i),
             ];
             if play {
-                effects.extend(play_program_effects(i, true, repeat_after_measures));
+                effects.extend(play_program_effects(
+                    i,
+                    player::Start::NextMeasure,
+                    repeat_after_measures,
+                ));
             }
             effects
         }
@@ -933,7 +948,7 @@ fn transport_play_effects(state: &AppState, ctx: &Context) -> Vec<Effect> {
     {
         vec![]
     } else {
-        play_program_effects(i, true, state.repeat_after_measures)
+        play_program_effects(i, player::Start::NextMeasure, state.repeat_after_measures)
     }
 }
 
@@ -1006,20 +1021,21 @@ fn apply_take_transport(state: &mut AppState, ctx: &Context, transport: Transpor
         return vec![];
     };
     let keys_program = *keys_program;
+    let finish = if transport == Transport::Play {
+        Finish::Play
+    } else {
+        Finish::Silent
+    };
     let response = match transport {
         Transport::Stop => take.stop(),
         Transport::Record | Transport::Play => {
             let Some(boundary) = press_boundary(ctx) else {
                 return vec![];
             };
-            let finish = if transport == Transport::Play {
-                Finish::Play
-            } else {
-                Finish::Silent
-            };
             take.finish(finish, ctx.now, boundary)
         }
     };
+    let display_name = state.programs.display_name(state.active_program_index);
     match response {
         Response::Disarmed { play } => {
             state.mode = Mode::Select;
@@ -1029,10 +1045,21 @@ fn apply_take_transport(state: &mut AppState, ctx: &Context, transport: Transpor
                 vec![Effect::ShowMessage("Disarmed".to_string())]
             }
         }
-        // TODO the play outcome: post the play text at a Play press, and the
-        // un-queue text at a Record press that cancels one.
-        Response::Finishing { .. } => vec![],
-        Response::Closed(closed) => write_take(state, keys_program, closed),
+        // The phrase isn't queued until the write, so the text a queue or an
+        // un-queue would post is posted here.
+        Response::Finishing { previous } => match (finish, previous) {
+            (Finish::Play, _) => vec![Effect::ShowMessage(player::play_waveform_message(
+                &display_name,
+                state.repeat_after_measures,
+                ctx.beats_per_measure,
+            ))],
+            (Finish::Silent, Some(Finish::Play)) => vec![Effect::ShowMessage(format!(
+                "Removed pending waveform for program {}",
+                display_name
+            ))],
+            (Finish::Silent, _) => vec![],
+        },
+        Response::Closed(closed) => write_take(state, ctx, keys_program, closed),
         Response::Discarded { notes } => {
             state.mode = Mode::Select;
             vec![Effect::ShowMessage(format!(
@@ -1056,7 +1083,7 @@ fn apply_take_tick(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
             take.keys_name(),
             state.programs.display_name(state.active_program_index)
         ))],
-        Tick::Closed(closed) => write_take(state, keys_program, closed),
+        Tick::Closed(closed) => write_take(state, ctx, keys_program, closed),
     }
 }
 
@@ -1064,14 +1091,23 @@ fn apply_take_tick(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
 ///
 /// An empty take leaves the program untouched. Otherwise the phrase replaces
 /// the program's text as one undo unit, and an empty slot takes the level of
-/// the program at `keys_program`.
-fn write_take(state: &mut AppState, keys_program: usize, closed: Closed) -> Vec<Effect> {
+/// the program at `keys_program`. With the play outcome, the phrase starts
+/// repeating from the take's end boundary; an empty take queues the program
+/// as the Play press does.
+fn write_take(
+    state: &mut AppState,
+    ctx: &Context,
+    keys_program: usize,
+    closed: Closed,
+) -> Vec<Effect> {
     state.mode = Mode::Select;
     if closed.notes == 0 {
-        return vec![Effect::ShowMessage("Nothing recorded".to_string())];
+        let mut effects = vec![Effect::ShowMessage("Nothing recorded".to_string())];
+        if closed.finish == Finish::Play {
+            effects.extend(transport_play_effects(state, ctx));
+        }
+        return effects;
     }
-    // TODO the play outcome (`closed.finish`): play the phrase from
-    // `closed.end`.
     let i = state.active_program_index;
     let display_name = state.programs.display_name(i);
     let keys_level_db = state.programs.program(keys_program).map(|p| p.level_db());
@@ -1086,9 +1122,10 @@ fn write_take(state: &mut AppState, keys_program: usize, closed: Closed) -> Vec<
     let cursor = program.text().len();
     program.record_edit(cursor);
     program.set_text(closed.text);
-    vec![
+    let mut effects = vec![
         // Posted first so that an evaluation error or a refused save, which
-        // set their own message, stay on screen.
+        // set their own message, stay on screen. A play from an instant
+        // posts nothing, so this is still the last message on success.
         Effect::ShowMessage(format!(
             "Recorded {} into {}",
             note_count(closed.notes),
@@ -1100,7 +1137,16 @@ fn write_take(state: &mut AppState, keys_program: usize, closed: Closed) -> Vec<
             mode_on_failure: None,
         },
         Effect::UpdateSource(i),
-    ]
+    ];
+    if closed.finish == Finish::Play {
+        // A failed evaluation leaves no waveform, so this plays nothing.
+        effects.push(Effect::PlayProgram {
+            program_index: i,
+            start: player::Start::At(closed.end),
+            repeat_after_measures: state.repeat_after_measures,
+        });
+    }
+    effects
 }
 
 /// Returns `n` notes as text, e.g. "1 note" or "7 notes".
@@ -1115,13 +1161,13 @@ fn note_count(n: usize) -> String {
 /// Returns the effects that play the given program and persist its source.
 fn play_program_effects(
     program_index: usize,
-    start_at_next_measure: bool,
+    start: player::Start,
     repeat_after_measures: Option<u32>,
 ) -> Vec<Effect> {
     vec![
         Effect::PlayProgram {
             program_index,
-            start_at_next_measure,
+            start,
             repeat_after_measures,
         },
         Effect::UpdateSource(program_index),
@@ -1997,6 +2043,7 @@ mod tests {
             environment: &environment,
             source_stale: false,
             tempo: 60,
+            beats_per_measure: 4,
         };
         apply(state, &ctx, action)
     }
@@ -2017,6 +2064,7 @@ mod tests {
             environment: &environment,
             source_stale: true,
             tempo: 60,
+            beats_per_measure: 4,
         };
         apply(state, &ctx, action)
     }
@@ -2576,6 +2624,7 @@ mod tests {
             environment: &environment,
             source_stale: false,
             tempo: 60,
+            beats_per_measure: 4,
         };
         apply(state, &ctx, action)
     }
@@ -3105,7 +3154,7 @@ _ = saw(220);";
                 effects[0],
                 Effect::PlayProgram {
                     program_index: 0,
-                    start_at_next_measure: false,
+                    start: player::Start::Now,
                     repeat_after_measures: None,
                 }
             ),
@@ -3154,7 +3203,7 @@ _ = saw(220);";
                 effects[0],
                 Effect::PlayProgram {
                     program_index: 0,
-                    start_at_next_measure: true,
+                    start: player::Start::NextMeasure,
                     repeat_after_measures: Some(2),
                 }
             ),
@@ -3397,7 +3446,7 @@ _ = saw(220);";
                 effects[0],
                 Effect::PlayProgram {
                     program_index: 0,
-                    start_at_next_measure: true,
+                    start: player::Start::NextMeasure,
                     repeat_after_measures: Some(2),
                 }
             ),
@@ -3686,7 +3735,7 @@ _ = saw(220);";
                 e,
                 Effect::PlayProgram {
                     program_index: 0,
-                    start_at_next_measure: true,
+                    start: player::Start::NextMeasure,
                     repeat_after_measures: Some(2),
                 }
             )
@@ -3950,16 +3999,119 @@ _ = saw(220);";
         );
     }
 
+    /// Returns the start of the `PlayProgram` effects among `effects`, in order.
+    fn play_starts(effects: &[Effect]) -> Vec<player::Start> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::PlayProgram { start, .. } => Some(*start),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
-    fn play_while_recording_finishes_like_record() {
+    fn play_while_recording_plays_the_phrase_from_the_end_boundary() {
+        let t0 = Instant::now();
+        let mut state = record_state(RECORD_SOURCE, 1);
+        state.repeat_after_measures = Some(1);
+        apply_at(&mut state, t0, 4.0, record());
+        apply_at(&mut state, t0, 4.5, note_on(t0, 4.5));
+        let effects = apply_at(&mut state, t0, 6.0, Action::Transport(Transport::Play));
+        assert_eq!(take_phase(&state), Phase::Finishing(Finish::Play));
+        assert_eq!(
+            messages(&effects),
+            vec!["Looping waveform A:2 every 4 beats"]
+        );
+        assert!(play_starts(&effects).is_empty());
+
+        let effects = apply_at(&mut state, t0, 7.9, Action::TakeTick);
+        assert!(matches!(state.mode, Mode::Select));
+        assert_eq!(messages(&effects), vec!["Recorded 1 note into A:2"]);
+        // The play follows the evaluation and the save.
+        assert!(
+            matches!(
+                effects[1..],
+                [
+                    Effect::EvaluateProgram {
+                        program_index: 1,
+                        ..
+                    },
+                    Effect::UpdateSource(1),
+                    Effect::PlayProgram {
+                        program_index: 1,
+                        repeat_after_measures: Some(1),
+                        ..
+                    },
+                ]
+            ),
+            "got {:?}",
+            effects
+        );
+        assert_eq!(
+            play_starts(&effects),
+            vec![player::Start::At(t0 + Duration::from_secs(8))]
+        );
+    }
+
+    #[test]
+    fn late_play_press_plays_from_the_boundary_just_passed() {
         let t0 = Instant::now();
         let mut state = record_state(RECORD_SOURCE, 1);
         apply_at(&mut state, t0, 4.0, record());
         apply_at(&mut state, t0, 4.5, note_on(t0, 4.5));
+        // Within one margin after the boundary at 8 s.
+        let effects = apply_at(&mut state, t0, 8.05, Action::Transport(Transport::Play));
+        assert!(matches!(state.mode, Mode::Select));
+        assert_eq!(messages(&effects), vec!["Recorded 1 note into A:2"]);
+        assert_eq!(
+            play_starts(&effects),
+            vec![player::Start::At(t0 + Duration::from_secs(8))]
+        );
+    }
+
+    #[test]
+    fn record_after_play_while_finishing_writes_silently() {
+        let t0 = Instant::now();
+        let mut state = record_state(RECORD_SOURCE, 1);
+        apply_at(&mut state, t0, 4.0, record());
+        apply_at(&mut state, t0, 4.5, note_on(t0, 4.5));
+        let effects = apply_at(&mut state, t0, 6.0, Action::Transport(Transport::Play));
+        assert_eq!(messages(&effects), vec!["Playing waveform A:2"]);
+        let effects = apply_at(&mut state, t0, 6.5, record());
+        assert_eq!(take_phase(&state), Phase::Finishing(Finish::Silent));
+        assert_eq!(
+            messages(&effects),
+            vec!["Removed pending waveform for program A:2"]
+        );
+        // Play again while Finishing re-posts the play text.
+        let effects = apply_at(&mut state, t0, 6.7, Action::Transport(Transport::Play));
+        assert_eq!(messages(&effects), vec!["Playing waveform A:2"]);
+        let effects = apply_at(&mut state, t0, 6.9, record());
+        assert_eq!(
+            messages(&effects),
+            vec!["Removed pending waveform for program A:2"]
+        );
+        // Record again while Finishing silent says nothing.
+        let effects = apply_at(&mut state, t0, 7.0, record());
+        assert!(effects.is_empty(), "got {:?}", effects);
+
+        let effects = apply_at(&mut state, t0, 7.9, Action::TakeTick);
+        assert_eq!(messages(&effects), vec!["Recorded 1 note into A:2"]);
+        assert!(play_starts(&effects).is_empty());
+    }
+
+    #[test]
+    fn empty_take_with_play_queues_the_program() {
+        let t0 = Instant::now();
+        let mut state = record_state(RECORD_SOURCE, 1);
+        apply_at(&mut state, t0, 4.0, record());
         apply_at(&mut state, t0, 6.0, Action::Transport(Transport::Play));
         let effects = apply_at(&mut state, t0, 7.9, Action::TakeTick);
         assert!(matches!(state.mode, Mode::Select));
-        assert_eq!(messages(&effects), vec!["Recorded 1 note into A:2"]);
+        assert_eq!(messages(&effects), vec!["Nothing recorded"]);
+        assert_eq!(play_starts(&effects), vec![player::Start::NextMeasure]);
+        assert_eq!(state.active_program().text(), "1");
     }
 
     #[test]
@@ -4023,7 +4175,7 @@ _ = saw(220);";
                 effects[0],
                 Effect::PlayProgram {
                     program_index: 1,
-                    start_at_next_measure: true,
+                    start: player::Start::NextMeasure,
                     ..
                 }
             ),

@@ -3,8 +3,8 @@
 //! `Player` owns the two command routes: `precompute_sender` goes through
 //! the precompute thread (used for playback scheduled at the next measure,
 //! where latency is hidden), and `fast_sender` goes straight to the
-//! tracker (used for immediate playback and note-on/off, where keystroke
-//! latency matters). All methods take `&self`.
+//! tracker (used for immediate playback, playback at a chosen instant, and
+//! note-on/off, where latency matters). All methods take `&self`.
 
 use std::sync::mpsc;
 use std::time;
@@ -53,6 +53,45 @@ pub fn substitute_current_slider_values(
     }
 }
 
+/// When a played program starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Start {
+    /// Immediately, through the fast route.
+    Now,
+    /// At the next measure boundary, through the precompute thread.
+    NextMeasure,
+    /// At the given instant, through the fast route. An instant already
+    /// past plays from where the waveform would be by now, dropping what was
+    /// missed.
+    At(time::Instant),
+}
+
+/// Returns the status text for playing the waveform of the program named
+/// `display_name`, repeating every `repeat_after_measures` measures if given.
+///
+/// # Example
+///
+/// ```
+/// use tuun::player::play_waveform_message;
+///
+/// assert_eq!(play_waveform_message("B:3", Some(1), 4), "Looping waveform B:3 every 4 beats");
+/// assert_eq!(play_waveform_message("B:3", None, 4), "Playing waveform B:3");
+/// ```
+pub fn play_waveform_message(
+    display_name: &str,
+    repeat_after_measures: Option<u32>,
+    beats_per_measure: u32,
+) -> String {
+    match repeat_after_measures {
+        Some(measures) => format!(
+            "Looping waveform {} every {} beats",
+            display_name,
+            measures * beats_per_measure
+        ),
+        None => format!("Playing waveform {}", display_name),
+    }
+}
+
 pub struct Player {
     tempo: u32,
     beats_per_measure: u32,
@@ -80,60 +119,63 @@ impl Player {
         self.tempo
     }
 
+    /// Returns the route for a play that starts where `start` says.
+    fn sender(&self, start: Start) -> &mpsc::Sender<tracker::Command<WaveformId, MarkId>> {
+        match start {
+            Start::NextMeasure => &self.precompute_sender,
+            Start::Now | Start::At(_) => &self.fast_sender,
+        }
+    }
+
+    /// Returns the number of beats in a measure.
+    pub fn beats_per_measure(&self) -> u32 {
+        self.beats_per_measure
+    }
+
     /// Plays the program at `program_index` as a waveform, substituting its
     /// current slider values. Returns the user-visible message, or `None`
     /// when the program's text didn't evaluate to a waveform (or the index
     /// is out of range) and nothing was played.
     ///
-    /// `start_at_next_measure` routes through the precompute thread and
-    /// schedules the start at the next measure boundary; otherwise the
-    /// waveform plays immediately via the fast route.
+    /// The waveform starts where `start` says.
     pub fn play_program(
         &self,
         set: &ProgramSet,
         program_index: usize,
         status: &tracker::Status<WaveformId, MarkId>,
-        start_at_next_measure: bool,
+        start: Start,
         repeat_after_measures: Option<u32>,
     ) -> Option<String> {
         let program = set.program(program_index)?;
-        let display_name = set.display_name(program_index);
-        let message;
-        let repeat_every;
-        if let Some(measures) = repeat_after_measures {
-            let beats = (measures * self.beats_per_measure) as u64;
-            message = format!("Looping waveform {} every {:?} beats", display_name, beats);
-            repeat_every = Some(duration_from_beats(self.tempo, beats));
-        } else {
-            // Otherwise, play it once
-            message = format!("Playing waveform {}", display_name);
-            repeat_every = None;
-        }
-        let start = if start_at_next_measure {
-            Some(
+        let message = play_waveform_message(
+            &set.display_name(program_index),
+            repeat_after_measures,
+            self.beats_per_measure,
+        );
+        let repeat_every = repeat_after_measures.map(|measures| {
+            duration_from_beats(self.tempo, (measures * self.beats_per_measure) as u64)
+        });
+        let start_instant = match start {
+            Start::Now => None,
+            Start::NextMeasure => Some(
                 next_measure_start(status, time::Instant::now())
                     .expect("No next measure found in marks"),
-            )
-        } else {
-            None
+            ),
+            Start::At(instant) => Some(instant),
         };
         let mut waveform = program.waveform().cloned()?;
         // Substitute the program's current slider positions before handing
         // the waveform to the tracker (since the cached ones may be old).
         substitute_current_slider_values(&mut waveform, set);
-        if start_at_next_measure {
-            &self.precompute_sender
-        } else {
-            &self.fast_sender
-        }
-        .send(tracker::Command::Play {
-            // TODO maybe extend the top-level mark to the full measure?
-            id: WaveformId::Program(program_index),
-            waveform: build_top_level_waveform(waveform, program.level_db()),
-            start,
-            repeat_every,
-        })
-        .unwrap();
+        self.sender(start)
+            .send(tracker::Command::Play {
+                // TODO maybe extend the top-level mark to the full measure?
+                id: WaveformId::Program(program_index),
+                waveform: build_top_level_waveform(waveform, program.level_db()),
+                start: start_instant,
+                repeat_every,
+            })
+            .unwrap();
         Some(message)
     }
 
@@ -178,15 +220,13 @@ impl Player {
     /// Returns the user-visible message, or `None` when the program's text
     /// didn't evaluate to a sequenceable waveform and nothing was played.
     ///
-    /// `start_at_next_measure` routes through the precompute thread and
-    /// anchors the cycle at the next measure boundary; otherwise the cycle
-    /// is anchored at the current instant.
+    /// The cycle is anchored where `start` says.
     pub fn play_program_steps(
         &self,
         set: &ProgramSet,
         program_index: usize,
         status: &tracker::Status<WaveformId, MarkId>,
-        start_at_next_measure: bool,
+        start: Start,
         repeat_after_measures: Option<u32>,
     ) -> Option<String> {
         let program = set.program(program_index)?;
@@ -202,19 +242,15 @@ impl Player {
             message = format!("Playing sequence {}", display_name);
             repeat_every = None;
         }
-        let base = if start_at_next_measure {
-            next_measure_start(status, time::Instant::now())
-                .expect("No next measure found in marks")
-        } else {
-            time::Instant::now()
+        let base = match start {
+            Start::Now => time::Instant::now(),
+            Start::NextMeasure => next_measure_start(status, time::Instant::now())
+                .expect("No next measure found in marks"),
+            Start::At(instant) => instant,
         };
         let mut step = sequence.step_waveform.clone();
         substitute_current_slider_values(&mut step, set);
-        let sender = if start_at_next_measure {
-            &self.precompute_sender
-        } else {
-            &self.fast_sender
-        };
+        let sender = self.sender(start);
         for &step_beat in &sequence.steps {
             sender
                 .send(tracker::Command::Play {
@@ -658,7 +694,7 @@ mod tests {
         let set = sequenced_set();
         let (player, _precompute_receiver, fast_receiver) = test_player();
 
-        let message = player.play_program_steps(&set, 0, &empty_status(), false, Some(1));
+        let message = player.play_program_steps(&set, 0, &empty_status(), Start::Now, Some(1));
         assert!(message.is_some());
 
         let commands: Vec<_> = fast_receiver.try_iter().collect();
