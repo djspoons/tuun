@@ -220,6 +220,29 @@ pub enum Pattern {
     Tuple(Vec<Pattern>),
 }
 
+impl Pattern {
+    /// Returns whether the pattern binds `name`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tuun::expr::Pattern;
+    ///
+    /// let pattern = Pattern::Tuple(vec![
+    ///     Pattern::Identifier("a".to_string()),
+    ///     Pattern::Identifier("b".to_string()),
+    /// ]);
+    /// assert!(pattern.binds("b"));
+    /// assert!(!pattern.binds("c"));
+    /// ```
+    pub fn binds(&self, name: &str) -> bool {
+        match self {
+            Pattern::Identifier(n) => n == name,
+            Pattern::Tuple(patterns) => patterns.iter().any(|p| p.binds(name)),
+        }
+    }
+}
+
 /// A name paired with the expression bound to it.
 pub type NamedExpr<M, S = ()> = (String, SourceExpr<M, S>);
 

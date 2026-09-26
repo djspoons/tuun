@@ -684,6 +684,17 @@ impl Environment {
         eval::evaluate_bindings(|path| self.resolve(path), &bindings)
     }
 
+    /// Returns whether the module at `path` defines `name`, counting only its
+    /// own definitions (what `open` brings into scope). A module that can't be
+    /// loaded defines nothing.
+    pub fn module_defines(&self, path: &[String], name: &str) -> bool {
+        self.resolve(path).is_ok_and(|bindings| {
+            bindings.iter().any(|b| {
+                matches!(&b.binding, expr::Binding::Definition(pattern, _) if pattern.binds(name))
+            })
+        })
+    }
+
     /// Applies a note function `expr` to the given `arguments`, expecting a
     /// pair of (note-on, note-off) waveforms as a result. Both returned
     /// waveforms are optimized.

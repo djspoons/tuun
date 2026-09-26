@@ -15,7 +15,8 @@ use crate::ids::{MarkId, WaveformId, WaveformSelector};
 use crate::keys;
 use crate::launchkey;
 use crate::player;
-use crate::programs::{self, PROGRAMS_PER_BANK, Program};
+use crate::programs::{self, BoundTo, PROGRAMS_PER_BANK, Program};
+use crate::recorder::{self, Closed, Finish, Phase, Response, Take, Tick};
 use crate::sequencer;
 use crate::tracker;
 use crate::waveform;
@@ -44,6 +45,14 @@ pub enum Mode {
     /// Computer-keyboard piano: lower QWERTY row plays white keys, row above
     /// plays sharps. Only reachable when `state.keys` is installed.
     Keys,
+    /// Recording a phrase from the keys into the active program. Entered from
+    /// Select with the Record transport press and left, always to Select, when
+    /// the take is written or dropped.
+    Record {
+        take: Take,
+        /// The installed keys program when the take was armed.
+        keys_program: usize,
+    },
 }
 
 /// The state of an identifier-completion cycle (`Action::Complete`).
@@ -172,6 +181,14 @@ impl AppState {
     pub fn active_program(&self) -> &Program {
         &self.programs.programs()[self.active_program_index]
     }
+
+    /// Returns whether a take is waiting on a tick that is due at `now`.
+    pub fn take_tick_due(&self, now: Instant) -> bool {
+        match &self.mode {
+            Mode::Record { take, .. } => take.next_tick().is_some_and(|due| due <= now),
+            _ => false,
+        }
+    }
 }
 
 /// Read-only snapshot of the world used by the reducer.
@@ -186,6 +203,8 @@ pub struct Context<'a> {
     /// last read or wrote it. Editing gestures refuse while stale so in-app
     /// changes can't pile up against external ones.
     pub source_stale: bool,
+    /// The tempo in beats per minute.
+    pub tempo: u32,
 }
 
 /// A transport buttons on the controller.
@@ -227,11 +246,19 @@ pub enum Action {
     /// it to play at the beginning of next measure (repeating per the app-wide
     /// default). Does nothing if the program isn't a waveform.
     ToggleProgramPendingPlayback(usize),
-    /// Press a transport button. Play queues the active program to play at
-    /// the beginning of the next measure (repeating per the app-wide
-    /// default) unless its playback is already pending; Stop removes the
-    /// active program's pending playback; Record does nothing.
+    /// Press a transport button.
+    ///
+    /// In Record mode the press goes to the take: Record and Play finish it
+    /// at the press's measure boundary (or disarm it before it starts), and
+    /// Stop discards it. Otherwise, Record arms a take on the active program
+    /// if every precondition for recording holds, Play queues the active
+    /// program to play at the beginning of the next measure (repeating per
+    /// the app-wide default) unless its playback is already pending, and Stop
+    /// removes the active program's pending playback.
     Transport(Transport),
+    /// Advance the take in Record mode to now: start recording at its start
+    /// boundary, or write it at its close. Does nothing in other modes.
+    TakeTick,
     /// Toggle the given sixteenth of the active program's `on_beats` step
     /// list, in the source text and — when the program is live — on the
     /// tracker.
@@ -481,6 +508,10 @@ pub enum Effect {
 /// `state` and `ctx`. Effects whose outcome depends on I/O (evaluating a
 /// program, splicing source, playing notes) mutate state in the runner instead.
 pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect> {
+    // The take owns the transport while it lives.
+    if let (Action::Transport(transport), Mode::Record { .. }) = (&action, &state.mode) {
+        return apply_take_transport(state, ctx, *transport);
+    }
     if refused_by_ownership(state, ctx.status, ctx.now, &action) {
         return vec![];
     }
@@ -526,23 +557,12 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             }
         }
 
-        Action::Transport(Transport::Play) => {
-            let i = state.active_program_index;
-            if ctx.status.has_pending_mark(
-                ctx.now,
-                &WaveformSelector::ProgramVoices(i),
-                &MarkId::TopLevel,
-            ) || state.keys.as_ref().is_some_and(|k| k.id == i)
-            {
-                vec![]
-            } else {
-                play_program_effects(i, true, state.repeat_after_measures)
-            }
-        }
+        Action::Transport(Transport::Play) => transport_play_effects(state, ctx),
         Action::Transport(Transport::Stop) => {
             remove_pending_effects(state, ctx, state.active_program_index)
         }
-        Action::Transport(Transport::Record) => vec![],
+        Action::Transport(Transport::Record) => apply_arm(state, ctx),
+        Action::TakeTick => apply_take_tick(state, ctx),
 
         Action::ToggleSequencerStep { sixteenth } => {
             apply_toggle_sequencer_step(state, ctx, sixteenth)
@@ -569,14 +589,26 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
         }
 
         Action::ToggleInstalledKeys(i) => apply_install_keys(state, i),
-        Action::NoteOn { key, velocity, .. } => {
+        Action::NoteOn {
+            key,
+            velocity,
+            stamp,
+        } => {
+            if let Mode::Record { take, .. } = &mut state.mode {
+                take.note_on(key, velocity, stamp);
+            }
             if state.keys.is_some() {
                 vec![Effect::PlayNoteOn { key, velocity }]
             } else {
                 vec![]
             }
         }
-        Action::NoteOff { key, .. } => vec![Effect::PlayNoteOff { key }],
+        Action::NoteOff { key, stamp } => {
+            if let Mode::Record { take, .. } = &mut state.mode {
+                take.note_off(key, stamp);
+            }
+            vec![Effect::PlayNoteOff { key }]
+        }
 
         Action::EnterEditMode => {
             // Editing on top of external changes would set up a conflict the
@@ -844,7 +876,7 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
 /// While it does, changes that would affect or depend on the active
 /// program's text are refused.
 fn owns_active_program(state: &AppState) -> bool {
-    matches!(state.mode, Mode::Edit { .. })
+    matches!(state.mode, Mode::Edit { .. } | Mode::Record { .. })
 }
 
 /// Returns whether `action` is refused, silently, because the editor mode owns
@@ -885,6 +917,198 @@ pub fn refused_by_ownership(
             i == owned && !status.has_pending_mark(now, &voices, &MarkId::TopLevel)
         }
         _ => false,
+    }
+}
+
+/// Returns the effects of the Play transport press outside Record mode: queue
+/// the active program at the next measure, unless its playback is already
+/// pending or it is the installed keys program.
+fn transport_play_effects(state: &AppState, ctx: &Context) -> Vec<Effect> {
+    let i = state.active_program_index;
+    if ctx.status.has_pending_mark(
+        ctx.now,
+        &WaveformSelector::ProgramVoices(i),
+        &MarkId::TopLevel,
+    ) || state.keys.as_ref().is_some_and(|k| k.id == i)
+    {
+        vec![]
+    } else {
+        play_program_effects(i, true, state.repeat_after_measures)
+    }
+}
+
+/// Returns the measure boundary a transport press at `ctx.now` refers to (see
+/// [`recorder::boundary_for_press`]), or `None` when no boundary after now is
+/// known.
+fn press_boundary(ctx: &Context) -> Option<Instant> {
+    let next = player::next_measure_start(ctx.status, ctx.now)?;
+    let previous = player::previous_measure_start(ctx.status, ctx.now);
+    Some(recorder::boundary_for_press(
+        ctx.now, previous, next, ctx.tempo,
+    ))
+}
+
+/// Arms a take on the active program from Select mode, or tells why it can't.
+///
+/// Refuses silently outside Select mode. The take starts at the press's
+/// measure boundary; the active program's pending playback is removed.
+fn apply_arm(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
+    if !matches!(state.mode, Mode::Select) {
+        return vec![];
+    }
+    let refuse = |message: String| vec![Effect::ShowMessage(message)];
+    let i = state.active_program_index;
+    let Some(keys_program) = state.keys.as_ref().map(|k| k.id) else {
+        return refuse("No keys instrument installed".to_string());
+    };
+    if i == keys_program {
+        return refuse("Can't record into the keys program".to_string());
+    }
+    let Some(keys_name) = state.programs.binding_name(keys_program) else {
+        return refuse("Keys program has no name".to_string());
+    };
+    let keys_name = keys_name.to_string();
+    let display_name = state.programs.display_name(i);
+    if state.programs.resolve_name(ctx.environment, i, &keys_name) != BoundTo::Program(keys_program)
+    {
+        return refuse(format!("{} isn't in scope at {}", keys_name, display_name));
+    }
+    if state
+        .programs
+        .resolve_name(ctx.environment, i, recorder::PHRASE_HELPER)
+        == BoundTo::Unbound
+    {
+        return refuse(format!(
+            "{} not in scope (open std)",
+            recorder::PHRASE_HELPER
+        ));
+    }
+    if ctx.source_stale {
+        return refuse("File changed on disk (reload before recording)".to_string());
+    }
+    let Some(start) = press_boundary(ctx) else {
+        return vec![];
+    };
+    let take = Take::arm(keys_name.clone(), ctx.tempo, ctx.now, start);
+    let message = match take.phase() {
+        Phase::Armed => format!("Armed: recording {} into {}", keys_name, display_name),
+        _ => format!("Recording {} into {}", keys_name, display_name),
+    };
+    let mut effects = remove_pending_effects(state, ctx, i);
+    effects.push(Effect::ShowMessage(message));
+    state.mode = Mode::Record { take, keys_program };
+    effects
+}
+
+/// Hands a transport press in Record mode to the take.
+fn apply_take_transport(state: &mut AppState, ctx: &Context, transport: Transport) -> Vec<Effect> {
+    let Mode::Record { take, keys_program } = &mut state.mode else {
+        return vec![];
+    };
+    let keys_program = *keys_program;
+    let response = match transport {
+        Transport::Stop => take.stop(),
+        Transport::Record | Transport::Play => {
+            let Some(boundary) = press_boundary(ctx) else {
+                return vec![];
+            };
+            let finish = if transport == Transport::Play {
+                Finish::Play
+            } else {
+                Finish::Silent
+            };
+            take.finish(finish, ctx.now, boundary)
+        }
+    };
+    match response {
+        Response::Disarmed { play } => {
+            state.mode = Mode::Select;
+            if play {
+                transport_play_effects(state, ctx)
+            } else {
+                vec![Effect::ShowMessage("Disarmed".to_string())]
+            }
+        }
+        // TODO the play outcome: post the play text at a Play press, and the
+        // un-queue text at a Record press that cancels one.
+        Response::Finishing { .. } => vec![],
+        Response::Closed(closed) => write_take(state, keys_program, closed),
+        Response::Discarded { notes } => {
+            state.mode = Mode::Select;
+            vec![Effect::ShowMessage(format!(
+                "Discarded take ({})",
+                note_count(notes)
+            ))]
+        }
+    }
+}
+
+/// Advances the take in Record mode to `ctx.now`.
+fn apply_take_tick(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
+    let Mode::Record { take, keys_program } = &mut state.mode else {
+        return vec![];
+    };
+    let keys_program = *keys_program;
+    match take.tick(ctx.now) {
+        Tick::Waiting => vec![],
+        Tick::Started => vec![Effect::ShowMessage(format!(
+            "Recording {} into {}",
+            take.keys_name(),
+            state.programs.display_name(state.active_program_index)
+        ))],
+        Tick::Closed(closed) => write_take(state, keys_program, closed),
+    }
+}
+
+/// Writes a closed take into the active program and returns to Select mode.
+///
+/// An empty take leaves the program untouched. Otherwise the phrase replaces
+/// the program's text as one undo unit, and an empty slot takes the level of
+/// the program at `keys_program`.
+fn write_take(state: &mut AppState, keys_program: usize, closed: Closed) -> Vec<Effect> {
+    state.mode = Mode::Select;
+    if closed.notes == 0 {
+        return vec![Effect::ShowMessage("Nothing recorded".to_string())];
+    }
+    // TODO the play outcome (`closed.finish`): play the phrase from
+    // `closed.end`.
+    let i = state.active_program_index;
+    let display_name = state.programs.display_name(i);
+    let keys_level_db = state.programs.program(keys_program).map(|p| p.level_db());
+    let Some(program) = state.programs.program_mut(i) else {
+        return vec![];
+    };
+    if program.is_empty()
+        && let Some(level_db) = keys_level_db
+    {
+        program.set_level_db(level_db);
+    }
+    let cursor = program.text().len();
+    program.record_edit(cursor);
+    program.set_text(closed.text);
+    vec![
+        // Posted first so that an evaluation error or a refused save, which
+        // set their own message, stay on screen.
+        Effect::ShowMessage(format!(
+            "Recorded {} into {}",
+            note_count(closed.notes),
+            display_name
+        )),
+        Effect::EvaluateProgram {
+            program_index: i,
+            mode_on_success: None,
+            mode_on_failure: None,
+        },
+        Effect::UpdateSource(i),
+    ]
+}
+
+/// Returns `n` notes as text, e.g. "1 note" or "7 notes".
+fn note_count(n: usize) -> String {
+    if n == 1 {
+        "1 note".to_string()
+    } else {
+        format!("{} notes", n)
     }
 }
 
@@ -1772,6 +1996,7 @@ mod tests {
             now,
             environment: &environment,
             source_stale: false,
+            tempo: 60,
         };
         apply(state, &ctx, action)
     }
@@ -1791,6 +2016,7 @@ mod tests {
             now: Instant::now(),
             environment: &environment,
             source_stale: true,
+            tempo: 60,
         };
         apply(state, &ctx, action)
     }
@@ -2349,6 +2575,7 @@ mod tests {
             now: Instant::now(),
             environment: &environment,
             source_stale: false,
+            tempo: 60,
         };
         apply(state, &ctx, action)
     }
@@ -3204,14 +3431,6 @@ _ = saw(220);";
     }
 
     #[test]
-    fn transport_record_does_nothing() {
-        let mut state = test_state();
-        let effects = apply_with_empty_status(&mut state, Action::Transport(Transport::Record));
-        assert!(effects.is_empty(), "expected no effects, got {:?}", effects);
-        assert!(matches!(state.mode, Mode::Select));
-    }
-
-    #[test]
     fn enter_edit_mode_refuses_when_source_stale() {
         let mut state = test_state();
         let effects = apply_with_stale_source(&mut state, Action::EnterEditMode);
@@ -3490,5 +3709,348 @@ _ = saw(220);";
             "expected the uninstall message, got {:?}",
             effects
         );
+    }
+
+    /// A file whose slot 1 (`kb`) is a named keys program at -6 dB, followed by
+    /// the phrase helper and an unnamed program in slot 2; slot 3 is empty.
+    const RECORD_SOURCE: &str = "#{keys, level_db=-6}\nkb = fn(k, v) => (0, 0);\n\
+        as_midi_phrase = fn(inst) => 0;\n#{level_db=0}\n_ = 1;\n";
+
+    /// Returns a Select-mode state over `source` with slot 1 installed as the
+    /// keys instrument and `active` as the active program.
+    fn record_state(source: &str, active: usize) -> AppState {
+        let mut state = AppState::from_source(source.to_string(), std::path::PathBuf::new())
+            .expect("test source should parse");
+        install_test_keys(&mut state);
+        state.active_program_index = active;
+        state
+    }
+
+    /// A status whose measure boundaries (4 beats at 60 bpm) fall at `t0`
+    /// plus 0, 4, 8 and 12 seconds.
+    fn measures(t0: Instant) -> tracker::Status<WaveformId, MarkId> {
+        let mut status = empty_status();
+        for k in 0..4 {
+            status.marks.push(tracker::Mark {
+                waveform_id: WaveformId::Beats(k % 2 == 1),
+                mark_id: MarkId::TopLevel,
+                start: t0 + Duration::from_secs(4 * k),
+                duration: Duration::from_secs(4),
+            });
+        }
+        status
+    }
+
+    /// Applies `action` at `seconds` past `t0` against [`measures`]`(t0)`.
+    fn apply_at(state: &mut AppState, t0: Instant, seconds: f64, action: Action) -> Vec<Effect> {
+        let now = t0 + Duration::from_secs_f64(seconds);
+        apply_with_status(state, &measures(t0), now, action)
+    }
+
+    /// Returns the messages among `effects`, in order.
+    fn messages(effects: &[Effect]) -> Vec<&str> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::ShowMessage(m) => Some(m.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Returns the take's phase; panics outside Record mode.
+    fn take_phase(state: &AppState) -> Phase {
+        let Mode::Record { take, .. } = &state.mode else {
+            panic!("expected Record mode, got {:?}", state.mode);
+        };
+        take.phase()
+    }
+
+    fn record() -> Action {
+        Action::Transport(Transport::Record)
+    }
+
+    fn note_on(t0: Instant, seconds: f64) -> Action {
+        Action::NoteOn {
+            key: 60,
+            velocity: 127,
+            stamp: t0 + Duration::from_secs_f64(seconds),
+        }
+    }
+
+    fn note_off(t0: Instant, seconds: f64) -> Action {
+        Action::NoteOff {
+            key: 60,
+            stamp: t0 + Duration::from_secs_f64(seconds),
+        }
+    }
+
+    #[test]
+    fn record_refuses_with_the_failing_precondition() {
+        let t0 = Instant::now();
+        let cases = [
+            // The keys program itself is active.
+            (RECORD_SOURCE, 0, "Can't record into the keys program"),
+            // The keys program is bound to `_`.
+            (
+                "#{keys}\n_ = fn(k, v) => (0, 0);\n#{level_db=0}\n_ = 1;\n",
+                1,
+                "Keys program has no name",
+            ),
+            // A later binding shadows `kb` before slot 2.
+            (
+                "#{keys}\nkb = fn(k, v) => (0, 0);\nkb = 2;\nas_midi_phrase = 0;\n\
+                 #{level_db=0}\n_ = 1;\n",
+                1,
+                "kb isn't in scope at A:2",
+            ),
+            // The helper isn't bound.
+            (
+                "#{keys}\nkb = fn(k, v) => (0, 0);\n#{level_db=0}\n_ = 1;\n",
+                1,
+                "as_midi_phrase not in scope (open std)",
+            ),
+        ];
+        for (source, active, expected) in cases {
+            let mut state = record_state(source, active);
+            let effects = apply_at(&mut state, t0, 1.0, record());
+            assert_eq!(messages(&effects), vec![expected], "for {:?}", source);
+            assert!(matches!(state.mode, Mode::Select));
+        }
+
+        let mut state = record_state(RECORD_SOURCE, 1);
+        state.keys = None;
+        let effects = apply_at(&mut state, t0, 1.0, record());
+        assert_eq!(messages(&effects), vec!["No keys instrument installed"]);
+
+        let mut state = record_state(RECORD_SOURCE, 1);
+        let effects = apply_with_stale_source(&mut state, record());
+        assert_eq!(
+            messages(&effects),
+            vec!["File changed on disk (reload before recording)"]
+        );
+        assert!(matches!(state.mode, Mode::Select));
+    }
+
+    #[test]
+    fn record_outside_select_mode_is_silent() {
+        let t0 = Instant::now();
+        let mut state = record_state(RECORD_SOURCE, 1);
+        state.mode = Mode::Keys;
+        let effects = apply_at(&mut state, t0, 1.0, record());
+        assert!(effects.is_empty(), "got {:?}", effects);
+        assert!(matches!(state.mode, Mode::Keys));
+    }
+
+    #[test]
+    fn record_into_a_slot_before_the_keys_program_is_refused() {
+        let t0 = Instant::now();
+        let source = "as_midi_phrase = 0;\n#{level_db=0}\n_ = 1;\n#{keys}\n\
+                      kb = fn(k, v) => (0, 0);\n";
+        let mut state = record_state(source, 0);
+        state.keys.as_mut().unwrap().id = 1;
+        let effects = apply_at(&mut state, t0, 1.0, record());
+        assert_eq!(messages(&effects), vec!["kb isn't in scope at A:1"]);
+    }
+
+    #[test]
+    fn record_arms_until_the_next_boundary_and_removes_pending_playback() {
+        let t0 = Instant::now();
+        let mut state = record_state(RECORD_SOURCE, 1);
+        let mut status = measures(t0);
+        status.marks.push(tracker::Mark {
+            waveform_id: WaveformId::Program(1),
+            mark_id: MarkId::TopLevel,
+            start: t0 + Duration::from_secs(4),
+            duration: Duration::from_secs(1),
+        });
+        let now = t0 + Duration::from_secs(1);
+        let effects = apply_with_status(&mut state, &status, now, record());
+        assert_eq!(take_phase(&state), Phase::Armed);
+        assert!(
+            matches!(effects[0], Effect::RemovePendingProgram(1)),
+            "got {:?}",
+            effects
+        );
+        assert_eq!(
+            messages(&effects).last(),
+            Some(&"Armed: recording kb into A:2")
+        );
+        assert!(!state.take_tick_due(t0 + Duration::from_secs_f64(3.9)));
+        assert!(state.take_tick_due(t0 + Duration::from_secs(4)));
+
+        let effects = apply_at(&mut state, t0, 4.0, Action::TakeTick);
+        assert_eq!(take_phase(&state), Phase::Recording);
+        assert_eq!(messages(&effects), vec!["Recording kb into A:2"]);
+        assert!(!state.take_tick_due(t0 + Duration::from_secs(100)));
+    }
+
+    #[test]
+    fn record_just_after_a_boundary_records_from_it() {
+        let t0 = Instant::now();
+        let mut state = record_state(RECORD_SOURCE, 1);
+        let effects = apply_at(&mut state, t0, 4.05, record());
+        assert_eq!(take_phase(&state), Phase::Recording);
+        assert_eq!(messages(&effects), vec!["Recording kb into A:2"]);
+    }
+
+    #[test]
+    fn take_is_written_at_the_close() {
+        let t0 = Instant::now();
+        let mut state = record_state(RECORD_SOURCE, 1);
+        apply_at(&mut state, t0, 1.0, record());
+        apply_at(&mut state, t0, 4.0, Action::TakeTick);
+        apply_at(&mut state, t0, 4.5, note_on(t0, 4.5));
+        apply_at(&mut state, t0, 5.0, note_off(t0, 5.0));
+        let effects = apply_at(&mut state, t0, 6.0, record());
+        assert!(effects.is_empty(), "got {:?}", effects);
+        assert_eq!(take_phase(&state), Phase::Finishing(Finish::Silent));
+        // The close is one margin (0.125 s at 60 bpm) before the end boundary.
+        assert!(!state.take_tick_due(t0 + Duration::from_secs_f64(7.8)));
+        assert!(state.take_tick_due(t0 + Duration::from_secs_f64(7.875)));
+
+        let effects = apply_at(&mut state, t0, 7.9, Action::TakeTick);
+        assert!(matches!(state.mode, Mode::Select));
+        assert_eq!(
+            state.active_program().text(),
+            "[(1.500, 60, 1.000, 0.500)] | as_midi_phrase(kb)"
+        );
+        assert_eq!(messages(&effects), vec!["Recorded 1 note into A:2"]);
+        assert!(matches!(
+            effects[1..],
+            [
+                Effect::EvaluateProgram {
+                    program_index: 1,
+                    mode_on_success: None,
+                    mode_on_failure: None,
+                },
+                Effect::UpdateSource(1),
+            ]
+        ));
+        // The write is one undo unit.
+        let program = state.programs.program_mut(1).unwrap();
+        program.undo(0);
+        assert_eq!(program.text(), "1");
+    }
+
+    #[test]
+    fn stop_press_at_the_close_writes_at_once() {
+        let t0 = Instant::now();
+        let mut state = record_state(RECORD_SOURCE, 1);
+        apply_at(&mut state, t0, 4.0, record());
+        apply_at(&mut state, t0, 4.5, note_on(t0, 4.5));
+        // Within one margin before the end boundary at 8 s.
+        let effects = apply_at(&mut state, t0, 7.95, record());
+        assert!(matches!(state.mode, Mode::Select));
+        assert_eq!(messages(&effects), vec!["Recorded 1 note into A:2"]);
+        // Still held at the close, so released at the end boundary.
+        assert_eq!(
+            state.active_program().text(),
+            "[(1.500, 60, 1.000, 3.500)] | as_midi_phrase(kb)"
+        );
+    }
+
+    #[test]
+    fn play_while_recording_finishes_like_record() {
+        let t0 = Instant::now();
+        let mut state = record_state(RECORD_SOURCE, 1);
+        apply_at(&mut state, t0, 4.0, record());
+        apply_at(&mut state, t0, 4.5, note_on(t0, 4.5));
+        apply_at(&mut state, t0, 6.0, Action::Transport(Transport::Play));
+        let effects = apply_at(&mut state, t0, 7.9, Action::TakeTick);
+        assert!(matches!(state.mode, Mode::Select));
+        assert_eq!(messages(&effects), vec!["Recorded 1 note into A:2"]);
+    }
+
+    #[test]
+    fn empty_take_leaves_the_program_untouched() {
+        let t0 = Instant::now();
+        let mut state = record_state(RECORD_SOURCE, 1);
+        apply_at(&mut state, t0, 4.0, record());
+        apply_at(&mut state, t0, 6.0, record());
+        let effects = apply_at(&mut state, t0, 7.9, Action::TakeTick);
+        assert!(matches!(state.mode, Mode::Select));
+        assert_eq!(messages(&effects), vec!["Nothing recorded"]);
+        assert_eq!(effects.len(), 1);
+        assert_eq!(state.active_program().text(), "1");
+    }
+
+    #[test]
+    fn take_into_an_empty_slot_takes_the_keys_level() {
+        let t0 = Instant::now();
+        let mut state = record_state(RECORD_SOURCE, 2);
+        apply_at(&mut state, t0, 4.0, record());
+        apply_at(&mut state, t0, 4.5, note_on(t0, 4.5));
+        let effects = apply_at(&mut state, t0, 7.95, record());
+        assert_eq!(messages(&effects), vec!["Recorded 1 note into A:3"]);
+        assert_eq!(state.active_program().level_db(), -6.0);
+    }
+
+    #[test]
+    fn stop_disarms_or_discards_the_take() {
+        let t0 = Instant::now();
+        let stop = || Action::Transport(Transport::Stop);
+
+        let mut state = record_state(RECORD_SOURCE, 1);
+        apply_at(&mut state, t0, 1.0, record());
+        let effects = apply_at(&mut state, t0, 2.0, stop());
+        assert!(matches!(state.mode, Mode::Select));
+        assert_eq!(messages(&effects), vec!["Disarmed"]);
+
+        let mut state = record_state(RECORD_SOURCE, 1);
+        apply_at(&mut state, t0, 4.0, record());
+        apply_at(&mut state, t0, 4.5, note_on(t0, 4.5));
+        let effects = apply_at(&mut state, t0, 5.0, stop());
+        assert!(matches!(state.mode, Mode::Select));
+        assert_eq!(messages(&effects), vec!["Discarded take (1 note)"]);
+        assert_eq!(state.active_program().text(), "1");
+    }
+
+    #[test]
+    fn record_or_play_while_armed_disarms() {
+        let t0 = Instant::now();
+        let mut state = record_state(RECORD_SOURCE, 1);
+        apply_at(&mut state, t0, 1.0, record());
+        let effects = apply_at(&mut state, t0, 2.0, record());
+        assert!(matches!(state.mode, Mode::Select));
+        assert_eq!(messages(&effects), vec!["Disarmed"]);
+
+        apply_at(&mut state, t0, 2.5, record());
+        let effects = apply_at(&mut state, t0, 3.0, Action::Transport(Transport::Play));
+        assert!(matches!(state.mode, Mode::Select));
+        assert!(
+            matches!(
+                effects[0],
+                Effect::PlayProgram {
+                    program_index: 1,
+                    start_at_next_measure: true,
+                    ..
+                }
+            ),
+            "expected today's Play, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn record_mode_owns_the_active_program() {
+        let t0 = Instant::now();
+        let mut state = record_state(RECORD_SOURCE, 1);
+        apply_at(&mut state, t0, 1.0, record());
+        for action in [
+            Action::SelectProgram(0),
+            Action::AdvanceProgram(1),
+            Action::EnterEditMode,
+            Action::PlayProgram {
+                program_index: 1,
+                start_at_next_measure: false,
+                repeat_after_measures: None,
+            },
+        ] {
+            let effects = apply_at(&mut state, t0, 2.0, action);
+            assert!(effects.is_empty(), "got {:?}", effects);
+        }
+        assert_eq!(state.active_program_index, 1);
+        assert_eq!(take_phase(&state), Phase::Armed);
     }
 }

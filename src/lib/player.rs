@@ -75,6 +75,11 @@ impl Player {
         }
     }
 
+    /// Returns the tempo in beats per minute.
+    pub fn tempo(&self) -> u32 {
+        self.tempo
+    }
+
     /// Plays the program at `program_index` as a waveform, substituting its
     /// current slider values. Returns the user-visible message, or `None`
     /// when the program's text didn't evaluate to a waveform (or the index
@@ -105,7 +110,10 @@ impl Player {
             repeat_every = None;
         }
         let start = if start_at_next_measure {
-            Some(next_measure_start(status))
+            Some(
+                next_measure_start(status, time::Instant::now())
+                    .expect("No next measure found in marks"),
+            )
         } else {
             None
         };
@@ -195,7 +203,8 @@ impl Player {
             repeat_every = None;
         }
         let base = if start_at_next_measure {
-            next_measure_start(status)
+            next_measure_start(status, time::Instant::now())
+                .expect("No next measure found in marks")
         } else {
             time::Instant::now()
         };
@@ -518,19 +527,36 @@ fn silence_of_beats(beats: f32, tempo: u32) -> waveform::Waveform<MarkId> {
     }
 }
 
-// Returns the start time of the next measure
-fn next_measure_start(status: &tracker::Status<WaveformId, MarkId>) -> time::Instant {
-    for mark in &status.marks {
-        match mark.waveform_id {
-            WaveformId::Beats(_)
-                if mark.mark_id == MarkId::TopLevel && mark.start > time::Instant::now() =>
-            {
-                return mark.start;
-            }
-            _ => (),
-        }
-    }
-    panic!("No next measure found in marks");
+/// Returns the first measure boundary after `now`: the earliest start of a
+/// Beats waveform's top-level mark, or `None` when `status` holds no such mark
+/// after `now`.
+pub fn next_measure_start(
+    status: &tracker::Status<WaveformId, MarkId>,
+    now: time::Instant,
+) -> Option<time::Instant> {
+    measure_starts(status).filter(|&start| start > now).min()
+}
+
+/// Returns the latest measure boundary at or before `now`, or `None` when
+/// `status` holds no Beats top-level mark starting by then.
+pub fn previous_measure_start(
+    status: &tracker::Status<WaveformId, MarkId>,
+    now: time::Instant,
+) -> Option<time::Instant> {
+    measure_starts(status).filter(|&start| start <= now).max()
+}
+
+/// Returns the start of every Beats waveform's top-level mark in `status`.
+fn measure_starts(
+    status: &tracker::Status<WaveformId, MarkId>,
+) -> impl Iterator<Item = time::Instant> + '_ {
+    status
+        .marks
+        .iter()
+        .filter(|mark| {
+            matches!(mark.waveform_id, WaveformId::Beats(_)) && mark.mark_id == MarkId::TopLevel
+        })
+        .map(|mark| mark.start)
 }
 
 fn duration_from_beats(tempo: u32, beats: u64) -> time::Duration {
@@ -556,6 +582,36 @@ mod tests {
             tracker_load: None,
             allocations_per_sample: None,
         }
+    }
+
+    #[test]
+    fn measure_starts_bracket_now() {
+        let t0 = Instant::now();
+        let mut status = empty_status();
+        // Out of order, as the odd and even Beats waveforms interleave.
+        for (k, even) in [(1, true), (0, false), (2, false)] {
+            status.marks.push(tracker::Mark {
+                waveform_id: WaveformId::Beats(even),
+                mark_id: MarkId::TopLevel,
+                start: t0 + Duration::from_secs(4 * k),
+                duration: Duration::from_secs(4),
+            });
+        }
+        let now = t0 + Duration::from_secs(5);
+        assert_eq!(
+            previous_measure_start(&status, now),
+            Some(t0 + Duration::from_secs(4))
+        );
+        assert_eq!(
+            next_measure_start(&status, now),
+            Some(t0 + Duration::from_secs(8))
+        );
+        let later = t0 + Duration::from_secs(9);
+        assert_eq!(next_measure_start(&status, later), None);
+        assert_eq!(
+            previous_measure_start(&status, t0 - Duration::from_secs(1)),
+            None
+        );
     }
 
     /// Builds a program set whose program 0 is sequenceable with steps on

@@ -331,6 +331,7 @@ impl InputHandler {
 mod tests {
     use super::*;
     use crate::actions::{Action, AppState};
+    use crate::recorder;
     use sdl2::keyboard::{Mod, Scancode};
 
     fn test_state(mode: Mode) -> AppState {
@@ -341,6 +342,39 @@ mod tests {
         .expect("test source should parse");
         state.mode = mode;
         state
+    }
+
+    #[test]
+    fn record_mode_accepts_only_ctrl_c() {
+        let handler = InputHandler::new(true, 800, 600);
+        let now = Instant::now();
+        let state = test_state(Mode::Record {
+            take: recorder::Take::arm("kb".to_string(), 60, now, now),
+            keys_program: 0,
+        });
+        let exit = handler.classify_keydown(Some(Scancode::C), Mod::LCTRLMOD, false, &state);
+        assert!(matches!(exit.as_deref(), Some([Action::Exit])));
+        for (scancode, keymod) in [
+            (Scancode::Return, Mod::NOMOD),
+            (Scancode::Escape, Mod::NOMOD),
+            (Scancode::Escape, Mod::LGUIMOD),
+            (Scancode::Up, Mod::NOMOD),
+            (Scancode::R, Mod::LGUIMOD),
+            (Scancode::LAlt, Mod::NOMOD),
+            (Scancode::Z, Mod::LGUIMOD),
+        ] {
+            let actions = handler.classify_keydown(Some(scancode), keymod, false, &state);
+            assert!(
+                matches!(actions.as_deref(), Some([])),
+                "{:?} gave {:?}",
+                scancode,
+                actions
+            );
+        }
+        for text in ["1", "k", "K", "D"] {
+            let actions = handler.classify_text_input(text, &state);
+            assert!(matches!(actions.as_deref(), Some([])), "{:?}", text);
+        }
     }
 
     #[test]

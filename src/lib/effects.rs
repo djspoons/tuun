@@ -119,6 +119,7 @@ impl EffectRunner {
             now: Instant::now(),
             environment: &self.environment,
             source_stale: state.programs.disk_changed(),
+            tempo: self.player.tempo(),
         };
         let mut all_effects = Vec::new();
         for action in actions {

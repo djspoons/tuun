@@ -515,6 +515,16 @@ pub fn main() {
                 Err(e) => println!("Error receiving status: {:?}", e),
             }
         }
+        if state.take_tick_due(Instant::now()) {
+            dispatch_actions(
+                &mut effect_runner,
+                &mut state,
+                launchkey.as_mut(),
+                &status,
+                vec![actions::Action::TakeTick],
+            );
+        }
+
         renderer.render(
             &ttf_context,
             &state,

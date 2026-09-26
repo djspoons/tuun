@@ -546,6 +546,18 @@ fn walk_ui_positions(
     out
 }
 
+/// What a name resolves to in a program's scope (see
+/// [`ProgramSet::resolve_name`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundTo {
+    /// The binding of the program at this index.
+    Program(usize),
+    /// Some other binding, a module's definition, a slider or the prelude.
+    Other,
+    /// Nothing: the name is unbound.
+    Unbound,
+}
+
 /// The set of programs backed by a source file: the file's contents, its parsed
 /// bindings, and one `Program` per UI slot.
 ///
@@ -714,6 +726,61 @@ impl ProgramSet {
                 _ => format!("{}", pattern),
             },
             _ => String::new(),
+        }
+    }
+
+    /// Returns the name the program at `index` is bound to, or `None` when its
+    /// binding is not a single identifier other than `_` (a tuple pattern, an
+    /// anonymous or missing binding).
+    pub fn binding_name(&self, index: usize) -> Option<&str> {
+        let program = self.programs.get(index)?;
+        match &self.bindings.get(program.binding_index)?.binding {
+            expr::Binding::Definition(expr::Pattern::Identifier(name), _) if name != "_" => {
+                Some(name)
+            }
+            _ => None,
+        }
+    }
+
+    /// Returns what `name` resolves to in the scope of the program at `index`:
+    /// its own sliders, then the bindings before it in source order (for an
+    /// empty slot, those before the binding of the next program, where its
+    /// binding would be inserted), then the prelude.
+    pub fn resolve_name(&self, environment: &Environment, index: usize, name: &str) -> BoundTo {
+        let program = &self.programs[index];
+        if program.sliders.configs().iter().any(|c| c.label == name) {
+            return BoundTo::Other;
+        }
+        let end = if program.binding_index < self.bindings.len() {
+            program.binding_index
+        } else {
+            walk_ui_positions(&self.bindings, self.source.len())
+                .into_iter()
+                .find(|(position, _, _)| *position > index)
+                .map_or(self.bindings.len(), |(_, binding_index, _)| binding_index)
+        };
+        for (binding_index, source_binding) in self.bindings[..end].iter().enumerate().rev() {
+            match &source_binding.binding {
+                expr::Binding::Definition(pattern, _) if pattern.binds(name) => {
+                    return self
+                        .programs
+                        .iter()
+                        .position(|p| p.binding_index == binding_index)
+                        .map_or(BoundTo::Other, BoundTo::Program);
+                }
+                expr::Binding::Use(path) if path.last().is_some_and(|last| last == name) => {
+                    return BoundTo::Other;
+                }
+                expr::Binding::Open(path) if environment.module_defines(path, name) => {
+                    return BoundTo::Other;
+                }
+                _ => {}
+            }
+        }
+        if environment.module_defines(&["__prelude".to_string()], name) {
+            BoundTo::Other
+        } else {
+            BoundTo::Unbound
         }
     }
 

@@ -365,7 +365,7 @@ impl Renderer {
                         }
                     }
                 }
-                Mode::Select | Mode::MoveSliders | Mode::Keys => {
+                Mode::Select | Mode::MoveSliders | Mode::Keys | Mode::Record { .. } => {
                     if active_program_index == index {
                         let color = match mode {
                             Mode::MoveSliders => ACTIVE_COLOR,
