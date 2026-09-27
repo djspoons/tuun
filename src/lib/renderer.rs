@@ -14,6 +14,7 @@ use crate::ids::{MarkId, WaveformId, WaveformSelector};
 use crate::launchkey;
 use crate::metric::Metric;
 use crate::programs::{PROGRAMS_PER_BANK, SliderDisplay};
+use crate::recorder::{Finish, Phase};
 use crate::tracker;
 
 fn make_texture<'a>(
@@ -36,7 +37,8 @@ fn make_texture<'a>(
 const INACTIVE_COLOR: Color = Color::RGB(0x00, 0xFF, 0xFF);
 const ACTIVE_COLOR: Color = Color::RGB(0x00, 0xFF, 0x00);
 const EDIT_COLOR: Color = Color::RGB(0xFF, 0xFF, 0xFF);
-const ERROR_COLOR: Color = Color::RGB(0xFF, 0x00, 0x00);
+const ERROR_COLOR: Color = Color::RGB(0xFF, 0xDE, 0x21);
+const RECORD_COLOR: Color = Color::RGB(0xFF, 0x00, 0x00);
 
 pub struct Renderer {
     pub video_subsystem: sdl2::VideoSubsystem,
@@ -144,6 +146,9 @@ impl Renderer {
         let now = Instant::now();
         let (current_beat, current_beat_start, current_beat_duration) =
             current_beat_info(now, status);
+        // Alpha for things that fade over the beat: opaque at its start.
+        let beat_fade = u8::MAX
+            - (beat_phase(now, current_beat_start, current_beat_duration) * u8::MAX as f32) as u8;
         let texture_creator = self.canvas.texture_creator();
         let font = ttf_context.load_font(FONT_PATH, 48).unwrap();
         let circle_font = ttf_context.load_font(FONT_PATH, 108).unwrap();
@@ -228,31 +233,25 @@ impl Renderer {
                 .color()
                 .map(|(r, g, b)| Color::RGB(r, g, b))
                 .unwrap_or(INACTIVE_COLOR);
-            let color = match (
-                &mode,
-                status.has_active_mark(
-                    now,
-                    &WaveformSelector::ProgramVoices(index),
-                    &MarkId::TopLevel,
-                ),
-            ) {
-                (_, true) => ACTIVE_COLOR,
-                (Mode::Edit { .. }, _) if index == active_program_index => EDIT_COLOR,
-                _ => program_color,
-            };
-            let number = char::from_u32(0x31 + i as u32).unwrap().to_string();
-            let mut number_texture = make_texture(&font, color, &texture_creator, &number);
-            if status.has_active_mark(
+            let sounding = status.has_active_mark(
                 now,
                 &WaveformSelector::ProgramVoices(index),
                 &MarkId::TopLevel,
-            ) {
-                let intensity = (now
-                    .duration_since(current_beat_start)
-                    .div_duration_f32(current_beat_duration)
-                    * u8::MAX as f32) as u8;
-                number_texture.set_alpha_mod(u8::MAX - intensity);
-            }
+            );
+            let take_phase = match mode {
+                Mode::Record { take, .. } if index == active_program_index => Some(take.phase()),
+                _ => None,
+            };
+            // The take's red wins over the sounding green for the active slot.
+            let (color, alpha) = match (take_phase, mode, sounding) {
+                (Some(Phase::Recording | Phase::Finishing(_)), _, _) => (RECORD_COLOR, beat_fade),
+                (_, _, true) => (ACTIVE_COLOR, beat_fade),
+                (_, Mode::Edit { .. }, _) if index == active_program_index => (EDIT_COLOR, u8::MAX),
+                _ => (program_color, u8::MAX),
+            };
+            let number = char::from_u32(0x31 + i as u32).unwrap().to_string();
+            let mut number_texture = make_texture(&font, color, &texture_creator, &number);
+            number_texture.set_alpha_mod(alpha);
             let TextureQuery {
                 width: number_width,
                 ..
@@ -269,31 +268,29 @@ impl Renderer {
                     )),
                 )
                 .unwrap();
-            if status.has_pending_mark(
-                now,
-                &WaveformSelector::ProgramVoices(index),
-                &MarkId::TopLevel,
-            ) {
-                let circle = char::from_u32(0x25EF).unwrap().to_string();
-                let circle_texture =
-                    make_texture(&circle_font, ACTIVE_COLOR, &texture_creator, &circle);
-                let TextureQuery {
-                    width: circle_width,
-                    height: circle_height,
-                    ..
-                } = circle_texture.query();
-                self.canvas
-                    .copy(
-                        &circle_texture,
-                        None,
-                        Some(sdl2::rect::Rect::new(
-                            self.prompt_width as i32 - 20,
-                            y - 38,
-                            circle_width,
-                            circle_height,
-                        )),
+            // The Finishing (play) circle stands in for the pending mark the
+            // write will queue.
+            let circle = match take_phase {
+                Some(Phase::Armed) => Some((RECORD_COLOR, u8::MAX)),
+                Some(Phase::Recording) => Some((RECORD_COLOR, beat_fade)),
+                Some(Phase::Finishing(Finish::Play)) => Some((ACTIVE_COLOR, u8::MAX)),
+                Some(Phase::Finishing(Finish::Silent)) => None,
+                None => status
+                    .has_pending_mark(
+                        now,
+                        &WaveformSelector::ProgramVoices(index),
+                        &MarkId::TopLevel,
                     )
-                    .unwrap();
+                    .then_some((ACTIVE_COLOR, u8::MAX)),
+            };
+            if let Some((circle_color, circle_alpha)) = circle {
+                self.draw_circle(
+                    &circle_font,
+                    &texture_creator,
+                    circle_color,
+                    circle_alpha,
+                    y,
+                );
             }
 
             match *mode {
@@ -366,7 +363,7 @@ impl Renderer {
                     }
                 }
                 Mode::Select | Mode::MoveSliders | Mode::Keys | Mode::Record { .. } => {
-                    if active_program_index == index {
+                    if active_program_index == index && !matches!(mode, Mode::Record { .. }) {
                         let color = match mode {
                             Mode::MoveSliders => ACTIVE_COLOR,
                             _ => INACTIVE_COLOR, // Select
@@ -716,6 +713,37 @@ impl Renderer {
         self.canvas.present();
     }
 
+    /// Draws the large circle around the slot number on the row at `y`.
+    fn draw_circle<'a>(
+        &mut self,
+        circle_font: &Font<'a, 'static>,
+        texture_creator: &'a TextureCreator<WindowContext>,
+        color: Color,
+        alpha: u8,
+        y: i32,
+    ) {
+        let circle = char::from_u32(0x25EF).unwrap().to_string();
+        let mut circle_texture = make_texture(circle_font, color, texture_creator, &circle);
+        circle_texture.set_alpha_mod(alpha);
+        let TextureQuery {
+            width: circle_width,
+            height: circle_height,
+            ..
+        } = circle_texture.query();
+        self.canvas
+            .copy(
+                &circle_texture,
+                None,
+                Some(sdl2::rect::Rect::new(
+                    self.prompt_width as i32 - 20,
+                    y - 38,
+                    circle_width,
+                    circle_height,
+                )),
+            )
+            .unwrap();
+    }
+
     fn draw_cursor(
         self: &mut Renderer,
         ttf_context: &Sdl2TtfContext,
@@ -808,6 +836,26 @@ impl Renderer {
             }
         }
     }
+}
+
+/// Returns how far `now` is through the beat starting at `beat_start`, from 0
+/// at its start to 1 at its end.
+///
+/// # Example
+///
+/// ```
+/// use std::time::{Duration, Instant};
+/// use tuun::renderer::beat_phase;
+///
+/// let start = Instant::now();
+/// let beat = Duration::from_millis(500);
+/// assert_eq!(beat_phase(start + Duration::from_millis(125), start, beat), 0.25);
+/// assert_eq!(beat_phase(start + Duration::from_secs(2), start, beat), 1.0);
+/// ```
+pub fn beat_phase(now: Instant, beat_start: Instant, beat_duration: Duration) -> f32 {
+    now.duration_since(beat_start)
+        .div_duration_f32(beat_duration)
+        .min(1.0)
 }
 
 pub fn current_beat_info(

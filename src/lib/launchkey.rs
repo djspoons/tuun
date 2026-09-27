@@ -162,6 +162,14 @@ const PAD_FUNCTION_OFFSET: u8 = 105;
 /// the same CC back on channel 0, as for `PAD_FUNCTION_OFFSET`.
 const LAUNCH_CC: u8 = 104;
 
+/// The Record button. Its monochrome LED's brightness is set by sending the
+/// same CC back on `BRIGHTNESS_CHANNEL`.
+const RECORD_CC: u8 = 117;
+
+/// The channel (channel 4, 0-indexed) on which a monochrome LED's CC value is
+/// its brightness.
+const BRIGHTNESS_CHANNEL: u8 = 3;
+
 const DAW_MODE_DISPLAY_TARGET: u8 = 34;
 
 #[repr(u8)]
@@ -335,6 +343,17 @@ impl Launchkey {
         });
     }
 
+    /// Sets the brightness of the Record button's LED, from 0 (dim) to 127.
+    pub fn set_record_brightness(&mut self, brightness: u8) {
+        self.send_event(LiveEvent::Midi {
+            channel: BRIGHTNESS_CHANNEL.into(),
+            message: MidiMessage::Controller {
+                controller: RECORD_CC.into(),
+                value: brightness.min(127).into(),
+            },
+        });
+    }
+
     pub fn set_daw_mode_display(&mut self, name: &str) {
         let mut buf = Vec::new();
         buf.extend(&STANDARD_SKU_PREFIX);
@@ -501,8 +520,8 @@ impl DAWState {
                         (115, 0) => None,
                         (116, 127) => Some(Event::StopDown),
                         (116, 0) => None,
-                        (117, 127) => Some(Event::RecordDown),
-                        (117, 0) => None,
+                        (RECORD_CC, 127) => Some(Event::RecordDown),
+                        (RECORD_CC, 0) => None,
 
                         // Encoders in Relative output mode: each event
                         // on CC 55h-5Ch (85-92) carries `64 + delta`

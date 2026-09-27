@@ -5,6 +5,7 @@ use crate::ids::{MarkId, WaveformId, WaveformSelector};
 use crate::launchkey;
 use crate::player;
 use crate::programs::{PROGRAMS_PER_BANK, Program, ProgramKind};
+use crate::recorder;
 use crate::renderer;
 use crate::sequencer;
 use crate::tracker;
@@ -166,6 +167,18 @@ pub fn update_launchkey_state(
     let now = Instant::now();
     let (_current_beat, current_beat_start, current_beat_duration) =
         renderer::current_beat_info(now, status);
+
+    launchkey.set_record_brightness(match &state.mode {
+        actions::Mode::Record { take, .. } => match take.phase() {
+            recorder::Phase::Armed => U7_MAX,
+            recorder::Phase::Recording | recorder::Phase::Finishing(_) => {
+                let phase = renderer::beat_phase(now, current_beat_start, current_beat_duration);
+                ((1.0 - phase) * U7_MAX as f32) as u8
+            }
+        },
+        _ => 0,
+    });
+
     let bank_start = state.bank_start();
     if launchkey.pad_mode != launchkey::PadMode::DAW {
         // Some other pad layout (Drum, Custom, etc.) owns the pads —
@@ -221,9 +234,7 @@ fn pulsed(
     beat_start: Instant,
     beat_duration: std::time::Duration,
 ) -> (u8, u8, u8) {
-    let fraction = now
-        .duration_since(beat_start)
-        .div_duration_f32(beat_duration);
+    let fraction = renderer::beat_phase(now, beat_start, beat_duration);
     let dim = |channel: u8| channel.saturating_sub((fraction * channel as f32) as u8);
     (dim(color.0), dim(color.1), dim(color.2))
 }
