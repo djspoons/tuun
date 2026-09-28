@@ -47,7 +47,9 @@ pub enum Mode {
     Keys,
     /// Recording a phrase from the keys into the active program. Entered from
     /// Select with the Record transport press and left, always to Select, when
-    /// the take is written or dropped.
+    /// the take is written or dropped. The checks made at arm (the keys
+    /// binding's name, the helper's scope) must hold until the write, so no
+    /// gesture reachable in this mode may change any program's text.
     Record {
         take: Take,
         /// The installed keys program when the take was armed.
@@ -935,6 +937,8 @@ pub fn refused_by_ownership(
         Action::ToggleProgramPendingPlayback(i) => {
             i == owned && !status.has_pending_mark(now, &voices, &MarkId::TopLevel)
         }
+        // Actions that check the editor mode themselves, such as reload and
+        // undo, refuse there.
         _ => false,
     }
 }
@@ -960,6 +964,8 @@ fn transport_play_effects(state: &AppState, ctx: &Context) -> Vec<Effect> {
 /// [`recorder::boundary_for_press`]), or `None` when no boundary after now is
 /// known.
 fn press_boundary(ctx: &Context) -> Option<Instant> {
+    // Unlike notes, transport presses carry no stamp from the MIDI callback,
+    // so a press is timed when the reducer runs, up to one main-loop pass late.
     let next = player::next_measure_start(ctx.status, ctx.now)?;
     let previous = player::previous_measure_start(ctx.status, ctx.now);
     Some(recorder::boundary_for_press(
@@ -1013,6 +1019,8 @@ fn apply_arm(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
         Phase::Armed => format!("Armed: recording {} into {}", keys_name, display_name),
         _ => format!("Recording {} into {}", keys_name, display_name),
     };
+    // A queued playback would keep playing the old text through the take and
+    // after the write.
     let mut effects = remove_pending_effects(state, ctx, i);
     effects.push(Effect::ShowMessage(message));
     state.mode = Mode::Record { take, keys_program };
@@ -1104,6 +1112,9 @@ fn write_take(
     keys_program: usize,
     closed: Closed,
 ) -> Vec<Effect> {
+    // The take closes one margin before its end boundary, so a transport
+    // press in that last margin lands in Select mode and acts on the written
+    // program as it would outside a take.
     state.mode = Mode::Select;
     if closed.notes == 0 {
         let mut effects = vec![Effect::ShowMessage("Nothing recorded".to_string())];

@@ -512,6 +512,8 @@ pub fn main() {
                 Err(e) => println!("Error receiving status: {:?}", e),
             }
         }
+        // TODO could consider the case where a tick is due soon and use a
+        // different timeout above.
         if state.take_tick_due(Instant::now()) {
             dispatch_actions(
                 &mut effect_runner,

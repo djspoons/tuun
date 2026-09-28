@@ -1,8 +1,17 @@
 //! Recording a MIDI phrase: the take's phases and the recording window.
 //!
 //! A take runs from the Record press until its notes are written or discarded.
-//! Times are `Instant`s and positions are beats, where beat 1 is the take's
-//! start boundary.
+//! It changes only on key presses and releases, transport presses and ticks,
+//! and closes into at most one phrase; its API takes only `Instant`s, beats and
+//! MIDI numbers. Times are `Instant`s and positions are beats, where beat 1 is the take's
+//! start boundary. A note's onset is the stamp of its press, written as is:
+//! there is no compensation for the delay before a live key sounds.
+//!
+//! The recording window runs from one boundary margin (an eighth of a beat)
+//! before the start boundary to one margin before the end boundary. A key
+//! pressed inside the window, and not before the Record press, is a note in
+//! the phrase; a key still held when the window closes is released at the end
+//! boundary.
 
 use std::time::{Duration, Instant};
 
@@ -305,22 +314,28 @@ impl Take {
 
     /// Returns the notes written for an end boundary of `end`.
     fn notes_until(&self, end: Instant) -> Vec<Note> {
+        // The window rules apply here, at the close, rather than as presses
+        // arrive, so an end boundary already in the past (a snapped press)
+        // drops the presses received after it.
         let take_length = self.beats_between(self.start, end);
         self.presses
             .iter()
             .filter(|p| {
-                // In the take from one margin before the start boundary
-                // (rule 6) to one margin before the end boundary (rule 8).
+                // In the take from one margin before the start boundary to
+                // one margin before the end boundary.
                 self.beats_between(self.start, p.onset) >= -MARGIN_BEATS
                     && self.beats_between(end, p.onset) < -MARGIN_BEATS
             })
             .map(|p| {
                 // Releases from the close onward are not observed; the key
-                // is released at the end boundary (rule 9).
+                // is released at the end boundary.
                 let release = match p.release {
                     Some(r) if self.beats_between(end, r) < -MARGIN_BEATS => r,
                     _ => end,
                 };
+                // An early hit is pulled to beat 1 but keeps its hold from its
+                // real onset; the duration is clipped to the take's last beat
+                // and floored at one margin so the note stays audible.
                 let hold = self.beats_between(p.onset, release);
                 let beat = (1.0 + self.beats_between(self.start, p.onset)).max(1.0);
                 Note {
@@ -558,7 +573,7 @@ mod tests {
         assert_eq!(take.stop(), Response::Discarded { notes: 2 });
     }
 
-    // --- press snapping (rule 5 as amended) ---
+    // --- press snapping ---
 
     #[test]
     fn press_snaps_back_within_a_margin() {
@@ -582,7 +597,6 @@ mod tests {
 
     #[test]
     fn early_hit_is_pulled_to_beat_one_keeping_its_hold() {
-        // Rule 6.
         let at = clock();
         let mut take = recording(&at);
         take.note_on(60, 100, at(0.9));
@@ -594,7 +608,6 @@ mod tests {
 
     #[test]
     fn window_never_reaches_back_before_arming() {
-        // Rule 6.
         let at = clock();
         let mut take = Take::arm("kb".to_string(), TEMPO, at(0.95), at(1.0));
         take.note_on(60, 100, at(0.9));
@@ -605,7 +618,7 @@ mod tests {
 
     #[test]
     fn key_struck_before_the_margin_is_not_a_note() {
-        // Rule 7: held into the take, and its note-off is ignored.
+        // Held into the take, and its note-off is ignored.
         let at = clock();
         let mut take = recording(&at);
         take.note_on(60, 100, at(0.8));
@@ -616,7 +629,6 @@ mod tests {
 
     #[test]
     fn note_on_in_the_closing_margin_is_not_a_note() {
-        // Rule 8.
         let at = clock();
         let mut take = recording(&at);
         take.note_on(60, 100, at(4.9));
@@ -625,7 +637,7 @@ mod tests {
 
     #[test]
     fn open_key_at_the_close_is_released_at_the_end_boundary() {
-        // Rule 9 as amended: the note-off in [end - margin, end) is not observed.
+        // The note-off in [end - margin, end) is not observed.
         let at = clock();
         let mut take = recording(&at);
         take.note_on(60, 100, at(4.0));
@@ -638,7 +650,6 @@ mod tests {
 
     #[test]
     fn duration_has_a_floor_of_one_margin() {
-        // Rule 10.
         let at = clock();
         let mut take = recording(&at);
         take.note_on(60, 100, at(2.0));
@@ -648,8 +659,8 @@ mod tests {
 
     #[test]
     fn pulled_note_is_clipped_to_the_end_of_the_take() {
-        // Rules 9 and 10: an early hit held to the end keeps its hold, which
-        // would run past the take's last beat, so it is clipped there.
+        // An early hit held to the end keeps its hold, which would run past
+        // the take's last beat, so it is clipped there.
         let at = clock();
         let mut take = recording(&at);
         take.note_on(60, 100, at(0.9));
@@ -658,7 +669,6 @@ mod tests {
 
     #[test]
     fn retrigger_closes_the_open_note() {
-        // Rule 11.
         let at = clock();
         let mut take = recording(&at);
         take.note_on(60, 100, at(2.0));
@@ -673,7 +683,6 @@ mod tests {
 
     #[test]
     fn phrase_text_has_three_decimals() {
-        // Rule 12.
         let at = clock();
         let mut take = recording(&at);
         take.note_on(60, 80, at(1.0));
@@ -689,7 +698,7 @@ mod tests {
 
     #[test]
     fn beats_follow_the_tempo() {
-        // Rule 5: beat = 1 + (t - start) * tempo / 60.
+        // beat = 1 + (t - start) * tempo / 60.
         let at = clock();
         let mut take = Take::arm("kb".to_string(), 120, at(0.0), at(1.0));
         take.tick(at(1.0));

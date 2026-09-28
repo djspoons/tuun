@@ -143,6 +143,7 @@ impl InputHandler {
             return Some(vec![]);
         }
         match (mode, scancode) {
+            // Ctrl+C exits in every mode.
             (_, Some(Scancode::C)) if ctrl => Some(vec![Action::Exit]),
             (Mode::Select, Some(Scancode::R)) if gui_mod => Some(vec![Action::ReloadSource]),
             (Mode::Select, Some(Scancode::Up)) => Some(vec![Action::AdvanceProgram(-1)]),
