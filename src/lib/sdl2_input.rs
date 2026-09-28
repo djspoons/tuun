@@ -245,13 +245,15 @@ impl InputHandler {
             (Mode::Edit { .. }, Some(Scancode::Slash)) if gui_mod => Some(vec![Action::Complete]),
             // Type of the identifier under the cursor on Ctrl-H.
             (Mode::Edit { .. }, Some(Scancode::H)) if ctrl => Some(vec![Action::ShowType]),
-            // Undo / redo on Ctrl+Z or Cmd+Z; Shift reverses. The redo arm
-            // comes first so the shifted chord isn't captured by the undo
-            // arm.
-            (Mode::Edit { .. }, Some(Scancode::Z)) if (ctrl || gui_mod) && shift => {
+            // Undo / redo on Ctrl+Z or Cmd+Z, in Edit or Select mode; Shift
+            // reverses. The redo arm comes first so the shifted chord isn't
+            // captured by the undo arm.
+            (Mode::Edit { .. } | Mode::Select, Some(Scancode::Z)) if (ctrl || gui_mod) && shift => {
                 Some(vec![Action::Redo])
             }
-            (Mode::Edit { .. }, Some(Scancode::Z)) if (ctrl || gui_mod) && !shift => {
+            (Mode::Edit { .. } | Mode::Select, Some(Scancode::Z))
+                if (ctrl || gui_mod) && !shift =>
+            {
                 Some(vec![Action::Undo])
             }
             (Mode::Edit { .. }, Some(Scancode::Left)) => Some(vec![Action::MoveCursorBy(-1)]),
@@ -550,6 +552,25 @@ mod tests {
             .classify_keydown(Some(Scancode::R), Mod::NOMOD, false, &state)
             .expect("plain R falls through");
         assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn select_mode_binds_undo_and_redo_on_z() {
+        let handler = InputHandler::new(false, 800, 600);
+        let state = test_state(Mode::Select);
+        let actions = handler
+            .classify_keydown(Some(Scancode::Z), Mod::LGUIMOD, false, &state)
+            .expect("Cmd+Z in Select mode should be classified");
+        assert!(matches!(actions[..], [Action::Undo]));
+        let actions = handler
+            .classify_keydown(
+                Some(Scancode::Z),
+                Mod::LCTRLMOD | Mod::LSHIFTMOD,
+                false,
+                &state,
+            )
+            .expect("Ctrl+Shift+Z in Select mode should be classified");
+        assert!(matches!(actions[..], [Action::Redo]));
     }
 
     #[test]

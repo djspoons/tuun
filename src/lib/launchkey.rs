@@ -45,6 +45,8 @@ pub enum PadMode {
 struct DAWState {
     encoder_mode: EncoderMode,
     pad_mode: PadMode,
+    /// Whether the Shift button is held, tracked from its press and release.
+    shift_held: bool,
     sender: mpsc::Sender<Event>,
 }
 
@@ -114,6 +116,10 @@ pub enum Event {
     PadFunctionDown,
     /// The button marked ">" beside the top row of pads.
     LaunchDown,
+    /// The Undo button, pressed without Shift.
+    UndoDown,
+    /// The Undo button, pressed while Shift is held (marked "Redo").
+    RedoDown,
 }
 
 #[derive(Debug, Error)]
@@ -170,6 +176,11 @@ const RECORD_CC: u8 = 117;
 /// its brightness.
 const BRIGHTNESS_CHANNEL: u8 = 3;
 
+/// The Shift button, reported on `FEATURE_CONTROL_CHANNEL`.
+const SHIFT_CC: u8 = 63;
+
+const UNDO_CC: u8 = 77;
+
 const DAW_MODE_DISPLAY_TARGET: u8 = 34;
 
 #[repr(u8)]
@@ -216,6 +227,7 @@ impl Launchkey {
         let mut daw_state = DAWState {
             encoder_mode: EncoderMode::Plugin,
             pad_mode: PadMode::DAW,
+            shift_held: false,
             sender: sender.clone(),
         };
         let mut daw_input = MidiInput::new("tuun reading DAW input")?;
@@ -498,6 +510,10 @@ impl DAWState {
                             current: new_mode,
                         });
                     }
+                    if ch == FEATURE_CONTROL_CHANNEL && controller.as_int() == SHIFT_CC {
+                        self.shift_held = value.as_int() != 0;
+                        return None;
+                    }
                     match (controller.as_int(), value.as_int()) {
                         // Navigation
                         (102, 127) => Some(Event::NextTrackDown),
@@ -550,6 +566,9 @@ impl DAWState {
                         (PAD_FUNCTION_OFFSET, 0) => None,
                         (LAUNCH_CC, 127) => Some(Event::LaunchDown),
                         (LAUNCH_CC, 0) => None,
+                        (UNDO_CC, 127) if self.shift_held => Some(Event::RedoDown),
+                        (UNDO_CC, 127) => Some(Event::UndoDown),
+                        (UNDO_CC, 0) => None,
 
                         _ => {
                             println!(
@@ -1214,6 +1233,7 @@ mod tests {
         DAWState {
             encoder_mode: EncoderMode::Plugin,
             pad_mode: PadMode::DAW,
+            shift_held: false,
             sender,
         }
     }
@@ -1251,5 +1271,27 @@ mod tests {
             Some(Event::RecordDown)
         ));
         assert!(state.decode(&[0xB0, 117, 0]).is_none());
+    }
+
+    #[test]
+    fn undo_decodes_as_redo_while_shift_is_held() {
+        let mut state = daw_state();
+        assert!(matches!(
+            state.decode(&[0xB0, 77, 127]),
+            Some(Event::UndoDown)
+        ));
+        assert!(state.decode(&[0xB0, 77, 0]).is_none());
+        // Shift press and release are consumed (channel 7).
+        assert!(state.decode(&[0xB6, 63, 127]).is_none());
+        assert!(matches!(
+            state.decode(&[0xB0, 77, 127]),
+            Some(Event::RedoDown)
+        ));
+        assert!(state.decode(&[0xB0, 77, 0]).is_none());
+        assert!(state.decode(&[0xB6, 63, 0]).is_none());
+        assert!(matches!(
+            state.decode(&[0xB0, 77, 127]),
+            Some(Event::UndoDown)
+        ));
     }
 }

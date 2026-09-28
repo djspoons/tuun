@@ -108,6 +108,8 @@ pub fn classify(
         },
         Event::PadFunctionDown => Some(vec![Action::CycleRepeatAfterMeasures]),
         Event::LaunchDown => Some(vec![Action::ToggleLaunchMode]),
+        Event::UndoDown => Some(vec![Action::Undo]),
+        Event::RedoDown => Some(vec![Action::Redo]),
 
         Event::NoteOn {
             key,
@@ -623,6 +625,21 @@ mod tests {
                 actions[0],
                 Action::ToggleSequencerStep { sixteenth } if sixteenth == index + 8
             ));
+        }
+    }
+
+    #[test]
+    fn undo_and_redo_buttons_classify_in_every_pad_mode() {
+        for mode in [
+            DawPadMode::ClipLauncher,
+            DawPadMode::KeysInstaller,
+            DawPadMode::Sequencer,
+        ] {
+            let state = test_state(mode);
+            let actions = classify(&launchkey::Event::UndoDown, &state).unwrap();
+            assert!(matches!(actions[..], [Action::Undo]));
+            let actions = classify(&launchkey::Event::RedoDown, &state).unwrap();
+            assert!(matches!(actions[..], [Action::Redo]));
         }
     }
 }

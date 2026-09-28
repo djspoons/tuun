@@ -4,7 +4,7 @@
 //! `Action`s. `apply` then mutates `AppState` and returns `Effect`s, which
 //! the runner in `effects.rs` executes against the outside world.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::ops::Range;
 use std::time::Instant;
 
@@ -802,8 +802,12 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
         }),
         Action::Complete => apply_complete(state, ctx),
         Action::ShowType => apply_show_type(state, ctx),
-        Action::Undo => apply_history_restore(state, Program::undo, "Nothing to undo"),
-        Action::Redo => apply_history_restore(state, Program::redo, "Nothing to redo"),
+        Action::Undo => {
+            apply_history_restore(state, ctx, Program::undo, "Undid", "Nothing to undo")
+        }
+        Action::Redo => {
+            apply_history_restore(state, ctx, Program::redo, "Redid", "Nothing to redo")
+        }
 
         Action::SetSliderNormalized {
             program,
@@ -1267,19 +1271,10 @@ fn apply_toggle_sequencer_step(state: &mut AppState, ctx: &Context, sixteenth: u
         .programs
         .program_mut(i)
         .expect("program existed above");
+    program.record_edit(program.text().len());
     program.set_text(edit.new_text);
-    program.close_insert_run();
 
-    let anchor = WaveformSelector::Only(WaveformId::Step {
-        program: i,
-        sixteenth: player::ANCHOR_SIXTEENTH,
-    });
-    let live = ctx
-        .status
-        .has_active_mark(ctx.now, &anchor, &MarkId::TopLevel)
-        || ctx
-            .status
-            .has_pending_mark(ctx.now, &anchor, &MarkId::TopLevel);
+    let live = sequence_is_live(ctx, i);
 
     let mut effects = vec![
         Effect::EvaluateProgram {
@@ -1309,6 +1304,34 @@ fn apply_toggle_sequencer_step(state: &mut AppState, ctx: &Context, sixteenth: u
         }
     }
     effects
+}
+
+/// Returns whether the program at `program_index` is playing as a sequence:
+/// its anchor step is sounding or queued.
+fn sequence_is_live(ctx: &Context, program_index: usize) -> bool {
+    let anchor = WaveformSelector::Only(WaveformId::Step {
+        program: program_index,
+        sixteenth: player::ANCHOR_SIXTEENTH,
+    });
+    ctx.status
+        .has_active_mark(ctx.now, &anchor, &MarkId::TopLevel)
+        || ctx
+            .status
+            .has_pending_mark(ctx.now, &anchor, &MarkId::TopLevel)
+}
+
+/// Returns the sixteenths holding a step of `text`, or none when `text` isn't
+/// sequenceable.
+fn step_sixteenths(text: &str) -> BTreeSet<u8> {
+    sequencer::analyze(text)
+        .map(|shape| {
+            shape
+                .steps
+                .iter()
+                .map(|&(beat, _)| sequencer::sixteenth_for_beat(beat))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn apply_install_keys(state: &mut AppState, program_index: usize) -> Vec<Effect> {
@@ -1630,22 +1653,28 @@ fn apply_parameter_hint(state: &mut AppState, ctx: &Context, cursor: usize) -> V
     }
 }
 
-/// Applies `Action::Undo` or `Action::Redo` in Edit mode: `restore` moves
-/// the active program's state between its undo and redo stacks and returns
-/// the restored cursor. On success the Edit-mode cursor, parse errors,
-/// status message, and completion cycle are refreshed, mirroring
-/// `edit_text_op`; when there is nothing to restore, shows `empty_message`.
-/// Does nothing outside Edit mode.
+/// Applies `Action::Undo` or `Action::Redo`: `restore` moves the active
+/// program's state between its undo and redo stacks and returns the restored
+/// cursor.
+///
+/// In Edit mode, the Edit-mode cursor, parse errors, status message, and
+/// completion cycle are refreshed, mirroring `edit_text_op`. In Record mode it
+/// does nothing. In every other mode the restored text is re-evaluated and
+/// persisted, and `verb` names the change in the status message ("Undid change
+/// to kick"). When there is nothing to restore, shows `empty_message`.
 fn apply_history_restore(
     state: &mut AppState,
+    ctx: &Context,
     restore: impl FnOnce(&mut Program, usize) -> Option<usize>,
+    verb: &str,
     empty_message: &str,
 ) -> Vec<Effect> {
     let cursor = match &state.mode {
         Mode::Edit {
             cursor_position, ..
         } => *cursor_position,
-        _ => return vec![],
+        Mode::Record { .. } => return vec![],
+        _ => return apply_committed_history_restore(state, ctx, restore, verb, empty_message),
     };
     let program = state
         .programs
@@ -1666,6 +1695,70 @@ fn apply_history_restore(
     refresh_edit_errors(state);
     state.message.clear();
     vec![]
+}
+
+/// Applies `restore` to the active program outside Edit mode, then re-evaluates
+/// and persists the restored text.
+///
+/// When the program is playing as a sequence, steps the restore added are
+/// scheduled and steps it removed have their queued repeats cancelled, as for
+/// `Action::ToggleSequencerStep`. Refuses when the source file has changed on
+/// disk.
+fn apply_committed_history_restore(
+    state: &mut AppState,
+    ctx: &Context,
+    restore: impl FnOnce(&mut Program, usize) -> Option<usize>,
+    verb: &str,
+    empty_message: &str,
+) -> Vec<Effect> {
+    // A restore both edits and persists; refuse on top of external changes.
+    if ctx.source_stale {
+        return vec![Effect::ShowMessage(
+            "File changed on disk (reload before editing)".to_string(),
+        )];
+    }
+    let i = state.active_program_index;
+    let display_name = state.programs.display_name(i);
+    let Some(program) = state.programs.program_mut(i) else {
+        return vec![];
+    };
+    // There is no Edit-mode cursor to save, so the redo snapshot's cursor is
+    // the end of the text, as for a recorded take.
+    let cursor = program.text().len();
+    let old_text = program.text().to_string();
+    if restore(program, cursor).is_none() {
+        return vec![Effect::ShowMessage(empty_message.to_string())];
+    }
+    let mut effects = vec![
+        // Posted first so that an evaluation error or a refused save, which
+        // set their own message, stay on screen.
+        Effect::ShowMessage(format!("{} change to {}", verb, display_name)),
+        Effect::EvaluateProgram {
+            program_index: i,
+            mode_on_success: None,
+            mode_on_failure: None,
+        },
+        Effect::UpdateSource(i),
+    ];
+    // Playing steps repeat independently of the text, so bring them in line
+    // with the restored step list.
+    if sequence_is_live(ctx, i) {
+        let old_steps = step_sixteenths(&old_text);
+        let new_steps = step_sixteenths(state.active_program().text());
+        effects.extend(new_steps.difference(&old_steps).map(|&sixteenth| {
+            Effect::PlaySequencerStep {
+                program_index: i,
+                sixteenth,
+            }
+        }));
+        effects.extend(old_steps.difference(&new_steps).map(|&sixteenth| {
+            Effect::RemovePendingSequencerStep {
+                program_index: i,
+                sixteenth,
+            }
+        }));
+    }
+    effects
 }
 
 /// Refreshes `Mode::Edit.errors` from the active program's text. Called
@@ -2944,10 +3037,12 @@ mod tests {
     }
 
     #[test]
-    fn undo_outside_edit_mode_is_a_no_op() {
+    fn undo_in_select_mode_with_empty_history_shows_message() {
         let mut state = test_state();
         let effects = apply_with_empty_status(&mut state, Action::Undo);
-        assert!(effects.is_empty(), "expected no effects, got {:?}", effects);
+        assert_eq!(messages(&effects), vec!["Nothing to undo"]);
+        let effects = apply_with_empty_status(&mut state, Action::Redo);
+        assert_eq!(messages(&effects), vec!["Nothing to redo"]);
         assert!(matches!(state.mode, Mode::Select));
     }
 
@@ -3323,6 +3418,52 @@ _ = saw(220);";
     }
 
     #[test]
+    fn undo_and_redo_of_sequencer_toggle_reevaluate_and_persist() {
+        let mut state = sequencer_state();
+        let original = state.active_program().text().to_string();
+        apply_with_empty_status(&mut state, Action::ToggleSequencerStep { sixteenth: 8 });
+        let toggled = state.active_program().text().to_string();
+        assert_ne!(original, toggled);
+
+        for (action, verb, expected) in [
+            (Action::Undo, "Undid", &original),
+            (Action::Redo, "Redid", &toggled),
+        ] {
+            let effects = apply_with_empty_status(&mut state, action);
+            assert_eq!(state.active_program().text(), expected);
+            assert!(
+                matches!(&effects[0], Effect::ShowMessage(m) if m.starts_with(verb)),
+                "expected a {} message, got {:?}",
+                verb,
+                effects
+            );
+            assert!(matches!(
+                effects[1],
+                Effect::EvaluateProgram {
+                    program_index: 0,
+                    mode_on_success: None,
+                    mode_on_failure: None,
+                }
+            ));
+            assert!(matches!(effects[2], Effect::UpdateSource(0)));
+            assert_eq!(effects.len(), 3);
+        }
+    }
+
+    #[test]
+    fn undo_outside_edit_mode_refuses_when_source_stale() {
+        let mut state = sequencer_state();
+        apply_with_empty_status(&mut state, Action::ToggleSequencerStep { sixteenth: 8 });
+        let toggled = state.active_program().text().to_string();
+        let effects = apply_with_stale_source(&mut state, Action::Undo);
+        assert_eq!(
+            messages(&effects),
+            vec!["File changed on disk (reload before editing)"]
+        );
+        assert_eq!(state.active_program().text(), toggled);
+    }
+
+    #[test]
     fn toggle_sequencer_step_off_removes_off_grid_steps_in_window() {
         let mut state = AppState::from_source(
             "on_beats = fn(w) => fn(bs) => w;\n\
@@ -3345,6 +3486,47 @@ _ = saw(220);";
             "expected a beat-off message, got {:?}",
             effects
         );
+    }
+
+    #[test]
+    fn undo_and_redo_while_playing_sync_the_playing_steps() {
+        let mut state = sequencer_state();
+        let now = Instant::now();
+        let status = status_with_anchor(now - Duration::from_secs(1));
+        apply_with_status(
+            &mut state,
+            &status,
+            now,
+            Action::ToggleSequencerStep { sixteenth: 4 },
+        );
+
+        let effects = apply_with_status(&mut state, &status, now, Action::Undo);
+        assert!(
+            matches!(
+                effects.last(),
+                Some(Effect::RemovePendingSequencerStep {
+                    program_index: 0,
+                    sixteenth: 4,
+                })
+            ),
+            "expected RemovePendingSequencerStep last, got {:?}",
+            effects
+        );
+        assert_eq!(effects.len(), 4);
+
+        let effects = apply_with_status(&mut state, &status, now, Action::Redo);
+        assert!(
+            matches!(
+                effects.last(),
+                Some(Effect::PlaySequencerStep {
+                    program_index: 0,
+                    sixteenth: 4,
+                })
+            ),
+            "expected PlaySequencerStep last, got {:?}",
+            effects
+        );
+        assert_eq!(effects.len(), 4);
     }
 
     #[test]
@@ -3817,6 +3999,20 @@ _ = saw(220);";
 
     fn record() -> Action {
         Action::Transport(Transport::Record)
+    }
+
+    #[test]
+    fn undo_during_a_take_is_a_no_op() {
+        let t0 = Instant::now();
+        let mut state = record_state(RECORD_SOURCE, 1);
+        let program = state.programs.program_mut(1).unwrap();
+        program.record_edit(0);
+        program.set_text("2".to_string());
+        apply_at(&mut state, t0, 1.0, record());
+        assert!(matches!(state.mode, Mode::Record { .. }));
+        let effects = apply_at(&mut state, t0, 1.5, Action::Undo);
+        assert!(effects.is_empty(), "expected no effects, got {:?}", effects);
+        assert_eq!(state.programs.program(1).unwrap().text(), "2");
     }
 
     fn note_on(t0: Instant, seconds: f64) -> Action {
