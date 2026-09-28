@@ -458,22 +458,32 @@ impl Player {
     }
 
     /// Builds the per-measure beats waveform — a sequence of `mark`-tagged
-    /// short silences, one per beat — used to keep timing visible to the
-    /// rest of the runtime.
+    /// beats used to keep timing visible to the rest of the runtime as well as
+    /// generating metronome clicks.
     pub fn beats_waveform(&self, environment: &Environment) -> waveform::Waveform<MarkId> {
-        let seconds_per_beat = duration_from_beats(self.tempo, 1);
+        let seconds_per_beat = duration_from_beats(self.tempo, 1).as_secs_f32();
         let mut ws = Vec::new();
         for i in 0..self.beats_per_measure {
             ws.push(format!(
-                "0 | fin(time - {}) | seq(time - {}) | mark({})",
-                seconds_per_beat.as_secs_f32(),
-                seconds_per_beat.as_secs_f32(),
+                "({} * _metronome_amplitude) | fin(time - {}) | seq(time - {}) | mark({})",
+                click_source(i == 0),
+                seconds_per_beat,
+                seconds_per_beat,
                 i + 1
             ));
         }
         let source = format!("<[{}]>", ws.join(", "));
-        let bindings: Vec<expr::SourceBinding<MarkId, Source>> =
-            vec![expr::Binding::Open(vec!["__prelude".to_string()]).into()];
+        let metronome_amplitude = waveform::Waveform::Marked {
+            id: MarkId::MetronomeAmplitude,
+            waveform: Box::new(waveform::Waveform::Const(0.0)),
+        };
+        let bindings: Vec<expr::SourceBinding<MarkId, Source>> = vec![
+            expr::Binding::Open(vec!["__prelude".to_string()]).into(),
+            expr::SourceBinding::definition(
+                expr::Pattern::Identifier("_metronome_amplitude".to_string()),
+                expr::Expr::Waveform(metronome_amplitude).into(),
+            ),
+        ];
         match environment
             .evaluate_source(&source, &bindings)
             .map(|s| s.expr)
@@ -489,6 +499,40 @@ impl Player {
             Err(message) => panic!("Error evaluating beats waveform: {}", message),
         }
     }
+
+    /// Turns the metronome click on both Beats waveforms on or off.
+    pub fn set_metronome(&self, on: bool) {
+        self.modify(
+            WaveformSelector::AllBeats,
+            MarkId::MetronomeAmplitude,
+            waveform::Waveform::Const(if on { 1.0 } else { 0.0 }),
+        );
+    }
+}
+
+/// Returns tuun source for a metronome click followed by silence, pitched
+/// higher when `accent`.
+fn click_source(accent: bool) -> String {
+    const CLICK_SECS: f32 = 0.02;
+    const Q: f32 = 4.0;
+    // Measured peaks land around -12 dBFS.
+    const GAIN: f32 = 1.4;
+    let center_hz = if accent { 2000.0 } else { 1000.0 };
+    // A constant-peak-gain band-pass filter (RBJ Audio EQ Cookbook, "BPF
+    // (constant 0 dB peak gain)") applied to a decaying noise burst.
+    format!(
+        "let
+           w0 = 2 * 3.14159265 * {center_hz} / sample_rate,
+           alpha = sine(0, w0) / (2 * {Q}),
+           a0 = 1 + alpha,
+         in
+           ((noise * (1 - time / {CLICK_SECS}) * {GAIN}
+             | filter([alpha / a0, 0, -alpha / a0],
+                      [-2 * sine(0, w0 + 3.14159265 / 2) / a0, (1 - alpha) / a0])
+             | fin(time - {CLICK_SECS})
+             | seq(time - {CLICK_SECS}))
+            \\ 0)"
+    )
 }
 
 /// Builds the short fade-out ramp to be substituted at a `Terminator` mark to

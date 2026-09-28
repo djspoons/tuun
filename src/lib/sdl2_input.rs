@@ -314,6 +314,7 @@ impl InputHandler {
                 )]),
                 // Enter Keys (piano) mode
                 "k" => Some(vec![Action::EnterKeysMode]),
+                "m" => Some(vec![Action::ToggleMetronome]),
                 // Digits 1..=8 select a program in the active bank.
                 t if t.len() == 1 => match t.parse::<usize>() {
                     Ok(n) if (1..=PROGRAMS_PER_BANK).contains(&n) => {
@@ -374,7 +375,7 @@ mod tests {
                 actions
             );
         }
-        for text in ["1", "k", "K", "D"] {
+        for text in ["1", "k", "K", "D", "m"] {
             let actions = handler.classify_text_input(text, &state);
             assert!(matches!(actions.as_deref(), Some([])), "{:?}", text);
         }
@@ -456,6 +457,17 @@ mod tests {
             "expected NoteOn(E4=64), got {:?}",
             actions[0]
         );
+    }
+
+    #[test]
+    fn select_mode_m_toggles_the_metronome() {
+        let handler = InputHandler::new(false, 800, 600);
+        let state = test_state(Mode::Select);
+        let actions = handler.classify_text_input("m", &state);
+        assert!(matches!(
+            actions.as_deref(),
+            Some([Action::ToggleMetronome])
+        ));
     }
 
     #[test]

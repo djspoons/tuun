@@ -67,6 +67,7 @@ In "select" mode (when a solid triangle appears at the left-hand side):
 * K - enter **keys** mode
 * Shift + D - print the current program's evaluated form to stdout
 * Shift + K - install the current program as the keys instrument
+* M - turn the **metronome** on or off
 * 1 to 8 - select the program with the given number
 * Down - select the next program
 * Up - select the previous program
@@ -114,6 +115,10 @@ Tuun provides a limited MIDI integration, specifically for the Novation Launchke
     * Arrow buttons to the left of the pads scroll from beats 1-4 to beats 5-8 and so on
 
 * "Play" button starts the current waveform at the beginning of the next measure with the same repeating behavior as the bottom pads in "clip launcher" mode
+* "Record" button arms recording MIDI notes starting at the beginning of the next measure; notes are written into the current program at the end of recording
+* "Stop" button cancels any pending playback for the current program or cancels the current recording
+
+* "Metronome" button turns the metronome on or off
 
 ## WebAssembly
 

@@ -110,6 +110,7 @@ pub fn classify(
         Event::LaunchDown => Some(vec![Action::ToggleLaunchMode]),
         Event::UndoDown => Some(vec![Action::Undo]),
         Event::RedoDown => Some(vec![Action::Redo]),
+        Event::MetronomeDown => Some(vec![Action::ToggleMetronome]),
 
         Event::NoteOn {
             key,
@@ -168,6 +169,7 @@ pub fn update_launchkey_state(
         actions::Mode::Record { .. } => U7_MAX,
         _ => 0,
     });
+    launchkey.set_metronome_brightness(if state.metronome { U7_MAX } else { 0 });
 
     let bank_start = state.bank_start();
     if launchkey.pad_mode != launchkey::PadMode::DAW {
@@ -653,5 +655,12 @@ mod tests {
             let actions = classify(&launchkey::Event::RedoDown, &state).unwrap();
             assert!(matches!(actions[..], [Action::Redo]));
         }
+    }
+
+    #[test]
+    fn metronome_button_toggles_the_metronome() {
+        let state = test_state(DawPadMode::ClipLauncher);
+        let actions = classify(&launchkey::Event::MetronomeDown, &state).unwrap();
+        assert!(matches!(actions[..], [Action::ToggleMetronome]));
     }
 }

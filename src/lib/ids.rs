@@ -48,6 +48,8 @@ pub enum WaveformSelector {
     ProgramVoices(usize),
     /// Every program, step, and key waveform; not the Beats timekeepers.
     AllVoices,
+    /// Both Beats timekeepers.
+    AllBeats,
 }
 
 impl tracker::Select<WaveformId> for WaveformSelector {
@@ -60,6 +62,7 @@ impl tracker::Select<WaveformId> for WaveformSelector {
                 WaveformId::Program(i) | WaveformId::Step { program: i, .. } if i == p
             ),
             WaveformSelector::AllVoices => !id.is_beats(),
+            WaveformSelector::AllBeats => id.is_beats(),
         }
     }
 }
@@ -76,8 +79,9 @@ pub enum MarkId {
         program: usize,
         label: String,
     },
-    Amplitude,  // use to set top-level amplitude
-    Terminator, // used to stop programs
+    Amplitude,          // use to set top-level amplitude
+    Terminator,         // used to stop programs
+    MetronomeAmplitude, // used to set the level of the metronome click
     UserDefined(u32),
     // TODO consider replacing "UserDefined" with cases that better describe the cases
     //VisualizeTiming, // How mark(1) is currently used
@@ -98,6 +102,7 @@ impl fmt::Display for MarkId {
             }
             MarkId::Amplitude => write!(f, "amplitude"),
             MarkId::Terminator => write!(f, "terminator"),
+            MarkId::MetronomeAmplitude => write!(f, "metronome"),
             MarkId::UserDefined(id) => write!(f, "{:?}", id),
         }
     }
@@ -141,6 +146,15 @@ mod tests {
         assert!(selector.matches(&WaveformId::Key(60)));
         assert!(!selector.matches(&WaveformId::Beats(false)));
         assert!(!selector.matches(&WaveformId::Beats(true)));
+    }
+
+    #[test]
+    fn selector_all_beats_matches_only_beats() {
+        let selector = WaveformSelector::AllBeats;
+        assert!(selector.matches(&WaveformId::Beats(false)));
+        assert!(selector.matches(&WaveformId::Beats(true)));
+        assert!(!selector.matches(&WaveformId::Program(0)));
+        assert!(!selector.matches(&WaveformId::Key(60)));
     }
 
     #[test]

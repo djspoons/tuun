@@ -120,6 +120,7 @@ pub enum Event {
     UndoDown,
     /// The Undo button, pressed while Shift is held (marked "Redo").
     RedoDown,
+    MetronomeDown,
 }
 
 #[derive(Debug, Error)]
@@ -180,6 +181,11 @@ const BRIGHTNESS_CHANNEL: u8 = 3;
 const SHIFT_CC: u8 = 63;
 
 const UNDO_CC: u8 = 77;
+
+/// The Metronome button. Hypothesis (unverified on hardware): its LED is
+/// monochrome like Record's, so its brightness is set by sending the same CC
+/// back on `BRIGHTNESS_CHANNEL`.
+const METRONOME_CC: u8 = 76;
 
 const DAW_MODE_DISPLAY_TARGET: u8 = 34;
 
@@ -357,10 +363,21 @@ impl Launchkey {
 
     /// Sets the brightness of the Record button's LED, from 0 (dim) to 127.
     pub fn set_record_brightness(&mut self, brightness: u8) {
+        self.set_brightness(RECORD_CC, brightness);
+    }
+
+    /// Sets the brightness of the Metronome button's LED, from 0 (dim) to 127.
+    pub fn set_metronome_brightness(&mut self, brightness: u8) {
+        self.set_brightness(METRONOME_CC, brightness);
+    }
+
+    /// Sets the brightness of the monochrome LED on the button that sends
+    /// `cc`, from 0 (dim) to 127.
+    fn set_brightness(&mut self, cc: u8, brightness: u8) {
         self.send_event(LiveEvent::Midi {
             channel: BRIGHTNESS_CHANNEL.into(),
             message: MidiMessage::Controller {
-                controller: RECORD_CC.into(),
+                controller: cc.into(),
                 value: brightness.min(127).into(),
             },
         });
@@ -569,6 +586,8 @@ impl DAWState {
                         (UNDO_CC, 127) if self.shift_held => Some(Event::RedoDown),
                         (UNDO_CC, 127) => Some(Event::UndoDown),
                         (UNDO_CC, 0) => None,
+                        (METRONOME_CC, 127) => Some(Event::MetronomeDown),
+                        (METRONOME_CC, 0) => None,
 
                         _ => {
                             println!(
@@ -1271,6 +1290,16 @@ mod tests {
             Some(Event::RecordDown)
         ));
         assert!(state.decode(&[0xB0, 117, 0]).is_none());
+    }
+
+    #[test]
+    fn metronome_button_press_decodes_and_release_is_ignored() {
+        let mut state = daw_state();
+        assert!(matches!(
+            state.decode(&[0xB0, 76, 127]),
+            Some(Event::MetronomeDown)
+        ));
+        assert!(state.decode(&[0xB0, 76, 0]).is_none());
     }
 
     #[test]

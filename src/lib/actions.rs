@@ -141,6 +141,8 @@ pub struct AppState {
     /// The measure the sequencer pad grid is showing: page 0 = beats [1, 5),
     /// page 1 = beats [5, 9), and so on.
     pub sequencer_page: u8,
+    /// Whether the metronome clicks on every beat.
+    pub metronome: bool,
     /// Set by `Effect::Exit`; `main` checks at top of loop and breaks.
     pub should_exit: bool,
     /// Last user-visible status message. Set by `Effect::ShowMessage` (and
@@ -171,6 +173,7 @@ impl AppState {
             launch_mode: LaunchMode::Toggle,
             daw_pad_mode: DawPadMode::ClipLauncher,
             sequencer_page: 0,
+            metronome: false,
             should_exit: false,
             message,
         })
@@ -395,6 +398,8 @@ pub enum Action {
     /// Switch the clip launcher's top pads between `LaunchMode::Toggle` and
     /// `LaunchMode::Trigger`.
     ToggleLaunchMode,
+    /// Turn the metronome click on or off.
+    ToggleMetronome,
 
     // --- program-related I/O and other effects ---
     ShowMessage(String),
@@ -432,6 +437,8 @@ pub enum Effect {
     PlaySequencerStep { program_index: usize, sixteenth: u8 },
     /// Remove one sequencer step's pending playback from the tracker.
     RemovePendingSequencerStep { program_index: usize, sixteenth: u8 },
+    /// Turn the metronome click on the Beats waveforms on or off.
+    SetMetronome(bool),
     /// Send a Modify command to the tracker for the selected waveforms.
     ModifyWaveform {
         selector: WaveformSelector,
@@ -879,6 +886,17 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
                 "Launch mode: {}",
                 state.launch_mode.display_name()
             ))]
+        }
+
+        Action::ToggleMetronome => {
+            state.metronome = !state.metronome;
+            vec![
+                Effect::SetMetronome(state.metronome),
+                Effect::ShowMessage(format!(
+                    "Metronome {}",
+                    if state.metronome { "on" } else { "off" }
+                )),
+            ]
         }
 
         Action::ShowMessage(message) => vec![Effect::ShowMessage(message)],
@@ -3249,6 +3267,20 @@ _ = saw(220);";
         assert_eq!(state.launch_mode, LaunchMode::Trigger);
         apply_with_empty_status(&mut state, Action::ToggleLaunchMode);
         assert_eq!(state.launch_mode, LaunchMode::Toggle);
+    }
+
+    #[test]
+    fn toggle_metronome_flips_the_click_on_and_off() {
+        let mut state = test_state();
+        assert!(!state.metronome);
+        let effects = apply_with_empty_status(&mut state, Action::ToggleMetronome);
+        assert!(state.metronome);
+        assert!(matches!(effects[0], Effect::SetMetronome(true)));
+        assert!(matches!(&effects[1], Effect::ShowMessage(m) if m == "Metronome on"));
+        let effects = apply_with_empty_status(&mut state, Action::ToggleMetronome);
+        assert!(!state.metronome);
+        assert!(matches!(effects[0], Effect::SetMetronome(false)));
+        assert!(matches!(&effects[1], Effect::ShowMessage(m) if m == "Metronome off"));
     }
 
     #[test]

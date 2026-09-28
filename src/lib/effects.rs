@@ -233,6 +233,9 @@ impl EffectRunner {
                     self.player.remove_pending(selector, Some(after));
                 }
             }
+            Effect::SetMetronome(on) => {
+                self.player.set_metronome(on);
+            }
             Effect::ModifyWaveform {
                 selector,
                 mark_id,
