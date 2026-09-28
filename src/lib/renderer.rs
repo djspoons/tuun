@@ -272,9 +272,8 @@ impl Renderer {
             // write will queue.
             let circle = match take_phase {
                 Some(Phase::Armed) => Some((RECORD_COLOR, u8::MAX)),
-                Some(Phase::Recording) => Some((RECORD_COLOR, beat_fade)),
                 Some(Phase::Finishing(Finish::Play)) => Some((ACTIVE_COLOR, u8::MAX)),
-                Some(Phase::Finishing(Finish::Silent)) => None,
+                Some(Phase::Recording | Phase::Finishing(Finish::Silent)) => None,
                 None => status
                     .has_pending_mark(
                         now,

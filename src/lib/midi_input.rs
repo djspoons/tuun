@@ -132,13 +132,7 @@ pub fn classify(
     }
 }
 
-/// Pushes the current app state out to the Launchkey hardware: pad colors
-/// for active/pending program waveforms and the installed-keys program,
-/// plus the pad-function button color reflecting `repeat_after_measures`
-/// and the ">" button color reflecting `launch_mode`.
-///
-/// `status` and the controller handle stay as separate args — they don't
-/// live on `AppState`.
+/// Pushes the current app state out to the Launchkey hardware.
 pub fn update_launchkey_state(
     state: &actions::AppState,
     status: &tracker::Status<WaveformId, MarkId>,
@@ -171,13 +165,7 @@ pub fn update_launchkey_state(
         renderer::current_beat_info(now, status);
 
     launchkey.set_record_brightness(match &state.mode {
-        actions::Mode::Record { take, .. } => match take.phase() {
-            recorder::Phase::Armed => U7_MAX,
-            recorder::Phase::Recording | recorder::Phase::Finishing(_) => {
-                let phase = renderer::beat_phase(now, current_beat_start, current_beat_duration);
-                ((1.0 - phase) * U7_MAX as f32) as u8
-            }
-        },
+        actions::Mode::Record { .. } => U7_MAX,
         _ => 0,
     });
 
@@ -273,8 +261,26 @@ fn update_pads_clip_launcher(
         let program_index = bank_start + i;
         let (red, green, blue) = program_pad_color(program);
         let is_installed_keys = state.keys.as_ref().is_some_and(|k| k.id == program_index);
-        // Top row is based on active waveforms
-        if status.has_active_mark(
+        let take_phase = match &state.mode {
+            actions::Mode::Record { take, .. } if program_index == state.active_program_index => {
+                Some(take.phase())
+            }
+            _ => None,
+        };
+        // Top row is based on active waveforms; the take's red wins over the
+        // sounding green.
+        if matches!(
+            take_phase,
+            Some(recorder::Phase::Recording | recorder::Phase::Finishing(_))
+        ) {
+            let (r, g, b) = pulsed(
+                (U7_MAX, 0, 0),
+                now,
+                current_beat_start,
+                current_beat_duration,
+            );
+            launchkey.set_daw_top_pad_color(i as u8, r, g, b);
+        } else if status.has_active_mark(
             now,
             &WaveformSelector::ProgramVoices(program_index),
             &MarkId::TopLevel,
@@ -304,12 +310,18 @@ fn update_pads_clip_launcher(
             // empty
             launchkey.set_daw_top_pad_color(i as u8, 0, 0, 0);
         }
-        // Bottom row is based on pending waveforms
-        if status.has_pending_mark(
-            now,
-            &WaveformSelector::ProgramVoices(program_index),
-            &MarkId::TopLevel,
-        ) {
+        // Bottom row is based on pending waveforms. An armed take is waiting
+        // for its start boundary, and the Finishing (play) green stands in for
+        // the pending mark the write will queue.
+        if take_phase == Some(recorder::Phase::Armed) {
+            launchkey.set_daw_bottom_pad_color(i as u8, U7_MAX, 0, 0);
+        } else if take_phase == Some(recorder::Phase::Finishing(recorder::Finish::Play))
+            || status.has_pending_mark(
+                now,
+                &WaveformSelector::ProgramVoices(program_index),
+                &MarkId::TopLevel,
+            )
+        {
             launchkey.set_daw_bottom_pad_color(i as u8, 0, 127, 0);
         } else if is_installed_keys {
             // If it's the installed keys program, pulse the configured color.
