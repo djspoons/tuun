@@ -429,9 +429,8 @@ where
     }
 }
 
-/// Replaces zero or more parts of `waveform` with a copy of `new_waveform.`
-///
-/// Replaces the contents of all Marked waveforms whose id matches `mark_id`.
+/// Replaces zero or more parts of `waveform` with a copy of `new_waveform.` by
+/// replacing the contents of all Marked waveforms whose id matches `mark_id`.
 pub fn substitute<M, S>(waveform: &mut Waveform<M, S>, mark_id: &M, new_waveform: &Waveform<M, S>)
 where
     S: Clone + Debug,

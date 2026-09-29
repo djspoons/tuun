@@ -383,12 +383,14 @@ where
                             span.clone(),
                         ));
                     }
-                    // Builtins operate on bare `Expr<M>` values, so unwrap
-                    // the SourceExpr children before calling and wrap the
-                    // result. Use the outer Application's span (`span`) so
-                    // errors — and the result's provenance — point at the
-                    // whole `f(x, y)` call site; builtins themselves don't
-                    // see spans.
+                    // Builtins operate on bare `Expr<M>` values, so unwrap the
+                    // SourceExpr children before calling and wrap the result.
+                    // Use the outer Application's span (`span`) so errors — and
+                    // the result's provenance — point at the whole `f(x, y)`
+                    // call site; builtins themselves don't see spans. An error
+                    // that already has a span came from a function the builtin
+                    // applied (e.g. `map`'s), and that span is more precise, so
+                    // keep it.
                     let actuals: Vec<Expr<M, S>> = arguments.into_iter().map(|s| s.expr).collect();
                     let result = function.0(actuals);
                     result
@@ -396,9 +398,9 @@ where
                             expr,
                             span: span.clone(),
                         })
-                        .map_err(|error| error.at(span))
+                        .map_err(|error| error.or_at(span))
                 }
-                (function, _) => Err(Error::eval(
+                (function, _) => Err(Error::internal(
                     format!("Invalid application: {}", function),
                     span.clone(),
                 )),
@@ -820,6 +822,25 @@ mod tests {
         // out, so it is reported as one.
         assert_eq!(error.kind(), ErrorKind::Internal);
         assert_eq!(error.message(), "internal error: Invalid application: 1");
+    }
+
+    #[test]
+    fn test_higher_order_builtins_keep_element_errors() {
+        // An out-of-range `nth` inside an applied function is the caller's
+        // error, not an internal one, and points at the `nth` call rather
+        // than the enclosing `map`/`reduce`/`unfold`.
+        for input in [
+            "map(fn(i) => nth(i, [1, 2]), [0, 5])",
+            "reduce(fn(a, i) => a + nth(i, [1, 2]), 0, [0, 5])",
+            "unfold(fn(i) => nth(i, [1, 2]), 5, 2)",
+        ] {
+            let error = eval_with_builtins(input).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::Eval, "{}", input);
+            assert_eq!(error.message(), "no element with index 5", "{}", input);
+            let start = input.find("nth").unwrap();
+            let end = start + "nth(i, [1, 2])".len();
+            assert_eq!(error.range(), Some(start..end), "{}", input);
+        }
     }
 
     #[test]

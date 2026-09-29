@@ -128,6 +128,14 @@ impl<S> Error<S> {
         Self { span, ..self }
     }
 
+    /// Returns this error located at `span` if it has no location yet.
+    pub fn or_at(self, span: Option<Span<S>>) -> Self {
+        match self.span {
+            Some(_) => self,
+            None => self.at(span),
+        }
+    }
+
     /// The error's byte range, without its source identity.
     pub fn range(&self) -> Option<Range<usize>> {
         self.span.as_ref().map(|span| span.range.clone())

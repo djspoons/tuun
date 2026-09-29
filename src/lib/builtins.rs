@@ -440,14 +440,10 @@ where
             [function, List(exprs)] => {
                 let mut results: Vec<SourceExpr<M, S>> = Vec::new();
                 for expr in exprs {
-                    let result = eval::evaluate_closed(SourceExpr::application(
+                    results.push(eval::evaluate_closed(SourceExpr::application(
                         function.clone().into(),
                         vec![expr.clone()], // can we avoid this clone?
-                    ));
-                    match result {
-                        Ok(expr) => results.push(expr),
-                        Err(err) => return Err(Error::internal_here(err.to_string())),
-                    }
+                    ))?);
                 }
                 Expr::List(results)
             }
@@ -466,14 +462,10 @@ where
             [function, acc, List(exprs)] => {
                 let mut acc: SourceExpr<M, S> = SourceExpr::from(acc.clone());
                 for expr in exprs {
-                    let result = eval::evaluate_closed(SourceExpr::application(
+                    acc = eval::evaluate_closed(SourceExpr::application(
                         function.clone().into(),
                         vec![acc, expr.clone()],
-                    ));
-                    acc = match result {
-                        Ok(expr) => expr,
-                        Err(err) => return Err(Error::internal_here(err.to_string())),
-                    };
+                    ))?;
                 }
                 acc.expr
             }
@@ -496,14 +488,10 @@ where
                 let mut current: SourceExpr<M, S> = SourceExpr::from(seed.clone());
                 for _ in 0..(*n as u32) {
                     results.push(current.clone());
-                    let result = eval::evaluate_closed(SourceExpr::application(
+                    current = eval::evaluate_closed(SourceExpr::application(
                         function.clone().into(),
                         vec![current.clone()],
-                    ));
-                    current = match result {
-                        Ok(expr) => expr,
-                        Err(err) => return Err(Error::internal_here(err.to_string())),
-                    };
+                    ))?;
                 }
                 Expr::List(results)
             }
