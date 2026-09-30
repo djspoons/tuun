@@ -161,6 +161,7 @@ where
     captured_file_prefix: String,
     command_receiver: mpsc::Receiver<Command<I, M>>,
     status_sender: mpsc::Sender<Status<I, M>>,
+    output_latency: Duration,
 
     // The time at which the first sample counted by `samples_elapsed` plays;
     // set by the first callback.
@@ -186,13 +187,15 @@ where
     /// processes commands from `command_receiver`.
     ///
     /// Each captured file is named from `captured_file_prefix`, the capture's
-    /// own file stem, and a serial number.
+    /// own file stem, and a serial number. `output_latency` is the time from
+    /// the start of a callback until the first sample it generates plays.
     pub fn new(
         sample_rate: u32,
         captured_output_dir: path::PathBuf,
         captured_file_prefix: String,
         command_receiver: mpsc::Receiver<Command<I, M>>,
         status_sender: mpsc::Sender<Status<I, M>>,
+        output_latency: Duration,
     ) -> Tracker<'a, I, M> {
         Tracker {
             generator: generator::Generator::new(sample_rate),
@@ -201,6 +204,7 @@ where
             captured_file_prefix,
             command_receiver,
             status_sender,
+            output_latency,
 
             clock_origin: None,
             samples_elapsed: 0,
@@ -292,6 +296,33 @@ where
             }
         }
     }
+}
+
+/// The latency the audio device adds after SDL2's queue of buffers.
+// Measured on macOS with the development machine's usual speakers as about 24
+// ms from a key strike, at both 1024 and 2048 samples, which includes a few ms
+// of MIDI input latency; with this value, a key strike's sound started 3.5 ms
+// after the tracker's prediction.
+const SDL_DEVICE_LATENCY: Duration = Duration::from_millis(21);
+
+/// Returns the time from the start of an SDL2 audio callback on macOS until the
+/// first sample it generates plays, for buffers of `buffer_samples` samples at
+/// `sample_rate`.
+///
+/// SDL2 keeps several buffers queued and refills each one as it finishes
+/// playing, behind the rest, so a callback's samples play after the rest of the
+/// queue and then the device's own latency.
+pub fn sdl_output_latency(sample_rate: u32, buffer_samples: u32) -> Duration {
+    // In src/audio/coreaudio/SDL_coreaudio.m (the same in SDL2 2.26.4 and 2.32.2), SDL2 queues 2
+    // buffers, or ceil(15 ms / buffer) * 2 when a buffer lasts less than 15 ms.
+    let buffer = duration_from_samples(buffer_samples as u64, sample_rate);
+    let minimum = Duration::from_millis(15);
+    let queued = if buffer < minimum {
+        minimum.div_duration_f64(buffer).ceil() as u32 * 2
+    } else {
+        2
+    };
+    buffer * (queued - 1) + SDL_DEVICE_LATENCY
 }
 
 /// Returns how long `samples` samples play for at `sample_rate`.
@@ -399,12 +430,8 @@ where
     type Channel = f32;
 
     fn callback(&mut self, out: &mut [f32]) {
-        // Assume that the callback is called far enough in advance of when the samples are
-        // needed that we can use time equal to the length of the buffer. If that's true, then
-        // the moment corresponding to the start of the buffer is the current time plus the length
-        // of the buffer.
-        let expected_start =
-            Instant::now() + duration_from_samples(out.len() as u64, self.sample_rate);
+        // The wall-clock estimate of when the first sample of this buffer plays.
+        let expected_start = Instant::now() + self.output_latency;
         let buffer_start = self.next_buffer_start(expected_start);
         // Check to see if we have any new commands
         self.empty_command_queue(buffer_start);
@@ -802,6 +829,7 @@ mod tests {
             String::new(),
             command_receiver,
             status_sender,
+            Duration::ZERO,
         );
         (tracker, command_sender, status_receiver)
     }
@@ -1014,6 +1042,7 @@ mod tests {
             "tuun_run".to_string(),
             command_receiver,
             status_sender,
+            Duration::ZERO,
         );
 
         let captured = |value| waveform::Waveform::Captured {

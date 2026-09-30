@@ -107,6 +107,8 @@ pub fn main() {
             captured_file_prefix.clone(),
             command_receiver,
             status_sender,
+            // No audio device plays these samples, so just use one buffer.
+            Duration::from_secs_f32(args.buffer_size as f32 / args.sample_rate as f32),
         );
         use sdl2::audio::AudioCallback;
         let mut out = vec![0.0f32; args.buffer_size as usize];
@@ -197,13 +199,15 @@ pub fn main() {
     };
     let device = audio_subsystem
         .open_playback(None, &desired_spec, |spec| {
-            println!("Spec: {:?}", spec);
+            let output_latency = tracker::sdl_output_latency(spec.freq as u32, spec.samples as u32);
+            println!("Spec: {:?}, output latency: {:?}", spec, output_latency);
             tracker::Tracker::<WaveformId, MarkId>::new(
                 args.sample_rate,
                 args.output_dir.clone().into(),
                 captured_file_prefix.clone(),
                 command_receiver,
                 status_sender,
+                output_latency,
             )
         })
         .unwrap();
