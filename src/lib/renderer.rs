@@ -878,7 +878,7 @@ pub fn current_beat_info(
         }
     }
     if current_beat == 0 {
-        println!(
+        panic!(
             "No current beat found in marks at time {:?}: {:?}",
             status.buffer_start, status.marks
         );

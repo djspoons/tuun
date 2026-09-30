@@ -13,6 +13,16 @@ use sdl2::audio;
 use crate::generator;
 use crate::waveform;
 
+/// The largest difference allowed between the tracker's sample clock and the
+/// wall clock before the tracker resynchronizes with the wall clock.
+// Measured with SDL2 on macOS (1024-sample buffers at 44.1 kHz), callbacks
+// arrive evenly with no burst at startup, and the audio clock runs about 6.5
+// ppm fast, so this resyncs about every 27 minutes. Late callbacks put the
+// wall-clock estimate up to ~6 ms ahead of the sample clock before catching up,
+// so a smaller symmetric threshold would trigger spurious resyncs; tightening
+// it would need a tighter bound only when the sample clock runs ahead.
+const MAX_CLOCK_ERROR: Duration = Duration::from_millis(10);
+
 /// Selects the waveforms a command or query applies to.
 pub trait Select<I>: Clone + fmt::Debug + Send {
     /// Returns true when the waveform identified by `id` is selected.
@@ -152,6 +162,11 @@ where
     command_receiver: mpsc::Receiver<Command<I, M>>,
     status_sender: mpsc::Sender<Status<I, M>>,
 
+    // The time at which the first sample counted by `samples_elapsed` plays;
+    // set by the first callback.
+    clock_origin: Option<Instant>,
+    samples_elapsed: u64,
+
     // Persistent generation state
     active_waveforms: Vec<ActiveWaveform<I, M>>,
     pending_waveforms: Vec<PendingWaveform<I, M>>, // sorted by start time
@@ -186,6 +201,9 @@ where
             captured_file_prefix,
             command_receiver,
             status_sender,
+
+            clock_origin: None,
+            samples_elapsed: 0,
 
             active_waveforms: Vec::new(),
             pending_waveforms: Vec::new(),
@@ -273,6 +291,20 @@ where
                 out.insert(file_stem.clone(), writer);
             }
         }
+    }
+}
+
+/// Returns how long `samples` samples play for at `sample_rate`.
+fn duration_from_samples(samples: u64, sample_rate: u32) -> Duration {
+    Duration::from_nanos((samples as u128 * 1_000_000_000 / sample_rate as u128) as u64)
+}
+
+/// Returns `a - b` in milliseconds, negative when `a` is earlier than `b`.
+fn signed_millis(a: Instant, b: Instant) -> f64 {
+    if a >= b {
+        (a - b).as_secs_f64() * 1e3
+    } else {
+        -(b - a).as_secs_f64() * 1e3
     }
 }
 
@@ -371,8 +403,9 @@ where
         // needed that we can use time equal to the length of the buffer. If that's true, then
         // the moment corresponding to the start of the buffer is the current time plus the length
         // of the buffer.
-        let buffer_start =
-            Instant::now() + Duration::from_secs_f32(out.len() as f32 / self.sample_rate as f32);
+        let expected_start =
+            Instant::now() + duration_from_samples(out.len() as u64, self.sample_rate);
+        let buffer_start = self.next_buffer_start(expected_start);
         // Check to see if we have any new commands
         self.empty_command_queue(buffer_start);
 
@@ -412,6 +445,7 @@ where
         }
 
         self.status_sender.send(status_to_send).unwrap();
+        self.samples_elapsed += out.len() as u64;
     }
 }
 
@@ -420,6 +454,45 @@ where
     I: Id,
     M: Clone + Debug + Send + PartialEq + fmt::Display,
 {
+    /// Returns the time at which the next buffer starts playing, as counted by
+    /// the samples generated so far. Modifies waveforms as necessary.
+    ///
+    /// Counting samples keeps each waveform's marks aligned with the samples
+    /// it generates. When the count strays from `expected` (the wall-clock
+    /// estimate) by more than `MAX_CLOCK_ERROR`, resynchronizes to `expected`
+    /// and shifts every active and pending waveform by the same amount.
+    fn next_buffer_start(&mut self, expected: Instant) -> Instant {
+        let origin = *self.clock_origin.get_or_insert(expected);
+        let counted = origin + duration_from_samples(self.samples_elapsed, self.sample_rate);
+        if expected.max(counted) - expected.min(counted) <= MAX_CLOCK_ERROR {
+            return counted;
+        }
+        println!(
+            "Resynchronizing tracker clock from {:?} to {:?} (diff is {:.3} ms)",
+            counted,
+            expected,
+            signed_millis(counted, expected)
+        );
+        let shift = |t: &mut Instant| {
+            if expected > counted {
+                *t += expected - counted;
+            } else {
+                *t -= counted - expected;
+            }
+        };
+        for active in &mut self.active_waveforms {
+            shift(&mut active.start);
+            active.marks.iter_mut().for_each(|m| shift(&mut m.start));
+        }
+        for pending in &mut self.pending_waveforms {
+            shift(&mut pending.start);
+            pending.marks.iter_mut().for_each(|m| shift(&mut m.start));
+        }
+        self.clock_origin = Some(expected);
+        self.samples_elapsed = 0;
+        expected
+    }
+
     // buffer_start is the time corresponding to the beginning of the current buffer
     fn process_command(&mut self, command: Command<I, M>, buffer_start: Instant) {
         match command {
@@ -650,8 +723,8 @@ where
             // are no active waveforms, then just updated filled and continue.
             if self.active_waveforms.is_empty() {
                 filled += segment_length;
-                segment_start +=
-                    Duration::from_secs_f32(segment_length as f32 / self.sample_rate as f32);
+                segment_start =
+                    buffer_start + duration_from_samples(filled as u64, self.sample_rate);
                 segment_length = out.len() - filled;
                 continue;
             }
@@ -698,8 +771,7 @@ where
                 }
             }
             filled += segment_length;
-            segment_start +=
-                Duration::from_secs_f32(segment_length as f32 / self.sample_rate as f32);
+            segment_start = buffer_start + duration_from_samples(filled as u64, self.sample_rate);
             segment_length = out.len() - filled;
         }
         (finished, allocations)
@@ -969,6 +1041,106 @@ mod tests {
             names,
             ["tuun_run_shared_0.wav", "tuun_run_shared_1.wav"],
             "each voice should write its own file, named from the prefix, stem, and serial"
+        );
+    }
+
+    /// Plays two waveforms that alternate like the Beats timekeepers: each
+    /// lasts `length` and repeats every `2 * length`, the second starting
+    /// `length` after the first.
+    fn play_alternating_beats(
+        sender: &mpsc::Sender<Command<WaveformId, MarkId>>,
+        length: Duration,
+    ) {
+        use waveform::Waveform::*;
+        let now = Instant::now();
+        for (even, offset) in [(false, Duration::ZERO), (true, length)] {
+            let beat = Marked {
+                id: MarkId::TopLevel,
+                waveform: Box::new(Fin {
+                    length: Box::new(BinaryPointOp(
+                        waveform::Operator::Subtract,
+                        Box::new(Time(())),
+                        Box::new(Const(length.as_secs_f32())),
+                    )),
+                    waveform: Box::new(Const(0.0)),
+                }),
+            };
+            sender
+                .send(Command::Play {
+                    id: WaveformId::Beats(even),
+                    waveform: beat,
+                    start: Some(now + offset),
+                    repeat_every: Some(2 * length),
+                })
+                .unwrap();
+        }
+    }
+
+    /// Returns whether a mark of the second Beats waveform covers the
+    /// status's `buffer_start`.
+    ///
+    /// Panics when no mark covers `buffer_start`.
+    fn even_beat_covers_buffer_start(status: &Status<WaveformId, MarkId>) -> bool {
+        let covering: Vec<_> = status
+            .marks
+            .iter()
+            .filter(|m| {
+                m.start <= status.buffer_start && status.buffer_start < m.start + m.duration
+            })
+            .collect();
+        assert!(
+            !covering.is_empty(),
+            "no mark covers {:?}: {:?}",
+            status.buffer_start,
+            status.marks
+        );
+        covering
+            .iter()
+            .any(|m| m.waveform_id == WaveformId::Beats(true))
+    }
+
+    #[test]
+    fn alternating_repeats_cover_buffer_start_when_the_audio_clock_runs_fast() {
+        let (mut tracker, sender, status_receiver) = test_tracker();
+        play_alternating_beats(&sender, Duration::from_millis(100));
+
+        // Calling back without waiting generates samples far faster than
+        // real time, as an extreme case of an audio clock running fast.
+        let mut out = vec![0.0f32; 64];
+        let mut even_covered = false;
+        for _ in 0..300 {
+            tracker.callback(&mut out);
+            even_covered |= even_beat_covers_buffer_start(&status_receiver.try_recv().unwrap());
+        }
+        assert!(even_covered, "the second waveform should have played");
+    }
+
+    #[test]
+    fn alternating_repeats_cover_buffer_start_when_the_audio_clock_runs_slow() {
+        let (mut tracker, sender, status_receiver) = test_tracker();
+        play_alternating_beats(&sender, Duration::from_millis(50));
+
+        // Waiting longer than each 8ms buffer between callbacks generates
+        // samples slower than real time, as an audio clock running slow.
+        let mut out = vec![0.0f32; 64];
+        let callbacks = 60;
+        let mut even_covered = false;
+        let mut buffer_starts = Vec::new();
+        for _ in 0..callbacks {
+            tracker.callback(&mut out);
+            std::thread::sleep(Duration::from_millis(11));
+            let status = status_receiver.try_recv().unwrap();
+            even_covered |= even_beat_covers_buffer_start(&status);
+            buffer_starts.push(status.buffer_start);
+        }
+        assert!(even_covered, "the second waveform should have played");
+        // Without resynchronizing, the buffers would span only the samples
+        // generated.
+        let generated = Duration::from_millis(8) * callbacks;
+        assert!(
+            buffer_starts[buffer_starts.len() - 1] - buffer_starts[0]
+                > generated + 2 * MAX_CLOCK_ERROR,
+            "the clock should have resynchronized forward"
         );
     }
 }
