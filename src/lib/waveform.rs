@@ -429,8 +429,20 @@ where
     }
 }
 
-/// Replaces zero or more parts of `waveform` with a copy of `new_waveform.` by
-/// replacing the contents of all Marked waveforms whose id matches `mark_id`.
+/// Replaces every `Marked` node of `waveform` whose id is `mark_id`, mark
+/// included, with a copy of `new_waveform`.
+///
+/// The mark may appear in `new_waveform` but is it not touched in this call.
+///
+/// # Example
+///
+/// ```
+/// use tuun::waveform::{self, Waveform::{Const, Marked}};
+///
+/// let mut w: waveform::Waveform<&str> = Marked { id: "m", waveform: Box::new(Const(1.0)) };
+/// waveform::substitute(&mut w, &"m", &Const(2.0));
+/// assert_eq!(w, Const(2.0));
+/// ```
 pub fn substitute<M, S>(waveform: &mut Waveform<M, S>, mark_id: &M, new_waveform: &Waveform<M, S>)
 where
     S: Clone + Debug,
@@ -438,11 +450,14 @@ where
 {
     use Waveform::*;
     match waveform {
-        Marked { id, waveform } => {
+        Marked {
+            id,
+            waveform: inner,
+        } => {
             if *id == *mark_id {
-                **waveform = new_waveform.clone();
+                *waveform = new_waveform.clone();
             } else {
-                substitute(waveform, mark_id, new_waveform);
+                substitute(inner, mark_id, new_waveform);
             }
         }
         // Leaf nodes — nothing to recurse into

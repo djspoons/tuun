@@ -2080,12 +2080,12 @@ fn apply_level_db(state: &mut AppState, program_index: usize, level_db: f32) -> 
         None => return vec![],
     };
     program.set_level_db(level_db);
-    let amplitude = player::db_to_amplitude(level_db);
+    let amplitude = player::amplitude(level_db);
 
     let mut effects = vec![Effect::ModifyWaveform {
         selector: WaveformSelector::ProgramVoices(program_index),
         mark_id: MarkId::Amplitude,
-        waveform: waveform::Waveform::Const(amplitude),
+        waveform: amplitude.clone(),
     }];
 
     // Mirror onto installed keys.
@@ -2099,7 +2099,7 @@ fn apply_level_db(state: &mut AppState, program_index: usize, level_db: f32) -> 
         effects.push(Effect::ModifyWaveform {
             selector: WaveformSelector::AllKeys,
             mark_id: MarkId::Amplitude,
-            waveform: waveform::Waveform::Const(amplitude),
+            waveform: amplitude,
         });
     }
 

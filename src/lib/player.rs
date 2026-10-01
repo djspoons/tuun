@@ -41,14 +41,15 @@ pub fn substitute_current_slider_values(
         let sliders = program.sliders();
         for (config, &normalized) in sliders.configs().iter().zip(sliders.normalized_values()) {
             let value = slider::denormalize(&config.function, normalized).unwrap_or(0.0);
-            waveform::substitute(
-                waveform,
-                &MarkId::Slider {
-                    program: program_index,
-                    label: config.label.clone(),
-                },
-                &waveform::Waveform::Const(value),
-            );
+            let mark_id = MarkId::Slider {
+                program: program_index,
+                label: config.label.clone(),
+            };
+            let marked = waveform::Waveform::Marked {
+                id: mark_id.clone(),
+                waveform: Box::new(waveform::Waveform::Const(value)),
+            };
+            waveform::substitute(waveform, &mark_id, &marked);
         }
     }
 }
@@ -398,8 +399,8 @@ impl Player {
             .send(tracker::Command::RemovePending { selector, after });
     }
 
-    /// Replaces the waveform under `mark_id` on every waveform matched by the
-    /// selector.
+    /// Replaces each `mark_id` mark with `waveform` on every waveform matched
+    /// by the selector.
     pub fn modify(
         &self,
         selector: WaveformSelector,
@@ -473,10 +474,7 @@ impl Player {
             ));
         }
         let source = format!("<[{}]>", ws.join(", "));
-        let metronome_amplitude = waveform::Waveform::Marked {
-            id: MarkId::MetronomeAmplitude,
-            waveform: Box::new(waveform::Waveform::Const(0.0)),
-        };
+        let metronome_amplitude = metronome_amplitude(false);
         let bindings: Vec<expr::SourceBinding<MarkId, Source>> = vec![
             expr::Binding::Open(vec!["__prelude".to_string()]).into(),
             expr::SourceBinding::definition(
@@ -505,7 +503,7 @@ impl Player {
         self.modify(
             WaveformSelector::AllBeats,
             MarkId::MetronomeAmplitude,
-            waveform::Waveform::Const(if on { 1.0 } else { 0.0 }),
+            metronome_amplitude(on),
         );
     }
 }
@@ -535,12 +533,43 @@ fn click_source(accent: bool) -> String {
     )
 }
 
-/// Builds the short fade-out ramp to be substituted at a `Terminator` mark to
-/// stop a waveform.
+/// Returns the `MetronomeAmplitude` mark holding the click's amplitude: 1
+/// when `on`, 0 otherwise.
+fn metronome_amplitude(on: bool) -> waveform::Waveform<MarkId> {
+    waveform::Waveform::Marked {
+        id: MarkId::MetronomeAmplitude,
+        waveform: Box::new(waveform::Waveform::Const(if on { 1.0 } else { 0.0 })),
+    }
+}
+
+/// Returns the `Amplitude` mark holding the amplitude for `level_db`.
+pub fn amplitude(level_db: f32) -> waveform::Waveform<MarkId> {
+    waveform::Waveform::Marked {
+        id: MarkId::Amplitude,
+        waveform: Box::new(waveform::Waveform::Const(db_to_amplitude(level_db))),
+    }
+}
+
+/// Returns `waveform` scaled by a fresh `Terminator` mark: `waveform *
+/// Marked(Terminator, 1)`.
+pub fn terminate(waveform: waveform::Waveform<MarkId>) -> waveform::Waveform<MarkId> {
+    use waveform::Waveform::{BinaryPointOp, Const, Marked};
+    BinaryPointOp(
+        waveform::Operator::Multiply,
+        Box::new(waveform),
+        Box::new(Marked {
+            id: MarkId::Terminator,
+            waveform: Box::new(Const(1.0)),
+        }),
+    )
+}
+
+/// Returns the replacement for a `Terminator` mark that fades a voice out over
+/// a short ramp and then ends it.
 pub fn stop_ramp() -> waveform::Waveform<MarkId> {
     use waveform::{Operator, Waveform::*};
     const STOP_DURATION_SECS: f32 = 0.05;
-    Fin {
+    terminate(Fin {
         length: Box::new(BinaryPointOp(
             Operator::Subtract,
             Box::new(Time(())),
@@ -555,7 +584,7 @@ pub fn stop_ramp() -> waveform::Waveform<MarkId> {
                 Box::new(Const(1.0 / STOP_DURATION_SECS)),
             )),
         )),
-    }
+    })
 }
 
 /// Wraps `waveform` with the standard voice marks: an `Amplitude` mark at
@@ -564,22 +593,11 @@ fn build_leveled_waveform(
     waveform: waveform::Waveform<MarkId>,
     level_db: f32,
 ) -> waveform::Waveform<MarkId> {
-    use waveform::Waveform::{BinaryPointOp, Const, Marked};
-    BinaryPointOp(
+    terminate(waveform::Waveform::BinaryPointOp(
         waveform::Operator::Multiply,
-        Box::new(BinaryPointOp(
-            waveform::Operator::Multiply,
-            Box::new(waveform),
-            Box::new(Marked {
-                id: MarkId::Amplitude,
-                waveform: Box::new(Const(db_to_amplitude(level_db))),
-            }),
-        )),
-        Box::new(Marked {
-            id: MarkId::Terminator,
-            waveform: Box::new(Const(1.0)),
-        }),
-    )
+        Box::new(waveform),
+        Box::new(amplitude(level_db)),
+    ))
 }
 
 /// Wraps `waveform` with the standard top-level marks: a `TopLevel` mark

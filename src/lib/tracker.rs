@@ -45,9 +45,9 @@ pub enum Command<I: Id, M> {
         // If set, play this waveform in a loop
         repeat_every: Option<Duration>,
     },
-    // Immediately modify every active and pending waveform matched by the selector
-    // to replace the contents of any marked waveform with the given mark_id with
-    // the new waveform.
+    // Immediately modify every active and pending waveform matched by the
+    // selector to replace any marked waveform with the given mark_id with the
+    // new waveform.
     Modify {
         selector: I::Selector,
         mark_id: M,
@@ -871,7 +871,7 @@ mod tests {
             .send(Command::Modify {
                 selector: WaveformSelector::AllKeys,
                 mark_id: MarkId::Amplitude,
-                waveform: waveform::Waveform::Const(0.0),
+                waveform: marked(MarkId::Amplitude, 0.0),
             })
             .unwrap();
         tracker.callback(&mut out);
@@ -896,7 +896,7 @@ mod tests {
             .send(Command::Modify {
                 selector: WaveformSelector::Only(WaveformId::Key(60)),
                 mark_id: MarkId::Amplitude,
-                waveform: waveform::Waveform::Const(0.0),
+                waveform: marked(MarkId::Amplitude, 0.0),
             })
             .unwrap();
         tracker.callback(&mut out);

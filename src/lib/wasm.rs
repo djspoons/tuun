@@ -319,9 +319,15 @@ impl Wasm {
 
         let last_value = self.last_slider_values.get(name).copied().unwrap_or(value);
 
-        let ramp = slider::make_ramp(last_value, value, self.buffer_duration.as_secs_f32());
+        let mark_id = MarkId::Slider(name.to_string());
+        let ramp = slider::make_ramp(
+            mark_id.clone(),
+            last_value,
+            value,
+            self.buffer_duration.as_secs_f32(),
+        );
         let ramp = generator::initialize_state(ramp);
-        waveform::substitute(waveform, &MarkId::Slider(name.to_string()), &ramp);
+        waveform::substitute(waveform, &mark_id, &ramp);
 
         self.last_slider_values.insert(name.to_string(), value);
     }

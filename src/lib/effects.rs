@@ -61,7 +61,7 @@ pub fn flush_slider_updates(
     let mut commands = Vec::with_capacity(pending.len());
     for (mark_id, value) in pending.drain() {
         let last_value = last_slider_values.entry(mark_id.clone()).or_insert(value);
-        let waveform = slider::make_ramp(*last_value, value, ramp_duration_secs);
+        let waveform = slider::make_ramp(mark_id.clone(), *last_value, value, ramp_duration_secs);
         *last_value = value;
         commands.push(tracker::Command::Modify {
             selector: WaveformSelector::AllVoices,
@@ -410,8 +410,11 @@ impl EffectRunner {
                     // Swap in the current values so the release doesn't snap
                     // back to stale ones.
                     player::substitute_current_slider_values(&mut note_off, &state.programs);
-                    self.player
-                        .modify(WaveformSelector::Only(id), MarkId::Terminator, note_off);
+                    self.player.modify(
+                        WaveformSelector::Only(id),
+                        MarkId::Terminator,
+                        player::terminate(note_off),
+                    );
                     return;
                 }
                 // No stored note-off (key wasn't NoteOn'd, or keys were
@@ -923,7 +926,7 @@ mod tests {
         // Seeded from the target, so the ramp is flat.
         assert_eq!(
             format!("{}", waveform),
-            format!("{}", slider::make_ramp::<MarkId>(0.7, 0.7, 0.02))
+            format!("{}", slider::make_ramp(key.clone(), 0.7, 0.7, 0.02))
         );
     }
 
@@ -947,8 +950,12 @@ mod tests {
                 panic!("expected a Modify command");
             };
             let expected = match mark_id {
-                MarkId::Slider { program: 0, .. } => slider::make_ramp::<MarkId>(0.1, 0.2, 0.02),
-                MarkId::Slider { program: 1, .. } => slider::make_ramp::<MarkId>(0.9, 0.8, 0.02),
+                MarkId::Slider { program: 0, .. } => {
+                    slider::make_ramp(mark_id.clone(), 0.1, 0.2, 0.02)
+                }
+                MarkId::Slider { program: 1, .. } => {
+                    slider::make_ramp(mark_id.clone(), 0.9, 0.8, 0.02)
+                }
                 other => panic!("unexpected mark {}", other),
             };
             assert_eq!(format!("{}", waveform), format!("{}", expected));
@@ -969,7 +976,7 @@ mod tests {
         };
         assert_eq!(
             format!("{}", waveform),
-            format!("{}", slider::make_ramp::<MarkId>(0.2, 0.8, 0.02))
+            format!("{}", slider::make_ramp(key.clone(), 0.2, 0.8, 0.02))
         );
         assert_eq!(last_slider_values.get(&key), Some(&0.8));
 
@@ -981,7 +988,7 @@ mod tests {
         };
         assert_eq!(
             format!("{}", waveform),
-            format!("{}", slider::make_ramp::<MarkId>(0.8, 0.5, 0.02))
+            format!("{}", slider::make_ramp(key.clone(), 0.8, 0.5, 0.02))
         );
         assert_eq!(last_slider_values.get(&key), Some(&0.5));
     }

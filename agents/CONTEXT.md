@@ -58,6 +58,10 @@ _Avoid_: early-hit window, pre-roll, anticipation window, grace period, toleranc
 A labelled point inside a waveform that can later be substituted — how a sound is stopped, and how a live slider value reaches it.
 _Avoid_: tag, label, handle
 
+**Terminator**:
+The mark on every voice through which it is released or stopped. What is written there only ever scales the voice, so it can end or quiet a voice but never make it louder.
+_Avoid_: stop mark, envelope
+
 **Slider**:
 A single value, declared on a binding, that can be changed while sound is playing. Every voice whose waveform uses that binding shares one synchronized view of it. The name the slider binds is visible only inside its declaring binding; other programs reach the slider by referencing that binding, not by naming the slider.
 _Avoid_: parameter, knob, control

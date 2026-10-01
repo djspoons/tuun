@@ -4,7 +4,7 @@ use crate::waveform;
 use crate::{builtins, eval, expr, parser};
 
 use waveform::Operator;
-use waveform::Waveform::{Append, BinaryPointOp, Const, Fin, Time};
+use waveform::Waveform::{Append, BinaryPointOp, Const, Fin, Marked, Time};
 
 // This file defines types and functions related to sliders that are platform-independent.
 
@@ -80,14 +80,16 @@ pub fn append_slider_bindings<M, S, F>(
     );
 }
 
-/// Build a waveform that ramps linearly from `last_value` to `new_value` over
-/// `ramp_duration_secs`, then holds `new_value` forever.
+/// Builds a `mark_id` mark around a waveform that ramps linearly from
+/// `last_value` to `new_value` over `ramp_duration_secs`, then holds
+/// `new_value` forever.
 pub fn make_ramp<M>(
+    mark_id: M,
     last_value: f32,
     new_value: f32,
     ramp_duration_secs: f32,
 ) -> waveform::Waveform<M> {
-    Append(
+    let ramp = Append(
         Box::new(Fin {
             length: Box::new(BinaryPointOp(
                 Operator::Subtract,
@@ -106,5 +108,9 @@ pub fn make_ramp<M>(
         }),
         Box::new(Const(new_value)),
         (),
-    )
+    );
+    Marked {
+        id: mark_id,
+        waveform: Box::new(ramp),
+    }
 }
