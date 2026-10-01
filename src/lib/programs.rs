@@ -484,16 +484,20 @@ impl Program {
     }
 
     /// Realigns the program with its binding after the source file was
-    /// re-parsed: updates the binding index and span, and re-slices `text`
-    /// from `source`.
+    /// re-parsed: updates the binding index and span.
     ///
-    /// Deliberately does NOT drop the evaluation result — the text is
-    /// unchanged semantically, only its location in the file moved. This is
-    /// the one sanctioned way to rewrite `text` without dropping it.
-    fn realign(&mut self, binding_index: usize, span: Range<usize>, source: &str) {
+    /// Leaves `text` and the evaluation result alone, so `text` may still
+    /// differ from `source[span]` when it holds unsaved edits.
+    fn realign(&mut self, binding_index: usize, span: Range<usize>) {
         self.binding_index = binding_index;
-        self.text = source[span.clone()].to_string();
         self.span = span;
+    }
+
+    /// Replaces `text` with the program's binding in `source`. However, the
+    /// text must be unchanged semantically. This does *not* update the
+    /// evaluation results.
+    fn resync_text(&mut self, source: &str) {
+        self.text = source[self.span.clone()].to_string();
     }
 
     /// Marks the program as a padding slot with no binding: the binding
@@ -1496,7 +1500,13 @@ impl ProgramSet {
         for (i, program) in self.programs.iter_mut().enumerate() {
             match &slot_lookup[i] {
                 Some((binding_index, span)) => {
-                    program.realign(*binding_index, span.clone(), &new_source);
+                    program.realign(*binding_index, span.clone());
+                    // Only the spliced program's text is re-read, picking up
+                    // the stripped semicolons. Any other program's text may
+                    // hold unsaved edits the file doesn't have.
+                    if i == program_index {
+                        program.resync_text(&new_source);
+                    }
                 }
                 None => {
                     // No binding for this slot — keep it as a padding slot.
@@ -1931,6 +1941,42 @@ synth = saw(440);"
         // span.
         assert_eq!(state.programs()[0].text(), "pulse(60)");
         assert_eq!(state.programs()[1].text(), "saw(440)");
+    }
+
+    #[test]
+    fn splice_keeps_unsaved_text_of_other_programs() {
+        let source = "\
+#{level_db=0}
+kick = pulse(60);
+#{level_db=0}
+synth = saw(220);";
+        let mut state = state_from(source);
+
+        // Slot 2 holds unsaved edits while slot 1 is spliced with a longer
+        // text, shifting slot 2's span.
+        state
+            .program_mut(1)
+            .unwrap()
+            .set_text("saw(440) * 0.5".to_string());
+        state
+            .program_mut(0)
+            .unwrap()
+            .set_text("pulse(120)".to_string());
+        state.splice(0).expect("splice should succeed");
+
+        assert_eq!(state.programs()[1].text(), "saw(440) * 0.5");
+        assert!(state.source.ends_with("synth = saw(220);"));
+
+        // Splicing slot 2 later lands its edits in its shifted span.
+        state.splice(1).expect("splice should succeed");
+        assert_eq!(
+            state.source,
+            "\
+#{level_db=0}
+kick = pulse(120);
+#{level_db=0}
+synth = saw(440) * 0.5;"
+        );
     }
 
     #[test]
