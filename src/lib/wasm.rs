@@ -11,7 +11,10 @@ use std::time::Duration;
 use wasm_bindgen::prelude::*;
 use web_sys::console;
 
-use crate::{builtins, eval, expr, generator, infer, modules, optimizer, parser, slider, waveform};
+use crate::{
+    builtins, eval, expr, generator, infer, modules, optimizer, parser, signatures, slider,
+    waveform,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 enum MarkId {
@@ -260,6 +263,7 @@ impl Wasm {
         let findings = infer::check_program(
             &resolve,
             &bindings,
+            signatures::signature,
             &parsed_expr,
             Some(infer::Expectation::Playable),
             &mut self.module_types,

@@ -94,7 +94,7 @@ use std::mem;
 use std::rc::Rc;
 
 use crate::expr::{Binding, Error, Expr, Pattern, SourceBinding, SourceExpr, Span};
-use crate::signatures;
+use crate::signatures::Signatures;
 use crate::types::{Refinement, Sort, Type};
 use crate::waveform;
 
@@ -116,13 +116,17 @@ pub enum Expectation {
 /// build reached (each module's own, once per check), then the program's.
 ///
 /// The signature mirrors [`crate::eval::evaluate`]; `resolve` should behave
-/// identically to the resolver evaluation uses. `cache` carries module
-/// export types and findings between checks; pass a fresh
-/// [`ModuleCache::default`] for a one-shot check. The caller owns its
-/// invalidation (see [`ModuleCache`]).
+/// identically to the resolver evaluation uses. `signatures` gives the
+/// declared type of each built-in by name (e.g.
+/// [`crate::signatures::signature`]); a built-in it returns `None` for checks
+/// as [`Type::Erroneous`]. `cache` carries module export types and findings
+/// between checks; pass a fresh [`ModuleCache::default`] for a one-shot
+/// check. The caller owns its invalidation (see [`ModuleCache`]), and should
+/// share one cache only between checks that use the same `signatures`.
 pub fn check_program<'a, M, S, F>(
     resolve: F,
     bindings: &'a [SourceBinding<M, S>],
+    signatures: Signatures,
     expr: &SourceExpr<M, S>,
     expectation: Option<Expectation>,
     cache: &mut ModuleCache<S>,
@@ -131,7 +135,7 @@ where
     F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
     S: Clone,
 {
-    let mut checker = Infer::new();
+    let mut checker = Infer::new(signatures);
     let mut context = Vec::new();
     let mut memo = HashMap::new();
     checker.build_context(&resolve, bindings, &mut context, &mut memo, cache);
@@ -163,24 +167,25 @@ where
     errors
 }
 
-/// Returns the type of the identifier covering `offset` in `expr`, rendered
-/// as diagnostics render types, or `None` when no identifier covers it.
+/// Returns the type of the identifier covering `offset` in `expr`, rendered as
+/// diagnostics render types, or `None` when no identifier covers it.
 ///
-/// Checks under the same bindings and expectation as [`check_program`], so
-/// the answer is the one the checker itself is working with, and reports it
-/// only once inference has finished: a parameter whose type the body settles
-/// reads as what it was solved to rather than as an unknown. Errors elsewhere
-/// in the program do not prevent an answer — inference recovers and carries
-/// on — and the errors themselves are discarded, since `check_program` is
-/// what reports them.
+/// Checks under the same bindings, signatures, and expectation as
+/// [`check_program`], so the answer is the one the checker itself is working
+/// with, and reports it only once inference has finished: a parameter whose
+/// type the body settles reads as what it was solved to rather than as an
+/// unknown. Errors elsewhere in the program do not prevent an answer —
+/// inference recovers and carries on — and the errors themselves are discarded,
+/// since `check_program` is what reports them.
 ///
 /// `offset` is a byte offset into the text `expr` was parsed from. Only
-/// identifiers answer: a name's type is what the context holds for it,
-/// which is well defined in a way an arbitrary sub-expression's is not (a
-/// function's node under an application judges to the call's result).
+/// identifiers answer: a name's type is what the context holds for it, which is
+/// well defined in a way an arbitrary sub-expression's is not (a function's
+/// node under an application judges to the call's result).
 pub fn type_at<'a, M, S, F>(
     resolve: F,
     bindings: &'a [SourceBinding<M, S>],
+    signatures: Signatures,
     expr: &SourceExpr<M, S>,
     expectation: Option<Expectation>,
     offset: usize,
@@ -190,7 +195,7 @@ where
     F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
     S: Clone,
 {
-    let mut checker = Infer::new();
+    let mut checker = Infer::new(signatures);
     let mut context = Vec::new();
     let mut memo = HashMap::new();
     // The probe is armed only after the context is built: the modules typed
@@ -347,6 +352,8 @@ enum Selection {
 /// Oliveira's substitution `S` and name supply `N` (Appendix E.1), plus the
 /// errors accumulated so far.
 struct Infer<S> {
+    /// The declared type of each built-in, by name.
+    signatures: Signatures,
     /// The last sort conflict a refinement variable reported, as
     /// (guaranteed, required).
     ///
@@ -476,8 +483,9 @@ impl<S> ModuleCache<S> {
 }
 
 impl<S: Clone> Infer<S> {
-    fn new() -> Infer<S> {
+    fn new(signatures: Signatures) -> Infer<S> {
         Infer {
+            signatures,
             subst: HashMap::new(),
             supply: 0,
             refs: Vec::new(),
@@ -3097,14 +3105,14 @@ impl<S: Clone> Infer<S> {
         let name = match &function.expr {
             Expr::Variable(name) => name,
             Expr::BuiltIn { name, .. } => {
-                return signatures::signature(name).as_ref().is_some_and(arrow);
+                return (self.signatures)(name).as_ref().is_some_and(arrow);
             }
             _ => return false,
         };
         match context.iter().rev().find(|(n, _)| n == name) {
             Some((_, ContextEntry::Ty(ty, _))) => arrow(&self.resolve(ty)),
             Some((_, ContextEntry::Builtin(builtin))) => {
-                signatures::signature(builtin).as_ref().is_some_and(arrow)
+                (self.signatures)(builtin).as_ref().is_some_and(arrow)
             }
             None => false,
         }
@@ -3256,7 +3264,7 @@ impl<S: Clone> Infer<S> {
                 }
                 Some((_, ContextEntry::Builtin(builtin))) => {
                     let builtin = builtin.clone();
-                    let ty = signatures::signature(&builtin).unwrap_or(Type::Erroneous);
+                    let ty = (self.signatures)(&builtin).unwrap_or(Type::Erroneous);
                     self.probe_type(&expr.span, &ty);
                     self.app_subtype(psi, ty, Some(&builtin))
                 }
@@ -3269,7 +3277,7 @@ impl<S: Clone> Infer<S> {
             // AT-Var for built-ins: the signature table stands in for the
             // typing-context entry.
             Expr::BuiltIn { name, .. } => {
-                let ty = signatures::signature(name).unwrap_or(Type::Erroneous);
+                let ty = (self.signatures)(name).unwrap_or(Type::Erroneous);
                 self.app_subtype(psi, ty, Some(name))
             }
             Expr::Function {
@@ -3715,7 +3723,7 @@ impl<S: Clone> Infer<S> {
                             let ty = match entry {
                                 ContextEntry::Ty(ty, _) => ty,
                                 ContextEntry::Builtin(builtin) => {
-                                    signatures::signature(&builtin).unwrap_or(Type::Erroneous)
+                                    (self.signatures)(&builtin).unwrap_or(Type::Erroneous)
                                 }
                             };
                             (member, ty)
@@ -3944,10 +3952,23 @@ mod tests {
     use crate::expr::BuiltInFn;
     use crate::modules;
     use crate::parser::{parse_module, parse_program};
+    use crate::signatures;
+
+    /// Returns the signature of the built-in named `name`: the test-owned
+    /// built-ins first, then the native table.
+    fn test_signature(name: &str) -> Option<Type> {
+        match name {
+            "w2" => Some(Type::function(
+                vec![Type::waveform(), Type::waveform()],
+                Type::waveform(),
+            )),
+            _ => signatures::signature(name),
+        }
+    }
 
     /// Builds a prelude mirroring the native one: the built-ins plus
     /// `tempo`, `sample_rate`, `mark`, and `debug`, and then the test
-    /// stand-ins `osc` and `cos`. The extra built-ins get stub closures — the
+    /// stand-ins `w2` and `cos`. The extra built-ins get stub closures — the
     /// checker only looks at their names.
     fn test_prelude<S: Clone + std::fmt::Debug + 'static>() -> Vec<SourceBinding<u32, S>> {
         let mut prelude: Vec<SourceBinding<u32, S>> = Vec::new();
@@ -3971,26 +3992,29 @@ mod tests {
             Pattern::Identifier("debug".to_string()),
             builtins::debug(|_| {}),
         ));
-        // `osc(freq, offset)`: the tests' stand-in for a built-in taking two
-        // waveforms to a waveform that may fold to a constant. It is a real
-        // built-in under another name, so it checks and evaluates as that
-        // built-in does; a change to which built-in fills this role is a
-        // change to this binding alone.
+        // `w2`: a built-in of type `(waveform, waveform) -> waveform` (see
+        // `test_signature`). Returning its first argument keeps evaluation
+        // consistent with that type.
         prelude.push(SourceBinding::definition(
-            Pattern::Identifier("osc".to_string()),
+            Pattern::Identifier("w2".to_string()),
             SourceExpr::from(Expr::BuiltIn {
-                name: "phase".to_string(),
-                function: BuiltInFn(Rc::new(builtins::phase)),
+                name: "w2".to_string(),
+                function: BuiltInFn(Rc::new(|arguments: Vec<Expr<u32, S>>| {
+                    arguments
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| Error::internal_here("w2 takes two arguments"))
+                })),
             }),
         ));
         // `cos`: the tests' stand-in for a definition-bound arrow over
-        // waveforms, `fn(x) => osc(0, x + pi / 2)`.
+        // waveforms, `fn(x) => w2(0, x + pi / 2)`.
         prelude.push(SourceBinding::definition(
             Pattern::Identifier("cos".to_string()),
             SourceExpr::function(
                 vec![Pattern::Identifier("x".to_string())],
                 SourceExpr::application(
-                    SourceExpr::variable("osc".to_string()),
+                    SourceExpr::variable("w2".to_string()),
                     vec![
                         SourceExpr::float(0.0),
                         SourceExpr::application(
@@ -4019,6 +4043,7 @@ mod tests {
         check_program(
             |_: &[String]| Err(Error::types_here("no modules".to_string())),
             &bindings,
+            test_signature,
             &expr,
             expectation,
             &mut ModuleCache::default(),
@@ -4109,7 +4134,7 @@ mod tests {
         assert_clean(
             "(fn(inst) => (fn(xs) => <map(fn(y) => \
              inst((fn(m) => pow(2, (m - 69) / 12) * 440)(y)), xs)>)([60, 64]))\
-             (fn(freq) => osc(freq, 0) | fin(1) | seq(1))",
+             (fn(freq) => w2(freq, 0) | fin(1) | seq(1))",
         );
     }
 
@@ -4128,7 +4153,7 @@ mod tests {
                let g = fn(x) => tonic + round(x) in \
                fn(xs) => let ys = map(g, xs) in \
                  <map(fn(y) => inst((fn(m) => pow(2, (m - 69) / 12) * 440)(y)), ys)> in \
-             [60, 64] | f(1, fn(freq) => osc(freq, 0) | fin(1) | seq(1))",
+             [60, 64] | f(1, fn(freq) => w2(freq, 0) | fin(1) | seq(1))",
         );
     }
 
@@ -4152,7 +4177,7 @@ mod tests {
     // offending argument, not the whole call.
     #[test]
     fn argument_mismatch_points_at_argument() {
-        let input = "osc(\"a\", 0)";
+        let input = "w2(\"a\", 0)";
         let errors = check(input);
         assert_eq!(messages(&errors), ["expected waveform, found string"]);
         let start = input.find("\"a\"").unwrap();
@@ -4189,7 +4214,7 @@ mod tests {
         assert_errors("if 1 then 2 else 3", &["expected bool, found int"]);
         // Branches join by sort union: float and waveform join into the
         // waveform class.
-        assert_clean("if true then 1 else osc(440, 0)");
+        assert_clean("if true then 1 else w2(440, 0)");
     }
 
     #[test]
@@ -4200,14 +4225,14 @@ mod tests {
     #[test]
     fn seq_typing() {
         // seq(0)(w) builds a seq; `\` wants a seq on the left.
-        assert_clean("seq(0)(osc(440, 0)) \\ 1");
-        // A non-seq on the left of `\` is a genuine runtime error (osc
+        assert_clean("seq(0)(w2(440, 0)) \\ 1");
+        // A non-seq on the left of `\` is a genuine runtime error (w2
         // may fold to a constant, hence the union in the message).
-        assert_errors("osc(440, 0) \\ 1", &["expected seq, found waveform"]);
+        assert_errors("w2(440, 0) \\ 1", &["expected seq, found waveform"]);
         // Arithmetic threads a seq operand through (`binary_op`'s seq
         // conjuncts), so seq-ness survives to the following `\`.
-        assert_clean("(seq(0)(osc(440, 0)) * 0.5) \\ 1");
-        assert_clean("(-seq(0)(osc(440, 0))) \\ 1");
+        assert_clean("(seq(0)(w2(440, 0)) * 0.5) \\ 1");
+        assert_clean("(-seq(0)(w2(440, 0))) \\ 1");
     }
 
     // Runtime errors the refinement lattice makes visible: arms the
@@ -4631,14 +4656,14 @@ mod tests {
 
     #[test]
     fn containment_judgments() {
-        // A possibly-wrong value is an error: osc may fold to a float,
+        // A possibly-wrong value is an error: w2 may fold to a float,
         // and exp requires one.
         assert_errors(
-            "map(exp, [osc(440, 0)])",
+            "map(exp, [w2(440, 0)])",
             &["expected [float], found [waveform]"],
         );
         // Ground containment still passes what it should.
-        assert_clean("exp(2) + osc(440, 0)");
+        assert_clean("exp(2) + w2(440, 0)");
         // Atom coverage: no single conjunct contains waveform-or-seq, but the
         // waveform and seq atoms are covered by different conjuncts.
         assert_clean("(if true then time else seq(0)(1)) * 1");
@@ -4655,7 +4680,7 @@ mod tests {
     fn non_numeric_domains_impose_no_numeric_contract() {
         assert_clean(
             "let count = fn(xs) => reduce(fn(acc, x) => acc + 1, 0, xs) in \
-             let f = fn(xs) => (count(xs), map(fn(x) => osc(x, 0), xs)) in \
+             let f = fn(xs) => (count(xs), map(fn(x) => w2(x, 0), xs)) in \
              f([440])",
         );
     }
@@ -4667,7 +4692,7 @@ mod tests {
     // conflict final when first seen.
     #[test]
     fn bound_consistency_at_flow_sites() {
-        let mut infer: Infer<()> = Infer::new();
+        let mut infer: Infer<()> = Infer::new(test_signature);
         let Refinement::Var(id) = infer.fresh_refinement() else {
             unreachable!("fresh refinements are variables");
         };
@@ -4730,7 +4755,7 @@ mod tests {
         // An unbound name recovers as `Erroneous`, so it produces exactly one
         // error even when applied and used in arithmetic.
         assert_errors(
-            "osc(missing, wrong)",
+            "w2(missing, wrong)",
             &["unbound variable 'missing'", "unbound variable 'wrong'"],
         );
     }
@@ -4747,6 +4772,7 @@ mod tests {
         let errors = check_program(
             |_: &[String]| Err(Error::types_here("no modules".to_string())),
             &bindings,
+            test_signature,
             &expr,
             None,
             &mut ModuleCache::default(),
@@ -4765,10 +4791,10 @@ mod tests {
     fn program_expectations() {
         let errors = check_with_expectation("\"hello\"", Some(Expectation::Playable));
         assert_eq!(messages(&errors), ["expected numeric, found string"]);
-        let errors = check_with_expectation("osc(440, 0)", Some(Expectation::Playable));
+        let errors = check_with_expectation("w2(440, 0)", Some(Expectation::Playable));
         assert!(errors.is_empty(), "got {:?}", messages(&errors));
         // A seq qualifies as a waveform program.
-        let errors = check_with_expectation("seq(0)(osc(440, 0))", Some(Expectation::Playable));
+        let errors = check_with_expectation("seq(0)(w2(440, 0))", Some(Expectation::Playable));
         assert!(errors.is_empty(), "got {:?}", messages(&errors));
     }
 
@@ -4778,16 +4804,16 @@ mod tests {
     #[test]
     fn note_function_expectation() {
         let errors = check_with_expectation(
-            "fn(note, vel) => (osc(note*100, 0), fin(1)(osc(440, 0)))",
+            "fn(note, vel) => (w2(note*100, 0), fin(1)(w2(440, 0)))",
             Some(Expectation::NoteFunction),
         );
         assert!(errors.is_empty(), "got {:?}", messages(&errors));
 
         // The unpaired parameter takes a fresh unknown, so the body is
         // still checked at the summary level: `note*100` may be a seq for
-        // all the arity-broken signature says, and `osc` cannot take one.
+        // all the arity-broken signature says, and `w2` cannot take one.
         let errors = check_with_expectation(
-            "fn(note) => (osc(note*100, 0), osc(note, 0))",
+            "fn(note) => (w2(note*100, 0), w2(note, 0))",
             Some(Expectation::NoteFunction),
         );
         assert_eq!(
@@ -4799,7 +4825,7 @@ mod tests {
         );
 
         let errors = check_with_expectation(
-            "fn(note, vel) => (osc(note*100, 0), \"x\")",
+            "fn(note, vel) => (w2(note*100, 0), \"x\")",
             Some(Expectation::NoteFunction),
         );
         assert_eq!(
@@ -4833,12 +4859,26 @@ mod tests {
         // `alias` is exported by `a` (bound there through `a`'s own open of
         // `b`); using it as a float checks.
         let expr = parse_program::<u32, _>("alias * 2", ()).unwrap();
-        let errors = check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default());
+        let errors = check_program(
+            resolve,
+            &bindings,
+            test_signature,
+            &expr,
+            None,
+            &mut ModuleCache::default(),
+        );
         assert!(errors.is_empty(), "got {:?}", messages(&errors));
 
         // `two` is not re-exported through `a`, so it errors as unbound.
         let expr = parse_program::<u32, _>("two", ()).unwrap();
-        let errors = check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default());
+        let errors = check_program(
+            resolve,
+            &bindings,
+            test_signature,
+            &expr,
+            None,
+            &mut ModuleCache::default(),
+        );
         assert_eq!(messages(&errors), ["unbound variable 'two'"]);
     }
 
@@ -4861,16 +4901,37 @@ mod tests {
         bindings.extend(uses);
 
         let expr = parse_program::<u32, _>("b.two + 1", ()).unwrap();
-        let errors = check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default());
+        let errors = check_program(
+            resolve,
+            &bindings,
+            test_signature,
+            &expr,
+            None,
+            &mut ModuleCache::default(),
+        );
         assert!(errors.is_empty(), "got {:?}", messages(&errors));
 
         let expr = parse_program::<u32, _>("b.three", ()).unwrap();
-        let errors = check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default());
+        let errors = check_program(
+            resolve,
+            &bindings,
+            test_signature,
+            &expr,
+            None,
+            &mut ModuleCache::default(),
+        );
         assert_eq!(messages(&errors), ["Module has no binding 'three'"]);
 
         // Projecting from a non-module errors statically too.
         let expr = parse_program::<u32, _>("let x = 1 in x.y", ()).unwrap();
-        let errors = check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default());
+        let errors = check_program(
+            resolve,
+            &bindings,
+            test_signature,
+            &expr,
+            None,
+            &mut ModuleCache::default(),
+        );
         assert_eq!(
             messages(&errors),
             ["cannot project 'y' from a value of type int"]
@@ -4880,7 +4941,14 @@ mod tests {
         // unknown is rejected rather than trusted. This is the one shape
         // the rule costs: a function over modules.
         let expr = parse_program::<u32, _>("let f = fn(q) => q.two in f(b)", ()).unwrap();
-        let errors = check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default());
+        let errors = check_program(
+            resolve,
+            &bindings,
+            test_signature,
+            &expr,
+            None,
+            &mut ModuleCache::default(),
+        );
         assert_eq!(
             messages(&errors),
             ["cannot project 'two' from a value of unknown type"]
@@ -4904,8 +4972,14 @@ mod tests {
             ("let (u, v) = (b, b) in u.two", None),
         ] {
             let expr = parse_program::<u32, _>(text, ()).unwrap();
-            let errors =
-                check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default());
+            let errors = check_program(
+                resolve,
+                &bindings,
+                test_signature,
+                &expr,
+                None,
+                &mut ModuleCache::default(),
+            );
             match expected {
                 None => assert!(errors.is_empty(), "{}: got {:?}", text, messages(&errors)),
                 Some(message) => assert_eq!(messages(&errors), [message], "for {}", text),
@@ -4976,17 +5050,17 @@ mod tests {
 
     #[test]
     fn branches_join_arrows_with_the_variance() {
-        // osc takes waveforms and log takes floats; the branch takes what
+        // w2 takes waveforms and log takes floats; the branch takes what
         // both take and returns what either returns.
-        assert_clean("(if false then osc else log)(0.5, 0.5)");
+        assert_clean("(if false then w2 else log)(0.5, 0.5)");
         // So a waveform argument is rejected — at the argument, which only
         // the joined domain can point at.
         assert_errors(
-            "(if false then osc else log)(time, 0)",
+            "(if false then w2 else log)(time, 0)",
             &["expected float, found waveform"],
         );
         // The join is symmetric.
-        assert_clean("(if false then log else osc)(0.5, 0.5)");
+        assert_clean("(if false then log else w2)(0.5, 0.5)");
         // An intersection joins with itself, which needs `unify` to know
         // about intersections at all.
         assert_clean("let g = fn(v) => v + 1 in nth(1, [g, g])(1)");
@@ -5005,7 +5079,7 @@ mod tests {
     // rarely reach.
     #[test]
     fn subtype_corners() {
-        let mut checker: Infer<()> = Infer::new();
+        let mut checker: Infer<()> = Infer::new(test_signature);
 
         // ∀a.(a) -> a <: (float) -> float: instantiate left (AS-ForallL).
         let id = Type::Forall(
@@ -5025,7 +5099,7 @@ mod tests {
         assert!(checker.subtype(&meta, &all).is_err());
 
         // Occurs check (AU-Var1's side condition): ?m = [?m] must fail.
-        let mut checker: Infer<()> = Infer::new();
+        let mut checker: Infer<()> = Infer::new(test_signature);
         let meta = checker.fresh_meta();
         let list = Type::List(Box::new(meta.clone()));
         assert!(checker.unify(&meta, &list).is_err());
@@ -5129,6 +5203,7 @@ mod tests {
             let clean = check_program(
                 |p: &[String]| library_resolve(&prelude, &parsed, p),
                 bindings,
+                test_signature,
                 &expr,
                 None,
                 &mut ModuleCache::default(),
@@ -5154,7 +5229,7 @@ mod tests {
         // one check and one evaluation for all of them — with a
         // distinct source id per call for attribution.
         for (_, _, bindings) in &parsed {
-            let mut checker: Infer<u32> = Infer::new();
+            let mut checker: Infer<u32> = Infer::new(test_signature);
             let mut context = Vec::new();
             let mut memo = HashMap::new();
             let exports = checker.build_context(
@@ -5224,6 +5299,7 @@ mod tests {
             let errors = check_program(
                 |p: &[String]| library_resolve(&prelude, &parsed, p),
                 &extended,
+                test_signature,
                 &expr,
                 None,
                 &mut ModuleCache::default(),
@@ -5382,7 +5458,7 @@ mod tests {
         "capture(\"c\")",
     ];
     const FN1: &[&str] = &["sqrt", "exp", "cos", "g", "h"];
-    const BUILTIN2: &[&str] = &["log", "osc", "reset", "append", "pow"];
+    const BUILTIN2: &[&str] = &["log", "phase", "reset", "append", "pow"];
 
     fn gen_expr(rng: &mut Rng, depth: usize) -> String {
         if depth == 0 {
@@ -5617,10 +5693,15 @@ mod tests {
         for _ in 0..count {
             let text = generated(&mut rng);
             let accepted = match parse_program::<u32, _>(&text, 0u32) {
-                Ok(expr) => {
-                    check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default())
-                        .is_empty()
-                }
+                Ok(expr) => check_program(
+                    resolve,
+                    &bindings,
+                    test_signature,
+                    &expr,
+                    None,
+                    &mut ModuleCache::default(),
+                )
+                .is_empty(),
                 Err(_) => continue,
             };
             hash ^= u64::from(accepted);
@@ -5678,7 +5759,14 @@ mod tests {
                 continue;
             };
             let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default())
+                check_program(
+                    resolve,
+                    &bindings,
+                    test_signature,
+                    &expr,
+                    None,
+                    &mut ModuleCache::default(),
+                )
             }));
             let Ok(errors) = checked else {
                 found += 1;
@@ -5693,7 +5781,7 @@ mod tests {
             }
             clean += 1;
             // The declared sort, for comparison against the value's own.
-            let mut checker: Infer<u32> = Infer::new();
+            let mut checker: Infer<u32> = Infer::new(test_signature);
             let mut context = Vec::new();
             let mut memo = HashMap::new();
             checker.build_context(
@@ -5773,7 +5861,14 @@ mod tests {
                 continue;
             };
             let Ok(errors) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default())
+                check_program(
+                    resolve,
+                    &bindings,
+                    test_signature,
+                    &expr,
+                    None,
+                    &mut ModuleCache::default(),
+                )
             })) else {
                 continue;
             };
@@ -5826,6 +5921,7 @@ mod tests {
                 std::hint::black_box(check_program(
                     resolve,
                     bindings,
+                    test_signature,
                     &expr,
                     None,
                     &mut ModuleCache::default(),
@@ -5863,7 +5959,14 @@ mod tests {
         for round in 0..rounds {
             let start = std::time::Instant::now();
             for (_, _, bindings) in parsed.iter() {
-                std::hint::black_box(check_program(resolve, bindings, &expr, None, &mut cache));
+                std::hint::black_box(check_program(
+                    resolve,
+                    bindings,
+                    test_signature,
+                    &expr,
+                    None,
+                    &mut cache,
+                ));
             }
             let elapsed = start.elapsed().as_secs_f64() * 1000.0;
             if round == 0 {
@@ -5949,6 +6052,7 @@ mod tests {
             check_program(
                 |p: &[String]| library_resolve(&prelude, &parsed, p),
                 &bindings,
+                test_signature,
                 &expr,
                 None,
                 &mut cache,
@@ -6000,6 +6104,7 @@ mod tests {
         let errors = check_program(
             resolve,
             &open_bindings,
+            test_signature,
             &expr,
             None,
             &mut ModuleCache::default(),
@@ -6016,6 +6121,7 @@ mod tests {
         let errors = check_program(
             resolve,
             &open_bindings,
+            test_signature,
             &expr,
             None,
             &mut ModuleCache::default(),
@@ -6030,6 +6136,7 @@ mod tests {
         let errors = check_program(
             resolve,
             &use_bindings,
+            test_signature,
             &expr,
             None,
             &mut ModuleCache::default(),
@@ -6045,8 +6152,22 @@ mod tests {
         // same pair.
         let mut cache = ModuleCache::default();
         let expr = parse_program::<u32, _>("broken * 2", ()).unwrap();
-        check_program(resolve, &open_bindings, &expr, None, &mut cache);
-        let errors = check_program(resolve, &open_bindings, &expr, None, &mut cache);
+        check_program(
+            resolve,
+            &open_bindings,
+            test_signature,
+            &expr,
+            None,
+            &mut cache,
+        );
+        let errors = check_program(
+            resolve,
+            &open_bindings,
+            test_signature,
+            &expr,
+            None,
+            &mut cache,
+        );
         assert_eq!(
             messages(&errors),
             [
@@ -6081,12 +6202,19 @@ mod tests {
         ];
         let expr = parse_program::<u32, _>("two + 1", ()).unwrap();
         let mut cache = ModuleCache::default();
-        let first = check_program(resolve, &bindings, &expr, None, &mut cache);
+        let first = check_program(resolve, &bindings, test_signature, &expr, None, &mut cache);
         assert!(!cache.is_empty());
-        let second = check_program(resolve, &bindings, &expr, None, &mut cache);
+        let second = check_program(resolve, &bindings, test_signature, &expr, None, &mut cache);
         assert_eq!(messages(&first), ["cannot combine two seqs with +"]);
         assert_eq!(messages(&first), messages(&second));
-        let cold = check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default());
+        let cold = check_program(
+            resolve,
+            &bindings,
+            test_signature,
+            &expr,
+            None,
+            &mut ModuleCache::default(),
+        );
         assert_eq!(messages(&cold), messages(&second));
     }
 
@@ -6100,7 +6228,14 @@ mod tests {
         let resolve = |p: &[String]| library_resolve(&prelude, &parsed, p);
         let expr = parse_program::<u32, _>("0", 9999).unwrap();
         for (index, (path, content, bindings)) in parsed.iter().enumerate() {
-            let errors = check_program(resolve, bindings, &expr, None, &mut ModuleCache::default());
+            let errors = check_program(
+                resolve,
+                bindings,
+                test_signature,
+                &expr,
+                None,
+                &mut ModuleCache::default(),
+            );
             let own: Vec<String> = errors
                 .iter()
                 .filter(|error| error.source() == Some(index as u32))
@@ -6248,7 +6383,7 @@ mod tests {
         // Which names a call passes does not depend on how many positions it
         // got right, so a bad name is still its own error.
         assert_errors(
-            "osc(440, y = 1)",
+            "w2(440, y = 1)",
             &[
                 "missing parameter of type waveform",
                 "no named parameter \"y\"",
@@ -6271,7 +6406,14 @@ mod tests {
         let expr = parse_program::<u32, _>("0", 9999).unwrap();
         let resolve =
             |path: &[String]| Err(Error::eval_here(format!("no module {}", path.join("."))));
-        let errors = check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default());
+        let errors = check_program(
+            resolve,
+            &bindings,
+            test_signature,
+            &expr,
+            None,
+            &mut ModuleCache::default(),
+        );
         assert!(
             errors
                 .iter()
@@ -6303,7 +6445,14 @@ mod tests {
         // must not let one stand in for the other.
         let (bindings, _) = parse_module::<u32, _>("use whole;\nuse prefix;\n", 9998u32).unwrap();
         let expr = parse_program::<u32, _>("(whole.y, prefix.x)", 9999).unwrap();
-        let errors = check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default());
+        let errors = check_program(
+            resolve,
+            &bindings,
+            test_signature,
+            &expr,
+            None,
+            &mut ModuleCache::default(),
+        );
         assert!(
             errors.is_empty(),
             "each module should keep its own exports, got {:?}",
@@ -6311,7 +6460,14 @@ mod tests {
         );
         // And the name the prefix does not export is still absent from it.
         let expr = parse_program::<u32, _>("prefix.y", 9999).unwrap();
-        let errors = check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default());
+        let errors = check_program(
+            resolve,
+            &bindings,
+            test_signature,
+            &expr,
+            None,
+            &mut ModuleCache::default(),
+        );
         assert!(
             errors.iter().any(|error| error.message().contains("y")),
             "expected the prefix to lack 'y', got {:?}",
@@ -6332,7 +6488,14 @@ mod tests {
             other => Err(Error::eval_here(format!("no module {}", other))),
         };
         let expr = parse_program::<u32, _>("0", 9999).unwrap();
-        let errors = check_program(resolve, &a, &expr, None, &mut ModuleCache::default());
+        let errors = check_program(
+            resolve,
+            &a,
+            test_signature,
+            &expr,
+            None,
+            &mut ModuleCache::default(),
+        );
         let messages: Vec<&str> = errors.iter().map(|error| error.message()).collect();
         assert!(
             messages.iter().any(|m| m.contains("is opened from itself")),
@@ -6511,8 +6674,15 @@ mod tests {
             let Ok(expr) = parse_program::<u32, _>(&text, 0u32) else {
                 continue;
             };
-            if !check_program(resolve, &bindings, &expr, None, &mut ModuleCache::default())
-                .is_empty()
+            if !check_program(
+                resolve,
+                &bindings,
+                test_signature,
+                &expr,
+                None,
+                &mut ModuleCache::default(),
+            )
+            .is_empty()
             {
                 continue;
             }
@@ -6520,7 +6690,7 @@ mod tests {
             if text.contains("seq") {
                 seqs += 1;
             }
-            let mut checker: Infer<u32> = Infer::new();
+            let mut checker: Infer<u32> = Infer::new(test_signature);
             let mut context = Vec::new();
             let mut memo = HashMap::new();
             checker.build_context(
@@ -6589,7 +6759,7 @@ mod tests {
     fn declared_sort(input: &str) -> Option<Sort> {
         let bindings = test_prelude::<()>();
         let expr = parse_program::<u32, _>(input, ()).unwrap();
-        let mut checker: Infer<()> = Infer::new();
+        let mut checker: Infer<()> = Infer::new(test_signature);
         let mut context = Vec::new();
         let mut memo = HashMap::new();
         checker.build_context(
@@ -6648,7 +6818,7 @@ mod tests {
         // Not `non-int`: `0.5 * 2` is `1.0`, which is integer-valued.
         assert_eq!(declared_sort("0.5 * 2"), Some(Sort::FLOAT));
         // And the seq arms still thread, which is what coverage is for.
-        assert_clean("(seq(0)(osc(440, 0)) * 0.5) \\ 1");
+        assert_clean("(seq(0)(w2(440, 0)) * 0.5) \\ 1");
     }
 
     #[test]
@@ -6659,7 +6829,14 @@ mod tests {
         let expr = parse_program::<u32, _>("0", 9999).unwrap();
         let mut report: Vec<String> = Vec::new();
         for (index, (path, content, bindings)) in parsed.iter().enumerate() {
-            let errors = check_program(resolve, bindings, &expr, None, &mut ModuleCache::default());
+            let errors = check_program(
+                resolve,
+                bindings,
+                test_signature,
+                &expr,
+                None,
+                &mut ModuleCache::default(),
+            );
             for error in &errors {
                 if error.source() == Some(index as u32) {
                     report.push(format!("{}: {}", path, error.display_with_source(content)));

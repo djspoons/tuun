@@ -23,6 +23,7 @@ use crate::optimizer;
 use crate::parser;
 use crate::programs::{Evaluated, ProgramKind, ProgramSet};
 use crate::sequencer;
+use crate::signatures;
 use crate::waveform;
 
 /// The `mark(N)` built-in: wraps a waveform in a `MarkId::UserDefined`
@@ -429,6 +430,7 @@ impl Environment {
             let errors = infer::check_program(
                 |path| self.resolve(path),
                 &bindings,
+                signatures::signature,
                 &expr,
                 Some(expectation),
                 &mut self.module_types.borrow_mut(),
@@ -521,6 +523,7 @@ impl Environment {
         infer::type_at(
             |path| self.resolve(path),
             &bindings,
+            signatures::signature,
             &expr,
             Some(expectation),
             offset,

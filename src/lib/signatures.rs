@@ -59,6 +59,9 @@ fn waveform_filter() -> Type {
     ])
 }
 
+/// A lookup of built-in signatures by name, such as [`signature`].
+pub type Signatures = fn(&str) -> Option<Type>;
+
 /// Returns the signature of the built-in named `name`, or `None` for names
 /// without a declared signature; callers should treat those as
 /// [`Type::Erroneous`].

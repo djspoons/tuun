@@ -3,7 +3,7 @@ use std::fs;
 
 use clap::Parser as ClapParser;
 
-use tuun::{builtins, diagnostics, eval, expr, ids, infer, modules, parser, slider};
+use tuun::{builtins, diagnostics, eval, expr, ids, infer, modules, parser, signatures, slider};
 
 #[derive(ClapParser, Debug)]
 #[command(version, about = "Check tuun-synth expressions in .md and .html files")]
@@ -346,6 +346,7 @@ fn check_block(
     let findings = infer::check_program(
         resolve,
         &bindings,
+        signatures::signature,
         &expr,
         Some(infer::Expectation::Playable),
         module_types,

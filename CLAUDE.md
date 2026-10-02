@@ -23,7 +23,7 @@
 - TODO comments should *not* be removed unless the code has been changed to address those cases or optimizations.
 
 ## Build & Test Verification
-- After any Rust code changes, run `cargo build`, `cargo build --benches`, `cargo test`, `cargo fmt`, and `cargo clippy` before declaring work complete. (Benches are not compiled by `cargo build` or `cargo test`, so they break silently without the `--benches` check.)
+- After any Rust code changes, run `cargo build`, `cargo build --benches`, `cargo test`, `cargo fmt`, and `cargo clippy` before declaring work complete. Also run `cargo test --no-default-features --features wasm --lib wasm::` so that wasm tests are checked. (Benches are not compiled by `cargo build` or `cargo test`, so they break silently without the `--benches` check.)
 - For Jekyll/Ruby changes, run `bundle exec jekyll build` to verify clean build.
 
 ## Primary Stack
@@ -31,6 +31,12 @@
 - Secondary: Ruby/Jekyll for docs/site work.
 
 ## Rust Style
+
+### Testing
+- A unit test depends only on the module it tests and that module's dependencies: a test shouldn't introduce additional dependencies unless they are fixtures or other testing infrastructure. When a needs something from another module, it defines its own stand-in rather than using the real one. Then a change elsewhere can't break it.
+- Integration tests may use the real thing. Tests whose purpose is checking how parts work together can use the real built-ins, prelude and std. Examples are the soundness fuzzer (checker vs. evaluation) and the std-library checks. They're expected to change when the language changes.
+- Name fixtures for their role, and don't copy production definitions.
+- Tuun source embedded in Rust needs a test that evaluates it in its real scope.
 
 ### Code Aesthetics
 
