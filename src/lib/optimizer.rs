@@ -43,7 +43,7 @@ where
 }
 
 // Optimize waveform expressions by...
-//   * eliminating constants in binary operators and Sine
+//   * eliminating constants in binary and unary operators and Phase
 //   * re-associates binary operations so that Consts are on the right
 //   * pulling Fin's up and combining nested Fin's
 //   * replacing zero-length waveforms with the canonical `Fixed(vec![])`
@@ -103,27 +103,6 @@ where
                 (a, Fixed(b, _)) if b.is_empty() => a,
                 (Fixed(a, _), Fixed(b, _)) => Fixed([a, b].concat(), ()),
                 (a, b) => Append(Box::new(a), Box::new(b), state),
-            }
-        }
-        // Check to see if we can compute the sine function:
-        Sine {
-            frequency,
-            phase,
-            state,
-        } => {
-            let frequency = optimize(*frequency);
-            let phase = optimize(*phase);
-            match (frequency, phase) {
-                (Const(0.0), Const(p)) => Const(p.sin()),
-                (Const(0.0), Fixed(v, _)) => {
-                    let v = v.into_iter().map(|x| x.sin()).collect();
-                    Fixed(v, ())
-                }
-                (frequency, phase) => Sine {
-                    frequency: Box::new(frequency),
-                    phase: Box::new(phase),
-                    state,
-                },
             }
         }
         Phase {
@@ -539,26 +518,14 @@ mod tests {
                 Box::new(BinaryPointOp(
                     Operator::Add,
                     Box::new(Const(3.0)),
-                    Box::new(Sine {
-                        frequency: Box::new(Const(1.0)),
-                        phase: Box::new(Const(0.0)),
-                        state: (),
-                    }),
+                    Box::new(Time(())),
                 )),
             )),
             Box::new(Const(5.0)),
         );
         assert_eq!(
             optimize(w2),
-            BinaryPointOp(
-                Operator::Add,
-                Box::new(Sine {
-                    frequency: Box::new(Const(1.0)),
-                    phase: Box::new(Const(0.0)),
-                    state: ()
-                }),
-                Box::new(Const(10.0))
-            ),
+            BinaryPointOp(Operator::Add, Box::new(Time(())), Box::new(Const(10.0))),
         );
 
         let w3: Waveform<(), ()> = BinaryPointOp(
@@ -569,11 +536,7 @@ mod tests {
                 Box::new(BinaryPointOp(
                     Operator::Multiply,
                     Box::new(Const(3.0)),
-                    Box::new(Sine {
-                        frequency: Box::new(Const(1.0)),
-                        phase: Box::new(Const(0.0)),
-                        state: (),
-                    }),
+                    Box::new(Time(())),
                 )),
             )),
             Box::new(Const(5.0)),
@@ -582,11 +545,7 @@ mod tests {
             optimize(w3),
             BinaryPointOp(
                 Operator::Multiply,
-                Box::new(Sine {
-                    frequency: Box::new(Const(1.0)),
-                    phase: Box::new(Const(0.0)),
-                    state: ()
-                }),
+                Box::new(Time(())),
                 Box::new(Const(30.0))
             ),
         );
@@ -599,11 +558,7 @@ mod tests {
                 Box::new(BinaryPointOp(
                     Operator::Multiply,
                     Box::new(Const(3.0)),
-                    Box::new(Sine {
-                        frequency: Box::new(Const(1.0)),
-                        phase: Box::new(Const(0.0)),
-                        state: (),
-                    }),
+                    Box::new(Time(())),
                 )),
             )),
             Box::new(Const(5.0)),
@@ -614,11 +569,7 @@ mod tests {
                 Operator::Add,
                 Box::new(BinaryPointOp(
                     Operator::Multiply,
-                    Box::new(Sine {
-                        frequency: Box::new(Const(1.0)),
-                        phase: Box::new(Const(0.0)),
-                        state: ()
-                    }),
+                    Box::new(Time(())),
                     Box::new(Const(15.0))
                 )),
                 Box::new(Const(10.0))

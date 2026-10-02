@@ -237,12 +237,7 @@ where
             | Marked { waveform, .. } => {
                 self.process_captured(waveform, out);
             }
-            Sine {
-                frequency: a,
-                phase: b,
-                ..
-            }
-            | Phase {
+            Phase {
                 frequency: a,
                 offset: b,
                 ..
@@ -389,12 +384,7 @@ fn process_marked<I, M>(
             let start = start + Duration::from_secs_f32(a_len as f32 / sample_rate);
             process_marked(generator, sample_rate, waveform_id, start, b.as_ref(), out);
         }
-        Sine {
-            frequency: a,
-            phase: b,
-            ..
-        }
-        | Phase {
+        Phase {
             frequency: a,
             offset: b,
             ..

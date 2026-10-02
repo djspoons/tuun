@@ -107,9 +107,6 @@ pub fn signature(name: &str) -> Option<Type> {
         "<" | "<=" | ">" | ">=" => Type::function(vec![Type::float(), Type::float()], Type::Bool),
         "log" => Type::function(vec![Type::float(), Type::float()], Type::float()),
         "sqrt" | "exp" => Type::function(vec![Type::float()], Type::float()),
-        // Zero frequency with a constant phase folds to a constant, so the
-        // result may be a float or a waveform.
-        "sine" => Type::function(vec![Type::waveform(), Type::waveform()], Type::waveform()),
         "sin" => Type::function(vec![Type::waveform()], Type::waveform()),
         "phase" => Type::function(vec![Type::waveform(), Type::waveform()], Type::waveform()),
         "round" => Type::function(vec![Type::float()], Type::int()),

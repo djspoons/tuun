@@ -615,7 +615,7 @@ mod tests {
 
     #[test]
     fn test_sequence_requires_seqs() {
-        let seq = "sine(2, 0) | fin(time - 1) | seq(time - 1)";
+        let seq = "time | fin(time - 1) | seq(time - 1)";
         // A fold of seqs is a seq; a singleton returns its element.
         assert!(matches!(
             eval_with_builtins(&format!("<[{seq}, {seq}]>"))
@@ -628,14 +628,14 @@ mod tests {
             Expr::Seq { .. }
         ));
         // A non-seq element is an error.
-        assert!(eval_with_builtins(&format!("<[{seq}, sine(3, 0)]>")).is_err());
+        assert!(eval_with_builtins(&format!("<[{seq}, time]>")).is_err());
         // The empty sequence is the empty seq — usable on `\`'s left.
         assert!(matches!(
             eval_with_builtins("<[]>").unwrap().expr,
             Expr::Seq { .. }
         ));
         assert!(matches!(
-            eval_with_builtins("<[]> \\ sine(3, 0)").unwrap().expr,
+            eval_with_builtins("<[]> \\ time").unwrap().expr,
             Expr::Waveform(_)
         ));
     }
@@ -648,11 +648,8 @@ mod tests {
         assert_eq!(format!("{}", eval_with_builtins("1 & 2").unwrap()), "3");
         // A constant merged with a non-constant stays a merge tree.
         assert_eq!(
-            format!("{}", eval_with_builtins("1 & sine(440, 0)").unwrap()),
-            format!(
-                "{}",
-                eval_with_builtins("(fn(w) => 1 & w)(sine(440, 0))").unwrap()
-            )
+            format!("{}", eval_with_builtins("1 & time").unwrap()),
+            format!("{}", eval_with_builtins("(fn(w) => 1 & w)(time)").unwrap())
         );
     }
 
@@ -721,8 +718,8 @@ mod tests {
         );
 
         // Builtins do not take named arguments.
-        let error = eval_with_builtins("sine(440, y = 1)").unwrap_err();
-        assert!(error.message().contains("built-in \"sine\""), "{}", error);
+        let error = eval_with_builtins("log(2, 8, y = 1)").unwrap_err();
+        assert!(error.message().contains("built-in \"log\""), "{}", error);
     }
 
     #[test]

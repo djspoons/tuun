@@ -1474,7 +1474,7 @@ fn apply_complete(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
     // A fragment after a `.` is a projection name and completes only among
     // the qualifying module's bindings — when the qualifier doesn't resolve
     // to a module value there is nothing the projection could mean, so
-    // nothing to offer (`sine.f`, `.sq`, or the `0.` inside a float). A
+    // nothing to offer (`time.f`, `.sq`, or the `0.` inside a float). A
     // fragment without a `.` completes among the in-scope names.
     let candidates: Vec<String> = match &qualifier {
         Some(path) => match resolve_module_path(&context, path) {
@@ -1670,7 +1670,7 @@ fn apply_parameter_hint(state: &mut AppState, ctx: &Context, cursor: usize) -> V
             })
         }
         // TODO built-ins don't carry parameter names or arity; give BuiltIn
-        // signature metadata so calls like `sine(` can be hinted too.
+        // signature metadata so calls like `phase(` can be hinted too.
         expr::Expr::BuiltIn { name, .. } => vec![Effect::ShowMessage(format!(
             "No parameter hint for built-in \"{}\"",
             name
@@ -2563,9 +2563,9 @@ mod tests {
 
     #[test]
     fn complete_includes_prelude_names() {
-        let mut state = edit_state("#{level_db=0}\n_ = test;", "sin", 3);
+        let mut state = edit_state("#{level_db=0}\n_ = test;", "appe", 4);
         apply_with_empty_status(&mut state, Action::Complete);
-        assert_eq!(edit_text_and_cursor(&state), ("sine".to_string(), 4));
+        assert_eq!(edit_text_and_cursor(&state), ("append".to_string(), 6));
     }
 
     /// The message a `ShowType` produced; panics if it produced none.
@@ -2587,17 +2587,17 @@ mod tests {
         let source = "#{level_db=0}\n_ = test;";
         // A prelude name, with the cursor inside it and just past it.
         assert_eq!(
-            show_type_message(source, "sine(2, 0)", 2),
-            "sine : (waveform, waveform) -> waveform"
+            show_type_message(source, "log(2, 8)", 1),
+            "log : (float, float) -> float"
         );
         assert_eq!(
-            show_type_message(source, "sine(2, 0)", 4),
-            "sine : (waveform, waveform) -> waveform"
+            show_type_message(source, "log(2, 8)", 3),
+            "log : (float, float) -> float"
         );
         // A parameter reads as what the body settled it to, not as an
         // unknown — the point of reporting after inference finishes.
         assert_eq!(
-            show_type_message(source, "fn(dur) => sine(2, 0) | fin(dur)", 29),
+            show_type_message(source, "fn(dur) => time | fin(dur)", 23),
             "dur : waveform"
         );
         // A let-bound name, and an overloaded one, both from inside the
@@ -2698,9 +2698,9 @@ mod tests {
 
     #[test]
     fn complete_after_open_paren_of_builtin_reports_no_hint() {
-        let mut state = edit_state("#{level_db=0}\n_ = test;", "sine(", 5);
+        let mut state = edit_state("#{level_db=0}\n_ = test;", "log(", 4);
         let effects = apply_with_empty_status(&mut state, Action::Complete);
-        assert_eq!(edit_text_and_cursor(&state), ("sine(".to_string(), 5));
+        assert_eq!(edit_text_and_cursor(&state), ("log(".to_string(), 4));
         assert!(
             matches!(&effects[0], Effect::ShowMessage(m) if m.contains("built-in")),
             "expected a built-in message, got {:?}",
@@ -2812,14 +2812,14 @@ mod tests {
 
     #[test]
     fn complete_after_non_module_qualifier_reports_not_a_module() {
-        // `sine` is bound, but not to a module value: no projection of it
+        // `time` is bound, but not to a module value: no projection of it
         // can evaluate, so the fragment must not complete against the
-        // context (`sine.f` must not become `sine.filter`).
-        let mut state = edit_state("#{level_db=0}\n_ = test;", "sine.f", 6);
+        // context (`time.f` must not become `time.filter`).
+        let mut state = edit_state("#{level_db=0}\n_ = test;", "time.f", 6);
         let effects = apply_with_empty_status(&mut state, Action::Complete);
-        assert_eq!(edit_text_and_cursor(&state), ("sine.f".to_string(), 6));
+        assert_eq!(edit_text_and_cursor(&state), ("time.f".to_string(), 6));
         assert!(
-            matches!(&effects[0], Effect::ShowMessage(m) if m == "\"sine\" is not a module"),
+            matches!(&effects[0], Effect::ShowMessage(m) if m == "\"time\" is not a module"),
             "expected a not-a-module message, got {:?}",
             effects
         );
@@ -2871,16 +2871,16 @@ mod tests {
 
     #[test]
     fn parameter_hint_for_non_module_qualifier_reports_not_a_module() {
-        // Without this, `sine.filter(` would hint the parameters of the
+        // Without this, `time.filter(` would hint the parameters of the
         // unrelated bare `filter` binding.
-        let mut state = edit_state("#{level_db=0}\n_ = test;", "sine.filter(", 12);
+        let mut state = edit_state("#{level_db=0}\n_ = test;", "time.filter(", 12);
         let effects = apply_with_empty_status(&mut state, Action::Complete);
         assert_eq!(
             edit_text_and_cursor(&state),
-            ("sine.filter(".to_string(), 12)
+            ("time.filter(".to_string(), 12)
         );
         assert!(
-            matches!(&effects[0], Effect::ShowMessage(m) if m == "\"sine\" is not a module"),
+            matches!(&effects[0], Effect::ShowMessage(m) if m == "\"time\" is not a module"),
             "expected a not-a-module message, got {:?}",
             effects
         );

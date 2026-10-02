@@ -521,12 +521,12 @@ fn click_source(accent: bool) -> String {
     format!(
         "let
            w0 = 2 * 3.14159265 * {center_hz} / sample_rate,
-           alpha = sine(0, w0) / (2 * {Q}),
+           alpha = sin(w0) / (2 * {Q}),
            a0 = 1 + alpha,
          in
            ((noise * (1 - time / {CLICK_SECS}) * {GAIN}
              | filter([alpha / a0, 0, -alpha / a0],
-                      [-2 * sine(0, w0 + 3.14159265 / 2) / a0, (1 - alpha) / a0])
+                      [-2 * sin(w0 + 3.14159265 / 2) / a0, (1 - alpha) / a0])
              | fin(time - {CLICK_SECS})
              | seq(time - {CLICK_SECS}))
             \\ 0)"
@@ -710,6 +710,19 @@ mod tests {
             previous_measure_start(&status, t0 - Duration::from_secs(1)),
             None
         );
+    }
+
+    // The click is evaluated with only the prelude in scope (no std), so it
+    // must not depend on library definitions.
+    #[test]
+    fn click_source_evaluates_with_the_prelude_alone() {
+        let environment = Environment::new(44100, 90, std::path::PathBuf::new());
+        let bindings: Vec<expr::SourceBinding<MarkId, Source>> =
+            vec![expr::Binding::Open(vec!["__prelude".to_string()]).into()];
+        for accent in [false, true] {
+            let result = environment.evaluate_source(&click_source(accent), &bindings);
+            assert!(result.is_ok(), "{:?}", result.err());
+        }
     }
 
     /// Builds a program set whose program 0 is sequenceable with steps on

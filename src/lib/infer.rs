@@ -83,7 +83,7 @@
 // TODO: We currently allow some non-Freeman-like types, in particular,
 // intersections of function types whose parameter types disagree (not just
 // their sorts). This is explicit in the types of ==/!= but also cases like
-//   let h = fn(v) => sine(v, 1) | fin(4) in
+//   let h = fn(v) => phase(v, 1) | fin(4) in
 //     let f = fn(k = h) => k(2) in f(k = cos)
 // where f gets the type (k: (int) -> 'a) -> 'a ∧ () -> waveform. In the case
 // of equality, there is no type of a curried form of == as in:
@@ -3946,8 +3946,9 @@ mod tests {
     use crate::parser::{parse_module, parse_program};
 
     /// Builds a prelude mirroring the native one: the built-ins plus
-    /// `tempo`, `sample_rate`, `mark`, and `debug`. The extra built-ins get
-    /// stub closures — the checker only looks at their names.
+    /// `tempo`, `sample_rate`, `mark`, and `debug`, and then the test
+    /// stand-ins `osc` and `cos`. The extra built-ins get stub closures — the
+    /// checker only looks at their names.
     fn test_prelude<S: Clone + std::fmt::Debug + 'static>() -> Vec<SourceBinding<u32, S>> {
         let mut prelude: Vec<SourceBinding<u32, S>> = Vec::new();
         builtins::add_bindings(&mut prelude);
@@ -3970,20 +3971,32 @@ mod tests {
             Pattern::Identifier("debug".to_string()),
             builtins::debug(|_| {}),
         ));
-        // std's `cos = fn(phase) => sine(0, phase + pi / 2)`: the tests lean
-        // on it as a definition-bound arrow over waveforms.
+        // `osc(freq, offset)`: the tests' stand-in for a built-in taking two
+        // waveforms to a waveform that may fold to a constant. It is a real
+        // built-in under another name, so it checks and evaluates as that
+        // built-in does; a change to which built-in fills this role is a
+        // change to this binding alone.
+        prelude.push(SourceBinding::definition(
+            Pattern::Identifier("osc".to_string()),
+            SourceExpr::from(Expr::BuiltIn {
+                name: "phase".to_string(),
+                function: BuiltInFn(Rc::new(builtins::phase)),
+            }),
+        ));
+        // `cos`: the tests' stand-in for a definition-bound arrow over
+        // waveforms, `fn(x) => osc(0, x + pi / 2)`.
         prelude.push(SourceBinding::definition(
             Pattern::Identifier("cos".to_string()),
             SourceExpr::function(
-                vec![Pattern::Identifier("phase".to_string())],
+                vec![Pattern::Identifier("x".to_string())],
                 SourceExpr::application(
-                    SourceExpr::variable("sine".to_string()),
+                    SourceExpr::variable("osc".to_string()),
                     vec![
                         SourceExpr::float(0.0),
                         SourceExpr::application(
                             SourceExpr::variable("+".to_string()),
                             vec![
-                                SourceExpr::variable("phase".to_string()),
+                                SourceExpr::variable("x".to_string()),
                                 SourceExpr::float(std::f32::consts::FRAC_PI_2),
                             ],
                         ),
@@ -4096,7 +4109,7 @@ mod tests {
         assert_clean(
             "(fn(inst) => (fn(xs) => <map(fn(y) => \
              inst((fn(m) => pow(2, (m - 69) / 12) * 440)(y)), xs)>)([60, 64]))\
-             (fn(freq) => sine(freq, 0) | fin(1) | seq(1))",
+             (fn(freq) => osc(freq, 0) | fin(1) | seq(1))",
         );
     }
 
@@ -4115,7 +4128,7 @@ mod tests {
                let g = fn(x) => tonic + round(x) in \
                fn(xs) => let ys = map(g, xs) in \
                  <map(fn(y) => inst((fn(m) => pow(2, (m - 69) / 12) * 440)(y)), ys)> in \
-             [60, 64] | f(1, fn(freq) => sine(freq, 0) | fin(1) | seq(1))",
+             [60, 64] | f(1, fn(freq) => osc(freq, 0) | fin(1) | seq(1))",
         );
     }
 
@@ -4139,7 +4152,7 @@ mod tests {
     // offending argument, not the whole call.
     #[test]
     fn argument_mismatch_points_at_argument() {
-        let input = "sine(\"a\", 0)";
+        let input = "osc(\"a\", 0)";
         let errors = check(input);
         assert_eq!(messages(&errors), ["expected waveform, found string"]);
         let start = input.find("\"a\"").unwrap();
@@ -4176,7 +4189,7 @@ mod tests {
         assert_errors("if 1 then 2 else 3", &["expected bool, found int"]);
         // Branches join by sort union: float and waveform join into the
         // waveform class.
-        assert_clean("if true then 1 else sine(440, 0)");
+        assert_clean("if true then 1 else osc(440, 0)");
     }
 
     #[test]
@@ -4187,14 +4200,14 @@ mod tests {
     #[test]
     fn seq_typing() {
         // seq(0)(w) builds a seq; `\` wants a seq on the left.
-        assert_clean("seq(0)(sine(440, 0)) \\ 1");
-        // A non-seq on the left of `\` is a genuine runtime error (sine
+        assert_clean("seq(0)(osc(440, 0)) \\ 1");
+        // A non-seq on the left of `\` is a genuine runtime error (osc
         // may fold to a constant, hence the union in the message).
-        assert_errors("sine(440, 0) \\ 1", &["expected seq, found waveform"]);
+        assert_errors("osc(440, 0) \\ 1", &["expected seq, found waveform"]);
         // Arithmetic threads a seq operand through (`binary_op`'s seq
         // conjuncts), so seq-ness survives to the following `\`.
-        assert_clean("(seq(0)(sine(440, 0)) * 0.5) \\ 1");
-        assert_clean("(-seq(0)(sine(440, 0))) \\ 1");
+        assert_clean("(seq(0)(osc(440, 0)) * 0.5) \\ 1");
+        assert_clean("(-seq(0)(osc(440, 0))) \\ 1");
     }
 
     // Runtime errors the refinement lattice makes visible: arms the
@@ -4618,14 +4631,14 @@ mod tests {
 
     #[test]
     fn containment_judgments() {
-        // A possibly-wrong value is an error: sine may fold to a float,
+        // A possibly-wrong value is an error: osc may fold to a float,
         // and exp requires one.
         assert_errors(
-            "map(exp, [sine(440, 0)])",
+            "map(exp, [osc(440, 0)])",
             &["expected [float], found [waveform]"],
         );
         // Ground containment still passes what it should.
-        assert_clean("exp(2) + sine(440, 0)");
+        assert_clean("exp(2) + osc(440, 0)");
         // Atom coverage: no single conjunct contains waveform-or-seq, but the
         // waveform and seq atoms are covered by different conjuncts.
         assert_clean("(if true then time else seq(0)(1)) * 1");
@@ -4642,7 +4655,7 @@ mod tests {
     fn non_numeric_domains_impose_no_numeric_contract() {
         assert_clean(
             "let count = fn(xs) => reduce(fn(acc, x) => acc + 1, 0, xs) in \
-             let f = fn(xs) => (count(xs), map(fn(x) => sine(x, 0), xs)) in \
+             let f = fn(xs) => (count(xs), map(fn(x) => osc(x, 0), xs)) in \
              f([440])",
         );
     }
@@ -4717,7 +4730,7 @@ mod tests {
         // An unbound name recovers as `Erroneous`, so it produces exactly one
         // error even when applied and used in arithmetic.
         assert_errors(
-            "sine(missing, wrong)",
+            "osc(missing, wrong)",
             &["unbound variable 'missing'", "unbound variable 'wrong'"],
         );
     }
@@ -4752,10 +4765,10 @@ mod tests {
     fn program_expectations() {
         let errors = check_with_expectation("\"hello\"", Some(Expectation::Playable));
         assert_eq!(messages(&errors), ["expected numeric, found string"]);
-        let errors = check_with_expectation("sine(440, 0)", Some(Expectation::Playable));
+        let errors = check_with_expectation("osc(440, 0)", Some(Expectation::Playable));
         assert!(errors.is_empty(), "got {:?}", messages(&errors));
         // A seq qualifies as a waveform program.
-        let errors = check_with_expectation("seq(0)(sine(440, 0))", Some(Expectation::Playable));
+        let errors = check_with_expectation("seq(0)(osc(440, 0))", Some(Expectation::Playable));
         assert!(errors.is_empty(), "got {:?}", messages(&errors));
     }
 
@@ -4765,16 +4778,16 @@ mod tests {
     #[test]
     fn note_function_expectation() {
         let errors = check_with_expectation(
-            "fn(note, vel) => (sine(note*100, 0), fin(1)(sine(440, 0)))",
+            "fn(note, vel) => (osc(note*100, 0), fin(1)(osc(440, 0)))",
             Some(Expectation::NoteFunction),
         );
         assert!(errors.is_empty(), "got {:?}", messages(&errors));
 
         // The unpaired parameter takes a fresh unknown, so the body is
         // still checked at the summary level: `note*100` may be a seq for
-        // all the arity-broken signature says, and `sine` cannot take one.
+        // all the arity-broken signature says, and `osc` cannot take one.
         let errors = check_with_expectation(
-            "fn(note) => (sine(note*100, 0), sine(note, 0))",
+            "fn(note) => (osc(note*100, 0), osc(note, 0))",
             Some(Expectation::NoteFunction),
         );
         assert_eq!(
@@ -4786,7 +4799,7 @@ mod tests {
         );
 
         let errors = check_with_expectation(
-            "fn(note, vel) => (sine(note*100, 0), \"x\")",
+            "fn(note, vel) => (osc(note*100, 0), \"x\")",
             Some(Expectation::NoteFunction),
         );
         assert_eq!(
@@ -4963,17 +4976,17 @@ mod tests {
 
     #[test]
     fn branches_join_arrows_with_the_variance() {
-        // sine takes waveforms and log takes floats; the branch takes what
+        // osc takes waveforms and log takes floats; the branch takes what
         // both take and returns what either returns.
-        assert_clean("(if false then sine else log)(0.5, 0.5)");
+        assert_clean("(if false then osc else log)(0.5, 0.5)");
         // So a waveform argument is rejected — at the argument, which only
         // the joined domain can point at.
         assert_errors(
-            "(if false then sine else log)(time, 0)",
+            "(if false then osc else log)(time, 0)",
             &["expected float, found waveform"],
         );
         // The join is symmetric.
-        assert_clean("(if false then log else sine)(0.5, 0.5)");
+        assert_clean("(if false then log else osc)(0.5, 0.5)");
         // An intersection joins with itself, which needs `unify` to know
         // about intersections at all.
         assert_clean("let g = fn(v) => v + 1 in nth(1, [g, g])(1)");
@@ -5369,7 +5382,7 @@ mod tests {
         "capture(\"c\")",
     ];
     const FN1: &[&str] = &["sqrt", "exp", "cos", "g", "h"];
-    const BUILTIN2: &[&str] = &["log", "sine", "reset", "append", "pow"];
+    const BUILTIN2: &[&str] = &["log", "osc", "reset", "append", "pow"];
 
     fn gen_expr(rng: &mut Rng, depth: usize) -> String {
         if depth == 0 {
@@ -6235,7 +6248,7 @@ mod tests {
         // Which names a call passes does not depend on how many positions it
         // got right, so a bad name is still its own error.
         assert_errors(
-            "sine(440, y = 1)",
+            "osc(440, y = 1)",
             &[
                 "missing parameter of type waveform",
                 "no named parameter \"y\"",
@@ -6635,7 +6648,7 @@ mod tests {
         // Not `non-int`: `0.5 * 2` is `1.0`, which is integer-valued.
         assert_eq!(declared_sort("0.5 * 2"), Some(Sort::FLOAT));
         // And the seq arms still thread, which is what coverage is for.
-        assert_clean("(seq(0)(sine(440, 0)) * 0.5) \\ 1");
+        assert_clean("(seq(0)(osc(440, 0)) * 0.5) \\ 1");
     }
 
     #[test]

@@ -772,7 +772,7 @@ mod tests {
         // for the programs after them, so a later broken sibling would
         // (correctly) report on this one's check as a file finding.
         let (mut set, warning) = ProgramSet::from_source(
-            "open m;\n#{level_db=0}\nu = sine(v, 0);\n#{level_db=0}\nw = sine(broken, 0);\n"
+            "open m;\n#{level_db=0}\nu = time | fin(v);\n#{level_db=0}\nw = time | fin(broken);\n"
                 .to_string(),
             PathBuf::from("song.tuun"),
         )
@@ -789,7 +789,10 @@ mod tests {
         // The use site carries the diagnostic and the gate fires.
         let diagnostics = environment.check_program(&set, 1);
         assert_eq!(diagnostics.len(), 1, "got {:?}", diagnostics);
-        assert_eq!(diagnostics[0].to_string(), "1:6: 'broken' has a type error");
+        assert_eq!(
+            diagnostics[0].to_string(),
+            "1:12: 'broken' has a type error"
+        );
         set.evaluate_and_record(&environment, 1)
             .expect_err("a use of a broken definition gates evaluation");
 
@@ -808,7 +811,7 @@ mod tests {
         let module = root.join("m.tuun");
         fs::write(&module, "broken = seq(0)(1) + seq(0)(2);\nv = 440;\n").expect("write module");
         let (set, warning) = ProgramSet::from_source(
-            "open m;\n#{level_db=0}\nw = sine(v, 0);\n".to_string(),
+            "open m;\n#{level_db=0}\nw = time | fin(v);\n".to_string(),
             PathBuf::from("song.tuun"),
         )
         .expect("test source should parse");
@@ -848,7 +851,7 @@ mod tests {
         let module = root.join("m.tuun");
         fs::write(&module, "v = 440;\n").expect("write module");
         let (set, warning) = ProgramSet::from_source(
-            "open m;\n#{level_db=0}\nw = sine(v, 0);\n".to_string(),
+            "open m;\n#{level_db=0}\nw = time | fin(v);\n".to_string(),
             PathBuf::from("song.tuun"),
         )
         .expect("test source should parse");
@@ -861,13 +864,13 @@ mod tests {
 
         // The rewrite bumps the file's mtime, so the next check re-parses
         // the module, clears the type cache, and reports against the new
-        // text — `v` is a string now, and `sine` rejects it.
+        // text — `v` is a string now, and `fin` rejects it.
         fs::write(&module, "v = \"s\";\n").expect("rewrite module");
         let diagnostics = environment.check_program(&set, 0);
         assert_eq!(diagnostics.len(), 1, "got {:?}", diagnostics);
         assert_eq!(
             diagnostics[0].to_string(),
-            "1:6: expected waveform, found string"
+            "1:12: expected waveform, found string"
         );
 
         // Unchanged on disk: the cache serves the module and the finding
@@ -1058,7 +1061,7 @@ mod tests {
     #[test]
     fn check_program_findings_gate_or_warn() {
         let (mut set, warning) = ProgramSet::from_source(
-            "#{level_db=0}\nw = sine(\"a\", 0);\n".to_string(),
+            "#{level_db=0}\nw = time | fin(\"a\");\n".to_string(),
             PathBuf::from("song.tuun"),
         )
         .expect("test source should parse");
@@ -1066,16 +1069,16 @@ mod tests {
         let mut environment = Environment::new(44100, 90, PathBuf::from("./lib/v0"));
 
         // Default mode: findings are errors, positioned in the program's
-        // own text (`"a"` starts at column 6), and they gate — evaluation
+        // own text (`"a"` starts at column 12), and they gate — evaluation
         // is never attempted, so the checker's finding stands alone.
         let diagnostics = environment.check_program(&set, 0);
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].severity, Severity::Error);
         assert_eq!(
             diagnostics[0].to_string(),
-            "1:6: expected waveform, found string"
+            "1:12: expected waveform, found string"
         );
-        assert_eq!(diagnostics[0].program_range, Some(5..8));
+        assert_eq!(diagnostics[0].program_range, Some(11..14));
         let diagnostics = set
             .evaluate_and_record(&environment, 0)
             .expect_err("error findings gate evaluation");
@@ -1083,7 +1086,7 @@ mod tests {
         assert_eq!(diagnostics[0].severity, Severity::Error);
         assert_eq!(
             diagnostics[0].to_string(),
-            "1:6: expected waveform, found string"
+            "1:12: expected waveform, found string"
         );
 
         // Warnings mode: the same finding reports as a warning, first, and
@@ -1091,32 +1094,30 @@ mod tests {
         environment.set_check_mode(CheckMode::Warnings);
         let diagnostics = set
             .evaluate_and_record(&environment, 0)
-            .expect_err("sine(\"a\", 0) fails at evaluation");
+            .expect_err("fin(\"a\") fails at evaluation");
         assert_eq!(diagnostics.len(), 2);
         assert_eq!(diagnostics[0].severity, Severity::Warning);
         assert_eq!(
             diagnostics[0].to_string(),
-            "1:6: expected waveform, found string"
+            "1:12: expected waveform, found string"
         );
         assert_eq!(diagnostics[1].severity, Severity::Error);
 
         // Clean programs evaluate with no findings in either mode,
         // including computed indexes.
         environment.set_check_mode(CheckMode::Errors);
-        set.program_mut(0)
-            .unwrap()
-            .set_text("sine(440, 0)".to_string());
+        set.program_mut(0).unwrap().set_text("time".to_string());
         assert_eq!(set.evaluate_and_record(&environment, 0), Ok(Vec::new()));
         set.program_mut(0)
             .unwrap()
-            .set_text("fin(nth(1 + 2, [1, 2, 4, 8]))(sine(440, 0))".to_string());
+            .set_text("fin(nth(1 + 2, [1, 2, 4, 8]))(time)".to_string());
         assert_eq!(set.evaluate_and_record(&environment, 0), Ok(Vec::new()));
 
         // A fractional index gates before evaluation can fail; column 9
         // points at `2.5` — the mismatched argument itself.
         set.program_mut(0)
             .unwrap()
-            .set_text("fin(nth(2.5, [1, 2, 4, 8]))(sine(440, 0))".to_string());
+            .set_text("fin(nth(2.5, [1, 2, 4, 8]))(time)".to_string());
         let diagnostics = set
             .evaluate_and_record(&environment, 0)
             .expect_err("the fractional index gates");
@@ -1129,7 +1130,7 @@ mod tests {
         // have succeeded); warnings mode lets it through, reported.
         set.program_mut(0)
             .unwrap()
-            .set_text("let f = fn(x) => nth(2.5, [1, 2]) in sine(440, 0)".to_string());
+            .set_text("let f = fn(x) => nth(2.5, [1, 2]) in time".to_string());
         let diagnostics = set
             .evaluate_and_record(&environment, 0)
             .expect_err("the unused function's finding gates");
@@ -1178,7 +1179,7 @@ mod tests {
     #[test]
     fn programs_see_the_prelude_without_any_open() {
         let (set, _) = ProgramSet::from_source(
-            "#{level_db=0}\n_ = (0.7 | debug(\"level\")) * sine(440, 0) | fin(0.1);\n".to_string(),
+            "#{level_db=0}\n_ = (0.7 | debug(\"level\")) * time | fin(0.1);\n".to_string(),
             PathBuf::new(),
         )
         .expect("test source should parse");

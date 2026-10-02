@@ -311,25 +311,6 @@ where
     })
 }
 
-pub fn sine<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
-where
-    M: Debug + Clone,
-    S: Clone + Debug,
-{
-    Ok({
-        // Like the waveform, Sine, the first argument is frequency in radians per
-        // second, and the second is phase in radians.
-        match &arguments[..] {
-            [Expr::Waveform(freq), Expr::Waveform(phase)] => Expr::Waveform(Waveform::Sine {
-                frequency: Box::new(freq.clone()),
-                phase: Box::new(phase.clone()),
-                state: (),
-            }),
-            _ => return Err(Error::internal_here("Invalid arguments for sine")),
-        }
-    })
-}
-
 pub fn phase<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
     M: Debug + Clone,
@@ -1113,7 +1094,6 @@ where
         ("sqrt", sqrt),
         ("exp", exp),
         ("sin", sin),
-        ("sine", sine),
         ("phase", phase),
         ("round", round),
         ("map", map),

@@ -189,42 +189,6 @@ impl<'a> Generator<'a> {
             }
             Append(_, _, _) => unreachable!("Append waveform has non-Initial, non-Finished state"),
 
-            Sine {
-                state: state @ Initial,
-                ..
-            } => {
-                *state = Accumulator { value: 0.0 };
-                self.generate(waveform, out)
-            }
-            Sine {
-                frequency,
-                phase,
-                state: Accumulator { value: accumulator },
-            } => {
-                // TODO Try to figure out if one the sub-waveforms is const and use
-                // `out` for the other one.
-                // Instantaneous frequency.
-                let f_len = self.generate(frequency, out);
-                // Instantaneous phase offset.
-                let mut ph_out = vec![0.0; f_len];
-                self.allocations += f_len;
-                let ph_len = self.generate(phase, &mut ph_out);
-                // Produce only the samples both sub-waveforms cover (the
-                // shorter one may be the phase), so the accumulator advances
-                // exactly over the reported samples.
-                for (i, &phase_offset) in ph_out[..ph_len].iter().enumerate() {
-                    let sample = (*accumulator + phase_offset as f64).sin() as f32;
-                    let f = out[i] as f64;
-                    let phase_inc = f / self.sample_rate as f64;
-                    // Overwrite the frequency with the output.
-                    out[i] = sample;
-                    // Move the accumulator according to the frequency and change in phase offset.
-                    *accumulator = (*accumulator + phase_inc).rem_euclid(f64::consts::TAU);
-                }
-                ph_len
-            }
-            Sine { .. } => unreachable!("Sine waveform has non-Initial, non-Accumulator state"),
-
             Phase {
                 state: state @ Initial,
                 ..
@@ -611,7 +575,6 @@ impl<'a> Generator<'a> {
             Time(_)
             | Noise
             | Fixed(_, _)
-            | Sine { .. }
             | Phase { .. }
             | Filter { .. }
             | Reset { .. }
@@ -762,13 +725,6 @@ impl<'a> Generator<'a> {
                 a_len + b_len
             }
             Append(_, _, _) => unreachable!("Append waveform with non-Initial, non-Finished state"),
-            Sine {
-                frequency, phase, ..
-            } => {
-                let f_len = self.length(frequency, max);
-                let ph_len = self.length(phase, max);
-                f_len.min(ph_len)
-            }
             Phase {
                 frequency, offset, ..
             } => {
@@ -996,7 +952,7 @@ impl<'a> Generator<'a> {
                 // Finite only when every sub-waveform is finite (Append,
                 // Merge).
                 All,
-                // Ends when any sub-waveform ends (truncating point ops, Sine).
+                // Ends when any sub-waveform ends (truncating point ops, Phase).
                 Any,
                 // Ends when the first sub-waveform (a trigger) ends (Reset,
                 // Alt).
@@ -1133,17 +1089,6 @@ impl<'a> Generator<'a> {
                 },
                 Append(a, b, state) => do_two(g, BoundedBy::All, *a, *b, move |a, b| {
                     Append(Box::new(a), Box::new(b), state)
-                }),
-                Sine {
-                    frequency,
-                    phase,
-                    state,
-                } => do_two(g, BoundedBy::Any, *frequency, *phase, |frequency, phase| {
-                    Sine {
-                        frequency: Box::new(frequency),
-                        phase: Box::new(phase),
-                        state,
-                    }
                 }),
                 Phase {
                     frequency,

@@ -122,7 +122,7 @@ fn bench_large(c: &mut Criterion) {
     match parser::parse_module::<u32, _>(
         r#"
     pi = 3.14159265;
-    $ = fn(freq_hz) => sine(2*pi * freq_hz, 0);
+    $ = fn(freq_hz) => sin(2*pi * phase(freq_hz, 0));
     triangle = fn(freq_hz) => let t = $freq_hz, slope = 4 * freq_hz, a = time * slope - 1, b = time * -slope + 3 in alt(t, reset(t, a), reset(t, b));
     linear = fn(initial, slope) => initial + (time * slope);
     Rw = fn(dur, level) => linear(level, -level / dur) | fin(time - dur);

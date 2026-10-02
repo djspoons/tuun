@@ -189,7 +189,6 @@ impl Wasm {
     ///
     /// # Examples
     /// ```javascript
-    /// tuun.install("sine(2764, 0)", "{}", "[]", "[]");
     /// tuun.install("$440", "{}", '["std"]', "[]");
     /// tuun.install("std.square(220) * 0.3", "{}", "[]", '["std"]');
     /// ```
@@ -483,7 +482,7 @@ mod tests {
         let mut tuun = Wasm::new(44100, 120.0).expect("Failed to create Tuun instance");
 
         let examples = vec![
-            ("sine(2764, 0)", "Sine wave (440 Hz)"),
+            ("sin(6.2831853 * phase(440, 0))", "Sine wave (440 Hz)"),
             ("noise * 0.1", "Noise"),
         ];
 
@@ -520,10 +519,10 @@ mod tests {
         let mut tuun = Wasm::new(44100, 120.0).expect("Failed to create Tuun instance");
 
         let error = tuun
-            .install("sine(\"a\", 0)", "{}", "[]", "[]")
-            .expect_err("a string frequency should gate the install");
+            .install("time | fin(\"a\")", "{}", "[]", "[]")
+            .expect_err("a string length should gate the install");
         assert!(
-            error.starts_with("Type errors: 1:6: expected waveform, found string"),
+            error.starts_with("Type errors: 1:12: expected waveform, found string"),
             "unexpected message: {}",
             error
         );
@@ -554,7 +553,7 @@ mod tests {
     fn test_invalid_expressions() {
         let mut tuun = Wasm::new(44100, 120.0).expect("Failed to create Tuun instance");
 
-        let invalid_examples = vec!["undefined_function()", "sine(2764)", "1 + "];
+        let invalid_examples = vec!["undefined_function()", "log(2764)", "1 + "];
 
         for expr in invalid_examples {
             println!("Testing invalid expression: {}", expr);
@@ -612,7 +611,7 @@ mod tests {
     #[test]
     fn test_open_unknown_module_errors() {
         let mut tuun = Wasm::new(44100, 120.0).expect("Failed to create Tuun instance");
-        let result = tuun.install("sine(2764, 0)", "{}", r#"["does_not_exist"]"#, "[]");
+        let result = tuun.install("time", "{}", r#"["does_not_exist"]"#, "[]");
         let message = result.expect_err("opening an unknown module should fail");
         assert!(
             message.contains("does_not_exist"),
