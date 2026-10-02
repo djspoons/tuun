@@ -242,6 +242,11 @@ where
                 phase: b,
                 ..
             }
+            | Phase {
+                frequency: a,
+                offset: b,
+                ..
+            }
             | Append(a, b, _)
             | BinaryPointOp(_, a, b) => {
                 self.process_captured(a, out);
@@ -372,27 +377,6 @@ fn process_marked<I, M>(
                 out,
             );
         }
-        Sine {
-            frequency, phase, ..
-        } => {
-            // TODO this is a little strange... but maybe correct?
-            process_marked(
-                generator,
-                sample_rate,
-                waveform_id,
-                start,
-                frequency.as_ref(),
-                out,
-            );
-            process_marked(
-                generator,
-                sample_rate,
-                waveform_id,
-                start,
-                phase.as_ref(),
-                out,
-            );
-        }
         Append(a, b, _) => {
             process_marked(generator, sample_rate, waveform_id, start, a, out);
             let a_len = generator.length(
@@ -402,7 +386,17 @@ fn process_marked<I, M>(
             let start = start + Duration::from_secs_f32(a_len as f32 / sample_rate);
             process_marked(generator, sample_rate, waveform_id, start, b.as_ref(), out);
         }
-        BinaryPointOp(_, a, b) => {
+        Sine {
+            frequency: a,
+            phase: b,
+            ..
+        }
+        | Phase {
+            frequency: a,
+            offset: b,
+            ..
+        }
+        | BinaryPointOp(_, a, b) => {
             process_marked(generator, sample_rate, waveform_id, start, a, out);
             process_marked(generator, sample_rate, waveform_id, start, b, out);
         }

@@ -314,6 +314,24 @@ where
     })
 }
 
+pub fn phase<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
+where
+    M: Debug + Clone,
+    S: Clone + Debug,
+{
+    Ok({
+        // Like the waveform, Phase, the first argument is frequency in hertz
+        match &arguments[..] {
+            [Expr::Waveform(freq), Expr::Waveform(offset)] => Expr::Waveform(Waveform::Phase {
+                frequency: Box::new(freq.clone()),
+                offset: Box::new(offset.clone()),
+                state: (),
+            }),
+            _ => return Err(Error::internal_here("Invalid arguments for phase")),
+        }
+    })
+}
+
 pub fn round<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
     M: Debug,
@@ -1079,6 +1097,7 @@ where
         ("sqrt", sqrt),
         ("exp", exp),
         ("sine", sine),
+        ("phase", phase),
         ("round", round),
         ("map", map),
         ("reduce", reduce),

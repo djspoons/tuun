@@ -25,9 +25,9 @@ pub enum State {
         input: VecDeque<f32>,
         output: VecDeque<f32>,
     },
-    // The current accumulated phase (for example, for Sine).
-    Phase {
-        accumulator: f64,
+    // The current accumulated value (example, for Phase).
+    Accumulator {
+        value: f64,
     },
     // The sign of the last generated value along with the direction of generation (for example, for Reset).
     Sign {
@@ -193,13 +193,13 @@ impl<'a> Generator<'a> {
                 state: state @ Initial,
                 ..
             } => {
-                *state = Phase { accumulator: 0.0 };
+                *state = Accumulator { value: 0.0 };
                 self.generate(waveform, out)
             }
             Sine {
                 frequency,
                 phase,
-                state: Phase { accumulator },
+                state: Accumulator { value: accumulator },
             } => {
                 // TODO Try to figure out if one the sub-waveforms is const and use
                 // `out` for the other one.
@@ -223,7 +223,42 @@ impl<'a> Generator<'a> {
                 }
                 ph_len
             }
-            Sine { .. } => unreachable!("Sine waveform has non-Initial, non-Phase state"),
+            Sine { .. } => unreachable!("Sine waveform has non-Initial, non-Accumulator state"),
+
+            Phase {
+                state: state @ Initial,
+                ..
+            } => {
+                *state = Accumulator { value: 0.0 };
+                self.generate(waveform, out)
+            }
+            Phase {
+                frequency,
+                offset,
+                state: Accumulator { value: accumulator },
+            } => {
+                // TODO Try to figure out if one the sub-waveforms is const and
+                // use `out` for the other one.
+                // Instantaneous frequency.
+                let f_len = self.generate(frequency, out);
+                // Instantaneous phase offset.
+                let mut o_out = vec![0.0; f_len];
+                self.allocations += f_len;
+                let o_len = self.generate(offset, &mut o_out);
+                // Output is the length of the shorter one.
+                for (i, &offset) in o_out[..o_len].iter().enumerate() {
+                    // Compute the next increment from the instantaneous frequency.
+                    let incr = out[i] as f64 / self.sample_rate as f64;
+                    // Overwrite the frequency with the output. (Rounding to f32
+                    // can turn 0.99999999 into 1.0; keep the range half-open.)
+                    let sample = (*accumulator + offset as f64).rem_euclid(1.0) as f32;
+                    out[i] = if sample >= 1.0 { 0.0 } else { sample };
+                    // Update the accumulator.
+                    *accumulator = (*accumulator + incr).rem_euclid(1.0);
+                }
+                o_len
+            }
+            Phase { .. } => unreachable!("Phase waveform has non-Initial, non-Accumulator state"),
             Filter {
                 waveform: inner,
                 feed_forward,
@@ -570,6 +605,7 @@ impl<'a> Generator<'a> {
             | Noise
             | Fixed(_, _)
             | Sine { .. }
+            | Phase { .. }
             | Filter { .. }
             | Reset { .. }
             | Fin { .. }
@@ -724,6 +760,13 @@ impl<'a> Generator<'a> {
                 let f_len = self.length(frequency, max);
                 let ph_len = self.length(phase, max);
                 f_len.min(ph_len)
+            }
+            Phase {
+                frequency, offset, ..
+            } => {
+                let f_len = self.length(frequency, max);
+                let o_len = self.length(offset, max);
+                f_len.min(o_len)
             }
             BinaryPointOp(op, a, b) => {
                 let a_len = self.length(a, max);
@@ -1093,6 +1136,21 @@ impl<'a> Generator<'a> {
                         state,
                     }
                 }),
+                Phase {
+                    frequency,
+                    offset,
+                    state,
+                } => do_two(
+                    g,
+                    BoundedBy::Any,
+                    *frequency,
+                    *offset,
+                    |frequency, offset| Phase {
+                        frequency: Box::new(frequency),
+                        offset: Box::new(offset),
+                        state,
+                    },
+                ),
                 BinaryPointOp(op, a, b) => {
                     // A truncating operator is bounded by either side; Merge
                     // extends past a finite side, so it needs both.
@@ -1542,7 +1600,7 @@ mod tests {
         run_tests(&w, &[0.0, 1.0]);
 
         // A finite frequency bounds the sine (even with an infinite phase),
-        // so the whole waveform precomputes to Fixed.
+        // so the whole waveform pre-computes to Fixed.
         let w: Waveform = Sine {
             frequency: Box::new(Fixed(vec![0.0, 0.0, 0.0], ())),
             phase: Box::new(Const(0.0)),

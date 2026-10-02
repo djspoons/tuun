@@ -126,6 +126,22 @@ where
                 },
             }
         }
+        Phase {
+            frequency,
+            offset,
+            state,
+        } => {
+            let frequency = optimize(*frequency);
+            let offset = optimize(*offset);
+            match (frequency, offset) {
+                (Const(0.0), Const(o)) => Const(o.rem_euclid(1.0)),
+                (frequency, offset) => Phase {
+                    frequency: Box::new(frequency),
+                    offset: Box::new(offset),
+                    state,
+                },
+            }
+        }
         Filter {
             waveform,
             feed_forward,

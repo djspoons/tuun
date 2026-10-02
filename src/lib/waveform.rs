@@ -91,6 +91,13 @@ pub enum Waveform<MarkId, State = ()> {
         phase: Box<Waveform<MarkId, State>>,
         state: State,
     },
+    /// Computes an accumulated phase in the range [0,1) with the given
+    /// frequency (in hertz) and offset.
+    Phase {
+        frequency: Box<Waveform<MarkId, State>>,
+        offset: Box<Waveform<MarkId, State>>,
+        state: State,
+    },
     /// Implements an impulse response filter with feed-forward and feedback coefficients. Assumes that
     /// the first feedback coefficient (a_0) is 1.0. If the filter has no feedback coefficients, then the
     /// filter has a finite response -- that is, it is a convolution.
@@ -167,6 +174,9 @@ impl<MarkId: Display, State> Display for Waveform<MarkId, State> {
             Sine {
                 frequency, phase, ..
             } => write!(f, "Sine({}, {})", frequency, phase),
+            Phase {
+                frequency, offset, ..
+            } => write!(f, "Phase({}, {})", frequency, offset),
             Filter {
                 waveform,
                 feed_forward,
@@ -238,6 +248,13 @@ where
         } => Sine {
             frequency: Box::new(initialize_state(*frequency, state.clone())),
             phase: Box::new(initialize_state(*phase, state.clone())),
+            state,
+        },
+        Phase {
+            frequency, offset, ..
+        } => Phase {
+            frequency: Box::new(initialize_state(*frequency, state.clone())),
+            offset: Box::new(initialize_state(*offset, state.clone())),
             state,
         },
         Filter {
@@ -312,6 +329,13 @@ pub fn remove_state<M, S>(waveform: Waveform<M, S>) -> Waveform<M> {
             phase: Box::new(remove_state(*phase)),
             state: (),
         },
+        Phase {
+            frequency, offset, ..
+        } => Phase {
+            frequency: Box::new(remove_state(*frequency)),
+            offset: Box::new(remove_state(*offset)),
+            state: (),
+        },
         Filter {
             waveform,
             feed_forward,
@@ -383,6 +407,15 @@ where
         } => {
             set_state(frequency, new_state.clone());
             set_state(phase, new_state.clone());
+            *state = new_state;
+        }
+        Phase {
+            frequency,
+            offset,
+            state,
+        } => {
+            set_state(frequency, new_state.clone());
+            set_state(offset, new_state.clone());
             *state = new_state;
         }
         Filter {
@@ -476,6 +509,12 @@ where
         } => {
             substitute(frequency, mark_id, new_waveform);
             substitute(phase, mark_id, new_waveform);
+        }
+        Phase {
+            frequency, offset, ..
+        } => {
+            substitute(frequency, mark_id, new_waveform);
+            substitute(offset, mark_id, new_waveform);
         }
         Filter {
             waveform,
