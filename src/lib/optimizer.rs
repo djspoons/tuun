@@ -134,7 +134,12 @@ where
             let frequency = optimize(*frequency);
             let offset = optimize(*offset);
             match (frequency, offset) {
-                (Const(0.0), Const(o)) => Const(o.rem_euclid(1.0)),
+                (Const(0.0), Const(o)) => {
+                    // Match the generator: wrap in f64, and keep the range
+                    // half-open if rounding to f32 gives 1.0.
+                    let p = (o as f64).rem_euclid(1.0) as f32;
+                    Const(if p >= 1.0 { 0.0 } else { p })
+                }
                 (frequency, offset) => Phase {
                     frequency: Box::new(frequency),
                     offset: Box::new(offset),
@@ -427,6 +432,11 @@ where
                 (a, b) => BinaryPointOp(Operator::Power, Box::new(a), Box::new(b)),
             }
         }
+        UnaryOp(op, a) => match optimize(*a) {
+            Fixed(mut a, _) => Fixed(a.iter_mut().map(|x| op.apply(*x)).collect(), ()),
+            Const(a) => Const(op.apply(a)),
+            a => UnaryOp(op, Box::new(a)),
+        },
         // TODO if the waveform has constants, they can be pulled out; also
         // nested resets with the same trigger. Consider a naive version of the
         // triangle wave as an example

@@ -17,12 +17,17 @@ sinh = fn(x) => (exp(x) - exp(-x)) / 2;
 // and start with their first positive value (including +0.0) at the origin (at least they 
 // should when no offset is applied). This will ensure they work well with Reset.
 
-// `sin` is shorthand for sine with no angular frequency.
-sin = fn(phase) => sine(0, phase);
+// `sine computes a sine wave whose angular frequency and phase offset may both
+// vary with time (analogous to `phase`). Both frequency and offset are given in
+// radians.
+sine = fn(ang_freq, phase_offset) =>
+  sin(2*pi * phase(ang_freq / (2*pi),
+                   phase_offset / (2*pi)));
+
 // `cos` is a quarter turn ahead of `sin`.
-cos = fn(phase) => sine(0, phase + pi / 2);
-// `$` computes a sine wave at the given frequency in hertz (which must be a float or waveform).
-$ = fn(freq_hz) => sine(2*pi * freq_hz, 0);
+cos = fn(radians) => sin(radians + pi / 2);
+// `$` computes a sine wave at the given frequency in hertz.
+$ = fn(freq_hz) => sin(2*pi * phase(freq_hz, 0));
 // `sawtooth` computes a sawtooth wave at the given frequency in hertz.
 // Note that this is an inverse sawtooth (used so that it meets the
 // negative/positive constraint described above).

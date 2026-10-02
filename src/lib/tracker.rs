@@ -252,6 +252,9 @@ where
                 self.process_captured(a, out);
                 self.process_captured(b, out);
             }
+            UnaryOp(_, a) => {
+                self.process_captured(a, out);
+            }
             Reset {
                 trigger, waveform, ..
             } => {
@@ -399,6 +402,9 @@ fn process_marked<I, M>(
         | BinaryPointOp(_, a, b) => {
             process_marked(generator, sample_rate, waveform_id, start, a, out);
             process_marked(generator, sample_rate, waveform_id, start, b, out);
+        }
+        UnaryOp(_, a) => {
+            process_marked(generator, sample_rate, waveform_id, start, a, out);
         }
         Marked { waveform, id } => {
             let len = generator.length(

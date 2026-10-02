@@ -297,6 +297,13 @@ impl<'a> Generator<'a> {
             } => self.generate_filter(waveform, feed_forward, feedback, input, output, out),
             Filter { .. } => unreachable!("Filter waveform has non-Initial, non-Samples state"),
             BinaryPointOp(op, a, b) => self.generate_binary_op(*op, a, b, out),
+            UnaryOp(op, a) => {
+                let len = self.generate(a, out);
+                for x in out[..len].iter_mut() {
+                    *x = op.apply(*x);
+                }
+                len
+            }
             Reset {
                 state: state @ Initial,
                 ..
@@ -618,6 +625,7 @@ impl<'a> Generator<'a> {
                 (Some(f), Some(g)) => Some(op.apply(f, g)),
                 _ => None,
             },
+            UnaryOp(op, a) => self.is_const(a).map(|f| op.apply(f)),
             Append(a, b, _) => match (self.is_const(a), self.is_const(b)) {
                 (Some(f), Some(g)) if f == g => Some(f),
                 _ => None,
@@ -777,6 +785,7 @@ impl<'a> Generator<'a> {
                     a_len.min(b_len)
                 }
             }
+            UnaryOp(_, a) => self.length(a, max),
             Reset { trigger, .. } => {
                 // We don't change the state of waveform here as its position
                 // isn't meaningful in a global sense.
@@ -1163,6 +1172,10 @@ impl<'a> Generator<'a> {
                         BinaryPointOp(op, Box::new(a), Box::new(b))
                     })
                 }
+                UnaryOp(op, a) => match precompute_internal(g, *a) {
+                    Pc(w) => Pc(UnaryOp(op, Box::new(w))),
+                    Npc(reason, w) => Npc(reason, UnaryOp(op, Box::new(w))),
+                },
                 Filter {
                     waveform,
                     feed_forward,
@@ -1288,7 +1301,10 @@ mod tests {
 
     use super::*;
     use crate::optimizer;
-    use waveform::Waveform::{Append, BinaryPointOp, Const, Filter, Fin, Fixed, Reset, Sine, Time};
+    use waveform::UnaryOperator;
+    use waveform::Waveform::{
+        Append, BinaryPointOp, Const, Filter, Fin, Fixed, Phase, Reset, Time, UnaryOp,
+    };
 
     type Waveform = waveform::Waveform<u32>;
 
@@ -1517,15 +1533,23 @@ mod tests {
 
     // frequency in Hz, phase in radians
     fn sin_waveform(frequency: f32, phase: f32) -> Box<Waveform> {
-        Box::new(Sine {
-            frequency: Box::new(BinaryPointOp(
+        Box::new(UnaryOp(
+            UnaryOperator::Sin,
+            Box::new(BinaryPointOp(
                 Operator::Multiply,
                 Box::new(Const(f32::consts::TAU)),
-                Box::new(Const(frequency)),
+                Box::new(Phase {
+                    frequency: Box::new(Const(frequency)),
+
+                    offset: Box::new(BinaryPointOp(
+                        Operator::Divide,
+                        Box::new(Const(phase)),
+                        Box::new(Const(f32::consts::TAU)),
+                    )),
+                    state: (),
+                }),
             )),
-            phase: Box::new(Const(phase)),
-            state: (),
-        })
+        ))
     }
 
     fn run_sin_test<M>(g: &mut Generator, waveform: &mut super::Waveform<M>, expected: Vec<f32>)
@@ -1547,7 +1571,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sine() {
+    fn test_phase_and_sine() {
         let sample_frequency = 44100;
         let mut g = new_test_generator(sample_frequency);
 
@@ -1559,19 +1583,22 @@ mod tests {
         run_sin_test(&mut g, &mut w, expected);
 
         // Non-constant frequency: f = time + 10 Hz
-        let mut w = initialize_state(Waveform::Sine {
-            frequency: Box::new(BinaryPointOp(
+        let mut w = initialize_state(Waveform::UnaryOp(
+            UnaryOperator::Sin,
+            Box::new(BinaryPointOp(
                 Operator::Multiply,
-                Box::new(BinaryPointOp(
-                    Operator::Add,
-                    Box::new(Time(())),
-                    Box::new(Const(10.0)),
-                )),
                 Box::new(Const(f32::consts::TAU)),
+                Box::new(Phase {
+                    frequency: Box::new(BinaryPointOp(
+                        Operator::Add,
+                        Box::new(Time(())),
+                        Box::new(Const(10.0)),
+                    )),
+                    offset: Box::new(Const(0.0)),
+                    state: (),
+                }),
             )),
-            phase: Box::new(Const(0.0)),
-            state: (),
-        });
+        ));
         let f_is_t_plus_ten = |x: i32| {
             let t = x as f64 / sample_frequency as f64;
             let phase = f64::consts::TAU * (0.5 * t * t + 10.0 * t);
@@ -1590,29 +1617,92 @@ mod tests {
             .collect();
         run_sin_test(&mut g, &mut w, expected);
 
-        // A finite phase bounds the sine too: two samples, no more, and the
-        // samples reflect the phase offsets.
-        let w: Waveform = Sine {
-            frequency: Box::new(Const(0.0)),
-            phase: Box::new(Fixed(vec![0.0, f32::consts::FRAC_PI_2], ())),
-            state: (),
-        };
-        run_tests(&w, &[0.0, 1.0]);
-
-        // A finite frequency bounds the sine (even with an infinite phase),
-        // so the whole waveform pre-computes to Fixed.
-        let w: Waveform = Sine {
+        // A finite frequency bounds the phase (even with an infinite offset), so
+        // the whole waveform pre-computes to Fixed.
+        let w: Waveform = Phase {
             frequency: Box::new(Fixed(vec![0.0, 0.0, 0.0], ())),
-            phase: Box::new(Const(0.0)),
+            offset: Box::new(Const(0.0)),
             state: (),
         };
         match g.precompute(w) {
             Fixed(_, _) => (),
             w => panic!(
-                "Expected the sine to be precomputed to a Fixed, but got {:?}",
+                "Expected the phase to be precomputed to a Fixed, but got {:?}",
                 w
             ),
         }
+
+        // The remaining cases use a sample rate of 1, so a frequency of 0.25
+        // advances the phase by a quarter cycle per sample.
+        let mut g = new_test_generator(1);
+
+        // Constant frequency
+        let w: Waveform = Phase {
+            frequency: Box::new(Const(0.25)),
+            offset: Box::new(Const(0.0)),
+            state: (),
+        };
+        run_tests(&w, &[0.0, 0.25, 0.5, 0.75, 0.0, 0.25, 0.5, 0.75, 0.0, 0.25]);
+
+        // Negative frequency: the phase runs backward but stays in [0, 1).
+        let w: Waveform = Phase {
+            frequency: Box::new(Const(-0.25)),
+            offset: Box::new(Const(0.0)),
+            state: (),
+        };
+        run_tests(&w, &[0.0, 0.75, 0.5, 0.25, 0.0, 0.75]);
+
+        // Changing frequency (and finite frequency => finite result)
+        let w: Waveform = Phase {
+            frequency: Box::new(Fixed(vec![0.25, 0.5, 0.25, 0.5], ())),
+            offset: Box::new(Const(0.0)),
+            state: (),
+        };
+        run_tests(&w, &[0.0, 0.25, 0.75, 0.0]);
+        check_length(&mut g, &w, 0, 4, 10);
+
+        // Changing offset (phase modulation): the offset is added to the
+        // accumulator before wrapping, so negative offsets wrap up from 1.
+        // (also finite offset => finite result)
+        let w: Waveform = Phase {
+            frequency: Box::new(Const(0.25)),
+            offset: Box::new(Fixed(vec![0.0, 0.5, 0.5, -0.5, -0.25], ())),
+            state: (),
+        };
+        run_tests(&w, &[0.0, 0.75, 0.0, 0.25, 0.75]);
+        check_length(&mut g, &w, 0, 5, 10);
+
+        // A phase just below a whole cycle can round up to 1.0 as f32; it must
+        // stay in [0, 1).
+        let w: Waveform = Phase {
+            frequency: Box::new(Const(0.0)),
+            offset: Box::new(Const(-1e-10)),
+            state: (),
+        };
+        run_tests(&w, &[0.0, 0.0]);
+
+        // Reset restarts the accumulator from 0.
+        let w: Waveform = Reset {
+            trigger: Box::new(Fixed(vec![1.0, -1.0, -1.0, 1.0, -1.0, 1.0, 1.0, 1.0], ())),
+            waveform: Box::new(Phase {
+                frequency: Box::new(Const(0.25)),
+                offset: Box::new(Const(0.0)),
+                state: (),
+            }),
+            state: (),
+        };
+        run_tests(&w, &[0.0, 0.25, 0.5, 0.0, 0.25, 0.0, 0.25, 0.5]);
+
+        // Sin applies point-wise and is as long as its input.
+        let w: Waveform = UnaryOp(
+            UnaryOperator::Sin,
+            Box::new(Fixed(
+                vec![0.0, f32::consts::FRAC_PI_2, -f32::consts::FRAC_PI_2],
+                (),
+            )),
+        );
+        run_tests(&w, &[0.0, 1.0, -1.0]);
+        check_length(&mut g, &w, 0, 3, 10);
     }
 
     #[test]

@@ -5,7 +5,7 @@ use crate::eval;
 use crate::expr;
 use crate::expr::{BuiltInFn, Error, Expr, SourceExpr, boxed};
 use crate::optimizer;
-use crate::waveform::{Operator, Waveform};
+use crate::waveform::{Operator, UnaryOperator, Waveform};
 use Expr::{Bool, BuiltIn, List, Seq};
 
 type BuiltinFn<M, S> = fn(Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>;
@@ -291,6 +291,22 @@ where
         match arguments[..] {
             [Expr::Waveform(Waveform::Const(value))] => Expr::float(value.exp()),
             _ => return Err(Error::internal_here("Invalid argument for exp")),
+        }
+    })
+}
+
+// sin returns the waveform combinator that computes the sine of each sample.
+pub fn sin<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
+where
+    M: Debug + Clone,
+    S: Clone + Debug,
+{
+    Ok({
+        match &arguments[..] {
+            [Expr::Waveform(a)] => {
+                Expr::Waveform(Waveform::UnaryOp(UnaryOperator::Sin, Box::new(a.clone())))
+            }
+            _ => return Err(Error::internal_here("Invalid arguments for sin")),
         }
     })
 }
@@ -1023,7 +1039,7 @@ where
 ///
 /// # Example
 /// ```tuun
-/// sine(440 | debug("freq"), 0)   // logs `[DEBUG] freq: 440`, plays sine(440, 0)
+/// $(440 | debug("freq"))   // logs `[DEBUG] freq: 440`, plays $440
 /// ```
 pub fn debug<M, S>(print: impl Fn(&str) + Clone + 'static) -> SourceExpr<M, S>
 where
@@ -1096,6 +1112,7 @@ where
         ("log", log),
         ("sqrt", sqrt),
         ("exp", exp),
+        ("sin", sin),
         ("sine", sine),
         ("phase", phase),
         ("round", round),

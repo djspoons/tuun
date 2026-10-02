@@ -56,6 +56,29 @@ impl Operator {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum UnaryOperator {
+    // Computes the sine of an angle given in radians.
+    Sin,
+}
+
+impl UnaryOperator {
+    /// Returns the operator applied to one sample.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tuun::waveform::UnaryOperator;
+    ///
+    /// assert_eq!(UnaryOperator::Sin.apply(std::f32::consts:: FRAC_PI_2), 1.0);
+    /// ```
+    pub fn apply(&self, a: f32) -> f32 {
+        match self {
+            UnaryOperator::Sin => a.sin(),
+        }
+    }
+}
+
 /// Waveform is a compact representation of a sequence of samples.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Waveform<MarkId, State = ()> {
@@ -114,6 +137,9 @@ pub enum Waveform<MarkId, State = ()> {
         Box<Waveform<MarkId, State>>,
         Box<Waveform<MarkId, State>>,
     ),
+    /// Implements a point-wise transformation of a waveform by computing the
+    /// given operation one sample at a time.
+    UnaryOp(UnaryOperator, Box<Waveform<MarkId, State>>),
     /// Generates a repeating waveform that restarts the given waveform whenever the trigger waveform
     /// flips from negative values to positive values. Its length is determined by the trigger waveform.
     Reset {
@@ -195,6 +221,9 @@ impl<MarkId: Display, State> Display for Waveform<MarkId, State> {
             }
             BinaryPointOp(op, a, b) => {
                 write!(f, "{:?}({}, {})", op, a, b)
+            }
+            UnaryOp(op, a) => {
+                write!(f, "{:?}({})", op, a)
             }
             Reset {
                 trigger, waveform, ..
@@ -279,6 +308,7 @@ where
             Box::new(initialize_state(*a, state.clone())),
             Box::new(initialize_state(*b, state)),
         ),
+        UnaryOp(op, a) => UnaryOp(op, Box::new(initialize_state(*a, state))),
         Reset {
             trigger, waveform, ..
         } => Reset {
@@ -350,6 +380,7 @@ pub fn remove_state<M, S>(waveform: Waveform<M, S>) -> Waveform<M> {
         BinaryPointOp(op, a, b) => {
             BinaryPointOp(op, Box::new(remove_state(*a)), Box::new(remove_state(*b)))
         }
+        UnaryOp(op, a) => UnaryOp(op, Box::new(remove_state(*a))),
         Reset {
             trigger, waveform, ..
         } => Reset {
@@ -434,6 +465,9 @@ where
         BinaryPointOp(_, a, b) => {
             set_state(a, new_state.clone());
             set_state(b, new_state);
+        }
+        UnaryOp(_, a) => {
+            set_state(a, new_state);
         }
         Reset {
             trigger,
@@ -533,6 +567,9 @@ where
         BinaryPointOp(_, a, b) => {
             substitute(a, mark_id, new_waveform);
             substitute(b, mark_id, new_waveform);
+        }
+        UnaryOp(_, a) => {
+            substitute(a, mark_id, new_waveform);
         }
         Reset {
             trigger, waveform, ..
