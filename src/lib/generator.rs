@@ -201,24 +201,34 @@ impl<'a> Generator<'a> {
                 offset,
                 state: Accumulator { value: accumulator },
             } => {
-                // TODO Try to figure out if one the sub-waveforms is const and
-                // use `out` for the other one.
+                // TODO Try to figure out if one of the sub-waveforms is const
+                // and use `out` for the other one.
                 // Instantaneous frequency.
                 let f_len = self.generate(frequency, out);
                 // Instantaneous phase offset.
                 let mut o_out = vec![0.0; f_len];
                 self.allocations += f_len;
-                let o_len = self.generate(offset, &mut o_out);
                 // Output is the length of the shorter one.
-                for (i, &offset) in o_out[..o_len].iter().enumerate() {
-                    // Compute the next increment from the instantaneous frequency.
-                    let incr = out[i] as f64 / self.sample_rate as f64;
-                    // Overwrite the frequency with the output. (Rounding to f32
-                    // can turn 0.99999999 into 1.0; keep the range half-open.)
-                    let sample = (*accumulator + offset as f64).rem_euclid(1.0) as f32;
-                    out[i] = if sample >= 1.0 { 0.0 } else { sample };
-                    // Update the accumulator.
-                    *accumulator = (*accumulator + incr).rem_euclid(1.0);
+                let o_len = self.generate(offset, &mut o_out);
+                // The accumulator is wrapped once per chunk rather than once
+                // per sample: within a chunk it grows by at most CHUNK * f /
+                // sample_rate cycles, too little to cost f64 precision that the
+                // f32 output could show.
+                const CHUNK: usize = 1024;
+                for (c, chunk) in o_out[..o_len].chunks(CHUNK).enumerate() {
+                    for (j, &offset) in chunk.iter().enumerate() {
+                        let i = c * CHUNK + j;
+                        // Compute the next increment from the instantaneous frequency.
+                        let incr = out[i] as f64 / self.sample_rate as f64;
+                        // Overwrite the frequency with the output. (Rounding,
+                        // here or in the cast to f32, can produce 1.0; keep the
+                        // range half-open.)
+                        let x = *accumulator + offset as f64;
+                        let sample = (x - x.floor()) as f32;
+                        out[i] = if sample >= 1.0 { 0.0 } else { sample };
+                        *accumulator += incr;
+                    }
+                    *accumulator -= accumulator.floor();
                 }
                 o_len
             }
@@ -1637,6 +1647,23 @@ mod tests {
             state: (),
         };
         run_tests(&w, &[0.0, 0.25, 0.5, 0.0, 0.25, 0.0, 0.25, 0.5]);
+
+        // A single long buffer (spanning several internal chunks) stays in
+        // [0, 1) and in phase, running forward or backward.
+        for frequency in [0.25, -0.25] {
+            let w: Waveform = Phase {
+                frequency: Box::new(Const(frequency)),
+                offset: Box::new(Const(0.0)),
+                state: (),
+            };
+            let mut w = initialize_state(w);
+            let mut out = vec![f32::INFINITY; 2500];
+            assert_eq!(g.generate(&mut w, &mut out), out.len());
+            for (i, &sample) in out.iter().enumerate() {
+                let expected = (i as f32 * frequency).rem_euclid(1.0);
+                assert_eq!(sample, expected, "frequency {} at sample {}", frequency, i);
+            }
+        }
 
         // Sin applies point-wise and is as long as its input.
         let w: Waveform = UnaryOp(
