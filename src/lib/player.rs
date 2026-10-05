@@ -156,12 +156,12 @@ impl Player {
         let repeat_every = repeat_after_measures.map(|measures| {
             duration_from_beats(self.tempo, (measures * self.beats_per_measure) as u64)
         });
+        let now = time::Instant::now();
         let start_instant = match start {
             Start::Now => None,
-            Start::NextMeasure => Some(
-                next_measure_start(status, time::Instant::now())
-                    .expect("No next measure found in marks"),
-            ),
+            Start::NextMeasure => Some(next_measure_start(status, now).unwrap_or_else(|| {
+                panic!("No next measure found at {:?}: {:?}", now, status.marks)
+            })),
             Start::At(instant) => Some(instant),
         };
         let mut waveform = program.waveform().cloned()?;
@@ -243,10 +243,12 @@ impl Player {
             message = format!("Playing sequence {}", display_name);
             repeat_every = None;
         }
+        let now = time::Instant::now();
         let base = match start {
-            Start::Now => time::Instant::now(),
-            Start::NextMeasure => next_measure_start(status, time::Instant::now())
-                .expect("No next measure found in marks"),
+            Start::Now => now,
+            Start::NextMeasure => next_measure_start(status, now).unwrap_or_else(|| {
+                panic!("No next measure found at {:?}: {:?}", now, status.marks)
+            }),
             Start::At(instant) => instant,
         };
         let mut step = sequence.step_waveform.clone();
