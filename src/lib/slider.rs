@@ -3,8 +3,8 @@ use std::fmt::Display;
 use crate::waveform;
 use crate::{builtins, eval, expr, parser};
 
-use waveform::Operator;
-use waveform::Waveform::{Append, BinaryPointOp, Const, Fin, Marked, Time};
+use waveform::BinaryOperator;
+use waveform::Waveform::{Append, BinaryOp, Const, Fin, Marked, Time};
 
 // This file defines types and functions related to sliders that are platform-independent.
 
@@ -91,15 +91,15 @@ pub fn make_ramp<M>(
 ) -> waveform::Waveform<M> {
     let ramp = Append(
         Box::new(Fin {
-            length: Box::new(BinaryPointOp(
-                Operator::Subtract,
+            length: Box::new(BinaryOp(
+                BinaryOperator::Subtract,
                 Box::new(Time(())),
                 Box::new(Const(ramp_duration_secs)),
             )),
-            waveform: Box::new(BinaryPointOp(
-                Operator::Add,
-                Box::new(BinaryPointOp(
-                    Operator::Multiply,
+            waveform: Box::new(BinaryOp(
+                BinaryOperator::Add,
+                Box::new(BinaryOp(
+                    BinaryOperator::Multiply,
                     Box::new(Time(())),
                     Box::new(Const((new_value - last_value) / ramp_duration_secs)),
                 )),

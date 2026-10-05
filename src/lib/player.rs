@@ -555,9 +555,9 @@ pub fn amplitude(level_db: f32) -> waveform::Waveform<MarkId> {
 /// Returns `waveform` scaled by a fresh `Terminator` mark: `waveform *
 /// Marked(Terminator, 1)`.
 pub fn terminate(waveform: waveform::Waveform<MarkId>) -> waveform::Waveform<MarkId> {
-    use waveform::Waveform::{BinaryPointOp, Const, Marked};
-    BinaryPointOp(
-        waveform::Operator::Multiply,
+    use waveform::Waveform::{BinaryOp, Const, Marked};
+    BinaryOp(
+        waveform::BinaryOperator::Multiply,
         Box::new(waveform),
         Box::new(Marked {
             id: MarkId::Terminator,
@@ -569,19 +569,19 @@ pub fn terminate(waveform: waveform::Waveform<MarkId>) -> waveform::Waveform<Mar
 /// Returns the replacement for a `Terminator` mark that fades a voice out over
 /// a short ramp and then ends it.
 pub fn stop_ramp() -> waveform::Waveform<MarkId> {
-    use waveform::{Operator, Waveform::*};
+    use waveform::{BinaryOperator, Waveform::*};
     const STOP_DURATION_SECS: f32 = 0.05;
     terminate(Fin {
-        length: Box::new(BinaryPointOp(
-            Operator::Subtract,
+        length: Box::new(BinaryOp(
+            BinaryOperator::Subtract,
             Box::new(Time(())),
             Box::new(Const(STOP_DURATION_SECS)),
         )),
-        waveform: Box::new(BinaryPointOp(
-            Operator::Subtract,
+        waveform: Box::new(BinaryOp(
+            BinaryOperator::Subtract,
             Box::new(Const(1.0)),
-            Box::new(BinaryPointOp(
-                Operator::Multiply,
+            Box::new(BinaryOp(
+                BinaryOperator::Multiply,
                 Box::new(Time(())),
                 Box::new(Const(1.0 / STOP_DURATION_SECS)),
             )),
@@ -595,8 +595,8 @@ fn build_leveled_waveform(
     waveform: waveform::Waveform<MarkId>,
     level_db: f32,
 ) -> waveform::Waveform<MarkId> {
-    terminate(waveform::Waveform::BinaryPointOp(
-        waveform::Operator::Multiply,
+    terminate(waveform::Waveform::BinaryOp(
+        waveform::BinaryOperator::Multiply,
         Box::new(waveform),
         Box::new(amplitude(level_db)),
     ))
@@ -616,10 +616,10 @@ fn build_top_level_waveform(
 
 /// Builds a silent waveform lasting the given number of beats.
 fn silence_of_beats(beats: f32, tempo: u32) -> waveform::Waveform<MarkId> {
-    use waveform::Waveform::{BinaryPointOp, Const, Fin, Time};
+    use waveform::Waveform::{BinaryOp, Const, Fin, Time};
     Fin {
-        length: Box::new(BinaryPointOp(
-            waveform::Operator::Subtract,
+        length: Box::new(BinaryOp(
+            waveform::BinaryOperator::Subtract,
             Box::new(Time(())),
             Box::new(Const(beats * 60.0 / tempo as f32)),
         )),

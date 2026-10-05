@@ -1,8 +1,8 @@
-use crate::waveform::{Operator, Waveform};
+use crate::waveform::{BinaryOperator, Waveform};
 
 // First root returns the first non-negative value at which the given waveform is zero. This
 // is implemented for waveforms of the forms:
-//   * BinaryPointOp(Operator::Add|Operator::Subtract, Time, _)
+//   * BinaryOp(BinaryOperator::Add|BinaryOperator::Subtract, Time, _)
 //   * Time
 //   * Const(0)
 // It returns None otherwise.
@@ -15,25 +15,25 @@ where
         Const(0.0) => Some(Const(0.0)),
         Const(_) => None,
         Time(_) => Some(Const(0.0)),
-        BinaryPointOp(Operator::Add, a, b) => match (&**a, &**b) {
+        BinaryOp(BinaryOperator::Add, a, b) => match (&**a, &**b) {
             // TODO should really check that Time doesn't appear on the other side too
-            (Time(_), w) => Some(optimize(BinaryPointOp(
-                Operator::Multiply,
+            (Time(_), w) => Some(optimize(BinaryOp(
+                BinaryOperator::Multiply,
                 Box::new(w.clone()),
                 Box::new(Const(-1.0)),
             ))),
-            (w, Time(_)) => Some(optimize(BinaryPointOp(
-                Operator::Multiply,
+            (w, Time(_)) => Some(optimize(BinaryOp(
+                BinaryOperator::Multiply,
                 Box::new(w.clone()),
                 Box::new(Const(-1.0)),
             ))),
             _ => None,
         },
-        BinaryPointOp(Operator::Subtract, a, b) => first_root(&BinaryPointOp(
-            Operator::Add,
+        BinaryOp(BinaryOperator::Subtract, a, b) => first_root(&BinaryOp(
+            BinaryOperator::Add,
             a.clone(),
-            Box::new(optimize(BinaryPointOp(
-                Operator::Multiply,
+            Box::new(optimize(BinaryOp(
+                BinaryOperator::Multiply,
                 b.clone(),
                 Box::new(Const(-1.0)),
             ))),
@@ -73,8 +73,8 @@ where
                         waveform,
                     } => match (first_root(&length), first_root(&*inner_length)) {
                         (Some(Const(a)), Some(Const(b))) => Fin {
-                            length: Box::new(optimize(BinaryPointOp(
-                                Operator::Subtract,
+                            length: Box::new(optimize(BinaryOp(
+                                BinaryOperator::Subtract,
                                 Box::new(Time(())),
                                 Box::new(Const(a.min(b))),
                             ))),
@@ -137,28 +137,28 @@ where
             feedback: feedback.into_iter().map(optimize).collect(),
             state,
         },
-        BinaryPointOp(Operator::Add, a, b) => {
+        BinaryOp(BinaryOperator::Add, a, b) => {
             match (optimize(*a), optimize(*b)) {
                 // Add yields the shorter of the two inputs.
                 (Fixed(a, _), _) if a.is_empty() => Fixed(vec![], ()),
                 (_, Fixed(b, _)) if b.is_empty() => Fixed(vec![], ()),
-                (Const(a), Const(b)) => Const(Operator::Add.apply(a, b)),
+                (Const(a), Const(b)) => Const(BinaryOperator::Add.apply(a, b)),
                 // Adding 0 is identity (because Add truncates to shorter, and Const is infinite)
                 (a, Const(0.0)) => a,
                 // Commute (moving constants to the right)
-                (Const(a), b) => optimize(BinaryPointOp(
-                    Operator::Add,
+                (Const(a), b) => optimize(BinaryOp(
+                    BinaryOperator::Add,
                     Box::new(b),
                     Box::new(Const(a)),
                 )),
                 // Re-associate
                 // TODO I think re-associating the other way would mean a lower water mark for allocations (in
                 // general). Consider long changes like in a big additive case.
-                (BinaryPointOp(Operator::Add, a, b), Const(c)) => BinaryPointOp(
-                    Operator::Add,
+                (BinaryOp(BinaryOperator::Add, a, b), Const(c)) => BinaryOp(
+                    BinaryOperator::Add,
                     a,
-                    Box::new(optimize(BinaryPointOp(
-                        Operator::Add,
+                    Box::new(optimize(BinaryOp(
+                        BinaryOperator::Add,
                         b,
                         Box::new(Const(c)),
                     ))),
@@ -178,33 +178,33 @@ where
                     },
                 ) if first_root(&a_length) == first_root(&b_length) => Fin {
                     length: a_length,
-                    waveform: Box::new(optimize(BinaryPointOp(Operator::Add, a, b))),
+                    waveform: Box::new(optimize(BinaryOp(BinaryOperator::Add, a, b))),
                 },
-                (a, b) => BinaryPointOp(Operator::Add, Box::new(a), Box::new(b)),
+                (a, b) => BinaryOp(BinaryOperator::Add, Box::new(a), Box::new(b)),
             }
         }
-        BinaryPointOp(Operator::Subtract, a, b) => optimize(BinaryPointOp(
-            Operator::Add,
+        BinaryOp(BinaryOperator::Subtract, a, b) => optimize(BinaryOp(
+            BinaryOperator::Add,
             a,
-            Box::new(optimize(BinaryPointOp(
-                Operator::Multiply,
+            Box::new(optimize(BinaryOp(
+                BinaryOperator::Multiply,
                 b,
                 Box::new(Const(-1.0)),
             ))),
         )),
-        BinaryPointOp(Operator::Merge, a, b) => {
+        BinaryOp(BinaryOperator::Merge, a, b) => {
             use Waveform::Marked;
             match (optimize(*a), optimize(*b)) {
                 // Merge yields the longer of the two inputs.
                 (Fixed(a, _), b) if a.is_empty() => b,
                 (a, Fixed(b, _)) if b.is_empty() => a,
-                (Const(a), Const(b)) => Const(Operator::Merge.apply(a, b)),
+                (Const(a), Const(b)) => Const(BinaryOperator::Merge.apply(a, b)),
                 // Merging 0 is the identity if the left-hand side is infinite
                 // TODO could check for other infinite waveforms
                 (a @ (Time(_) | Noise), Const(0.0)) => a,
                 // Commute (moving constants to the right)
-                (Const(a), b) => optimize(BinaryPointOp(
-                    Operator::Merge,
+                (Const(a), b) => optimize(BinaryOp(
+                    BinaryOperator::Merge,
                     Box::new(b),
                     Box::new(Const(a)),
                 )),
@@ -223,13 +223,13 @@ where
                     } if first_root(&a_length) == first_root(&b_length) => optimize(Append(
                         Box::new(Fin {
                             length: a_length,
-                            waveform: Box::new(BinaryPointOp(Operator::Merge, a, b)),
+                            waveform: Box::new(BinaryOp(BinaryOperator::Merge, a, b)),
                         }),
                         c,
                         (),
                     )),
-                    _ => BinaryPointOp(
-                        Operator::Merge,
+                    _ => BinaryOp(
+                        BinaryOperator::Merge,
                         Box::new(Fin {
                             length: a_length,
                             waveform: a,
@@ -254,14 +254,14 @@ where
                             id,
                             waveform: Box::new(Fin {
                                 length: a_length,
-                                waveform: Box::new(BinaryPointOp(Operator::Merge, a, b)),
+                                waveform: Box::new(BinaryOp(BinaryOperator::Merge, a, b)),
                             }),
                         }),
                         c,
                         (),
                     )),
-                    (a, b) => BinaryPointOp(
-                        Operator::Merge,
+                    (a, b) => BinaryOp(
+                        BinaryOperator::Merge,
                         Box::new(Marked {
                             id,
                             waveform: Box::new(a),
@@ -269,59 +269,59 @@ where
                         Box::new(Append(Box::new(b), c, ())),
                     ),
                 },
-                (a, b) => BinaryPointOp(Operator::Merge, Box::new(a), Box::new(b)),
+                (a, b) => BinaryOp(BinaryOperator::Merge, Box::new(a), Box::new(b)),
             }
         }
-        BinaryPointOp(Operator::Multiply, a, b) => {
+        BinaryOp(BinaryOperator::Multiply, a, b) => {
             match (optimize(*a), optimize(*b)) {
                 (Fixed(a, _), _) if a.is_empty() => Fixed(vec![], ()),
                 (_, Fixed(b, _)) if b.is_empty() => Fixed(vec![], ()),
                 (a, Const(1.0)) => a,
                 // If a is infinite, then we can replace multiplication of zero with zero
                 (Time(_) | Noise, Const(0.0)) => Const(0.0),
-                (Const(a), Const(b)) => Const(Operator::Multiply.apply(a, b)),
+                (Const(a), Const(b)) => Const(BinaryOperator::Multiply.apply(a, b)),
                 (Fixed(a, _), Const(b)) => Fixed(
                     a.into_iter()
-                        .map(|x| Operator::Multiply.apply(x, b))
+                        .map(|x| BinaryOperator::Multiply.apply(x, b))
                         .collect(),
                     (),
                 ),
                 // Commute (moving constants to the right)
-                (Const(a), b) => optimize(BinaryPointOp(
-                    Operator::Multiply,
+                (Const(a), b) => optimize(BinaryOp(
+                    BinaryOperator::Multiply,
                     Box::new(b),
                     Box::new(Const(a)),
                 )),
                 // Re-associate
-                (BinaryPointOp(Operator::Multiply, a, b), Const(c)) => BinaryPointOp(
-                    Operator::Multiply,
+                (BinaryOp(BinaryOperator::Multiply, a, b), Const(c)) => BinaryOp(
+                    BinaryOperator::Multiply,
                     a,
-                    Box::new(optimize(BinaryPointOp(
-                        Operator::Multiply,
+                    Box::new(optimize(BinaryOp(
+                        BinaryOperator::Multiply,
                         b,
                         Box::new(Const(c)),
                     ))),
                 ),
                 // Distribute
                 // (a + b) * c == (a * c) + (b * c)
-                (BinaryPointOp(Operator::Add, a, b), Const(c)) => BinaryPointOp(
-                    Operator::Add,
-                    Box::new(optimize(BinaryPointOp(
-                        Operator::Multiply,
+                (BinaryOp(BinaryOperator::Add, a, b), Const(c)) => BinaryOp(
+                    BinaryOperator::Add,
+                    Box::new(optimize(BinaryOp(
+                        BinaryOperator::Multiply,
                         a,
                         Box::new(Const(c)),
                     ))),
-                    Box::new(optimize(BinaryPointOp(
-                        Operator::Multiply,
+                    Box::new(optimize(BinaryOp(
+                        BinaryOperator::Multiply,
                         b,
                         Box::new(Const(c)),
                     ))),
                 ),
                 // (a / b) * c == (a * c) / b
-                (BinaryPointOp(Operator::Divide, a, b), Const(c)) => BinaryPointOp(
-                    Operator::Divide,
-                    Box::new(optimize(BinaryPointOp(
-                        Operator::Multiply,
+                (BinaryOp(BinaryOperator::Divide, a, b), Const(c)) => BinaryOp(
+                    BinaryOperator::Divide,
+                    Box::new(optimize(BinaryOp(
+                        BinaryOperator::Multiply,
                         a,
                         Box::new(Const(c)),
                     ))),
@@ -335,80 +335,82 @@ where
                 // Pull Fin out
                 (Fin { length, waveform }, b) => optimize(Fin {
                     length,
-                    waveform: Box::new(optimize(BinaryPointOp(
-                        Operator::Multiply,
+                    waveform: Box::new(optimize(BinaryOp(
+                        BinaryOperator::Multiply,
                         waveform,
                         Box::new(b),
                     ))),
                 }),
                 (a, Fin { length, waveform }) => optimize(Fin {
                     length,
-                    waveform: Box::new(optimize(BinaryPointOp(
-                        Operator::Multiply,
+                    waveform: Box::new(optimize(BinaryOp(
+                        BinaryOperator::Multiply,
                         Box::new(a),
                         waveform,
                     ))),
                 }),
-                (a, b) => BinaryPointOp(Operator::Multiply, Box::new(a), Box::new(b)),
+                (a, b) => BinaryOp(BinaryOperator::Multiply, Box::new(a), Box::new(b)),
             }
         }
-        BinaryPointOp(Operator::Divide, a, b) => {
+        BinaryOp(BinaryOperator::Divide, a, b) => {
             match (optimize(*a), optimize(*b)) {
                 (_, Fixed(b, _)) if b.is_empty() => Fixed(vec![], ()),
-                (Const(a), Const(b)) => Const(Operator::Divide.apply(a, b)),
+                (Const(a), Const(b)) => Const(BinaryOperator::Divide.apply(a, b)),
                 // Prefer multiplication by the reciprocal (zero when dividing
-                // by zero, matching `Operator::Divide`).
-                (a, Const(b)) => optimize(BinaryPointOp(
-                    Operator::Multiply,
+                // by zero, matching `BinaryOperator::Divide`).
+                (a, Const(b)) => optimize(BinaryOp(
+                    BinaryOperator::Multiply,
                     Box::new(a),
-                    Box::new(Const(Operator::Divide.apply(1.0, b))),
+                    Box::new(Const(BinaryOperator::Divide.apply(1.0, b))),
                 )),
                 // ((a / b) / c) == (a / (b * c))
-                (BinaryPointOp(Operator::Divide, a, b), c) => BinaryPointOp(
-                    Operator::Divide,
+                (BinaryOp(BinaryOperator::Divide, a, b), c) => BinaryOp(
+                    BinaryOperator::Divide,
                     a,
-                    Box::new(optimize(BinaryPointOp(Operator::Multiply, b, Box::new(c)))),
+                    Box::new(optimize(BinaryOp(BinaryOperator::Multiply, b, Box::new(c)))),
                 ),
                 // (a / (b / c)) == (a * c) / b
-                (a, BinaryPointOp(Operator::Divide, b, c)) => BinaryPointOp(
-                    Operator::Divide,
-                    Box::new(optimize(BinaryPointOp(Operator::Multiply, Box::new(a), c))),
+                (a, BinaryOp(BinaryOperator::Divide, b, c)) => BinaryOp(
+                    BinaryOperator::Divide,
+                    Box::new(optimize(BinaryOp(BinaryOperator::Multiply, Box::new(a), c))),
                     b,
                 ),
 
                 // Pull Fin out
                 (Fin { length, waveform }, b) => optimize(Fin {
                     length,
-                    waveform: Box::new(optimize(BinaryPointOp(
-                        Operator::Divide,
+                    waveform: Box::new(optimize(BinaryOp(
+                        BinaryOperator::Divide,
                         waveform,
                         Box::new(b),
                     ))),
                 }),
                 (a, Fin { length, waveform }) => optimize(Fin {
                     length,
-                    waveform: Box::new(optimize(BinaryPointOp(
-                        Operator::Divide,
+                    waveform: Box::new(optimize(BinaryOp(
+                        BinaryOperator::Divide,
                         Box::new(a),
                         waveform,
                     ))),
                 }),
-                (a, b) => BinaryPointOp(Operator::Divide, Box::new(a), Box::new(b)),
+                (a, b) => BinaryOp(BinaryOperator::Divide, Box::new(a), Box::new(b)),
             }
         }
-        BinaryPointOp(Operator::Power, a, b) => {
+        BinaryOp(BinaryOperator::Power, a, b) => {
             match (optimize(*a), optimize(*b)) {
                 (Fixed(a, _), _) if a.is_empty() => Fixed(vec![], ()),
                 (_, Fixed(b, _)) if b.is_empty() => Fixed(vec![], ()),
                 // An infinite waveform to the zeroth power is the constant 1
                 (Time(_) | Noise, Const(0.0)) => Const(1.0),
                 (a, Const(1.0)) => a,
-                (Const(a), Const(b)) => Const(Operator::Power.apply(a, b)),
+                (Const(a), Const(b)) => Const(BinaryOperator::Power.apply(a, b)),
                 (Fixed(a, _), Const(b)) => Fixed(
-                    a.into_iter().map(|x| Operator::Power.apply(x, b)).collect(),
+                    a.into_iter()
+                        .map(|x| BinaryOperator::Power.apply(x, b))
+                        .collect(),
                     (),
                 ),
-                (a, b) => BinaryPointOp(Operator::Power, Box::new(a), Box::new(b)),
+                (a, b) => BinaryOp(BinaryOperator::Power, Box::new(a), Box::new(b)),
             }
         }
         UnaryOp(op, a) => match optimize(*a) {
@@ -470,8 +472,8 @@ mod tests {
     #[test]
     fn fin_of_an_empty_waveform_is_empty() {
         let fin: Waveform<(), ()> = Fin {
-            length: Box::new(BinaryPointOp(
-                Operator::Subtract,
+            length: Box::new(BinaryOp(
+                BinaryOperator::Subtract,
                 Box::new(Time(())),
                 Box::new(Const(1.0)),
             )),
@@ -482,11 +484,14 @@ mod tests {
 
     #[test]
     fn power_of_zero_folds_only_for_infinite_bases() {
-        let infinite: Waveform<(), ()> =
-            BinaryPointOp(Operator::Power, Box::new(Time(())), Box::new(Const(0.0)));
+        let infinite: Waveform<(), ()> = BinaryOp(
+            BinaryOperator::Power,
+            Box::new(Time(())),
+            Box::new(Const(0.0)),
+        );
         assert_eq!(optimize(infinite), Const(1.0));
-        let finite: Waveform<(), ()> = BinaryPointOp(
-            Operator::Power,
+        let finite: Waveform<(), ()> = BinaryOp(
+            BinaryOperator::Power,
             Box::new(Fixed(vec![2.0, 3.0], ())),
             Box::new(Const(0.0)),
         );
@@ -495,13 +500,13 @@ mod tests {
 
     #[test]
     fn test_optimize() {
-        let w1: Waveform<(), ()> = BinaryPointOp(
-            Operator::Add,
-            Box::new(BinaryPointOp(
-                Operator::Add,
+        let w1: Waveform<(), ()> = BinaryOp(
+            BinaryOperator::Add,
+            Box::new(BinaryOp(
+                BinaryOperator::Add,
                 Box::new(Const(1.0)),
-                Box::new(BinaryPointOp(
-                    Operator::Add,
+                Box::new(BinaryOp(
+                    BinaryOperator::Add,
                     Box::new(Const(2.0)),
                     Box::new(Const(3.0)),
                 )),
@@ -510,13 +515,13 @@ mod tests {
         );
         assert_eq!(optimize(w1), Const(10.0));
 
-        let w2: Waveform<(), ()> = BinaryPointOp(
-            Operator::Add,
-            Box::new(BinaryPointOp(
-                Operator::Add,
+        let w2: Waveform<(), ()> = BinaryOp(
+            BinaryOperator::Add,
+            Box::new(BinaryOp(
+                BinaryOperator::Add,
                 Box::new(Const(2.0)),
-                Box::new(BinaryPointOp(
-                    Operator::Add,
+                Box::new(BinaryOp(
+                    BinaryOperator::Add,
                     Box::new(Const(3.0)),
                     Box::new(Time(())),
                 )),
@@ -525,16 +530,20 @@ mod tests {
         );
         assert_eq!(
             optimize(w2),
-            BinaryPointOp(Operator::Add, Box::new(Time(())), Box::new(Const(10.0))),
+            BinaryOp(
+                BinaryOperator::Add,
+                Box::new(Time(())),
+                Box::new(Const(10.0))
+            ),
         );
 
-        let w3: Waveform<(), ()> = BinaryPointOp(
-            Operator::Multiply,
-            Box::new(BinaryPointOp(
-                Operator::Multiply,
+        let w3: Waveform<(), ()> = BinaryOp(
+            BinaryOperator::Multiply,
+            Box::new(BinaryOp(
+                BinaryOperator::Multiply,
                 Box::new(Const(2.0)),
-                Box::new(BinaryPointOp(
-                    Operator::Multiply,
+                Box::new(BinaryOp(
+                    BinaryOperator::Multiply,
                     Box::new(Const(3.0)),
                     Box::new(Time(())),
                 )),
@@ -543,20 +552,20 @@ mod tests {
         );
         assert_eq!(
             optimize(w3),
-            BinaryPointOp(
-                Operator::Multiply,
+            BinaryOp(
+                BinaryOperator::Multiply,
                 Box::new(Time(())),
                 Box::new(Const(30.0))
             ),
         );
 
-        let w4: Waveform<(), ()> = BinaryPointOp(
-            Operator::Multiply,
-            Box::new(BinaryPointOp(
-                Operator::Add,
+        let w4: Waveform<(), ()> = BinaryOp(
+            BinaryOperator::Multiply,
+            Box::new(BinaryOp(
+                BinaryOperator::Add,
                 Box::new(Const(2.0)),
-                Box::new(BinaryPointOp(
-                    Operator::Multiply,
+                Box::new(BinaryOp(
+                    BinaryOperator::Multiply,
                     Box::new(Const(3.0)),
                     Box::new(Time(())),
                 )),
@@ -565,10 +574,10 @@ mod tests {
         );
         assert_eq!(
             optimize(w4),
-            BinaryPointOp(
-                Operator::Add,
-                Box::new(BinaryPointOp(
-                    Operator::Multiply,
+            BinaryOp(
+                BinaryOperator::Add,
+                Box::new(BinaryOp(
+                    BinaryOperator::Multiply,
                     Box::new(Time(())),
                     Box::new(Const(15.0))
                 )),
@@ -576,19 +585,19 @@ mod tests {
             ),
         );
 
-        let w5: Waveform<(), ()> = BinaryPointOp(
-            Operator::Multiply,
+        let w5: Waveform<(), ()> = BinaryOp(
+            BinaryOperator::Multiply,
             Box::new(Fin {
-                length: Box::new(BinaryPointOp(
-                    Operator::Add,
+                length: Box::new(BinaryOp(
+                    BinaryOperator::Add,
                     Box::new(Time(())),
                     Box::new(Const(-2.0)),
                 )),
                 waveform: Box::new(Const(3.0)),
             }),
             Box::new(Fin {
-                length: Box::new(BinaryPointOp(
-                    Operator::Add,
+                length: Box::new(BinaryOp(
+                    BinaryOperator::Add,
                     Box::new(Time(())),
                     Box::new(Const(-1.5)),
                 )),
@@ -598,8 +607,8 @@ mod tests {
         assert_eq!(
             optimize(w5),
             Fin {
-                length: Box::new(BinaryPointOp(
-                    Operator::Add,
+                length: Box::new(BinaryOp(
+                    BinaryOperator::Add,
                     Box::new(Time(())),
                     Box::new(Const(-1.5))
                 )),

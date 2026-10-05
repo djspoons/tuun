@@ -217,7 +217,7 @@ mod tests {
     use crate::expr::ErrorKind;
     use crate::expr::{Binding, BuiltInFn, Expr, Pattern, SourceBinding, boxed};
     use crate::types::{Refinement, Sort};
-    use crate::waveform::{Operator, Waveform};
+    use crate::waveform::{BinaryOperator, Waveform};
 
     /// Every built-in registered by `add_bindings` must have a signature, so
     /// new built-ins fail this test until the table above learns about them.
@@ -341,8 +341,8 @@ mod tests {
             // A realistic seq: offset linear in time (`time - 1`), so
             // offset-threading arms (`\`'s, `add_offsets`) work.
             Expr::Seq {
-                offset: boxed(Expr::Waveform(Waveform::BinaryPointOp(
-                    Operator::Subtract,
+                offset: boxed(Expr::Waveform(Waveform::BinaryOp(
+                    BinaryOperator::Subtract,
                     Box::new(Waveform::Time(())),
                     Box::new(Waveform::Const(1.0)),
                 ))),

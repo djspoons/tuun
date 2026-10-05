@@ -611,7 +611,7 @@ mod tests {
                 }
                 slider_mark_values(waveform, found);
             }
-            Waveform::BinaryPointOp(_, a, b) => {
+            Waveform::BinaryOp(_, a, b) => {
                 slider_mark_values(a, found);
                 slider_mark_values(b, found);
             }

@@ -243,7 +243,7 @@ where
                 ..
             }
             | Append(a, b, _)
-            | BinaryPointOp(_, a, b) => {
+            | BinaryOp(_, a, b) => {
                 self.process_captured(a, out);
                 self.process_captured(b, out);
             }
@@ -389,7 +389,7 @@ fn process_marked<I, M>(
             offset: b,
             ..
         }
-        | BinaryPointOp(_, a, b) => {
+        | BinaryOp(_, a, b) => {
             process_marked(generator, sample_rate, waveform_id, start, a, out);
             process_marked(generator, sample_rate, waveform_id, start, b, out);
         }
@@ -1076,8 +1076,8 @@ mod tests {
             let beat = Marked {
                 id: MarkId::TopLevel,
                 waveform: Box::new(Fin {
-                    length: Box::new(BinaryPointOp(
-                        waveform::Operator::Subtract,
+                    length: Box::new(BinaryOp(
+                        waveform::BinaryOperator::Subtract,
                         Box::new(Time(())),
                         Box::new(Const(length.as_secs_f32())),
                     )),

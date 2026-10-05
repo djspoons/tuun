@@ -5,7 +5,7 @@ use crate::eval;
 use crate::expr;
 use crate::expr::{BuiltInFn, Error, Expr, SourceExpr, boxed};
 use crate::optimizer;
-use crate::waveform::{Operator, UnaryOperator, Waveform};
+use crate::waveform::{BinaryOperator, UnaryOperator, Waveform};
 use Expr::{Bool, BuiltIn, List, Seq};
 
 type BuiltinFn<M, S> = fn(Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>;
@@ -14,7 +14,7 @@ type BuiltinFn<M, S> = fn(Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>;
 fn binary_op<M, S>(
     mut arguments: Vec<Expr<M, S>>,
     name: String,
-    op: Operator,
+    op: BinaryOperator,
 ) -> Result<Expr<M, S>, Error<S>>
 where
     M: Debug,
@@ -23,7 +23,7 @@ where
     Ok({
         fn make_seq<M, S>(
             offset: Box<SourceExpr<M, S>>,
-            op: Operator,
+            op: BinaryOperator,
             a: Waveform<M>,
             b: Waveform<M>,
         ) -> Expr<M, S>
@@ -32,7 +32,7 @@ where
         {
             Seq {
                 offset,
-                waveform: boxed(Expr::Waveform(Waveform::BinaryPointOp(
+                waveform: boxed(Expr::Waveform(Waveform::BinaryOp(
                     op,
                     Box::new(a),
                     Box::new(b),
@@ -53,7 +53,7 @@ where
         }
         match (x, y) {
             (Expr::Waveform(a), Expr::Waveform(b)) => {
-                Expr::Waveform(Waveform::BinaryPointOp(op, Box::new(a), Box::new(b)))
+                Expr::Waveform(Waveform::BinaryOp(op, Box::new(a), Box::new(b)))
             }
             (Seq { offset, waveform }, Expr::Waveform(b)) => match waveform.expr {
                 Expr::Waveform(a) => make_seq(offset, op, a, b),
@@ -88,7 +88,7 @@ where
     M: Debug,
     S: Debug,
 {
-    binary_op(arguments, "+".to_string(), Operator::Add)
+    binary_op(arguments, "+".to_string(), BinaryOperator::Add)
 }
 
 pub fn minus<M, S>(mut arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
@@ -100,9 +100,9 @@ where
     // same way.
     if arguments.len() == 1 {
         arguments.insert(0, Expr::float(-1.0));
-        return binary_op(arguments, "-".to_string(), Operator::Multiply);
+        return binary_op(arguments, "-".to_string(), BinaryOperator::Multiply);
     }
-    binary_op(arguments, "-".to_string(), Operator::Subtract)
+    binary_op(arguments, "-".to_string(), BinaryOperator::Subtract)
 }
 
 pub fn times<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
@@ -110,7 +110,7 @@ where
     M: Debug,
     S: Debug,
 {
-    binary_op(arguments, "*".to_string(), Operator::Multiply)
+    binary_op(arguments, "*".to_string(), BinaryOperator::Multiply)
 }
 
 pub fn divide<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
@@ -118,7 +118,7 @@ where
     M: Debug,
     S: Debug,
 {
-    binary_op(arguments, "/".to_string(), Operator::Divide)
+    binary_op(arguments, "/".to_string(), BinaryOperator::Divide)
 }
 
 pub fn merge<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
@@ -126,7 +126,7 @@ where
     M: Debug,
     S: Debug,
 {
-    binary_op(arguments, "&".to_string(), Operator::Merge)
+    binary_op(arguments, "&".to_string(), BinaryOperator::Merge)
 }
 
 // Given waveforms that represent offsets (and assuming offset waveforms are of the form
@@ -138,11 +138,11 @@ where
 {
     match (optimizer::first_root(&a), optimizer::first_root(&b)) {
         // The sum's root is the sum of the roots: `Time - (a + b)`.
-        (Some(a_root), Some(b_root)) => Ok(Expr::Waveform(Waveform::BinaryPointOp(
-            Operator::Subtract,
+        (Some(a_root), Some(b_root)) => Ok(Expr::Waveform(Waveform::BinaryOp(
+            BinaryOperator::Subtract,
             Box::new(Waveform::Time(())),
-            Box::new(Waveform::BinaryPointOp(
-                Operator::Add,
+            Box::new(Waveform::BinaryOp(
+                BinaryOperator::Add,
                 Box::new(a_root),
                 Box::new(b_root),
             )),
@@ -186,8 +186,8 @@ where
         };
 
         match arguments.remove(0) {
-            Expr::Waveform(b) => Expr::Waveform(Waveform::BinaryPointOp(
-                Operator::Merge,
+            Expr::Waveform(b) => Expr::Waveform(Waveform::BinaryOp(
+                BinaryOperator::Merge,
                 Box::new(a),
                 Box::new(Waveform::Append(
                     Box::new(Waveform::Fin {
@@ -215,8 +215,8 @@ where
                 let total_offset = add_offsets(a_offset.clone(), b_offset)?;
                 Seq {
                     offset: boxed(total_offset),
-                    waveform: boxed(Expr::Waveform(Waveform::BinaryPointOp(
-                        Operator::Merge,
+                    waveform: boxed(Expr::Waveform(Waveform::BinaryOp(
+                        BinaryOperator::Merge,
                         Box::new(a),
                         Box::new(Waveform::Append(
                             Box::new(Waveform::Fin {
@@ -244,7 +244,7 @@ where
     M: Debug,
     S: Debug,
 {
-    binary_op(arguments, "pow".to_string(), Operator::Power)
+    binary_op(arguments, "pow".to_string(), BinaryOperator::Power)
 }
 
 pub fn log<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
@@ -967,7 +967,7 @@ where
                             )));
                         }
                     };
-                    result = Waveform::BinaryPointOp(Operator::Merge, waveform, Box::new(result));
+                    result = Waveform::BinaryOp(BinaryOperator::Merge, waveform, Box::new(result));
                 }
                 Expr::Waveform(result)
             }
@@ -1208,8 +1208,8 @@ mod tests {
     fn test_followed_by_sums_seq_offsets() {
         fn seq(seconds: f32) -> Expr<u32, ()> {
             Seq {
-                offset: boxed(Expr::Waveform(Waveform::BinaryPointOp(
-                    Operator::Subtract,
+                offset: boxed(Expr::Waveform(Waveform::BinaryOp(
+                    BinaryOperator::Subtract,
                     Box::new(Waveform::Time(())),
                     Box::new(Waveform::Const(seconds)),
                 ))),

@@ -7,7 +7,7 @@ use std::{f64, mem};
 use fastrand;
 
 use crate::waveform;
-use crate::waveform::Operator;
+use crate::waveform::BinaryOperator;
 
 #[derive(Debug, Clone)]
 pub enum State {
@@ -270,7 +270,7 @@ impl<'a> Generator<'a> {
                 state: Samples { input, output },
             } => self.generate_filter(waveform, feed_forward, feedback, input, output, out),
             Filter { .. } => unreachable!("Filter waveform has non-Initial, non-Samples state"),
-            BinaryPointOp(op, a, b) => self.generate_binary_op(*op, a, b, out),
+            BinaryOp(op, a, b) => self.generate_binary_op(*op, a, b, out),
             UnaryOp(op, a) => {
                 let len = self.generate(a, out);
                 for x in out[..len].iter_mut() {
@@ -527,7 +527,7 @@ impl<'a> Generator<'a> {
     // be extended with zeros to match the length of the longer one.
     fn generate_binary_op<M: Debug + Display>(
         &mut self,
-        op: Operator,
+        op: BinaryOperator,
         a: &mut Waveform<M>,
         b: &mut Waveform<M>,
         out: &mut [f32],
@@ -594,7 +594,7 @@ impl<'a> Generator<'a> {
             | Captured { .. } => None,
 
             Const(f) => Some(*f),
-            BinaryPointOp(op, a, b) => match (self.is_const(a), self.is_const(b)) {
+            BinaryOp(op, a, b) => match (self.is_const(a), self.is_const(b)) {
                 (Some(f), Some(g)) => Some(op.apply(f, g)),
                 _ => None,
             },
@@ -742,7 +742,7 @@ impl<'a> Generator<'a> {
                 let o_len = self.length(offset, max);
                 f_len.min(o_len)
             }
-            BinaryPointOp(op, a, b) => {
+            BinaryOp(op, a, b) => {
                 let a_len = self.length(a, max);
                 let b_len = self.length(b, max);
                 if op.extends_to_longer() {
@@ -784,7 +784,7 @@ impl<'a> Generator<'a> {
         max: usize,
     ) -> MaybeOption<usize> {
         use State::{Initial, Position};
-        use waveform::Waveform::{Append, BinaryPointOp, Const, Time};
+        use waveform::Waveform::{Append, BinaryOp, Const, Time};
         if let Some(f) = self.is_const(waveform) {
             return if f >= value {
                 MaybeOption::Some(0)
@@ -829,8 +829,8 @@ impl<'a> Generator<'a> {
                     m => m, // Maybe gets passed through
                 }
             }
-            BinaryPointOp(op @ (Operator::Add | Operator::Subtract), a, b) => {
-                use waveform::Operator::{Add, Subtract};
+            BinaryOp(op @ (BinaryOperator::Add | BinaryOperator::Subtract), a, b) => {
+                use waveform::BinaryOperator::{Add, Subtract};
                 match (op, a.as_ref(), b.as_ref()) {
                     // TODO need to consider constant functions as const
                     (Add, Const(va), Const(vb)) if va + vb >= value => MaybeOption::Some(0),
@@ -1115,7 +1115,7 @@ impl<'a> Generator<'a> {
                         state,
                     },
                 ),
-                BinaryPointOp(op, a, b) => {
+                BinaryOp(op, a, b) => {
                     // A truncating operator is bounded by either side; Merge
                     // extends past a finite side, so it needs both.
                     let bounded_by = if op.extends_to_longer() {
@@ -1124,7 +1124,7 @@ impl<'a> Generator<'a> {
                         BoundedBy::Any
                     };
                     do_two(g, bounded_by, *a, *b, move |a, b| {
-                        BinaryPointOp(op, Box::new(a), Box::new(b))
+                        BinaryOp(op, Box::new(a), Box::new(b))
                     })
                 }
                 UnaryOp(op, a) => match precompute_internal(g, *a) {
@@ -1258,7 +1258,7 @@ mod tests {
     use crate::optimizer;
     use waveform::UnaryOperator;
     use waveform::Waveform::{
-        Append, BinaryPointOp, Const, Filter, Fin, Fixed, Phase, Reset, Time, UnaryOp,
+        Append, BinaryOp, Const, Filter, Fin, Fixed, Phase, Reset, Time, UnaryOp,
     };
 
     type Waveform = waveform::Waveform<u32>;
@@ -1396,13 +1396,13 @@ mod tests {
 
     #[test]
     fn test_fin() {
-        let w = BinaryPointOp(
-            Operator::Multiply,
+        let w = BinaryOp(
+            BinaryOperator::Multiply,
             Box::new(Const(2.0)),
             Box::new(Append(
                 Box::new(Fin {
-                    length: Box::new(BinaryPointOp(
-                        Operator::Subtract,
+                    length: Box::new(BinaryOp(
+                        BinaryOperator::Subtract,
                         Box::new(Time(())),
                         // It's important that the following waveform be dynamic.
                         Box::new(waveform::Waveform::Marked {
@@ -1425,8 +1425,8 @@ mod tests {
         let mark = "mark";
         let mut w = initialize_state(Append(
             Box::new(Fin {
-                length: Box::new(BinaryPointOp(
-                    Operator::Subtract,
+                length: Box::new(BinaryOp(
+                    BinaryOperator::Subtract,
                     Box::new(Time(())),
                     Box::new(Marked {
                         id: mark,
@@ -1456,8 +1456,8 @@ mod tests {
         // Same thing but for the inner waveform of Fin.
         let mut w = initialize_state(Append(
             Box::new(Fin {
-                length: Box::new(BinaryPointOp(
-                    Operator::Subtract,
+                length: Box::new(BinaryOp(
+                    BinaryOperator::Subtract,
                     Box::new(Time(())),
                     Box::new(Marked {
                         id: mark,
@@ -1490,14 +1490,14 @@ mod tests {
     fn sin_waveform(frequency: f32, phase: f32) -> Box<Waveform> {
         Box::new(UnaryOp(
             UnaryOperator::Sin,
-            Box::new(BinaryPointOp(
-                Operator::Multiply,
+            Box::new(BinaryOp(
+                BinaryOperator::Multiply,
                 Box::new(Const(f32::consts::TAU)),
                 Box::new(Phase {
                     frequency: Box::new(Const(frequency)),
 
-                    offset: Box::new(BinaryPointOp(
-                        Operator::Divide,
+                    offset: Box::new(BinaryOp(
+                        BinaryOperator::Divide,
                         Box::new(Const(phase)),
                         Box::new(Const(f32::consts::TAU)),
                     )),
@@ -1540,12 +1540,12 @@ mod tests {
         // Non-constant frequency: f = time + 10 Hz
         let mut w = initialize_state(Waveform::UnaryOp(
             UnaryOperator::Sin,
-            Box::new(BinaryPointOp(
-                Operator::Multiply,
+            Box::new(BinaryOp(
+                BinaryOperator::Multiply,
                 Box::new(Const(f32::consts::TAU)),
                 Box::new(Phase {
-                    frequency: Box::new(BinaryPointOp(
-                        Operator::Add,
+                    frequency: Box::new(BinaryOp(
+                        BinaryOperator::Add,
                         Box::new(Time(())),
                         Box::new(Const(10.0)),
                     )),
@@ -1738,8 +1738,8 @@ mod tests {
 
         let w = Reset {
             trigger: Box::new(Fin {
-                length: Box::new(BinaryPointOp(
-                    Operator::Subtract,
+                length: Box::new(BinaryOp(
+                    BinaryOperator::Subtract,
                     Box::new(Time(())),
                     Box::new(Const(6.0)),
                 )),
@@ -1753,8 +1753,8 @@ mod tests {
         let w = Reset {
             trigger: sin_waveform(0.25, 0.0),
             waveform: Box::new(Fin {
-                length: Box::new(BinaryPointOp(
-                    Operator::Subtract,
+                length: Box::new(BinaryOp(
+                    BinaryOperator::Subtract,
                     Box::new(Time(())),
                     Box::new(Const(3.0)),
                 )),
@@ -1824,26 +1824,30 @@ mod tests {
         // Add yields a result as long as the shorter of the two inputs.
 
         // Both infinite
-        let w = BinaryPointOp(Operator::Add, Box::new(Const(1.0)), Box::new(Const(2.0)));
+        let w = BinaryOp(
+            BinaryOperator::Add,
+            Box::new(Const(1.0)),
+            Box::new(Const(2.0)),
+        );
         run_tests(&w, &[3.0; 8]);
 
         // One finite, one infinite: truncates to the finite length
-        let w = BinaryPointOp(
-            Operator::Add,
+        let w = BinaryOp(
+            BinaryOperator::Add,
             Box::new(Fixed(vec![1.0, 2.0, 3.0], ())),
             Box::new(Const(10.0)),
         );
         run_tests(&w, &[11.0, 12.0, 13.0]);
 
         // Both finite, different lengths: truncates to the shorter
-        let w = BinaryPointOp(
-            Operator::Add,
+        let w = BinaryOp(
+            BinaryOperator::Add,
             Box::new(Fixed(vec![1.0, 2.0], ())),
             Box::new(Fixed(vec![10.0, 20.0, 30.0], ())),
         );
         run_tests(&w, &[11.0, 22.0]);
-        let w = BinaryPointOp(
-            Operator::Add,
+        let w = BinaryOp(
+            BinaryOperator::Add,
             Box::new(Fixed(vec![1.0, 2.0, 3.0], ())),
             Box::new(Fixed(vec![10.0, 20.0], ())),
         );
@@ -1851,13 +1855,13 @@ mod tests {
 
         // Fin + Const
         let w = Fin {
-            length: Box::new(BinaryPointOp(
-                Operator::Subtract,
+            length: Box::new(BinaryOp(
+                BinaryOperator::Subtract,
                 Box::new(Time(())),
                 Box::new(Const(4.0)),
             )),
-            waveform: Box::new(BinaryPointOp(
-                Operator::Add,
+            waveform: Box::new(BinaryOp(
+                BinaryOperator::Add,
                 Box::new(Const(1.0)),
                 Box::new(Const(2.0)),
             )),
@@ -1865,8 +1869,8 @@ mod tests {
         run_tests(&w, &[3.0, 3.0, 3.0, 3.0]);
 
         // Add with Fixed([], ()) yields empty (shorter is 0)
-        let w = BinaryPointOp(
-            Operator::Add,
+        let w = BinaryOp(
+            BinaryOperator::Add,
             Box::new(Fixed(vec![], ())),
             Box::new(Const(5.0)),
         );
@@ -1875,8 +1879,8 @@ mod tests {
         // Precompute: finite + infinite should precompute to Fixed — the
         // finite side bounds the result for a truncating operator.
         let mut g = new_test_generator(1);
-        let w = BinaryPointOp(
-            Operator::Add,
+        let w = BinaryOp(
+            BinaryOperator::Add,
             Box::new(Fixed(vec![3.0, 4.0, 5.0], ())),
             Box::new(Time(())),
         );
@@ -1898,13 +1902,13 @@ mod tests {
 
         // Both infinite
         let w = Fin {
-            length: Box::new(BinaryPointOp(
-                Operator::Subtract,
+            length: Box::new(BinaryOp(
+                BinaryOperator::Subtract,
                 Box::new(Time(())),
                 Box::new(Const(8.0)),
             )),
-            waveform: Box::new(BinaryPointOp(
-                Operator::Multiply,
+            waveform: Box::new(BinaryOp(
+                BinaryOperator::Multiply,
                 Box::new(Const(3.0)),
                 Box::new(Const(2.0)),
             )),
@@ -1912,32 +1916,32 @@ mod tests {
         run_tests(&w, &[6.0; 8]);
 
         // One finite, one infinite: truncates to finite
-        let w = BinaryPointOp(
-            Operator::Multiply,
+        let w = BinaryOp(
+            BinaryOperator::Multiply,
             Box::new(Fixed(vec![3.0, 4.0, 5.0], ())),
             Box::new(Const(2.0)),
         );
         run_tests(&w, &[6.0, 8.0, 10.0]);
 
         // Both finite, different lengths: truncates to shorter
-        let w = BinaryPointOp(
-            Operator::Multiply,
+        let w = BinaryOp(
+            BinaryOperator::Multiply,
             Box::new(Fixed(vec![3.0, 4.0], ())),
             Box::new(Fixed(vec![2.0, 5.0, 1.0], ())),
         );
         run_tests(&w, &[6.0, 20.0]);
 
         // Multiply with empty Fixed yields empty
-        let w = BinaryPointOp(
-            Operator::Multiply,
+        let w = BinaryOp(
+            BinaryOperator::Multiply,
             Box::new(Fixed(vec![], ())),
             Box::new(Const(5.0)),
         );
         run_tests(&w, &[]);
 
         // Precompute: finite * Const should precompute to Fixed
-        let w = BinaryPointOp(
-            Operator::Multiply,
+        let w = BinaryOp(
+            BinaryOperator::Multiply,
             Box::new(Fixed(vec![3.0, 4.0, 5.0], ())),
             Box::new(Const(2.0)),
         );
@@ -1956,36 +1960,40 @@ mod tests {
         // Merge behaves like Add but yields a result as long as the longer of the two inputs.
 
         // Both infinite
-        let w = BinaryPointOp(Operator::Merge, Box::new(Const(1.0)), Box::new(Const(2.0)));
+        let w = BinaryOp(
+            BinaryOperator::Merge,
+            Box::new(Const(1.0)),
+            Box::new(Const(2.0)),
+        );
         run_tests(&w, &[3.0; 8]);
 
         // Both finite, different lengths: extends to the longer
-        let w = BinaryPointOp(
-            Operator::Merge,
+        let w = BinaryOp(
+            BinaryOperator::Merge,
             Box::new(Fixed(vec![1.0, 2.0], ())),
             Box::new(Fixed(vec![10.0, 20.0, 30.0], ())),
         );
         run_tests(&w, &[11.0, 22.0, 30.0]);
 
         // One finite, one infinite: extends to infinite
-        let w = BinaryPointOp(
-            Operator::Merge,
+        let w = BinaryOp(
+            BinaryOperator::Merge,
             Box::new(Fixed(vec![1.0, 2.0], ())),
             Box::new(Const(10.0)),
         );
         run_tests(&w, &[11.0, 12.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]);
 
         // Both finite, same length
-        let w = BinaryPointOp(
-            Operator::Merge,
+        let w = BinaryOp(
+            BinaryOperator::Merge,
             Box::new(Fixed(vec![1.0, 2.0], ())),
             Box::new(Fixed(vec![10.0, 20.0], ())),
         );
         run_tests(&w, &[11.0, 22.0]);
 
         // Merge with empty Fixed: the other side survives
-        let w5 = BinaryPointOp(
-            Operator::Merge,
+        let w5 = BinaryOp(
+            BinaryOperator::Merge,
             Box::new(Fixed(vec![], ())),
             Box::new(Fixed(vec![10.0, 20.0], ())),
         );
@@ -1994,8 +2002,8 @@ mod tests {
         // Precompute must NOT promote finite & infinite to Fixed — the
         // infinite side outlives the finite one.
         let mut g = new_test_generator(1);
-        let w: Waveform = BinaryPointOp(
-            Operator::Merge,
+        let w: Waveform = BinaryOp(
+            BinaryOperator::Merge,
             Box::new(Fixed(vec![1.0, 2.0], ())),
             Box::new(Const(10.0)),
         );
@@ -2019,8 +2027,8 @@ mod tests {
 
         let w = Filter {
             waveform: Box::new(Fin {
-                length: Box::new(BinaryPointOp(
-                    Operator::Subtract,
+                length: Box::new(BinaryOp(
+                    BinaryOperator::Subtract,
                     Box::new(Time(())),
                     Box::new(Const(5.0)),
                 )),
@@ -2042,8 +2050,8 @@ mod tests {
 
         let w = Filter {
             waveform: Box::new(Fin {
-                length: Box::new(BinaryPointOp(
-                    Operator::Subtract,
+                length: Box::new(BinaryOp(
+                    BinaryOperator::Subtract,
                     Box::new(Time(())),
                     Box::new(Const(8.0)),
                 )),
@@ -2132,7 +2140,11 @@ mod tests {
 
     #[test]
     fn test_greater_or_equals_at() {
-        let w1: Waveform = BinaryPointOp(Operator::Add, Box::new(Time(())), Box::new(Const(-5.0)));
+        let w1: Waveform = BinaryOp(
+            BinaryOperator::Add,
+            Box::new(Time(())),
+            Box::new(Const(-5.0)),
+        );
         let w2: Waveform = Fin {
             length: Box::new(w1.clone()),
             waveform: Box::new(Time(())),

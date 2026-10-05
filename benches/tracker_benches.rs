@@ -12,8 +12,8 @@ use tuun::player;
 use tuun::waveform;
 
 fn bench_filter(c: &mut Criterion) {
-    use waveform::Operator::{Add, Multiply};
-    use waveform::Waveform::{BinaryPointOp, Const, Filter, Time};
+    use waveform::BinaryOperator::{Add, Multiply};
+    use waveform::Waveform::{BinaryOp, Const, Filter, Time};
     type Waveform = waveform::Waveform<u32>;
 
     c.bench_function("filter_1_1", |b| {
@@ -38,22 +38,18 @@ fn bench_filter(c: &mut Criterion) {
             let mut generator = generator::Generator::new(44100);
             let w1: Waveform = Filter {
                 waveform: Box::new(Time(())),
-                feed_forward: vec![BinaryPointOp(
+                feed_forward: vec![BinaryOp(
                     Add,
-                    Box::new(BinaryPointOp(
+                    Box::new(BinaryOp(
                         Multiply,
                         Box::new(Time(())),
                         Box::new(Const(-0.5)),
                     )),
                     Box::new(Const(0.5)),
                 )],
-                feedback: vec![BinaryPointOp(
+                feedback: vec![BinaryOp(
                     Add,
-                    Box::new(BinaryPointOp(
-                        Multiply,
-                        Box::new(Time(())),
-                        Box::new(Const(0.5)),
-                    )),
+                    Box::new(BinaryOp(Multiply, Box::new(Time(())), Box::new(Const(0.5)))),
                     Box::new(Const(-0.5)),
                 )],
                 state: (),

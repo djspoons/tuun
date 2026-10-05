@@ -2,7 +2,7 @@ use std::fmt;
 use std::fmt::{Debug, Display};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Operator {
+pub enum BinaryOperator {
     /// Computes the sum of two samples.
     Add,
     /// Computes the difference of two samples.
@@ -18,12 +18,12 @@ pub enum Operator {
     Power,
 }
 
-impl Operator {
+impl BinaryOperator {
     /// Returns true if the operator's result extends to the longer of its two
     /// inputs, with the finished input's samples taken as zero; otherwise the
     /// result is truncated to the shorter input.
     pub fn extends_to_longer(&self) -> bool {
-        matches!(self, Operator::Merge)
+        matches!(self, BinaryOperator::Merge)
     }
 
     /// Returns the operator applied to one pair of samples.
@@ -34,24 +34,24 @@ impl Operator {
     /// # Example
     ///
     /// ```
-    /// use tuun::waveform::Operator;
+    /// use tuun::waveform::BinaryOperator;
     ///
-    /// assert_eq!(Operator::Power.apply(2.0, 3.0), 8.0);
-    /// assert_eq!(Operator::Divide.apply(1.0, 0.0), 0.0);
+    /// assert_eq!(BinaryOperator::Power.apply(2.0, 3.0), 8.0);
+    /// assert_eq!(BinaryOperator::Divide.apply(1.0, 0.0), 0.0);
     /// ```
     pub fn apply(&self, a: f32, b: f32) -> f32 {
         match self {
-            Operator::Add | Operator::Merge => a + b,
-            Operator::Subtract => a - b,
-            Operator::Multiply => a * b,
-            Operator::Divide => {
+            BinaryOperator::Add | BinaryOperator::Merge => a + b,
+            BinaryOperator::Subtract => a - b,
+            BinaryOperator::Multiply => a * b,
+            BinaryOperator::Divide => {
                 if b == 0.0 {
                     0.0
                 } else {
                     a / b
                 }
             }
-            Operator::Power => a.powf(b),
+            BinaryOperator::Power => a.powf(b),
         }
     }
 }
@@ -122,8 +122,8 @@ pub enum Waveform<MarkId, State = ()> {
     },
     /// Implements a point-wise transformation of two waveforms by computing the given operation one
     /// sample at a time.
-    BinaryPointOp(
-        Operator,
+    BinaryOp(
+        BinaryOperator,
         Box<Waveform<MarkId, State>>,
         Box<Waveform<MarkId, State>>,
     ),
@@ -206,7 +206,7 @@ impl<MarkId: Display, State> Display for Waveform<MarkId, State> {
                     fb.join(", ")
                 )
             }
-            BinaryPointOp(op, a, b) => {
+            BinaryOp(op, a, b) => {
                 write!(f, "{:?}({}, {})", op, a, b)
             }
             UnaryOp(op, a) => {
@@ -283,7 +283,7 @@ where
                 .collect(),
             state,
         },
-        BinaryPointOp(op, a, b) => BinaryPointOp(
+        BinaryOp(op, a, b) => BinaryOp(
             op,
             Box::new(initialize_state(*a, state.clone())),
             Box::new(initialize_state(*b, state)),
@@ -350,9 +350,7 @@ pub fn remove_state<M, S>(waveform: Waveform<M, S>) -> Waveform<M> {
             feedback: feedback.into_iter().map(remove_state).collect(),
             state: (),
         },
-        BinaryPointOp(op, a, b) => {
-            BinaryPointOp(op, Box::new(remove_state(*a)), Box::new(remove_state(*b)))
-        }
+        BinaryOp(op, a, b) => BinaryOp(op, Box::new(remove_state(*a)), Box::new(remove_state(*b))),
         UnaryOp(op, a) => UnaryOp(op, Box::new(remove_state(*a))),
         Reset {
             trigger, waveform, ..
@@ -426,7 +424,7 @@ where
             let _ = feedback.iter_mut().map(|w| set_state(w, new_state.clone()));
             *state = new_state;
         }
-        BinaryPointOp(_, a, b) => {
+        BinaryOp(_, a, b) => {
             set_state(a, new_state.clone());
             set_state(b, new_state);
         }
@@ -522,7 +520,7 @@ where
                 substitute(w, mark_id, new_waveform);
             }
         }
-        BinaryPointOp(_, a, b) => {
+        BinaryOp(_, a, b) => {
             substitute(a, mark_id, new_waveform);
             substitute(b, mark_id, new_waveform);
         }
