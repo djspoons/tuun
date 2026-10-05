@@ -33,37 +33,39 @@ The ways that you use the Tuun language are up to you! There's nothing baked in 
 
 Tuun has several primitive waveforms and waveform combinators. These are the "assembly language" of Tuun, and akin to the "unit generators" of the [MUSIC languages](https://en.wikipedia.org/wiki/MUSIC-N). Waveforms are designed to be orthogonal (each serves a different purpose) and minimal (there are no extra waveforms). Waveforms are themselves finite (they can be written down!) but may specify infinite streams of samples.
 
-The first primitive, `Const`, isn't exactly a "wave" but is used to create waves: `Const` generates a stream where every sample is the same value. This can be used with the [`Sine` combinator](sine.md) to produce a sine wave. `Sine` takes two arguments: one for the angular frequency (in radians per second) and one for the phase offset. For example, the following will generate a tone at 220 Hz.
+The first primitive, `Const`, isn't exactly a "wave" but is used to create waves: `Const` generates a stream where every sample is the same value. It can be used with the `Phase` and `Sin` combinators to produce more interesting waveforms. `Phase` and `Sin` separate the two fundamental parts of generating a sine wave: a function that repeats periodically and the trigonometric function $sin$. `Phase` generates a waveform with samples in the range $[0,1)$ that repeat with a given frequency (in hertz). (It also takes a second parameter, offset, that is discussed elsewhere.) For example, the following will generate a tone at 220 Hz.
 
 ```
-Sine(Const(2 * PI * 220), Const(0))
+Sin(Const(2 * PI) * Phase(Const(220), Const(0)))
 ```
 
 This should be reminiscent of the definition from trigonometry class:
-$$
-\sin(t) = 2πft + \phi
-$$
-where $f$ is the desired frequency (in Hertz) and $\phi$ is the desired phase offset.
 
-Every waveform has an intrinsic property called its _length_, which may be finite or infinite. The length of `Const` is infinite, and the length of `Sine` is determined by its inputs: `Sine` generates one sample of output for each sample of inputs. This means that the expression above will generate a tone that goes on forever.
+$$
+\sin(2πft + \phi)
+$$
+
+where $f$ is the frequency (in Hertz) and $\phi$ is the phase offset.
+
+Every waveform has an intrinsic property called its _length_, which may be finite or infinite. The length of `Const` is infinite, and the lengths of `Phase` and `Sin` are determined by their inputs: each generates one sample of output for each sample of input. This means that the expression above will generate a tone that goes on forever.
 
 Since it's often useful to have waveforms that *don't* go on forever, Tuun includes the `Fin` combinator, which takes two waveforms and truncates the second based on the values of the first. That first waveform is called the `length` waveform: `Fin` reads samples from that waveform until a non-negative value is produced and then truncates the second waveform at that point.
 
 The example below leverages the `Time` combinator as part of the `length` waveform; `Time` generates a stream where each sample is the time elapsed since the beginning of the waveform in seconds. For example, the following will generate a tone at 220Hz for 2 seconds.
 
 ```
-Fin(Subtract(Time, Const(-2)),
-  Sine(Const(2 * PI * 220), Const(0)))
+Fin(Subtract(Time, Const(2)),
+  Sin(Const(2 * PI) * Phase(Const(220), Const(0))))
 ```
 
-`Fin` generates samples from the waveform `Subtract(Time, Const(2))` until it finds a non-negative one. The `Subtract` combinator subtracts each pair of corresponding samples, yielding a new stream. You can think of this waveform a bit like a countdown clock: it starts at -2 and then "counts down" (well, _up_) until it reaches 0. 
+`Fin` generates samples from the waveform `Subtract(Time, Const(2))` until it finds a non-negative one. The `Subtract` combinator subtracts each pair of corresponding samples, yielding a new stream. You can think of this waveform a bit like a countdown clock: it starts at -2 and then "counts down" (well, _up_) until it reaches 0.
 
-We can use binary operators to modify outputs of waveforms as well. The `Multiply` combinator multiplies each sample in the first waveform by the corresponding sample in the second waveform. For example, we can change the amplitude of the Sine wave by multiplying by a constant waveform.
+We can use binary operators to modify outputs of waveforms as well. The `Multiply` combinator multiplies each sample in the first waveform by the corresponding sample in the second waveform. For example, we can change the amplitude of the sine wave by multiplying by a constant waveform.
 
 ```
-Fin(Subtract(Time, Const(2)), 
-  Multiply(Const(0.5), 
-    Sine(Const(2 * PI * 220), Const(0))))
+Fin(Subtract(Time, Const(2)),
+  Multiply(Const(0.5),
+    Sin(Const(2 * PI) * Phase(Const(220), Const(0)))))
 ```
 
 The length of a waveform like `Subtract(a, b)` (or `Add`, `Multiply`, or `Divide`) is the _minimum_ of the length of `a` and the length of `b`.
@@ -71,13 +73,20 @@ The length of a waveform like `Subtract(a, b)` (or `Add`, `Multiply`, or `Divide
 Putting these combinators together enables us to create more interesting sounds. For example, we can generate harmonics by applying progressively smaller constants to higher frequencies like the following.
 
 ```
-Fin(Subtract(Time, Const(3)), 
-  Add(Sine(Const(2 * PI * 220), Const(0)),
-    Add(Multiply(Const(0.33), Sine(Const(2 * PI * 1320), Const(0))),
-    Multiply(Const(0.2), Sine(Const(2 * PI * 2200), Const(0))))))
+Fin(Subtract(Time, Const(3)),
+  Add(Sin(Const(2 * PI) * Phase(Const(220), Const(0))),
+    Add(Multiply(Const(0.33), Sin(Const(2 * PI) * Phase(Const(660), Const(0)))),
+    Multiply(Const(0.2), Sin(Const(2 * PI) * Phase(Const(1100), Const(0)))))))
 ```
 <div class="container">
-  <tuun-synth description="Harmonics" open='["std"]' expression="sine(2 * pi * 220, 0) + 0.33 * sine(2 * pi * 1320, 0) + 0.2 * sine(2 * pi * 2200, 0) | fin(time - 3)" />
+  <tuun-synth description="Harmonics" open='["std"]'>
+    <script type="text/tuun">
+      sin(2 * pi * phase(220, 0))
+        + 0.33 * sin(2 * pi * phase(660, 0))
+        + 0.2 * sin(2 * pi * phase(1100, 0))
+        | fin(time - 3)
+     </script>
+   </tuun-synth>
 </div>
 
 Writing this out is starting to get a little tedious, though, and we'll see how to use Tuun expressions below to build a library of functions for easily generating harmonics and other complex waveforms.
@@ -86,25 +95,31 @@ As another example of how to use finite waveforms, let's create a simple amplitu
 
 ```
 Multiply(
-  Sine(Const(2 * PI * 220), Const(0)),
+  Sin(Const(2 * PI) * Phase(Const(220), Const(0))),
   Append(
-    Fin(Subtract(Time, Const(2)), Multiply(Time, Const(0.5))), 
+    Fin(Subtract(Time, Const(2)), Multiply(Time, Const(0.5))),
     Fin(Subtract(Time, Const(1)), Add(Multiply(Time, Const(-1), 1)))))
 ```
 <div class="container">
-  <tuun-synth description="Simple amplitude envelope" open='["std"]' expression="sine(2 * pi * 220, 0) * append(time * 0.5 | fin(time - 2), time * -1 + 1 | fin(time - 1))" />
+  <tuun-synth description="Simple amplitude envelope" open='["std"]'>
+    <script type="text/tuun">
+      sin(2 * pi * phase(220, 0))
+        * append(time * 0.5 | fin(time - 2),
+                 time * -1 + 1 | fin(time - 1))
+    </script>
+  </tuun-synth>
 </div>
 
-This plays a 220Hz tone for three seconds, increasing the amplitude for the first two seconds (the "attack") and decreasing it to silence during the third (the "release"). 
+This plays a 220Hz tone for three seconds, increasing the amplitude for the first two seconds (the "attack") and decreasing it to silence during the third (the "release").
 
-Our last example shows how to combine waveforms at a much smaller scale. Up until now, we've considered combining waveforms that last for one or two seconds. What about waveforms that last for 0.002 seconds? The tones we've created so far have all been sine waves at their root. Sine waves are one type of periodic waveform, but they can be used to create other periodic waveforms as well. The [`Alt`](alt-and-reset.md) combinator picks between two waveforms based on the sign of a third, called a trigger. For example, the following will generate a square wave.
+Our last example shows how to combine waveforms at a much smaller scale. The tones we've created so far have all used the `Sin` combinator. Sine waves are one type of periodic waveform, but `Phase` can be used to create other periodic waveforms as well. The [`Alt`](alt-and-reset.md) combinator picks between two waveforms based on the sign of a third, called a trigger. For example, the following will generate a square wave.
 
 ```
-Alt(Sine(Const(2 * PI * 220), Const(0)), Const(1), Const(-1))
+Alt(Phase(Const(220), Const(0)) - 0.5, Const(-1), Const(1))
 ```
 <div class="container">
   <tuun-synth description="Square wave" open='["std"]'>
-    alt(sine(2 * pi * 220, 0), 1, -1) * 0.4 // cut the amplitude
+    alt(phase(220, 0) - 0.5, -1, 1) * 0.4 // cut the amplitude
   </tuun-synth>
 </div>
 There are a few other waveforms and waveform combinators available in Tuun and that are described briefly below. There are these basic waveforms:
@@ -126,11 +141,12 @@ There are the combinators that combine the samples themselves.
  * `Multiply(a, b)` - multiplies samples together
  * `Divide(a, b)` - divides samples
  * `Merge(a, b)` - merges two waveforms by extending the shorter one, and then adding samples together
+ * `Sin(a)` - takes the $sin$ of each sample
  * [`Filter(c, [b_0, ...], [a_1, ...])`](filter.md) - processes `c` using a finite or infinite impulse response filter with the given coefficients
 
 There are three combinators for describing periodic waveforms:
 
- * [`Sine(a, b)`](sine.md) - generates a sine wave with angular frequency `a` and phase offset `b`
+ * [`Phase(a, b)`](periodic.md) - generates a repeating waveform with frequency `a` and offset `b`
  * `Alt(trigger, a, b)` - generates samples from `a` when `trigger` is positive and from `b` otherwise
  * `Reset(trigger, a)` - restarts the second waveform each time the `trigger` switches from negative to positive
 
@@ -150,9 +166,10 @@ For comparison, here are the lengths of each waveform:
 | `Noise`                 | ∞
 | `Fixed(v)`              | length of v
 | `Fin(a, b)`             | position w/ `a` >= 0.0
-| `Sine(a, b)`            | min(a.length, b.length)
+| `Sin(a)`                | a.length
 | `Add(a, b)`, `Subtract(a, b)`, `Multiply(a, b)`, `Divide(a, b)` | min(a.length, b.length)
-| `Merge(a, b)`           |  max(a.length, b.length)
+| `Merge(a, b)`           | max(a.length, b.length)
+| `Phase(a, b)`           | min(a.length, b.length)
 | `Append(a, b)`          | a.length + b.length
 | `Filter(c, [b_0, ...], [a_1, ...])` | c.length
 | `Reset(trigger, a)`     | trigger.length
@@ -164,7 +181,7 @@ This small set of combinators is enough to create synthesizers, filters, and eve
 
 While Tuun waveforms are designed to be simple, Tuun expressions form a higher-order functional language that can be used to build abstractions and easily create complex sounds and even music!
 
-Tuun includes standard features like numeric literals, strings, booleans, functions, variables, application, tuples, lists, operators, and `let` bindings. Values include booleans, strings, functions, and (as described below) waveforms. Here is a simplified expression syntax: 
+Tuun includes standard features like numeric literals, strings, booleans, functions, variables, application, tuples, lists, operators, and `let` bindings. Values include booleans, strings, functions, and (as described below) waveforms. Here is a simplified expression syntax:
 
 ```
 expr ::= float
@@ -184,16 +201,16 @@ unary_op ::= "-" | "$" | "@" | ...
 binary_op ::= "+" | "-" | "*" | "/" | "&" | "|" | "==" | "!=" | "<" | ...
 ```
 
-Tuun waveforms are values, and in fact, _all_ numeric values are waveforms: when you write a floating point literal like `0.5`, you are describing the constant waveform `Const(0.5)`. Tuun provides built-in functions like `sine` that map to waveform combinators. These expression language built-ins for creating waveforms (including `fin`, `alt`, and `time`) are written in lowercase.
+Tuun waveforms are values, and in fact, _all_ numeric values are waveforms: when you write a floating point literal like `0.5`, you are describing the constant waveform `Const(0.5)`. Tuun provides built-in functions like `phase` that map to waveform combinators. These expression language built-ins for creating waveforms (including `fin`, `alt`, and `time`) are written in lowercase.
 
-Most built-in functions behave uniformly across all waveforms: for example, the frequency parameter of `sine` can be a constant or non-constant waveform. (The description of the [`Sine` waveform](sine.md#dynamic-frequency-and-phase) gives some examples of how this might be used.) Exceptions include built-in functions like `unfold`, which requires an constant, integral argument for the length of its result. To aid in using these functions correctly, Tuun provides [sorts](language-spec.md#types-and-sorts) which refine numeric values and distinguish constant and non-constant waveforms as well as those with integral values.
+Most built-in functions behave uniformly across all waveforms: for example, the frequency parameter of `phase` can be a constant or non-constant waveform. (The description of the [`Phase` waveform](periodic.md#dynamic-frequency-and-phase) gives some examples of how this might be used.) Exceptions include built-in functions like `unfold`, which requires an constant, integral argument for the length of its result. To aid in using these functions correctly, Tuun provides [sorts](language-spec.md#types-and-sorts) which refine numeric values and distinguish constant and non-constant waveforms as well as those with integral values.
 
 Tuun also includes a `|` ("pipe") operator, which denotes reverse application, enabling you to write the argument before the function you are passing it to. It's conventional in Tuun to write filters (like the ADSR example below) in a curried-form, so that they can be chained together. Built-in functions for `fin` and `filter` are also written this way. For example, a two second sine wave would be written as follows:
 <div class="container">
-  <tuun-synth open='["std"]' expression="sine(2 * pi * 220, 0) | fin(time - 2)" />
+  <tuun-synth open='["std"]' expression="sin(2 * pi * phase(220, 0)) | fin(time - 2)" />
 </div>
 
-Binary operators are written infix, with `&` used as the `Merge` waveform operator. Tuun supports special syntax for merging multiple waveforms: curly brackets (`{` and `}`) take a list of waveforms, apply the `Merge` combinator, and return a single waveform that plays them simultaneously. This is used for chords as well as for creating complex tones with multiple overtones. 
+Binary operators are written infix, with `&` used as the `Merge` waveform operator. Tuun supports special syntax for merging multiple waveforms: curly brackets (`{` and `}`) take a list of waveforms, apply the `Merge` combinator, and return a single waveform that plays them simultaneously. This is used for chords as well as for creating complex tones with multiple overtones.
 
 We can now give a more extensive — and more concise — version of the harmonics example, in part by defining a helper function that creates overtones. The dollar sign `$` is shorthand for a sine wave with the given frequency in hertz and no phase offset. The `over` function creates an overtone whose amplitude in inversely proportional to the ratio between that overtone and the fundamental. (`$` and `over` are both in the standard library but repeated here for clarity.)
 
@@ -202,8 +219,8 @@ We can now give a more extensive — and more concise — version of the harmoni
     <script type="text/tuun">
       let
         // $ computes a sine wave at the given frequency in hertz.
-        $ = fn(freq_hz) => sine(2*pi * freq_hz, 0),
-        over = fn(freq) => fn (x) => (1/x) * $(freq*x),
+        $ = fn(freq_hz) => sin(2 * pi * phase(freq_hz, 0)),
+        over = fn(freq) => fn (x) => (1 / x) * $(freq * x),
         odd_harmonics =
           fn(freq) => {map(over(freq), [1, 3, 5, 7, 9, 11])},
       in
@@ -213,7 +230,7 @@ We can now give a more extensive — and more concise — version of the harmoni
 </div>
 
 
-Though instances of `Multiply` (and other waveform combinators) are always values in the expression language, there are often other, simpler waveform values that will generate the same samples. For example, when both arguments to `Multiply` are constant waveforms, there's an equivalent constant waveform, as shown here: 
+Though instances of `Multiply` (and other waveform combinators) are always values in the expression language, there are often other, simpler waveform values that will generate the same samples. For example, when both arguments to `Multiply` are constant waveforms, there's an equivalent constant waveform, as shown here:
 
 | Expression       | Evaluates to...                       | Optimizes to...    |
 | ----------       | ---------------                       | ---------------    |
@@ -223,7 +240,7 @@ Before generating samples, Tuun first evaluates expression to values, then perfo
 
 ### Sequencing
 
-In most of the examples above, there's only a single note (whether played as a simple tone or one with harmonics). Of course, we also want to be able to play a sequence of notes! 
+In most of the examples above, there's only a single note (whether played as a simple tone or one with harmonics). Of course, we also want to be able to play a sequence of notes!
 
 While the `Append` waveform combinator offers a way of combining two waveforms sequentially, there are two challenges in using it. The first challenge is that `Append` always starts the second waveform immediately after the end of the first, but the length of the first waveform might be shorter or longer than the point at which the second should start. For example, the staccato sound of a drum may end before the next note should start, or the sound of a piano with the sustain pedal held down may extend past the start of the next.
 
@@ -246,8 +263,8 @@ The first is `seq` (pronounced like "seek"), a function that takes takes two wav
       let
         R = fn(dur) => fn(w) => w * (1 - time / dur) | fin(time - dur)
       in
-        $220 * 0.5 | R(3) | seq(time - 1) 
-          \ $440 * 0.5 | R(3) | seq(time - 1) 
+        $220 * 0.5 | R(3) | seq(time - 1)
+          \ $440 * 0.5 | R(3) | seq(time - 1)
           \ $660 * 0.5 | R(3)
     </script>
   </tuun-synth>

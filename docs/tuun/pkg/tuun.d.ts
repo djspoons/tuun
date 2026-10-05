@@ -29,6 +29,17 @@ export function main(): void;
 export class Tuun {
   free(): void;
   /**
+   * Returns whether a waveform is currently playing.
+   */
+  is_playing(): boolean;
+  /**
+   * Updates a slider value in the current waveform.
+   *
+   * Builds a linear ramp from the last value to the new value and
+   * substitutes it into the playing waveform.
+   */
+  update_slider(name: string, value: number): void;
+  /**
    * Creates a new Tuun instance with the specified sample rate and tempo.
    *
    * # Arguments
@@ -36,6 +47,10 @@ export class Tuun {
    * * `tempo` - The tempo in beats per minute (e.g., 120)
    */
   constructor(sample_rate: number, tempo: number);
+  /**
+   * Drops the current waveform.
+   */
+  stop(): void;
   /**
    * Installs an expression as the current waveform: parses it, evaluates
    * it under the slider bindings and opened modules, and stores the
@@ -57,23 +72,11 @@ export class Tuun {
    *
    * # Examples
    * ```javascript
-   * tuun.install("sine(2764, 0)", "{}", "[]", "[]");
    * tuun.install("$440", "{}", '["std"]', "[]");
    * tuun.install("std.square(220) * 0.3", "{}", "[]", '["std"]');
    * ```
    */
   install(expression: string, slider_json: string, open_json: string, use_json: string): void;
-  /**
-   * Drops the current waveform.
-   */
-  stop(): void;
-  /**
-   * Updates a slider value in the current waveform.
-   *
-   * Builds a linear ramp from the last value to the new value and
-   * substitutes it into the playing waveform.
-   */
-  update_slider(name: string, value: number): void;
   /**
    * Generates audio samples from the current waveform. Updates the internal
    * state of the waveform so that the next call to `generate()` will continue
@@ -94,10 +97,6 @@ export class Tuun {
    */
   process(out: Float32Array): boolean;
   /**
-   * Returns whether a waveform is currently playing.
-   */
-  is_playing(): boolean;
-  /**
    * Returns the current sample rate.
    */
   readonly sample_rate: number;
@@ -108,15 +107,15 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
   readonly memory: WebAssembly.Memory;
   readonly __wbg_tuun_free: (a: number, b: number) => void;
-  readonly tuun_new: (a: number, b: number) => [number, number, number];
+  readonly evaluateSlider: (a: number, b: number, c: number) => [number, number, number];
+  readonly parseSliders: (a: number, b: number) => [number, number, number, number];
   readonly tuun_install: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
+  readonly tuun_is_playing: (a: number) => number;
+  readonly tuun_new: (a: number, b: number) => [number, number, number];
+  readonly tuun_process: (a: number, b: number, c: number, d: any) => number;
+  readonly tuun_sample_rate: (a: number) => number;
   readonly tuun_stop: (a: number) => void;
   readonly tuun_update_slider: (a: number, b: number, c: number, d: number) => void;
-  readonly tuun_process: (a: number, b: number, c: number, d: any) => number;
-  readonly tuun_is_playing: (a: number) => number;
-  readonly tuun_sample_rate: (a: number) => number;
-  readonly parseSliders: (a: number, b: number) => [number, number, number, number];
-  readonly evaluateSlider: (a: number, b: number, c: number) => [number, number, number];
   readonly main: () => void;
   readonly __wbindgen_free: (a: number, b: number, c: number) => void;
   readonly __wbindgen_malloc: (a: number, b: number) => number;

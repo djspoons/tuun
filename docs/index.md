@@ -16,7 +16,7 @@ Many of the pages below include embedded synthesizer elements, but if you'd like
 * [Overview](overview.md)
 * [Architecture](architecture.md)
 * [Dynamic Waveforms](dynamic.md)
-* [Sine](sine.md)
+* [Periodic Waveforms](periodic.md)
 * [Alt and Reset](alt-and-reset.md)
 * [Filter](filter.md)
 

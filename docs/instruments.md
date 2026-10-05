@@ -235,7 +235,7 @@ We can then use to to generate a flute instrument by applying an amplitude envel
 
 #### Filters
 
-Above, the example of a flute synthesized using a sawtooth oscillator "cheats" by decomposing that sawtooth into its components. This example uses a true sawtooth oscillator, which though defined in Tuun's standard library, is reproduced here. Note how there is only a single use of the `$` waveform combinator. (You can hear the full sawtooth again by turning the low-pass filter cutoff all the way up and high-pass filter cutoff all the way down.)
+Above, the example of a flute synthesized using a sawtooth oscillator "cheats" by decomposing that sawtooth into its components. This example uses a true sawtooth oscillator, which is copied here from Tuun's standard library. Note how there is only a single use of the `Phase` waveform combinator. (You can hear the full sawtooth again by turning the low-pass filter cutoff all the way up and high-pass filter cutoff all the way down.)
 
 <div class="container">
   <tuun-synth
@@ -246,7 +246,7 @@ Above, the example of a flute synthesized using a sawtooth oscillator "cheats" b
     sliders='["low_pass_filter_Q:0.75293773:0.1:1.1","low_pass_filter_cutoff:0.43753:fn(x)=> 200 * pow(100, x)","high_pass_filter_Q:0.69140625:0.1:1.1","high_pass_filter_cutoff:0.41015625:fn(x)=> 100 * pow(100, x)"]'>
     <script type="text/tuun">
       let
-        sawtooth = fn(freq_hz) => (reset($freq_hz, -freq_hz * time) + 0.5) * 2,
+        sawtooth = fn(freq_hz) => 1 - 2 * phase(freq_hz, 0),
         flute = fn(dur, freq_hz) => let
           attack_dur = 0.27,
           release_dur = 0.17,
@@ -268,7 +268,7 @@ Above, the example of a flute synthesized using a sawtooth oscillator "cheats" b
 
 ### Frequency and phase modulation
 
-Frequency modulation (FM) and phase modulation (PM) are two related techniques for using a combination of sine waves to create rich tones. See [advanced synthesis using sine](sine.md#advanced-synthesis) for more details.
+Frequency modulation (FM) and phase modulation (PM) are two related techniques for using a combination of sine waves to create rich tones. See [advanced synthesis using phase](periodic.md#advanced-synthesis) for more details.
 
 As noted above, the ukulele sample has a rich set of harmonic overtones, especially for the first part of the sample.
 

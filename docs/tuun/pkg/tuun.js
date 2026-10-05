@@ -93,22 +93,6 @@ function takeFromExternrefTable0(idx) {
     wasm.__externref_table_dealloc(idx);
     return value;
 }
-
-let cachedFloat32ArrayMemory0 = null;
-
-function getFloat32ArrayMemory0() {
-    if (cachedFloat32ArrayMemory0 === null || cachedFloat32ArrayMemory0.byteLength === 0) {
-        cachedFloat32ArrayMemory0 = new Float32Array(wasm.memory.buffer);
-    }
-    return cachedFloat32ArrayMemory0;
-}
-
-function passArrayF32ToWasm0(arg, malloc) {
-    const ptr = malloc(arg.length * 4, 4) >>> 0;
-    getFloat32ArrayMemory0().set(arg, ptr / 4);
-    WASM_VECTOR_LEN = arg.length;
-    return ptr;
-}
 /**
  * Parses a slider config string like `["volume:0.5:0:1", "freq:0.5:fn(x) => 100 * pow(100, x)"]`
  * and returns a JSON array of slider objects.
@@ -167,6 +151,22 @@ export function main() {
     wasm.main();
 }
 
+let cachedFloat32ArrayMemory0 = null;
+
+function getFloat32ArrayMemory0() {
+    if (cachedFloat32ArrayMemory0 === null || cachedFloat32ArrayMemory0.byteLength === 0) {
+        cachedFloat32ArrayMemory0 = new Float32Array(wasm.memory.buffer);
+    }
+    return cachedFloat32ArrayMemory0;
+}
+
+function passArrayF32ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 4, 4) >>> 0;
+    getFloat32ArrayMemory0().set(arg, ptr / 4);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
+
 const TuunFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_tuun_free(ptr >>> 0, 1));
@@ -189,6 +189,35 @@ export class Tuun {
         wasm.__wbg_tuun_free(ptr, 0);
     }
     /**
+     * Returns whether a waveform is currently playing.
+     * @returns {boolean}
+     */
+    is_playing() {
+        const ret = wasm.tuun_is_playing(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * Returns the current sample rate.
+     * @returns {number}
+     */
+    get sample_rate() {
+        const ret = wasm.tuun_sample_rate(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * Updates a slider value in the current waveform.
+     *
+     * Builds a linear ramp from the last value to the new value and
+     * substitutes it into the playing waveform.
+     * @param {string} name
+     * @param {number} value
+     */
+    update_slider(name, value) {
+        const ptr0 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.tuun_update_slider(this.__wbg_ptr, ptr0, len0, value);
+    }
+    /**
      * Creates a new Tuun instance with the specified sample rate and tempo.
      *
      * # Arguments
@@ -205,6 +234,12 @@ export class Tuun {
         this.__wbg_ptr = ret[0] >>> 0;
         TuunFinalization.register(this, this.__wbg_ptr, this);
         return this;
+    }
+    /**
+     * Drops the current waveform.
+     */
+    stop() {
+        wasm.tuun_stop(this.__wbg_ptr);
     }
     /**
      * Installs an expression as the current waveform: parses it, evaluates
@@ -227,7 +262,6 @@ export class Tuun {
      *
      * # Examples
      * ```javascript
-     * tuun.install("sine(2764, 0)", "{}", "[]", "[]");
      * tuun.install("$440", "{}", '["std"]', "[]");
      * tuun.install("std.square(220) * 0.3", "{}", "[]", '["std"]');
      * ```
@@ -249,25 +283,6 @@ export class Tuun {
         if (ret[1]) {
             throw takeFromExternrefTable0(ret[0]);
         }
-    }
-    /**
-     * Drops the current waveform.
-     */
-    stop() {
-        wasm.tuun_stop(this.__wbg_ptr);
-    }
-    /**
-     * Updates a slider value in the current waveform.
-     *
-     * Builds a linear ramp from the last value to the new value and
-     * substitutes it into the playing waveform.
-     * @param {string} name
-     * @param {number} value
-     */
-    update_slider(name, value) {
-        const ptr0 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len0 = WASM_VECTOR_LEN;
-        wasm.tuun_update_slider(this.__wbg_ptr, ptr0, len0, value);
     }
     /**
      * Generates audio samples from the current waveform. Updates the internal
@@ -294,22 +309,6 @@ export class Tuun {
         var len0 = WASM_VECTOR_LEN;
         const ret = wasm.tuun_process(this.__wbg_ptr, ptr0, len0, out);
         return ret !== 0;
-    }
-    /**
-     * Returns whether a waveform is currently playing.
-     * @returns {boolean}
-     */
-    is_playing() {
-        const ret = wasm.tuun_is_playing(this.__wbg_ptr);
-        return ret !== 0;
-    }
-    /**
-     * Returns the current sample rate.
-     * @returns {number}
-     */
-    get sample_rate() {
-        const ret = wasm.tuun_sample_rate(this.__wbg_ptr);
-        return ret;
     }
 }
 
@@ -469,4 +468,4 @@ export { initSync };
 export default __wbg_init;
 
 // The git revision this build was made from (stamped by build-wasm.sh).
-export const tuunBuild = '2f63c94';
+export const tuunBuild = 'd18eb67-dirty';

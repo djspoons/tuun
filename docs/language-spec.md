@@ -76,7 +76,7 @@ private bindings
 
 ### Prelude
 
-Every Tuun module includes an implicit `open` that injects a special set of bindings called the _prelude_. The prelude includes definitions of waveform constructors (`sine`), list helpers (`map`), and mathematical functions (`sqrt`). The prelude may also contain environment-specific bindings such as `tempo` or a `debug` function that prints information to a console or log.
+Every Tuun module includes an implicit `open` that injects a special set of bindings called the _prelude_. The prelude includes definitions of waveform constructors (`phase`), list helpers (`map`), and mathematical functions (`pow`). The prelude may also contain environment-specific bindings such as `tempo` or a `debug` function that prints information to a console or log.
 
 ## Expressions and Values
 

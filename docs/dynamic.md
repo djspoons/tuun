@@ -5,12 +5,14 @@ Tuun's `Generator` is inherently static: with the exception of random waveforms 
 Waveform modification is accomplished with the help of a special waveform: `Marked` waveforms provide a way of substituting one waveform for part of another. For example, to change the frequency of a sine wave, we can use a marked waveform for the first parameter:
 
 ```
-Sine(Marked(Slider("A"), Const(1643.9)), Const(0.0))
-   — substitute Const(1845.1) for "Slider(A)" -->
-Sine(Marked(Slider("A"), Const(1845.1)), Const(0.0))
+Sin(Const(2 * PI) * Phase(Marked(Slider("A"), Const(1643.9)), Const(0.0)))
+   — substitute Marked(Slider("A"), Const(1845.1)) for Slider("A") -->
+Sin(Const(2 * PI) * Phase(Marked(Slider("A"), Const(1845.1)), Const(0.0)))
 ```
 
-Modification is different than wholesale replacement because the parts of the waveform that are not changed maintain their state. In the example using `Sine` above, the [accumulator](sine.md#accumulation) of the `Sine` waveform will persist, limiting audible artifacts that might otherwise occur.
+Modification takes a "mark" identifier and new waveform, and replaces each `Marked` waveform with a matching identifier with the new waveform. To allow later modifications, the new waveform should include the mark again (as shown in this example).
+
+Modification is different than wholesale replacement because the parts of the waveform that are _not_ changed maintain their state. In the example using `Phase` above, the [accumulator](periodic.md#accumulation) of the `Phase` waveform will persist, limiting audible artifacts that might otherwise occur.
 
 Since modification occurs only as a command to the Tracker (or a call to the web component), changes only occur at the beginning of a generation quantum. Setting the buffer size will therefore affect the latency with which modifications go into effect.
 
@@ -106,7 +108,8 @@ Changes to the slider (either in the linear case or the custom one) are then imp
 ```
 Modify {
     mark_id: slider("Q")
-    waveform:
+    waveform: Marked(
+        slider("Q"),
         Append(
             Fin {
                 length: Subtract(Time, Const(quantum_duration_secs)),
@@ -120,6 +123,7 @@ Modify {
             },
             Const(0.8),
         )
+    )
     ..
 }
 ```
@@ -135,24 +139,24 @@ Modify {
 }
 ```
 
-However, this simple implementation can lead to a "pop" sound if the amplitude of the waveform is large. Instead, "stop" is implemented with a special `Marked` waveform and a short ramp. When `waveform` is played, it is first multiplied by a constant 1.0 that is marked using a mark called `Level`.
+However, this simple implementation can lead to a "pop" sound if the amplitude of the waveform is large. Instead, "stop" is implemented with a special `Marked` waveform and a short ramp. When `waveform` is played, it is first multiplied by a constant 1.0 that is marked using a mark called `Terminator`.
 
 ```
 Multiply(
     waveform,
-    Marked {
-        id: Level,
-        waveform: Const(1.0),
-    },
+    Marked(
+        Terminator,
+        Const(1.0),
+    ),
 )
 ```
 
-When it's time to stop a waveform, this constant is replaced by the following ramp.
+When it's time to stop a waveform, this marked waveform is replaced as follows.
 
 ```
 Modify {
-    mark_id: Level
-    waveform:
+    mark_id: Terminator
+    waveform: Multiply(
         Fin(
             length: Subtract(
                 Time,
@@ -166,10 +170,15 @@ Modify {
                 ),
             ),
         ),
-    ..
+        Marked(
+            Terminator,
+            Const(1.0),
+        )
+    )
 }
 ```
 
+Notice that we keep marked waveform in the result. This ensures that multiple "stop" modifications will never make the waveform louder: subsequent substitutions will be nested inside each other.
 
 ## MIDI note-on and note-off
 
@@ -177,7 +186,7 @@ Handling MIDI note-on and note-off events is similar. Each MIDI instrument in Tu
 ```
 (key, velocity) -> (waveform, waveform) // (note_on, note_off)
 ```
-When a note-on event is received from a controller, the note (or key) number and the velocity (as a value between 0.0 and 1.0) are passed to this function. The first waveform is played immediately. This waveform may be infinite or finite. In either case, when a note-off event is received, the second waveform (`note_off`) is substituted for the `Level` mark, just as in the case of stopping a waveform above. As in the case of stopping, a simple `Fixed([])` would be sufficient to stop playback, but other waveforms can be used to produce instrument-specific results.
+When a note-on event is received from a controller, the note (or key) number and the velocity (as a value between 0.0 and 1.0) are passed to this function. The first waveform is played immediately. This waveform may be infinite or finite. In either case, when a note-off event is received, the second waveform (`note_off`) is used as part of the substitution for the `Terminator` mark, just as in the case of stopping a waveform above. As in the case of stopping, a simple `Fixed([])` would be sufficient to stop playback, but other waveforms can be used to produce instrument-specific results.
 
 The following example of a MIDI instrument (based on parameters from [Jim Woodhouse's Euphonics site](https://euphonics.org/3-3-marimbas-and-xylophones/)) has a long (but finite) sustain when keys are held.
 

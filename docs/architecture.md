@@ -39,7 +39,7 @@ Note that these transformations occur without generating any samples or even kno
 
 ### Sample Generation
 
-Once a waveform is in a suitable format, we can generate samples. Some types of waveforms maintain internal state that is specific to the implementation of the `Generator`. For example, the `Sine` waveform maintains an accumulator that represents the current phase of the oscillator. At the beginning of generate, all waveforms are initialized with a new state.
+Once a waveform is in a suitable format, we can generate samples. Some types of waveforms maintain internal state that is specific to the implementation of the `Generator`. For example, the `Phase` waveform maintains an accumulator that represents the current phase of the oscillator. At the beginning of generate, all waveforms are initialized with a new state.
 
 Generation can occur in two places:
 

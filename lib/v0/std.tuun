@@ -21,13 +21,13 @@ sinh = fn(x) => (exp(x) - exp(-x)) / 2;
 // vary with time (analogous to `phase`). Both frequency and offset are given in
 // radians.
 sine = fn(ang_freq, phase_offset) =>
-  sin(2*pi * phase(ang_freq / (2*pi),
-                   phase_offset / (2*pi)));
+  sin(2 * pi * phase(ang_freq / (2 * pi),
+                   phase_offset / (2 * pi)));
 
 // `cos` is a quarter turn ahead of `sin`.
 cos = fn(radians) => sin(radians + pi / 2);
 // `$` computes a sine wave at the given frequency in hertz.
-$ = fn(freq_hz) => sin(2*pi * phase(freq_hz, 0));
+$ = fn(freq_hz) => sin(2 * pi * phase(freq_hz, 0));
 // `sawtooth` computes a sawtooth wave at the given frequency in hertz.
 // Note that this is an inverse sawtooth (used so that it meets the
 // negative/positive constraint described above).
@@ -85,11 +85,11 @@ linear = fn(initial, slope) => initial + (time * slope);
 @ = fn(m) => pow(2, (m - 69) / 12) * 440;
 
 
-over = fn(freq) => fn(x) => $(freq*x) * (1/x); // TODO remove in favor of harmonic?
-harmonic = fn(freq) => fn(n) => $(freq*n) * (1/n);
+over = fn(freq) => fn(x) => $(freq * x) * (1 / x); // TODO remove in favor of harmonic?
+harmonic = fn(freq) => fn(n) => $(freq * n) * (1 / n);
 
-add_semitones = fn(freq, n) => pow(2, n/12) * freq;
-add_cents = fn(freq, n) => pow(2, n/1200) * freq;
+add_semitones = fn(freq, n) => pow(2, n / 12) * freq;
+add_cents = fn(freq, n) => pow(2, n / 1200) * freq;
 
 // Time and Rests
 duration_from_beats = fn(beats) => beats * (60 / tempo);

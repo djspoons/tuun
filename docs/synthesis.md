@@ -91,9 +91,9 @@ In this example, the two pulse waves are combined and then passed through a low-
 
 ## Phase modulation
 
-As discussed in the [advanced uses of Sine](sine.md#advanced-synthesis), Tuun supports both frequency and phase modulation synthesis. In this example, we'll use phase modulation, with `fc` as the frequency of the carrier and `fm` as the frequency of the modulator (both in hertz).
+As discussed in the [advanced uses of Phase and Sin](periodic.md#advanced-synthesis), Tuun supports both frequency and phase modulation synthesis. In this example, we'll use phase modulation, with `w_c` as the frequency of the carrier and `w_m` as the frequency of the modulator (both in radians per second).
 ```
-sine(2*pi * fc, I * $fm)
+sine(w_c, I * sine(w_m, 0))
 ```
 As in [Chowning's original article on frequency modulation](https://web.eecs.umich.edu/~fessler/course/100/misc/chowning-73-tso.pdf), we will vary the index of modulation over time by using a waveform (rather than a constant) for `I`. Since we know that the sine expression is infinite, the length of the modulator will be determined by `I` as well. That same envelope will also be used to control the magnitude the resulting waveform.
 
@@ -108,15 +108,15 @@ The instrument below is based on an example from Chowning's article.
   <tuun-synth description="Phase modulation synthesis" open='["std", "env.finseq"]' expanded>
     <script type="text/tuun">
       let
-        pm_synth = fn(I_max, D, a, d, s_level, r) => fn(dur, freq) =>
+        pm_synth = fn(I_max, D, a, d, s_level, r) => fn(dur, freq_hz) =>
           let
-            fc = freq,
+            w_c = 2 * pi * freq_hz,
             s = max(dur - (a + d + r), 0),
             envelope = ADSR(a, d, s_level, s, r),
             I = I_max | envelope,
-            fm = D/2 * fc
+            w_m = D/2 * w_c
           in
-            sine(2*pi * fc, I * $fm) | envelope | seq(time - dur),
+            sine(w_c, I * sine(w_m, 0)) | envelope | seq(time - dur),
         
         brass = pm_synth(5, 1, 0.1, 0.1, 0.7, 0.1),
       in
