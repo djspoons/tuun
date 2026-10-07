@@ -32,20 +32,56 @@ $ = fn(freq_hz) => sin(2 * pi * phase(freq_hz, 0));
 // Note that this is an inverse sawtooth (used so that it meets the
 // negative/positive constraint described above).
 sawtooth = fn(freq_hz) => 1 - 2 * phase(freq_hz, 0);
-// `square` computes a square wave at the given frequency in hertz.
-square = fn(freq_hz) => alt(phase(freq_hz, 0) - 0.5, -1, 1);
+// Computes a naive square wave at the given frequency in hertz.
+naive_square = fn(freq_hz) => alt(phase(freq_hz, 0) - 0.5, -1, 1);
 // `triangle` computes a triangle wave at the given frequency in hertz.
 triangle = fn(freq_hz) => 1 - 2 * abs(2 * phase(freq_hz, 0.25) - 1);
 
-// Pulse computes a pulse wave with the given width. `width` should be a number (or waveform)
-// between 0.0 and 1.0, where 0.0 is a square wave (i.e., 50% duty cycle). If width isn't constant;
-// then this is a PWM oscillator.
-pulse = fn(width, freq_hz) =>
+// Computes a naive pulse wave with the given width. `width` should be a number
+// (or waveform) between 0.0 and 1.0, where 0.0 is a square wave (i.e., 50% duty
+// cycle). If width isn't constant; then this is a PWM oscillator.
+naive_pulse = fn(width, freq_hz) =>
   let
     // Use a sawtooth wave (which is "lowered" by `width`) as the driver for the pulse.
     s = sawtooth(freq_hz)
   in
     alt(s - width, 1, -1);
+
+// The polyBLEP correction for a rising edge from -1 to 1 at phase `t` = 0,
+// where `t` is in [0, 1) and `dt` is the phase increment per sample.
+blep = fn(t, dt) =>
+  let
+    // u and v count the number of (fractional) samples since/until the
+    // true beginning/end of a cycle.
+    u = t / dt,          // samples since the beginning of a cycle
+    v = (t - 1) / dt,    // samples counting back from the end of the cycle
+    // Add corrections to the first and last samples
+  in alt(dt - t, 2*u - u*u - 1, 0) // only add in the first sample
+     + alt(t - (1 - dt), v*v + 2*v + 1, 0); // only add in the last sample
+
+// Computes a square wave at the given frequency in hertz with polyBLEP
+// correction.
+square = fn(freq_hz) =>
+  let
+    p = phase(freq_hz, 0),
+    dt = freq_hz / sample_rate,
+    d = p - 0.5,
+  in alt(d, -1, 1)                 // naive square
+     + blep(p, dt)                 // rising edge at the wrap
+     - blep(d + alt(d, 0, 1), dt); // falling edge at p = 0.5
+
+// Computes a pulse wave with the given width and polyBLEP correction. `width`
+// should be a number (or waveform) in [0,1), where 0.0 is a square wave 
+// (i.e., 50% duty cycle). If width isn't constant; then this is a PWM oscillator.
+pulse = fn(width, freq_hz) =>
+  let
+    p = phase(freq_hz, 0),
+    dt = freq_hz / sample_rate,
+    e = (1 - width) / 2, // the phase of the falling edge
+    d = p - e,
+  in alt(d, -1, 1)
+     + blep(p, dt)                 // rising edge at the wrap
+     - blep(d + alt(d, 0, 1), dt); // falling edge at p = e
 
 // LISTS
 
