@@ -120,6 +120,7 @@ s[t_n] = \sin \left( \left(2\pi \sum_{i=0}^{n-1} f[t_i] \Delta t\right) + 2\pi c
 $$
 
 Substituting $\Delta t = 1/f_s$ we have the following:
+
 $$
 s[t_n] = \sin \left( \left(2\pi \sum_{i=0}^{n-1} \frac{f[t_i]}{f_s}\right) + 2\pi c[t_n]\right)
 \\[1em]
@@ -196,7 +197,7 @@ In most cases, you should use `sine` or `$`, with the exception being an argumen
 | Expression      | Description
 |---------------- |--------------
 | `sin(p)`        | General form: use constants or `Phase` (argument in radians)
-| `sine(w, p)`    | `Phase` is built in; both arguments in radians
+| `sine(w, p)`    | `Phase` is built in; arguments in radians/second and radians
 | `$f`            | Sine wave with frequency `f` measured in hertz and zero phase offset
 
 ## Advanced Synthesis
@@ -267,19 +268,19 @@ Since phase offset parameter to `Phase` can also vary with time, Tuun offers ano
 ```
 sine(w_c, I * sine(w_m, 0))
 ```
-Technically this is *phase* modulation (PM) synthesis rather than frequency modulation, but when the modulator is a sinusoid, they produce the same results. Many implementations of FM synthesis use phase modulation since there are cases where it produces better results.
+Technically this is *phase* modulation (PM) synthesis rather than frequency modulation. Since the first parameter to `sine` is (still) integrated, we take the carrier frequency from the FM definition $w_\text{FM}$ unchanged. In contrast, the second parameter to `sine` is _not_ integrated, so we don't use `I * w_m * sine(w_m, pi / 2)` but the integrated offset from $s_\text{FM}$. If we apply this method, FM and PM produce the same results, and in fact, many implementations of "FM" synthesis actually use phase modulation instead.
 
-One case where they are *not* equivalent is where the modulator has a non-zero DC offset (that is, where its average value over time is not zero). In general, the DC offset of the first parameter of `Phase` determines the frequency that we perceive; if the modulator has a non-zero DC offset, it will cause this frequency to shift.
+ One case where they are *not* equivalent is where the modulator has a non-zero DC offset (that is, where its average value over time is not zero). An example of a modulator with a non-zero DC offset is a pulse wave. In FM, this offset is integrated into the frequencies of the partials, often yielding dissonant results. PM, on the other hand, handles this case without dissonance: the DC component doesn't affect the partials. (Note, however, that FM and PM have very different timbres with this modulator: these are not meant to give the same result, just show how the same modulator can have very different effects with FM compared to PM.)
 
-An example of a modulator with a non-zero DC offset is a pulse wave. FM will accumulate this offset, leading to a shift in pitch. In the examples below, a fader can be used to add in a pure tone at the carrier frequency. In the FM case, this pure tone will be highly dissonant. PM, on the other hand, handles this case without changes in pitch (and no dissonance with the additional pure tone). Note, however, that FM and PM have very different timbres with this modulator.
+Here `pulse(width, freq_hz)` is a function that returns a pulse wave with the given width and frequency and is defined in Tuun's standard library. A width of 0.0 yields a square wave, while a width of 0.6 yields a pulse with 30% duty cycle. The sliders can be used to control the width of the pulse. Notice how almost all widths will yield 
 
-(Here `pulse(width, freq_hz)` is a function that returns a pulse wave with the given width and frequency and is defined in the standard context. A width of 0.0 yields a square wave, while a width of 0.5 yields a pulse with 25% duty cycle.)
-
-First, FM with pulse modulator: `sine(w_c + I * w_m * pulse(0.5, w_m / (2 * pi)), 0)`
+First, FM with pulse modulator: `sine(w_c + I * w_m * pulse(width, w_m / (2 * pi)), 0)`
 
 <!-- TODO use level in db instead of amplitude -->
 <div class="container">
-  <tuun-synth description="FM synthesis tone with pulse modulator (with pure tone)" open='["std"]' sliders='["pure_tone_amplitude:0:0:1"]'>
+  <tuun-synth description="FM synthesis tone with pulse modulator"
+      open='["std"]'
+      sliders='["width:0.6:0:1"]'>
     <script type="text/tuun">
       let
         f_c = 440,
@@ -291,16 +292,17 @@ First, FM with pulse modulator: `sine(w_c + I * w_m * pulse(0.5, w_m / (2 * pi))
 
         I = 6,
       in
-        {[sine(w_c + I * w_m * pulse(0.5, f_m), 0) * 0.5,
-          pure_tone_amplitude * $f_c]}
+        sine(w_c + I * w_m * pulse(width, f_m), 0) * 0.5
     </script>
   </tuun-synth>
 </div>
 
-Second, PM with pulse modulator: `sine(w_c, I * pulse(0.5, w_m / (2 * pi)))`
+Second, PM with pulse modulator: `sine(w_c, I * pulse(width, w_m / (2 * pi)))`
 
 <div class="container">
-  <tuun-synth description="PM synthesis tone with pulse modulator (with pure tone)" open='["std"]' sliders='["pure_tone_amplitude:0:0:1"]'>
+  <tuun-synth description="PM synthesis tone with pulse modulator"
+      open='["std"]'
+      sliders='["width:0.6:0:1"]'>
     <script type="text/tuun">
       let
         f_c = 440,
@@ -311,8 +313,8 @@ Second, PM with pulse modulator: `sine(w_c, I * pulse(0.5, w_m / (2 * pi)))`
 
         I = 6,
       in
-        {[sine(w_c, I * pulse(0.5, f_m)) * 0.5,
-          pure_tone_amplitude * $f_c]}
+        // Use naive_pulse here, since we don't want to do polyBLEP before sin.
+        sine(w_c, I * naive_pulse(width, f_m)) * 0.5
     </script>
   </tuun-synth>
 </div>
