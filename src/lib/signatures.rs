@@ -183,9 +183,13 @@ pub fn signature(name: &str) -> Option<Type> {
             vec![Type::waveform(), Type::waveform()],
             Type::non_const_wave(),
         ),
+        // A constant trigger selects a branch, which may itself be a constant.
+        // A single arrow (rather than an intersection refining by the
+        // trigger's sort) keeps `min`/`max` applicable to arguments whose
+        // types are not yet known.
         "alt" => Type::function(
             vec![Type::waveform(), Type::waveform(), Type::waveform()],
-            Type::non_const_wave(),
+            Type::waveform(),
         ),
         "capture" => Type::function(vec![Type::String], waveform_filter()),
         "__chord" => Type::function(

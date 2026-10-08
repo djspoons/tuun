@@ -913,11 +913,15 @@ where
             Expr::Waveform(a) => a,
             _ => return Err(Error::internal_here("Third argument must be a waveform")),
         };
-        Expr::Waveform(Waveform::Alt {
-            trigger: Box::new(trigger),
-            positive_waveform: Box::new(positive_waveform),
-            negative_waveform: Box::new(negative_waveform),
-        })
+        match trigger {
+            Waveform::Const(v) if v >= 0.0 => Expr::Waveform(positive_waveform),
+            Waveform::Const(_) => Expr::Waveform(negative_waveform),
+            trigger => Expr::Waveform(Waveform::Alt {
+                trigger: Box::new(trigger),
+                positive_waveform: Box::new(positive_waveform),
+                negative_waveform: Box::new(negative_waveform),
+            }),
+        }
     })
 }
 
@@ -1231,6 +1235,29 @@ mod tests {
         assert_eq!(offset_root(two.clone()), Some(Waveform::Const(3.0)));
         let three = followed_by(vec![two, seq(4.0)]).unwrap();
         assert_eq!(offset_root(three), Some(Waveform::Const(7.0)));
+    }
+
+    #[test]
+    fn test_alt_with_constant_trigger_selects_its_branch() {
+        let alt_of = |trigger: Waveform<u32>| {
+            alt::<u32, ()>(vec![
+                Expr::Waveform(trigger),
+                Expr::Waveform(Waveform::Const(1.0)),
+                Expr::Waveform(Waveform::Time(())),
+            ])
+            .unwrap()
+        };
+        assert!(
+            matches!(alt_of(Waveform::Const(0.0)), Expr::Waveform(Waveform::Const(v)) if v == 1.0)
+        );
+        assert!(matches!(
+            alt_of(Waveform::Const(-0.5)),
+            Expr::Waveform(Waveform::Time(()))
+        ));
+        assert!(matches!(
+            alt_of(Waveform::Time(())),
+            Expr::Waveform(Waveform::Alt { .. })
+        ));
     }
 
     #[test]
