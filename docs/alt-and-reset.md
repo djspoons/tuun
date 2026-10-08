@@ -26,6 +26,7 @@ Square waves are a textbook application of the `Alt` waveform combinator. Using 
   </tuun-synth>
 </div>
 
+<!-- TODO add anti-aliasing -->
 <!-- TODO add sawtooth waves? -->
 
 ### Synchronized Oscillators

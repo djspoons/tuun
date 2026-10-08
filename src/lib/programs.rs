@@ -824,7 +824,7 @@ impl ProgramSet {
         for (binding_index, source_binding) in
             self.bindings[..program.binding_index].iter().enumerate()
         {
-            // Anonymous definitions are unreferenceable, so evaluating them
+            // Anonymous definitions are not referenceable, so evaluating them
             // here would be wasted work — and a broken one would poison every
             // later program's context.
             let expr::Binding::Definition(pattern, body) = &source_binding.binding else {

@@ -2563,7 +2563,9 @@ mod tests {
 
     #[test]
     fn complete_includes_prelude_names() {
+        // cSpell:disable
         let mut state = edit_state("#{level_db=0}\n_ = test;", "appe", 4);
+        // cSpell:enable
         apply_with_empty_status(&mut state, Action::Complete);
         assert_eq!(edit_text_and_cursor(&state), ("append".to_string(), 6));
     }
@@ -3842,7 +3844,7 @@ _ = saw(220);";
     }
 
     #[test]
-    fn owned_program_can_stop_and_unqueue_while_editing() {
+    fn owned_program_can_stop_and_dequeue_while_editing() {
         let mut state = editing_state();
         let now = Instant::now();
         let active = status_with_mark(now - Duration::from_millis(100));

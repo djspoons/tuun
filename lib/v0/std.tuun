@@ -34,7 +34,7 @@ $ = fn(freq_hz) => sin(2 * pi * phase(freq_hz, 0));
 sawtooth = fn(freq_hz) => 1 - 2 * phase(freq_hz, 0);
 // Computes a naive square wave at the given frequency in hertz.
 naive_square = fn(freq_hz) => alt(phase(freq_hz, 0) - 0.5, -1, 1);
-// `triangle` computes a triangle wave at the given frequency in hertz.
+// Computes a triangle wave at the given frequency in hertz.
 triangle = fn(freq_hz) => 1 - 2 * abs(2 * phase(freq_hz, 0.25) - 1);
 
 // Computes a naive pulse wave with the given width. `width` should be a number

@@ -79,7 +79,7 @@ In "edit" mode (when the current program is rendered in white):
 * Enter - play the current program's waveform at the beginning of the next measure
 * Cmd + Enter - play the current program's waveform at the beginning of the next measure and every measure afterward
 * Shift + Cmd + Enter - play the current program's waveform at the beginning of the next measure and every _other_ measure afterward
-* Cntl + H - display the inferred type of the identifier at the cursor
+* Ctl + H - display the inferred type of the identifier at the cursor
 * Escape - switch to "select" mode
 
 In "slider" mode (slider marks at top and left turn green):

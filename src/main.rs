@@ -101,6 +101,8 @@ pub fn main() {
             println!("{}", state.message);
         }
 
+        // TODO the tracker clock resync doesn't really make sense for batch
+        // mode... maybe we shouldn't try to resync in this case?
         let mut tracker = tracker::Tracker::<WaveformId, MarkId>::new(
             args.sample_rate,
             args.output_dir.clone().into(),
