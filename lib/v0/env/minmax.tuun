@@ -2,10 +2,14 @@
 
 open std;
 
+// The shortest attack, decay, or release. Dividing by zero gives zero, so a
+// zero duration would give a flat segment instead of a step.
+_min_dur = 10 / sample_rate;
+
 ADS = fn(attack_dur, decay_dur, sustain_level) =>
   let
-    // Enforce a minimum attack duration (and avoid divide-by-zero)
-    attack_dur = max(attack_dur, 10/sample_rate),
+    attack_dur = max(attack_dur, _min_dur),
+    decay_dur = max(decay_dur, _min_dur),
     attack = linear(0.0, 1/attack_dur),
     decay_slope = (sustain_level-1)/decay_dur,
     decay = linear(1-attack_dur*decay_slope, decay_slope),
@@ -13,16 +17,15 @@ ADS = fn(attack_dur, decay_dur, sustain_level) =>
   in
     fn(w) => w * env;
 
-ADSR = fn(attack_dur, decay_dur, sustain_level, sustain_dur, release_dur) =>
+// An ADSR envelope lasting exactly `total_dur`. When `total_dur` is shorter
+// than the four parts, the sustain shrinks first, then the decay is cut short
+// (the release starts from wherever the decay has reached), and finally the
+// attack and release split `total_dur` in proportion to their lengths.
+ADSR = fn(total_dur, attack_dur, decay_dur, sustain_level, release_dur) =>
   let
-    // Enforce a minimum attack duration (and avoid divide-by-zero)
-    attack_dur = max(attack_dur, 10/sample_rate),
-    attack = linear(0.0, 1/attack_dur),
-    decay_slope = (sustain_level-1)/decay_dur,
-    decay = linear(1-attack_dur*decay_slope, decay_slope),
-    release_slope = -sustain_level/release_dur,
-    release = linear(sustain_level-(attack_dur+decay_dur+sustain_dur)*release_slope, release_slope),
-    env = min(attack, max(decay, min(sustain_level, release))),
-    dur = attack_dur + decay_dur + sustain_dur + release_dur
+    scale = min(1, total_dur / (attack_dur + release_dur)),
+    scale_attack = attack_dur * scale,
+    scale_release = max(release_dur * scale, _min_dur),
+    release = min(1, (total_dur - time) / scale_release),
   in
-    fn(w) => w * env | fin(time - dur);
+    fn(w) => (w | ADS(scale_attack, decay_dur, sustain_level)) * release | fin(time - total_dur);

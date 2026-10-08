@@ -27,9 +27,9 @@ open env.minmax;
 
 // Amplitude envelope
 #{color=rgb(250, 132, 105),sliders=["attack:0.5:0:1","decay:0.5:0:1"]}
-_ = $220 | ADSR(attack, decay, 0, 0, 0);
+_ = $220 | ADSR(attack + decay, attack, decay, 0, 0);
 #{color=rgb(250, 82, 82),sliders=["sustain_level:0.5:0:1","release:0.5:0:1"]}
-_ = $220 | ADSR(0.0, 0.0, sustain_level, 0.5, release);
+_ = $220 | ADSR(0.5 + release, 0.0, 0.0, sustain_level, release);
 
 // Harmonics
 #{color=rgb(246, 94, 239),sliders=["harmonics:2:0:20"]}

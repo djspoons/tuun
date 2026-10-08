@@ -17,7 +17,7 @@ harmonica = fn(dur, freq) =>
   in
     osc
     | rbj.lpf(0.5, 1900)
-    | minmax.ADSR(a, d, 0.5, s, r)
+    | minmax.ADSR(a + d + s + r, a, d, 0.5, r)
     | fin(time - dur) // redundant with the ADSR
     | seq(time - dur);
 
@@ -43,10 +43,9 @@ flute = fn(dur, freq_hz, lpf_Q = 0.6, lpf_cutoff = 1600, hpf_Q = 0.6, hpf_cutoff
   let
     attack_dur = 0.27,
     release_dur = 0.17,
-    sustain_dur = dur - attack_dur - release_dur,
   in
     _flute_osc(freq_hz, lpf_Q = lpf_Q, lpf_cutoff = lpf_cutoff, hpf_Q = hpf_Q)
-    | minmax.ADSR(attack_dur, 0.0, 1.0, sustain_dur, release_dur);
+    | minmax.ADSR(dur, attack_dur, 0.0, 1.0, release_dur);
 
 flute_keys = fn(lpf_Q = 0.6, lpf_cutoff = 1600, hpf_Q = 0.6, hpf_cutoff = 1600) =>
   fn(k, v) =>

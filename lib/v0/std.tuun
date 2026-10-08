@@ -6,8 +6,8 @@ min = fn(x, y) => alt(x - y, y, x);
 max = fn(x, y) => alt(x - y, x, y);
 abs = fn(x) => alt(x, x, -x);
 sign = fn(x) => alt(x, 1, -1);
-clamp = fn(x, lower, upper) => min(max(x, lower), upper);
-clamp01 = fn(x) => clamp(x, 0, 1);
+clamp = fn(lower, upper) => fn(x) => min(max(x, lower), upper);
+clamp01 = clamp(0, 1);
 
 pi = 3.14159265;
 sinh = fn(x) => (exp(x) - exp(-x)) / 2;

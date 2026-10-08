@@ -1,0 +1,27 @@
+open std;
+use env.finseq;
+use env.minmax;
+
+organ = let
+  odd = fn(freq) => map(over(freq), [1, 3, 5, 7]),
+  // Envelope parameters
+  a = 0.05, d = 0.1, r = 0.1, s_level = 0.75,
+in
+  fn(dur, freq) => {concat([
+        map(amp(0.8), odd(freq)),
+        map(amp(0.5), odd(3/2 * freq)),
+        map(amp(0.3), odd(2 * freq)),
+        map(amp(0.4), odd(3 * freq)),
+        map(amp(0.2), odd(6 * freq))
+      ])} * (1 + 0.05 * $3)
+      | finseq.ADSR(dur, a, d, s_level, r)
+      | seq(time - dur);
+
+// Based on parameters from Jim Woodhouse's Euphonics site (https://euphonics.org/3-3-marimbas-and-xylophones/)
+_bars_partials = [1.0, 3.92, 9.24, 16.27, 24.22, 33.54, 42.97];
+
+bars = fn(dur, freq) =>
+  {map(over(freq), _bars_partials)}
+  | minmax.ADSR(0.3, 0, 0.1, 0.3, 0.2) | seq(time - dur);
+
+bars_keys = fn(key, vel) => ({map(over(@key), _bars_partials)} * vel | minmax.ADSR(0.3, 0, 0.1, 0.3, 0.2), finseq.Rw(0.2, 1.0));

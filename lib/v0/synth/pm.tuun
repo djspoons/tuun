@@ -6,21 +6,21 @@ use env.finseq;
 // of the output.
 pure = fn(I, D, freq_hz) =>
   let
-    fm = D/2 * freq_hz
+    w_c = 2 * pi * freq_hz,
+    w_m = D/2 * w_c,
   in
-    sine(2*pi * freq_hz, I * sine(2*pi * fm, 0));
+    sine(w_c, I * sine(w_m, 0));
 
 // Given I_max, D, and envelope, returns an instrument
 synth = fn(I_max, D, a, d, s_level, r) => fn(dur, freq_hz) =>
   let
-    s = max(dur - (a + d + r), 0),
-    envelope = minmax.ADSR(a, d, s_level, s, r),
+    envelope = minmax.ADSR(dur, a, d, s_level, r),
     I = I_max | envelope,
   in
     pure(I, D, freq_hz) | envelope | seq(time - dur);
 
-// Given I_max, D, and envelope, returns part of a keys instrument
-synth_keys_helper = fn(I_max, D, a, d, s_level) =>
+// Given I_max, D, and envelope, returns part of an instrument or keys instrument
+synth_stack = fn(I_max, D, a, d, s_level) =>
   let
     envelope = minmax.ADS(a, d, s_level),
     I = I_max | envelope,
@@ -28,49 +28,70 @@ synth_keys_helper = fn(I_max, D, a, d, s_level) =>
     fn(freq_hz) => pure(I, D, freq_hz) | envelope;
 
 // Roughly from Chowning (1977)
-brass = synth(5, 1, 0.1, 0.1, 0.75, 0.1);
-brass_keys =
-  let
-    synth = synth_keys_helper(5, 1, 0.1, 0.1, 0.75),
-    note_off = finseq.Rw(0.1, 1.0),
-  in
-    fn(k, v) => (v * synth(@k), note_off);
+(brass, brass_keys) = let
+    I_max = 5,
+    D = 1,
+    attack_dur = 0.1,
+    decay_dur = 0.1,
+    sustain_level = 0.75,
+    release_dur = 0.1,
 
-piano_keys = fn(k, v) =>
-  let
+    inst = synth(I_max, D, attack_dur, decay_dur, sustain_level, release_dur),
+    keys = let
+        stack = synth_stack(I_max, D, attack_dur, decay_dur, sustain_level),
+        note_off = finseq.Rw(release_dur, 1.0),
+      in
+        fn(k, v) => (v * stack(@k), note_off),
+  in
+    (inst, keys);
+
+(epiano, epiano_keys) = let
     I1_max = 6,
     amp_attack = 0.01,
     amp_decay = 0.55,
     amp_sustain_level = 0.65,
     amp_release = 0.2,
+    D1 = 2,
 
     I2_max = 10,
-    ratio2 = 2.98, // Slightly inharmonic
     attack2 = 0.01,
     decay2 = 0.33,
     sustain_level2 = 0.2,
-    osc_mix = 0.73,
+    release2 = 0.2,
+    // Slightly inharmonic
+    D2 = 5.96,
 
-    fc = @k,
-    // First stack: ratio of 1:1
-    envelope1 = minmax.ADS(amp_attack, amp_decay, amp_sustain_level),
-    I1 = I1_max | envelope1,
-    osc1 = v * sine(2*pi * fc, I1 * sine(2*pi * fc, 0)) | envelope1,
+    mix = 0.73, // portion of mix from first stack
 
-    // Second stack
-    envelope2 = minmax.ADS(attack2, decay2, sustain_level2),
-    I2 = I2_max | envelope2,
-    fc2 = fc * 1.01, // A little detune
-    fm2 = ratio2 * fc2,
-    // Non-linear response to key velocity for the second oscillator.
-    osc2 = v * v * sine(2*pi * fc2, I2 * sine(2*pi * fm2, 0)) | envelope2,
-    note_on = osc_mix * osc1 + (1 - osc_mix) * osc2,
+    inst = fn() => fn(dur, freq_hz) => let
+        envelope1 = minmax.ADSR(dur, amp_attack, amp_decay, amp_sustain_level, amp_release),
+        I1 = I1_max | envelope1,
+        osc1 = pure(I1, D1, freq_hz) | envelope1,
+
+        envelope2 = minmax.ADSR(dur, attack2, decay2, sustain_level2, release2),
+        I2 = I2_max | envelope2,
+        // A little detune
+        osc2 = pure(I2, D2, freq_hz * 1.01) | envelope2,
+      in
+        mix * osc1 & ((1 - mix) * osc2) | seq(time - dur),
 
     // Something better combination of the two envelopes?
     // This doesn't allow for I2 to change as part of the release
-    note_off = finseq.Rw(amp_release, 1.0)
+    keys = fn() => fn(k, v) => let
+        freq_hz = @k,
+        envelope1 = minmax.ADS(amp_attack, amp_decay, amp_sustain_level),
+        I1 = I1_max | envelope1,
+        osc1 = v * pure(I1, D1, freq_hz) | envelope1,
+
+        envelope2 = minmax.ADS(attack2, decay2, sustain_level2),
+        I2 = I2_max | envelope2,
+        // A little detune and non-linear response to key velocity for the
+        // second oscillator.
+        osc2 = v * v * pure(I2, D2, freq_hz * 1.01) | envelope2,
+      in
+        (mix * osc1 + (1 - mix) * osc2, finseq.Rw(amp_release, 1.0)),
   in
-    (note_on, note_off);
+    (inst, keys);
 
 ukulele = fn(I_max, decay_dur, mod_decay_dur) => fn(dur, freq_hz) =>
   let
@@ -82,15 +103,15 @@ ukulele = fn(I_max, decay_dur, mod_decay_dur) => fn(dur, freq_hz) =>
     release_dur = 2.0,
     mute_dur = 0.2,
 
-    mod_envelope = minmax.ADSR(attack_dur, mod_decay_dur, sustain_level, sustain_dur, release_dur),
+    mod_envelope = minmax.ADSR(attack_dur + mod_decay_dur + sustain_dur + release_dur, attack_dur, mod_decay_dur, sustain_level, release_dur),
 
     I = I_max | mod_envelope,
-    fc = freq_hz,
-    osc = sine(2*pi * fc, I * sine(2*pi * fc, 0)),
+    f_c = freq_hz,
+    osc = sine(2 * pi * f_c, I * sine(2 * pi * f_c, 0)),
     //pluck = noise * <[finseq.Rw(0.03, 1.0)]> | seq(time - 0.03),
     //mix = osc + (0.2 * pluck \ 0)
 
-    envelope = minmax.ADSR(attack_dur, decay_dur, sustain_level, sustain_dur, release_dur),
+    envelope = minmax.ADSR(attack_dur + decay_dur + sustain_dur + release_dur, attack_dur, decay_dur, sustain_level, release_dur),
 
   in
     osc | envelope | seq(time - dur) | fin(time - dur);
@@ -105,10 +126,10 @@ ukulele_keys = fn(I_max) => fn(k, v) =>
     amp_release = 2.0,
     mute_dur = 0.2,
 
-    fc = @k,
+    f_c = @k,
     envelope = minmax.ADS(amp_attack, amp_decay, amp_sustain_level),
     I = I_max | envelope,
-    osc = v * sine(2*pi * fc, I * sine(2*pi * fc, 0)) | envelope,
+    osc = v * sine(2 * pi * f_c, I * sine(2 * pi * f_c, 0)) | envelope,
     note_on = osc,
 
     note_off = finseq.Rw(mute_dur, 1.0)

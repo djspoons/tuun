@@ -1,0 +1,10 @@
+open std;
+
+// A pure FM waveform. Note that any of I, D, or freq_hz can control the length
+// of the output.
+pure = fn(I, D, freq_hz) =>
+  let
+    w_c = 2 * pi * freq_hz,
+    w_m = D/2 * w_c,
+  in
+    sine(w_c + I * w_m * sine(w_m, 0));

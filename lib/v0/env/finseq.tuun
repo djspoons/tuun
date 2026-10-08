@@ -8,14 +8,38 @@ Dw = fn(dur, a) => linear(1.0, (a - 1.0) / dur) | fin(time - dur) | seq(time - d
 Sw = fn(dur, a) => a | fin(time - dur) | seq(time - dur);
 // N.B. that R and Rw are not seq, since they are assumed to be the last part of the envelope.
 Rw = fn(dur, level) => linear(level, -level / dur) | fin(time - dur);
-// Combine them to create a new filter.
-ADSR = fn(attack_dur, decay_dur, sustain_level, sustain_dur, release_dur) =>
-  fn(w) => w * (Aw(attack_dur)
-                \ Dw(decay_dur, sustain_level)
-                \ Sw(sustain_dur, sustain_level)
-                \ Rw(release_dur, sustain_level));
+
+// The shortest attack, decay, or release. Dividing by zero gives zero, so a
+// zero duration would give a flat segment instead of a step.
+_min_dur = 10 / sample_rate;
+
+// An ADSR envelope lasting exactly `total_dur`. When `total_dur` is shorter
+// than the four parts, the sustain shrinks first, then the decay is cut short
+// (the release starts from wherever the decay has reached), and finally the
+// attack and release split `total_dur` in proportion to their lengths.
+ADSR = fn(total_dur, attack_dur, decay_dur, sustain_level, release_dur) =>
+  let
+    attack_dur = max(attack_dur, _min_dur),
+    decay_dur = max(decay_dur, _min_dur),
+    release_dur = max(release_dur, _min_dur),
+    scale = min(1, total_dur / (attack_dur + release_dur)),
+    scale_attack = attack_dur * scale,
+    scale_release = release_dur * scale,
+    middle_dur = total_dur - scale_attack - scale_release,
+    cut_decay = clamp(0, decay_dur)(middle_dur),
+    sustain_dur = middle_dur - cut_decay,
+    // A decay cut short keeps its full-length slope and stops partway down.
+    decay_slope = (sustain_level - 1.0) / decay_dur,
+    release_level = 1.0 + decay_slope * cut_decay,
+  in
+    fn(w) => w * (Aw(scale_attack)
+                  \ (linear(1.0, decay_slope) | fin(time - cut_decay) | seq(time - cut_decay))
+                  \ Sw(sustain_dur, sustain_level)
+                  \ Rw(scale_release, release_level));
 ADS = fn(attack_dur, decay_dur, sustain_level) =>
-  fn(w) => w * (Aw(attack_dur) \ Dw(decay_dur, sustain_level) \ sustain_level);
+  fn(w) => w * (Aw(max(attack_dur, _min_dur))
+                \ Dw(max(decay_dur, _min_dur), sustain_level)
+                \ sustain_level);
 
 // Also, we can create component filters... though note that the first three
 // don't change the length, so they need to be combined with R (or fin).
