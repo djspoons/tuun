@@ -30,7 +30,7 @@ Additive synthesis often requires many primitive waveforms to be combined; this 
           map(amp(0.4), odd(3 * freq)),
           map(amp(0.2), odd(6 * freq))
         ])} * (1 + 0.05 * $3)
-        | ADSR(a, d, s_level, max(dur - (a + d + r), 0), r)
+        | ADSR(dur, a, d, s_level, r)
         | seq(time - dur),
     in
       <map2(organ, [(Q, @48), (Q, @52), (W, @55)])>
@@ -45,7 +45,7 @@ Additive synthesis can also be used to create inharmonic sounds, including tuned
   <tuun-synth description="Additive synthesis (inharmonic)" open='["std", "env.finseq"]' expanded>
     let
       bars = fn(dur, freq) => {map(over(freq), [1.0, 3.92, 9.24, 16.27, 24.22, 33.54, 42.97])}
-        | ADSR(0, 0.1, 0.3, 0, 0.2) | seq(time - dur)
+        | ADSR(0.3, 0, 0.1, 0.3, 0.2) | seq(time - dur)
     in
       <map2(bars, [(Q, @60), (Q, @64), (W, @67)])>
   </tuun-synth>
@@ -58,7 +58,7 @@ Subtractive synthesis starts with a waveform with many component frequencies and
 <div class="container">
   <tuun-synth description="Pulse wave" open='["std", "env.finseq"]' expanded>
   let pulse_inst = fn(dur, freq) =>
-    pulse(0.93, freq) | amp(0.2) | ADSR(0.01, 0, 1, dur, 0.01) | seq(time - dur)
+    pulse(0.93, freq) | amp(0.2) | ADSR(dur, 0.01, 0, 1, 0.01) | seq(time - dur)
   in
     <map2(pulse_inst, [(Q, @60), (Q, @64), (W, @67)])>
   </tuun-synth>
@@ -77,11 +77,11 @@ In this example, the two pulse waves are combined and then passed through a low-
           osc2 = reset(osc1, pulse(0.7, add_cents(add_semitones(freq, 8), 7))),
           osc = 0.375 * osc1 + 0.5 * osc2,
           // Envelope
-          a = 0.13, d = 0.33, r = 0.33, s = max(dur - (a + d + r), 0)
+          a = 0.13, d = 0.33, r = 0.33
         in
           osc
           | rbj.lpf(0.5, 1900)
-          | ADSR(a, d, 0.5, s, r)
+          | ADSR(dur, a, d, 0.5, r)
           | seq(time - dur),
       in
         <map2(harmonica, [(Q, @60), (Q, @64), (W, @67)])>
@@ -111,8 +111,7 @@ The instrument below is based on an example from Chowning's article.
         pm_synth = fn(I_max, D, a, d, s_level, r) => fn(dur, freq_hz) =>
           let
             w_c = 2 * pi * freq_hz,
-            s = max(dur - (a + d + r), 0),
-            envelope = ADSR(a, d, s_level, s, r),
+            envelope = ADSR(dur, a, d, s_level, r),
             I = I_max | envelope,
             w_m = D/2 * w_c
           in

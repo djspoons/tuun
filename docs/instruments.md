@@ -83,7 +83,7 @@ One of the most common envelope shapes is called "ADSR" which is defined by the 
 
 <!-- TODO insert graphic -->
 
-The sustain also has a duration, but often this is determined by the overall length of the waveform.
+The sustain also has a duration, but often this is determined by the overall length of the waveform. Tuun's `ADSR` functions take that overall length as their first parameter and give the sustain whatever time remains after the attack, decay, and release. If the overall length is too short, the sustain is dropped first, then the decay is cut short, and finally the attack and release split the time in proportion.
 
 Below are two samples from live instruments, along with plots of their amplitude envelopes over time and the measured values of ADSR.
 
@@ -112,11 +112,9 @@ The example below is configured with an envelope that matches the flute sample. 
     sliders='["attack_dur:0.32:0.0:1.0","decay_dur:0.0:0.0:1.0","sustain_level_db:0.0:-36.0:2.0","release_dur:0.18:0.0:2.0"]'>
     <script type="text/tuun">
       let
-        inst = fn(dur, freq_hz) => let
-          sustain_dur = dur - attack_dur - release_dur,
-        in
+        inst = fn(dur, freq_hz) =>
           $freq_hz
-          | ADSR(attack_dur, decay_dur, db2amp(sustain_level_db), sustain_dur, release_dur)
+          | ADSR(dur, attack_dur, decay_dur, db2amp(sustain_level_db), release_dur)
       in
         reset($(1/3), inst(1.75, 546))
     </script>
@@ -149,7 +147,6 @@ The example below uses the amplitude envelope from above and adds in harmonics w
         flute = fn(dur, freq_hz) => let
           attack_dur = 0.27,
           release_dur = 0.17,
-          sustain_dur = dur - attack_dur - release_dur,
 
           level_dbs = [
             fundamental_db,
@@ -167,7 +164,7 @@ The example below uses the amplitude envelope from above and adds in harmonics w
           make_component = fn(freq_hz, level_amp) => $freq_hz * level_amp,
         in
           {map2(make_component, zip(freq_hzs, level_amps))}
-          | ADSR(attack_dur, 0.0, 1.0, sustain_dur, release_dur)
+          | ADSR(dur, attack_dur, 0.0, 1.0, release_dur)
       in
         reset($(1/3), flute(1.75, 546))
     </script>
@@ -217,12 +214,11 @@ We can then use to to generate a flute instrument by applying an amplitude envel
           let
             attack_dur = 0.27,
             release_dur = 0.17,
-            sustain_dur = dur - attack_dur - release_dur,
           in
             sawtooth(freq_hz)
             | rbj.lpf2(0.75, 1500)
             | rbj.hpf(0.7, 650)
-            | ADSR(attack_dur, 0.0, 1.0, sustain_dur, release_dur)
+            | ADSR(dur, attack_dur, 0.0, 1.0, release_dur)
         in
           reset($(1/3), flute(1.75, 546))
     </script>
@@ -250,12 +246,11 @@ Above, the example of a flute synthesized using a sawtooth oscillator "cheats" b
         flute = fn(dur, freq_hz) => let
           attack_dur = 0.27,
           release_dur = 0.17,
-          sustain_dur = dur - attack_dur - release_dur,
         in
           sawtooth(freq_hz)
           | rbj.lpf2(low_pass_filter_Q, low_pass_filter_cutoff)
           | rbj.hpf(high_pass_filter_Q, high_pass_filter_cutoff)
-          | ADSR(attack_dur, 0.0, 1.0, sustain_dur, release_dur)
+          | ADSR(dur, attack_dur, 0.0, 1.0, release_dur)
       in
         reset($(1/3), flute(1.75, 546))
     </script>

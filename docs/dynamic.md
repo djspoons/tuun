@@ -194,7 +194,7 @@ The following example of a MIDI instrument (based on parameters from [Jim Woodho
 fn(key, vel) =>
   ({map(over(@key), [1.0, 3.92, 9.24, 16.27, 24.22, 33.54, 42.97])}
       * vel
-      | ADSR(0, 0.1, 0.3, 3.0, 2.0),
+      | ADSR(0.3, 0, 0.1, 0.3, 0.2),
    Rw(0.5, 1.0))
 ```
 (Unfortunately, the Tuun web component doesn't yet support MIDI!)
