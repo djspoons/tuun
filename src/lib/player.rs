@@ -441,12 +441,13 @@ impl Player {
                 for mark in status.marks {
                     if mark.waveform_id == WaveformId::Beats(false)
                         && mark.mark_id == MarkId::TopLevel
+                        && let Some(duration) = mark.duration
                     {
                         self.precompute_sender
                             .send(tracker::Command::Play {
                                 id: WaveformId::Beats(true),
                                 waveform: self.beats_waveform(environment),
-                                start: Some(mark.start + mark.duration),
+                                start: Some(mark.start + duration),
                                 repeat_every: Some(
                                     duration_from_beats(self.tempo, self.beats_per_measure as u64)
                                         * 2,
@@ -672,6 +673,8 @@ fn duration_from_beats_f32(tempo: u32, beats: f32) -> time::Duration {
 mod tests {
     use std::time::{Duration, Instant};
 
+    use crate::generator;
+
     use super::*;
 
     fn empty_status() -> tracker::Status<WaveformId, MarkId> {
@@ -694,7 +697,7 @@ mod tests {
                 waveform_id: WaveformId::Beats(even),
                 mark_id: MarkId::TopLevel,
                 start: t0 + Duration::from_secs(4 * k),
-                duration: Duration::from_secs(4),
+                duration: Some(Duration::from_secs(4)),
             });
         }
         let now = t0 + Duration::from_secs(5);
@@ -712,6 +715,55 @@ mod tests {
             previous_measure_start(&status, t0 - Duration::from_secs(1)),
             None
         );
+    }
+
+    /// Collects the known length of each mark in `waveform`, by mark.
+    fn collect_mark_lengths(
+        generator: &generator::Generator,
+        waveform: &waveform::Waveform<MarkId>,
+        lengths: &mut Vec<(MarkId, Option<usize>)>,
+    ) {
+        use waveform::Waveform::*;
+        match waveform {
+            Marked { id, waveform } => {
+                lengths.push((id.clone(), generator.known_length(waveform)));
+                collect_mark_lengths(generator, waveform, lengths);
+            }
+            Fin { waveform, .. } => collect_mark_lengths(generator, waveform, lengths),
+            Append(a, b, _) | BinaryOp(_, a, b) => {
+                collect_mark_lengths(generator, a, lengths);
+                collect_mark_lengths(generator, b, lengths);
+            }
+            _ => {}
+        }
+    }
+
+    // Each beat and the whole measure must have a known length, with or
+    // without precompute, so that their marks have durations.
+    #[test]
+    fn beats_have_known_lengths() {
+        let environment = Environment::new(8000, 90, std::path::PathBuf::new());
+        let (player, _precompute_receiver, _fast_receiver) = test_player();
+        let mut generator = generator::Generator::new(8000);
+        let beats = player.beats_waveform(&environment);
+        let precomputed = generator.precompute(beats.clone());
+        for waveform in [beats, precomputed] {
+            let mut lengths = Vec::new();
+            collect_mark_lengths(&generator, &waveform, &mut lengths);
+            // A beat at 90 bpm is 2/3 s: 5334 samples at 8000 Hz, rounded up.
+            let expected = [
+                (MarkId::TopLevel, Some(4 * 5334)),
+                (MarkId::UserDefined(1), Some(5334)),
+                (MarkId::MetronomeAmplitude, Some(usize::MAX)),
+                (MarkId::UserDefined(2), Some(5334)),
+                (MarkId::MetronomeAmplitude, Some(usize::MAX)),
+                (MarkId::UserDefined(3), Some(5334)),
+                (MarkId::MetronomeAmplitude, Some(usize::MAX)),
+                (MarkId::UserDefined(4), Some(5334)),
+                (MarkId::MetronomeAmplitude, Some(usize::MAX)),
+            ];
+            assert_eq!(lengths, expected, "for beats {}", waveform);
+        }
     }
 
     // The click is evaluated with only the prelude in scope (no std), so it
@@ -762,7 +814,7 @@ mod tests {
             },
             mark_id: MarkId::TopLevel,
             start,
-            duration: Duration::ZERO,
+            duration: Some(Duration::ZERO),
         }
     }
 
