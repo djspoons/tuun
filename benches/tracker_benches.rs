@@ -3,10 +3,13 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use std::sync::mpsc;
 
 use tuun::builtins;
+use tuun::diagnostics;
 use tuun::environment;
 use tuun::eval;
 use tuun::expr;
 use tuun::generator;
+use tuun::ids::MarkId;
+use tuun::optimizer;
 use tuun::parser;
 use tuun::player;
 use tuun::waveform;
@@ -161,5 +164,96 @@ fn bench_large(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_filter, bench_marks, bench_large);
+/// Returns the number of `Fin` nodes in `waveform`.
+fn count_fins<M, S>(waveform: &waveform::Waveform<M, S>) -> usize {
+    use waveform::Waveform::*;
+    match waveform {
+        Const(_) | Time(_) | Noise | Fixed(_, _) => 0,
+        Fin { length, waveform } => 1 + count_fins(length) + count_fins(waveform),
+        Append(a, b, _) | BinaryOp(_, a, b) => count_fins(a) + count_fins(b),
+        Phase {
+            frequency, offset, ..
+        } => count_fins(frequency) + count_fins(offset),
+        Filter {
+            waveform,
+            feed_forward,
+            feedback,
+            ..
+        } => {
+            count_fins(waveform)
+                + feed_forward.iter().map(count_fins).sum::<usize>()
+                + feedback.iter().map(count_fins).sum::<usize>()
+        }
+        UnaryOp(_, a) => count_fins(a),
+        Reset {
+            trigger, waveform, ..
+        } => count_fins(trigger) + count_fins(waveform),
+        Alt {
+            trigger,
+            positive_waveform,
+            negative_waveform,
+        } => count_fins(trigger) + count_fins(positive_waveform) + count_fins(negative_waveform),
+        Marked { waveform, .. } | Captured { waveform, .. } => count_fins(waveform),
+    }
+}
+
+/// Benchmarks a sequence of notes from each instrument, generated in
+/// 1024-sample buffers until the sequence ends.
+fn bench_fins(c: &mut Criterion) {
+    const SAMPLE_RATE: u32 = 44100;
+    const NOTES: usize = 16;
+    let environment =
+        environment::Environment::new(SAMPLE_RATE, 120, std::path::PathBuf::from("./lib/v0"));
+    let bindings: Vec<expr::SourceBinding<MarkId, diagnostics::Source>> = vec![
+        expr::Binding::Open(vec!["__prelude".to_string()]).into(),
+        expr::Binding::Open(vec!["std".to_string()]).into(),
+        expr::Binding::Use(vec!["synth".to_string(), "pm".to_string()]).into(),
+        expr::Binding::Use(vec!["env".to_string(), "finseq".to_string()]).into(),
+        expr::Binding::Use(vec!["env".to_string(), "minmax".to_string()]).into(),
+    ];
+    let instruments = [
+        ("fins_epiano", "pm.epiano()(0.25, {f})"),
+        (
+            "fins_minmax",
+            "$({f}) | minmax.ADSR(0.25, 0.01, 0.1, 0.6, 0.1) | seq(time - 0.25)",
+        ),
+        (
+            "fins_finseq",
+            "$({f}) | finseq.ADSR(0.25, 0.01, 0.1, 0.6, 0.1) | seq(time - 0.25)",
+        ),
+    ];
+    for (name, note) in instruments {
+        let notes: Vec<String> = (0..NOTES)
+            .map(|i| note.replace("{f}", &(220.0 * (1.0 + i as f32 / 8.0)).to_string()))
+            .collect();
+        let source = format!("<[{}]>", notes.join(", "));
+        let waveform = match environment.evaluate_source(&source, &bindings) {
+            Ok(expr) => match expr.expr {
+                expr::Expr::Seq { waveform, .. } => match waveform.expr {
+                    expr::Expr::Waveform(waveform) => optimizer::optimize(waveform),
+                    expr => panic!("Expected waveform, got {}", expr),
+                },
+                expr::Expr::Waveform(waveform) => optimizer::optimize(waveform),
+                expr => panic!("Expected waveform, got {}", expr),
+            },
+            Err(message) => panic!("Error evaluating {}: {}", name, message),
+        };
+        println!(
+            "{}: {} Fin nodes for {} notes",
+            name,
+            count_fins(&waveform),
+            NOTES
+        );
+        c.bench_function(name, |b| {
+            b.iter(|| {
+                let mut generator = generator::Generator::new(SAMPLE_RATE);
+                let mut w = generator::initialize_state(waveform.clone());
+                let mut out = vec![0.0; 1024];
+                while generator.generate(&mut w, &mut out) == out.len() {}
+            });
+        });
+    }
+}
+
+criterion_group!(benches, bench_filter, bench_marks, bench_large, bench_fins);
 criterion_main!(benches);
