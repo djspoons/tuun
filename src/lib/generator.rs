@@ -668,9 +668,13 @@ impl<'a> Generator<'a> {
             _ => return None,
         };
         let sample_rate = self.sample_rate as f32;
-        // Start from an estimate, then adjust it to match `generate`, which computes each sample
-        // of `time` in f32 before applying the offset. (Subtracting `c` and adding `-c` agree
-        // exactly.) Far-off cutoffs are left unknown, since f32 can't tell their samples apart.
+        // Start from an estimate, then adjust it to match `generate`, which
+        // computes each sample of `time` in f32 before applying the offset.
+        // (Subtracting `c` and adding `-c` agree exactly.) Up to 2^24 samples,
+        // the estimate is off by at most a sample or two. Beyond that, f32
+        // can't tell neighboring samples apart, and the loops below take about
+        // 2^(n - 24) steps for a cutoff near 2^n samples. Far-off cutoffs are
+        // left unknown to bound that work.
         let estimate = (-offset * sample_rate).max(0.0).ceil();
         if offset.is_nan() || estimate >= (1u64 << 40) as f32 {
             return None;
@@ -1608,6 +1612,29 @@ mod tests {
                     let generated = g.generate(&mut initialize_state(w.clone()), &mut out);
                     check_known_length(&mut g, &w, Some(generated));
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn test_known_length_matches_fin_cutoff_every_millisecond() {
+        // f32 rounding puts the estimate in `fin_cutoff` one sample past the
+        // cutoff for some of these lengths (e.g., 0.09 seconds at 44100 Hz).
+        for sample_rate in [44100, 48000] {
+            let mut g = new_test_generator(sample_rate);
+            for i in 1..1000 {
+                let w: Waveform = Fin {
+                    length: Box::new(BinaryOp(
+                        BinaryOperator::Subtract,
+                        Box::new(Time(())),
+                        Box::new(Const(i as f32 / 1000.0)),
+                    )),
+                    waveform: Box::new(Const(1.0)),
+                    state: (),
+                };
+                let mut out = vec![0.0; sample_rate as usize];
+                let generated = g.generate(&mut initialize_state(w.clone()), &mut out);
+                assert_eq!(g.known_length(&w), Some(generated), "known_length of {}", w);
             }
         }
     }
