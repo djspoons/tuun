@@ -433,10 +433,12 @@ where
             state,
         } => {
             set_state(waveform, new_state.clone());
-            let _ = feed_forward
-                .iter_mut()
-                .map(|w| set_state(w, new_state.clone()));
-            let _ = feedback.iter_mut().map(|w| set_state(w, new_state.clone()));
+            for w in feed_forward.iter_mut() {
+                set_state(w, new_state.clone());
+            }
+            for w in feedback.iter_mut() {
+                set_state(w, new_state.clone());
+            }
             *state = new_state;
         }
         BinaryOp(_, a, b) => {
