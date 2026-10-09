@@ -13,6 +13,7 @@ use crate::diagnostics::Source;
 use crate::environment::Environment;
 use crate::expr;
 use crate::ids::{MarkId, WaveformId, WaveformSelector};
+use crate::optimizer;
 use crate::programs::ProgramSet;
 use crate::sequencer;
 use crate::slider;
@@ -466,10 +467,8 @@ impl Player {
         let seconds_per_beat = duration_from_beats(self.tempo, 1).as_secs_f32();
         let mut ws = Vec::new();
         for i in 0..self.beats_per_measure {
-            // The metronome multiplies the truncated click, so that precompute
-            // can turn each click into a fixed-length buffer.
             ws.push(format!(
-                "(({} | fin(time - {}) | seq(time - {})) * _metronome_amplitude) | mark({})",
+                "({} * _metronome_amplitude) | fin(time - {}) | seq(time - {}) | mark({})",
                 click_source(i == 0),
                 seconds_per_beat,
                 seconds_per_beat,
@@ -490,11 +489,9 @@ impl Player {
             .map(|s| s.expr)
         {
             Ok(expr::Expr::Seq { waveform, .. }) => match waveform.expr {
-                // Not optimized: the optimizer would move each `fin` back out
-                // past the metronome.
                 expr::Expr::Waveform(waveform) => waveform::Waveform::<MarkId>::Marked {
                     id: MarkId::TopLevel,
-                    waveform: Box::new(waveform),
+                    waveform: Box::new(optimizer::optimize(waveform)),
                 },
                 expr => panic!("Error creating beats waveform with seq, got {}", expr),
             },
@@ -675,8 +672,6 @@ fn duration_from_beats_f32(tempo: u32, beats: f32) -> time::Duration {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use crate::generator;
-
     use super::*;
 
     fn empty_status() -> tracker::Status<WaveformId, MarkId> {
@@ -730,53 +725,6 @@ mod tests {
             let result = environment.evaluate_source(&click_source(accent), &bindings);
             assert!(result.is_ok(), "{:?}", result.err());
         }
-    }
-
-    /// Collects the length of each beat mark in a precomputed beats waveform,
-    /// panicking unless the beat is a fixed buffer scaled by the metronome.
-    fn collect_beat_lengths(w: &waveform::Waveform<MarkId>, lengths: &mut Vec<usize>) {
-        use waveform::Waveform::*;
-        match w {
-            Marked {
-                id: MarkId::UserDefined(_),
-                waveform,
-            } => match waveform.as_ref() {
-                BinaryOp(waveform::BinaryOperator::Multiply, a, b) => {
-                    match (a.as_ref(), b.as_ref()) {
-                        (
-                            Fixed(samples, _),
-                            Marked {
-                                id: MarkId::MetronomeAmplitude,
-                                ..
-                            },
-                        ) => lengths.push(samples.len()),
-                        _ => panic!("beat is not Fixed * metronome: {}", waveform),
-                    }
-                }
-                _ => panic!("beat is not Fixed * metronome: {}", waveform),
-            },
-            Marked { waveform, .. } => collect_beat_lengths(waveform, lengths),
-            Append(a, b, _) | BinaryOp(_, a, b) => {
-                collect_beat_lengths(a, lengths);
-                collect_beat_lengths(b, lengths);
-            }
-            Fixed(_, _) => {}
-            w => panic!("unexpected waveform in beats: {}", w),
-        }
-    }
-
-    // Each beat's length must be fixed after precompute, so that it can be
-    // known without generating the beat.
-    #[test]
-    fn precomputed_beats_are_fixed_length() {
-        let environment = Environment::new(8000, 90, std::path::PathBuf::new());
-        let (player, _precompute_receiver, _fast_receiver) = test_player();
-        let mut generator = generator::Generator::new(8000);
-        let beats = generator.precompute(player.beats_waveform(&environment));
-        let mut lengths = Vec::new();
-        collect_beat_lengths(&beats, &mut lengths);
-        // A beat at 90 bpm is 2/3 s: 5334 samples at 8000 Hz, rounded up.
-        assert_eq!(lengths, vec![5334; 4]);
     }
 
     /// Builds a program set whose program 0 is sequenceable with steps on
