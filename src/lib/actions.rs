@@ -2144,7 +2144,7 @@ mod tests {
             waveform_id: WaveformId::Program(0),
             mark_id: MarkId::TopLevel,
             start,
-            duration: Duration::from_secs(1),
+            duration: Some(Duration::from_secs(1)),
         });
         status
     }
@@ -3430,7 +3430,7 @@ _ = saw(220);";
             },
             mark_id: MarkId::TopLevel,
             start,
-            duration: Duration::from_secs(1),
+            duration: Some(Duration::from_secs(1)),
         });
         status
     }
@@ -4011,7 +4011,7 @@ _ = saw(220);";
                 waveform_id: WaveformId::Beats(k % 2 == 1),
                 mark_id: MarkId::TopLevel,
                 start: t0 + Duration::from_secs(4 * k),
-                duration: Duration::from_secs(4),
+                duration: Some(Duration::from_secs(4)),
             });
         }
         status
@@ -4152,7 +4152,7 @@ _ = saw(220);";
             waveform_id: WaveformId::Program(1),
             mark_id: MarkId::TopLevel,
             start: t0 + Duration::from_secs(4),
-            duration: Duration::from_secs(1),
+            duration: Some(Duration::from_secs(1)),
         });
         let now = t0 + Duration::from_secs(1);
         let effects = apply_with_status(&mut state, &status, now, record());

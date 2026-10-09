@@ -56,13 +56,6 @@ pub struct Generator<'a> {
 
 // TODO add metrics for waveform expr depth and total ops
 
-#[derive(Debug, Copy, Clone)]
-enum MaybeOption<T> {
-    Some(T),
-    None,
-    Maybe, // The value may or may not be present
-}
-
 impl<'a> Generator<'a> {
     // Create a new generator with the given sample frequency. Note that capture_state must be set
     // before `generate` is called.
@@ -594,250 +587,90 @@ impl<'a> Generator<'a> {
         }
     }
 
-    /// Returns the number of samples that `waveform` will generate or `max`, whichever is
-    /// smaller, while modifying `waveform` so that it has been advanced to `max`.
-    /// Note that for waveforms that maintain state (other than position), the state is passed
-    /// through unchanged. This discontinuity may result in pops or clicks for audible waveforms.
+    /// Returns the number of samples that `waveform` generates from its initial state.
     ///
-    /// See the note at the call site in `generate` for more information.
-    pub fn length<M: Debug + Display>(&mut self, waveform: &mut Waveform<M>, max: usize) -> usize {
-        use State::*;
+    /// Returns `Some(usize::MAX)` when `waveform` is infinite and `None` when its length can't be
+    /// determined without generating it.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tuun::generator::Generator;
+    /// use tuun::waveform::{BinaryOperator, Waveform};
+    ///
+    /// // One second at 4 samples per second.
+    /// let w: Waveform<u32> = Waveform::Fin {
+    ///     length: Box::new(Waveform::BinaryOp(
+    ///         BinaryOperator::Subtract,
+    ///         Box::new(Waveform::Time(())),
+    ///         Box::new(Waveform::Const(1.0)),
+    ///     )),
+    ///     waveform: Box::new(Waveform::Noise),
+    /// };
+    /// assert_eq!(Generator::new(4).known_length(&w), Some(4));
+    /// ```
+    pub fn known_length<M, S>(&self, waveform: &waveform::Waveform<M, S>) -> Option<usize> {
         use waveform::Waveform::*;
         match waveform {
-            Const { .. } => max,
-            Time(state @ Initial) => {
-                *state = Position(0);
-                self.length(waveform, max)
+            Const(_) | Time(_) | Noise => Some(usize::MAX),
+            Fixed(samples, _) => Some(samples.len()),
+            Fin { length, waveform } => {
+                Some(self.fin_cutoff(length)?.min(self.known_length(waveform)?))
             }
-            Time(Position(position)) => {
-                *position += max;
-                max
-            }
-            Time(_) => unreachable!("Time waveform with non-Initial, non-Position state"),
-            Noise => max,
-            Fixed(_, state @ Initial) => {
-                *state = Position(0);
-                self.length(waveform, max)
-            }
-            Fixed(samples, Position(position)) => {
-                if *position >= samples.len() {
-                    return 0;
-                }
-                let len = max.min(samples.len() - *position);
-                *position += len;
-                len
-            }
-            Fixed(_, _) => unreachable!("Fixed waveform with non-Initial, non-Position state"),
-            Fin {
-                length,
-                waveform: inner,
-            } => {
-                // This is a little subtle, since Fin is not supposed to make waveforms longer.
-                // In particular, for optimizations that move Fin outside of a DotProduct, we need
-                // to check the length of the inner waveform to see if it's shorter than `length`
-                // would indicate.
-                match self.greater_or_equals_at(length, 0.0, max) {
-                    MaybeOption::Some(len) => {
-                        // Check to see if `inner` is shorter and use that result.
-                        let inner_len = self.length(inner, max);
-                        // Finally, advance `length` too
-                        let _ = self.length(length, max);
-                        len.min(inner_len)
-                    }
-                    MaybeOption::None => {
-                        // Check to see if `inner` is shorter and use that result.
-                        let inner_len = self.length(inner, max);
-                        // Advance `length` by `inner_len` samples
-                        let _ = self.length(length, max);
-                        inner_len
-                    }
-                    MaybeOption::Maybe => {
-                        println!(
-                            "Warning: unable to determine root of Fin length cheaply, generating samples for: {:?}",
-                            length
-                        );
-                        let mut length_out = vec![0.0; max];
-                        self.allocations += max;
-                        let length_len = self.generate(length, &mut length_out);
-                        let inner_len = self.length(inner, max);
-                        for (i, &v) in length_out.iter().enumerate() {
-                            if i == length_len || v >= 0.0 || i == inner_len {
-                                return i;
-                            }
-                        }
-                        max
-                    }
-                }
-            }
-            Filter {
-                waveform,
-                feed_forward,
-                feedback,
-                state: state @ Initial,
-            } => {
-                let ff_count = feed_forward.len();
-                let fb_count = feedback.len();
-                assert!(ff_count >= 1);
-                *state = Samples {
-                    input: VecDeque::from(vec![0.0; ff_count - 1]),
-                    output: VecDeque::from(vec![0.0; fb_count]),
-                };
-                self.length(waveform, max)
-            }
-            Filter {
-                waveform: inner,
-                feed_forward,
-                feedback,
-                state: Samples { .. },
-            } => {
-                // TODO I think this logic could be made to better parallel that of generate() (by actually advancing in the Initial arm and "padding" here.)
-                let inner_len = self.length(inner, max);
-                // Only the length of inner matters, but we need to advance all of the coefficient waveforms
-                for w in feed_forward.iter_mut() {
-                    let _ = self.length(w, max);
-                }
-                for w in feedback.iter_mut() {
-                    let _ = self.length(w, max);
-                }
-                inner_len
-            }
-            Filter { .. } => {
-                unreachable!("Filter with non-Initial, non-Samples state")
-            }
-            Append(_, _, state @ Initial) => {
-                *state = Finished(false);
-                self.length(waveform, max)
-            }
-            Append(a, b, Finished(a_finished)) => {
-                let a_len;
-                if !*a_finished {
-                    a_len = self.length(a, max);
-                    if a_len < max {
-                        *a_finished = true;
-                    }
+            Append(a, b, _) => Some(self.known_length(a)?.saturating_add(self.known_length(b)?)),
+            BinaryOp(op, a, b) => {
+                let (a, b) = (self.known_length(a)?, self.known_length(b)?);
+                Some(if op.extends_to_longer() {
+                    a.max(b)
                 } else {
-                    a_len = 0;
-                }
-                let b_len = self.length(b, max - a_len);
-                a_len + b_len
+                    a.min(b)
+                })
             }
-            Append(_, _, _) => unreachable!("Append waveform with non-Initial, non-Finished state"),
             Phase {
                 frequency, offset, ..
-            } => {
-                let f_len = self.length(frequency, max);
-                let o_len = self.length(offset, max);
-                f_len.min(o_len)
-            }
-            BinaryOp(op, a, b) => {
-                let a_len = self.length(a, max);
-                let b_len = self.length(b, max);
-                if op.extends_to_longer() {
-                    a_len.max(b_len)
-                } else {
-                    a_len.min(b_len)
-                }
-            }
-            UnaryOp(_, a) => self.length(a, max),
-            Reset { trigger, .. } => {
-                // We don't change the state of waveform here as its position
-                // isn't meaningful in a global sense.
-                // TODO reconsider this
-                self.length(trigger, max)
-            }
-            Alt {
-                trigger,
-                positive_waveform,
-                negative_waveform,
-            } => {
-                let len = self.length(trigger, max);
-                // Advance the position of the positive and negative waveforms.
-                let _ = self.length(positive_waveform, max);
-                let _ = self.length(negative_waveform, max);
-                len
-            }
-            Marked { waveform, .. } => self.length(waveform, max),
-            Captured { waveform, .. } => self.length(waveform, max),
+            } => Some(
+                self.known_length(frequency)?
+                    .min(self.known_length(offset)?),
+            ),
+            UnaryOp(_, waveform)
+            | Filter { waveform, .. }
+            | Marked { waveform, .. }
+            | Captured { waveform, .. } => self.known_length(waveform),
+            Reset { trigger, .. } | Alt { trigger, .. } => self.known_length(trigger),
         }
     }
 
-    // If `waveform` will be greater than or equal to `value` at some point between its current position and
-    // `max`, return Some of the number of samples that would be generated before then, None if `waveform`
-    // will not be greater than or equal in that range, or Maybe if that can't be determined cheaply.
-    fn greater_or_equals_at<M: Display>(
-        &self,
-        waveform: &Waveform<M>,
-        value: f32,
-        max: usize,
-    ) -> MaybeOption<usize> {
-        use State::{Initial, Position};
-        use waveform::Waveform::{Append, BinaryOp, Const, Time};
-        if let Some(f) = self.is_const(waveform) {
-            return if f >= value {
-                MaybeOption::Some(0)
-            } else {
-                MaybeOption::None
-            };
-        }
-        match waveform {
-            Const(v) if *v >= value => MaybeOption::Some(0),
-            Const(_) => MaybeOption::None,
-            Time(Initial) => self.greater_or_equals_at::<M>(&Time(Position(0)), value, max),
-            Time(Position(position)) => {
-                let current_value = *position as f32 / self.sample_rate as f32;
-                if current_value >= value {
-                    MaybeOption::Some(0)
-                } else {
-                    // current_value < value and current_value >= 0 so value > 0 (so usize is ok)
-                    let target_position = (value * self.sample_rate as f32).ceil() as usize;
-                    // Also, target_position must be > position
-                    MaybeOption::Some(max.min(target_position - position))
-                }
-            }
-            Append(a, _, _) => {
-                match self.greater_or_equals_at(a, value, max) {
-                    MaybeOption::Some(size) => MaybeOption::Some(size),
-                    MaybeOption::None => {
-                        /* XXX do we need this? for all cases? (maybe just for a = Fixed?)
-                        let a_len = self.length(*a.clone(), max);
-                        if a_len == max {
-                            // We didn't reach the end of `a`, so `b` isn't relevant yet.
-                            MaybeOption::None
-                        } else {
-                            match self.greater_or_equals_at(&b, value, max - a_len) {
-                                MaybeOption::Some(size) => MaybeOption::Some(size + a_len),
-                                m => m,
-                            }
-                        }
-                        */
-                        println!("Warning: in greater_or_equals_at for Append... returning Maybe");
-                        MaybeOption::Maybe
-                    }
-                    m => m, // Maybe gets passed through
-                }
-            }
+    /// Returns the number of samples before `length` is first non-negative, when `length` is
+    /// `time` offset by a constant.
+    fn fin_cutoff<M, S>(&self, length: &waveform::Waveform<M, S>) -> Option<usize> {
+        use waveform::Waveform::{BinaryOp, Const, Time};
+        let offset = match length {
             BinaryOp(op @ (BinaryOperator::Add | BinaryOperator::Subtract), a, b) => {
-                use waveform::BinaryOperator::{Add, Subtract};
-                match (op, a.as_ref(), b.as_ref()) {
-                    // TODO need to consider constant functions as const
-                    (Add, Const(va), Const(vb)) if va + vb >= value => MaybeOption::Some(0),
-                    (Add, Const(_), Const(_)) => MaybeOption::None,
-                    (Add, Const(va), _) => self.greater_or_equals_at(b, value - va, max),
-                    (Add, _, Const(vb)) => self.greater_or_equals_at(a, value - vb, max),
-
-                    (Subtract, Const(va), Const(vb)) if va - vb >= value => MaybeOption::Some(0),
-                    (Subtract, Const(_), Const(_)) => MaybeOption::None,
-                    (Subtract, _, Const(vb)) => self.greater_or_equals_at(a, value + vb, max),
-
-                    _ => MaybeOption::Maybe,
+                match (a.as_ref(), b.as_ref()) {
+                    (Time(_), Const(c)) if *op == BinaryOperator::Add => *c,
+                    (Time(_), Const(c)) => -*c,
+                    _ => return None,
                 }
             }
-            // TODO think about Marked here
-            _ => {
-                println!("Unhandled case in greater_or_equals_at: {}", waveform);
-                MaybeOption::Maybe
-            }
+            _ => return None,
+        };
+        let sample_rate = self.sample_rate as f32;
+        // Start from an estimate, then adjust it to match `generate`, which computes each sample
+        // of `time` in f32 before applying the offset. (Subtracting `c` and adding `-c` agree
+        // exactly.) Far-off cutoffs are left unknown, since f32 can't tell their samples apart.
+        let estimate = (-offset * sample_rate).max(0.0).ceil();
+        if offset.is_nan() || estimate >= (1u64 << 40) as f32 {
+            return None;
         }
+        let ends_at = |k: usize| k as f32 / sample_rate + offset >= 0.0;
+        let mut k = estimate as usize;
+        while k > 0 && ends_at(k - 1) {
+            k -= 1;
+        }
+        while !ends_at(k) {
+            k += 1;
+        }
+        Some(k)
     }
 
     /// Replaces parts of `waveform` that can be precomputed with their equivalent Fixed versions.
@@ -1252,44 +1085,33 @@ mod tests {
 
     type Waveform = waveform::Waveform<u32>;
 
-    const MAX_LENGTH: usize = 1000;
-
-    impl<T> MaybeOption<T> {
-        fn is_some(&self) -> bool {
-            matches!(self, MaybeOption::Some(_))
-        }
-
-        fn unwrap(self) -> T {
-            match self {
-                MaybeOption::Some(v) => v,
-                _ => panic!("Called unwrap on a MaybeOption that wasn't Some"),
-            }
-        }
-    }
-
     fn new_test_generator<'a>(sample_frequency: u32) -> Generator<'a> {
         Generator::new(sample_frequency)
     }
 
-    // Verifies that `waveform` would generate `expected` samples using a call to `length`.
-    fn check_length(
-        g: &mut Generator,
-        waveform: &Waveform,
-        position: usize,
-        expected: usize,
-        max: usize,
-    ) {
-        let mut waveform = initialize_state(waveform.clone());
-        // Generate up to `position` and discard those samples.
-        let mut out = vec![0.0; position];
-        let _ = g.generate(&mut waveform, &mut out);
+    // Verifies that `known_length` of `waveform` is `expected` and, when finite, that generating
+    // `waveform` to its end produces that many samples.
+    fn check_known_length(g: &mut Generator, waveform: &Waveform, expected: Option<usize>) {
         assert_eq!(
-            g.length(&mut waveform.clone(), max),
+            g.known_length(waveform),
             expected,
-            "Expected length {} (with max = {}) for waveform: {:?}",
-            expected,
-            max,
+            "known_length of {}",
             waveform
+        );
+        if let Some(len) = expected.filter(|&len| len != usize::MAX) {
+            let mut out = vec![0.0; len + 1];
+            let generated = g.generate(&mut initialize_state(waveform.clone()), &mut out);
+            assert_eq!(generated, len, "generated length of {}", waveform);
+        }
+    }
+
+    // Verifies that `waveform` is either of unknown length or at least `len` samples long.
+    fn check_not_known_shorter(g: &Generator, waveform: &Waveform, len: usize) {
+        assert!(
+            g.known_length(waveform).is_none_or(|known| known >= len),
+            "known_length of {} is shorter than {}",
+            waveform,
+            len
         );
     }
 
@@ -1298,8 +1120,7 @@ mod tests {
         // We initialize output vectors with infinity to make sure that nothing depends on
         // them being initialized to 0.0.
 
-        // Check that `waveform` would generate at least as many samples as `expected`.
-        check_length(&mut g, waveform, 0, expected.len(), expected.len());
+        check_not_known_shorter(&g, waveform, expected.len());
         for size in [1, 2, 4, 8] {
             let mut w = initialize_state(waveform.clone());
             let mut out = vec![f32::INFINITY; expected.len()];
@@ -1316,13 +1137,7 @@ mod tests {
         }
 
         let optimized_waveform = optimizer::optimize(waveform.clone());
-        check_length(
-            &mut g,
-            &optimized_waveform,
-            0,
-            expected.len(),
-            expected.len(),
-        );
+        check_not_known_shorter(&g, &optimized_waveform, expected.len());
         for size in [1, 2, 4, 8] {
             let mut w = initialize_state(optimized_waveform.clone());
             let mut out = vec![f32::INFINITY; expected.len()];
@@ -1339,13 +1154,7 @@ mod tests {
         }
 
         let precomputed_waveform = g.precompute(optimized_waveform);
-        check_length(
-            &mut g,
-            &precomputed_waveform,
-            0,
-            expected.len(),
-            expected.len(),
-        );
+        check_not_known_shorter(&g, &precomputed_waveform, expected.len());
         for size in [1, 2, 4, 8] {
             let mut w = initialize_state(precomputed_waveform.clone());
             let mut out = vec![f32::INFINITY; expected.len()];
@@ -1603,7 +1412,7 @@ mod tests {
             state: (),
         };
         run_tests(&w, &[0.0, 0.25, 0.75, 0.0]);
-        check_length(&mut g, &w, 0, 4, 10);
+        check_known_length(&mut g, &w, Some(4));
 
         // Changing offset (phase modulation): the offset is added to the
         // accumulator before wrapping, so negative offsets wrap up from 1.
@@ -1614,7 +1423,7 @@ mod tests {
             state: (),
         };
         run_tests(&w, &[0.0, 0.75, 0.0, 0.25, 0.75]);
-        check_length(&mut g, &w, 0, 5, 10);
+        check_known_length(&mut g, &w, Some(5));
 
         // A phase just below a whole cycle can round up to 1.0 as f32; it must
         // stay in [0, 1).
@@ -1663,8 +1472,82 @@ mod tests {
             )),
         );
         run_tests(&w, &[0.0, 1.0, -1.0]);
-        check_length(&mut g, &w, 0, 3, 10);
+        check_known_length(&mut g, &w, Some(3));
     }
+
+    #[test]
+    fn test_known_length() {
+        let mut g = new_test_generator(1);
+        check_known_length(&mut g, &Const(1.0), Some(usize::MAX));
+        check_known_length(
+            &mut g,
+            &Append(Box::new(Fixed(vec![1.0; 3], ())), Box::new(Const(2.0)), ()),
+            Some(usize::MAX),
+        );
+        // Merge yields the longer and other operators the shorter.
+        for (op, expected) in [(BinaryOperator::Merge, 5), (BinaryOperator::Multiply, 2)] {
+            let w = BinaryOp(
+                op,
+                Box::new(Fixed(vec![1.0; 2], ())),
+                Box::new(Fixed(vec![1.0; 5], ())),
+            );
+            check_known_length(&mut g, &w, Some(expected));
+        }
+        // A trigger sets the length of Reset.
+        let w = Reset {
+            trigger: Box::new(Fixed(vec![1.0; 4], ())),
+            waveform: Box::new(Const(1.0)),
+            state: (),
+        };
+        check_known_length(&mut g, &w, Some(4));
+        // Fin is no longer than its inner waveform.
+        let w = Fin {
+            length: Box::new(BinaryOp(
+                BinaryOperator::Subtract,
+                Box::new(Time(())),
+                Box::new(Const(5.0)),
+            )),
+            waveform: Box::new(Fixed(vec![1.0; 2], ())),
+        };
+        check_known_length(&mut g, &w, Some(2));
+        // A Fin length other than `time` offset by a constant is unknown.
+        let w = Fin {
+            length: Box::new(Fixed(vec![-1.0, 1.0], ())),
+            waveform: Box::new(Const(1.0)),
+        };
+        check_known_length(&mut g, &w, None);
+    }
+
+    #[test]
+    fn test_known_length_matches_fin_cutoff() {
+        for sample_rate in [1, 3, 8000, 44100, 48000] {
+            let mut g = new_test_generator(sample_rate);
+            for seconds in [0.0, 0.02, 2.0 / 3.0, 0.6666667, 1.0, 2.5, 10.0 / 3.0] {
+                let lengths = [
+                    BinaryOp(
+                        BinaryOperator::Subtract,
+                        Box::new(Time(())),
+                        Box::new(Const(seconds)),
+                    ),
+                    BinaryOp(
+                        BinaryOperator::Add,
+                        Box::new(Time(())),
+                        Box::new(Const(-seconds)),
+                    ),
+                ];
+                for length in lengths {
+                    let w = Fin {
+                        length: Box::new(length),
+                        waveform: Box::new(Const(1.0)),
+                    };
+                    let mut out = vec![0.0; 4 * sample_rate as usize + 1];
+                    let generated = g.generate(&mut initialize_state(w.clone()), &mut out);
+                    check_known_length(&mut g, &w, Some(generated));
+                }
+            }
+        }
+    }
+
     #[test]
     fn test_precompute_longer_than_one_chunk() {
         // 100,000 samples spans more than one 65,536-sample chunk.
@@ -1804,9 +1687,7 @@ mod tests {
             (),
         );
 
-        check_length(&mut g, &w, 0, 6, MAX_LENGTH);
-        check_length(&mut g, &w, 2, 4, MAX_LENGTH);
-        check_length(&mut g, &w, 4, 2, MAX_LENGTH);
+        check_known_length(&mut g, &w, Some(6));
         run_tests(&w, &[1.0, 1.0, 1.0, 2.0, 2.0, 2.0]);
         match g.precompute(w) {
             Fixed(_, _) => (), // Already checked the result above
@@ -2055,7 +1936,9 @@ mod tests {
             feedback: vec![],
             state: (),
         };
-        check_length(&mut g, &w, 0, 3, 5);
+        check_known_length(&mut g, &w, Some(3));
+        // The inner waveform is shorter than `ff_count - 1`.
+        run_tests(&w, &[12.0, 10.0, 6.0]);
 
         let w = Filter {
             waveform: Box::new(Fin {
@@ -2071,7 +1954,7 @@ mod tests {
             state: (),
         };
         let mut g = new_test_generator(1);
-        check_length(&mut g, &w, 0, 8, MAX_LENGTH);
+        check_known_length(&mut g, &w, Some(8));
         run_tests(&w, &[20.0, 30.0, 40.0, 50.0, 44.0, 36.0, 26.0, 14.0]);
 
         let w = Filter {
@@ -2143,34 +2026,6 @@ mod tests {
             state: (),
         };
         run_tests(&w, &[6.0, 3.0, 0.0]);
-
-        // TODO add test where length of inner waveform is less than ff_count - 1
-    }
-
-    #[test]
-    fn test_greater_or_equals_at() {
-        let w1: Waveform = BinaryOp(
-            BinaryOperator::Add,
-            Box::new(Time(())),
-            Box::new(Const(-5.0)),
-        );
-        let w2: Waveform = Fin {
-            length: Box::new(w1.clone()),
-            waveform: Box::new(Time(())),
-        };
-        let mut g = new_test_generator(1);
-        let position = g.greater_or_equals_at(&initialize_state(w1.clone()), 0.0, 10);
-        let mut out = vec![0.0; 10];
-        let len = g.generate(&mut initialize_state(w2), &mut out);
-        assert!(position.is_some());
-        assert_eq!(position.unwrap(), len);
-        for (i, x) in out.iter().enumerate() {
-            if i < position.unwrap() {
-                assert_eq!(*x, i as f32);
-            } else if i == position.unwrap() {
-                assert!(*x >= 0.0);
-            }
-        }
     }
 
     // TODO test for forgetting to sort pending waveforms

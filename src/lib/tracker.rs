@@ -69,7 +69,9 @@ pub struct Mark<I, M> {
     pub waveform_id: I,
     pub mark_id: M,
     pub start: Instant,
-    pub duration: Duration,
+    /// How long the marked waveform plays for, or `None` when it is infinite or
+    /// its length isn't known without generating it.
+    pub duration: Option<Duration>,
 }
 
 #[derive(Debug, Clone)]
@@ -342,9 +344,27 @@ fn signed_millis(a: Instant, b: Instant) -> f64 {
     }
 }
 
+/// Returns how long `waveform` plays for when it is finite and its length can
+/// be determined without generating it.
+fn known_duration<M>(
+    generator: &generator::Generator,
+    sample_rate: u32,
+    waveform: &generator::Waveform<M>,
+) -> Option<Duration> {
+    match generator.known_length(waveform)? {
+        usize::MAX => None,
+        len => Some(duration_from_samples(len as u64, sample_rate)),
+    }
+}
+
+/// Appends a mark to `out` for each Marked waveform within `waveform`, which
+/// starts at `start`.
+///
+/// Marks that follow part of `waveform` whose duration isn't known are omitted
+/// since their starts aren't known either.
 fn process_marked<I, M>(
-    generator: &mut generator::Generator,
-    sample_rate: f32,
+    generator: &generator::Generator,
+    sample_rate: u32,
     waveform_id: &I,
     start: Instant,
     waveform: &generator::Waveform<M>,
@@ -377,12 +397,10 @@ fn process_marked<I, M>(
         }
         Append(a, b, _) => {
             process_marked(generator, sample_rate, waveform_id, start, a, out);
-            let a_len = generator.length(
-                &mut a.clone(),
-                10 * sample_rate as usize, // XXX
-            );
-            let start = start + Duration::from_secs_f32(a_len as f32 / sample_rate);
-            process_marked(generator, sample_rate, waveform_id, start, b.as_ref(), out);
+            if let Some(a_duration) = known_duration(generator, sample_rate, a) {
+                let start = start + a_duration;
+                process_marked(generator, sample_rate, waveform_id, start, b.as_ref(), out);
+            }
         }
         Phase {
             frequency: a,
@@ -397,15 +415,11 @@ fn process_marked<I, M>(
             process_marked(generator, sample_rate, waveform_id, start, a, out);
         }
         Marked { waveform, id } => {
-            let len = generator.length(
-                &mut waveform.clone(),
-                10 * sample_rate as usize, // XXX
-            );
             out.push(Mark {
                 waveform_id: waveform_id.clone(),
                 mark_id: id.clone(),
                 start,
-                duration: Duration::from_secs_f32(len as f32 / sample_rate),
+                duration: known_duration(generator, sample_rate, waveform),
             });
             process_marked(generator, sample_rate, waveform_id, start, waveform, out);
         }
@@ -534,8 +548,8 @@ where
                 let mut marks = Vec::new();
                 let waveform = generator::initialize_state(waveform);
                 process_marked(
-                    &mut self.generator,
-                    self.sample_rate as f32,
+                    &self.generator,
+                    self.sample_rate,
                     &id,
                     start,
                     &waveform,
@@ -567,8 +581,8 @@ where
                         // Recompute the marks
                         active.marks.clear();
                         process_marked(
-                            &mut self.generator,
-                            self.sample_rate as f32,
+                            &self.generator,
+                            self.sample_rate,
                             &active.id,
                             active.start,
                             // We need to re-initialize here because this waveform has moved forward
@@ -586,8 +600,8 @@ where
                         // Recompute the marks
                         pending.marks.clear();
                         process_marked(
-                            &mut self.generator,
-                            self.sample_rate as f32,
+                            &self.generator,
+                            self.sample_rate,
                             &pending.id,
                             pending.start,
                             &pending.waveform,
@@ -712,8 +726,8 @@ where
                         pending.marks = Vec::new();
                         let waveform = generator::initialize_state(pending.waveform);
                         process_marked(
-                            &mut self.generator,
-                            self.sample_rate as f32,
+                            &self.generator,
+                            self.sample_rate,
                             &pending.id,
                             pending.start,
                             &waveform,
@@ -838,6 +852,56 @@ mod tests {
             start: None,
             repeat_every: None,
         }
+    }
+
+    #[test]
+    fn process_marked_gives_marks_known_durations() {
+        use waveform::Waveform::{Append, Const, Fin, Fixed, Marked};
+        let marked = |id, waveform| Marked {
+            id,
+            waveform: Box::new(waveform),
+        };
+        let append = |a, b| Append(Box::new(a), Box::new(b), ());
+        // A part whose length isn't known without generating it.
+        let unknown = Fin {
+            length: Box::new(Fixed(vec![-1.0, 1.0], ())),
+            waveform: Box::new(Const(0.0)),
+        };
+        // At 4 samples per second, mark 1 lasts one second, mark 2's duration is unknown, mark 3
+        // follows an unknown part, and mark 4 is infinite.
+        let waveform = marked(
+            4,
+            append(
+                append(
+                    marked(1, Fixed(vec![0.0; 4], ())),
+                    append(marked(2, unknown), marked(3, Fixed(vec![0.0; 4], ()))),
+                ),
+                Const(0.0),
+            ),
+        );
+        let start = Instant::now();
+        let mut marks: Vec<Mark<u32, u32>> = Vec::new();
+        process_marked(
+            &generator::Generator::new(4),
+            4,
+            &0,
+            start,
+            &generator::initialize_state(waveform),
+            &mut marks,
+        );
+        let marks: Vec<_> = marks
+            .iter()
+            .map(|m| (m.mark_id, m.start - start, m.duration))
+            .collect();
+        let second = Duration::from_secs(1);
+        assert_eq!(
+            marks,
+            vec![
+                (4, Duration::ZERO, None),
+                (1, Duration::ZERO, Some(second)),
+                (2, second, None),
+            ]
+        );
     }
 
     #[test]
@@ -984,7 +1048,7 @@ mod tests {
             waveform_id: id,
             mark_id: MarkId::TopLevel,
             start,
-            duration: Duration::ZERO,
+            duration: Some(Duration::ZERO),
         };
         let status = Status {
             buffer_start: now,
@@ -1104,7 +1168,9 @@ mod tests {
             .marks
             .iter()
             .filter(|m| {
-                m.start <= status.buffer_start && status.buffer_start < m.start + m.duration
+                m.start <= status.buffer_start
+                    && m.duration
+                        .is_some_and(|d| status.buffer_start < m.start + d)
             })
             .collect();
         assert!(

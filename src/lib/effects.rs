@@ -873,7 +873,7 @@ mod tests {
             },
             mark_id: MarkId::TopLevel,
             start: next_cycle,
-            duration: std::time::Duration::ZERO,
+            duration: Some(std::time::Duration::ZERO),
         });
         let mut world = World {
             launchkey: None,

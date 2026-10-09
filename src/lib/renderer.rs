@@ -473,12 +473,15 @@ impl Renderer {
             };
             // Find the start of the first Beats waveform that's odd/even
             for mark in status.marks.iter() {
-                if mark.waveform_id == WaveformId::Beats(even) && mark.mark_id == MarkId::TopLevel {
+                if mark.waveform_id == WaveformId::Beats(even)
+                    && mark.mark_id == MarkId::TopLevel
+                    && let Some(duration) = mark.duration
+                {
                     // We want to find the oldest even/odd beats in the marks.
                     if mark.start < marks_start {
                         marks_start = mark.start;
                         // Make the duration shorter by one sample to avoid spurious overlaps due to rounding.
-                        marks_duration = mark.duration - sample_duration;
+                        marks_duration = duration - sample_duration;
                     }
                 }
             }
@@ -489,10 +492,13 @@ impl Renderer {
                     WaveformId::Step { program, .. } => *program,
                     _ => continue,
                 };
-                // Only draw Mark(1)
+                // Only draw Mark(1), and only when its width is known.
                 if mark.mark_id != MarkId::UserDefined(1) {
                     continue;
                 }
+                let Some(duration) = mark.duration else {
+                    continue;
+                };
                 // Skip marks that don't start during this measure.
                 if mark.start < marks_start - sample_duration
                     || mark.start >= marks_start + marks_duration
@@ -505,7 +511,7 @@ impl Renderer {
                     .map(|(r, g, b)| Color::RGB(r, g, b))
                     .unwrap_or(INACTIVE_COLOR);
                 program_color.a = 128;
-                if now < mark.start || now >= mark.start + mark.duration {
+                if now < mark.start || now >= mark.start + duration {
                     program_color.r /= 2;
                     program_color.g /= 2;
                     program_color.b /= 2;
@@ -515,8 +521,7 @@ impl Renderer {
                     * marks_width
                     + marks_x_offset;
                 let y = row as f32 * marks_row_height + programs_bottom;
-                let width =
-                    mark.duration.as_secs_f32() / marks_duration.as_secs_f32() * marks_width;
+                let width = duration.as_secs_f32() / marks_duration.as_secs_f32() * marks_width;
                 let height = marks_row_height - marks_y_padding;
                 self.canvas
                     .fill_rect(sdl2::rect::Rect::new(
@@ -867,13 +872,14 @@ pub fn current_beat_info(
     for mark in status.marks.iter() {
         if let WaveformId::Beats(_) = mark.waveform_id {
             // XXX sometimes this doesn't match anything?
-            if mark.start <= status.buffer_start
-                && mark.start + mark.duration > status.buffer_start
+            if let Some(duration) = mark.duration
+                && mark.start <= status.buffer_start
+                && mark.start + duration > status.buffer_start
                 && let MarkId::UserDefined(beat) = mark.mark_id
             {
                 current_beat = beat;
                 current_beat_start = mark.start;
-                current_beat_duration = mark.duration;
+                current_beat_duration = duration;
             }
         }
     }
