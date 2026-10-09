@@ -1,8 +1,8 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
+use std::f64;
 use std::fmt::{Debug, Display};
 use std::io::BufWriter;
-use std::{f64, mem};
 
 use fastrand;
 
@@ -131,41 +131,27 @@ impl<'a> Generator<'a> {
                 len
             }
             Fixed(_, _) => unreachable!("Fixed waveform has non-Initial, non-Position state"),
-            Fin { .. } => {
-                // Set the inner waveform aside for a moment while we calculate the length.
-                let Fin {
-                    waveform: inner, ..
-                } = waveform
-                else {
-                    unreachable!()
-                };
-                let tmp = mem::replace(inner, Box::new(Const(0.0)));
-                // Note that this call to length also advances the position of the `length` waveform. It's
-                // important that this advance all the way to out.len(), even if we won't produce that many
-                // samples. That's because if there is a modification to some part of `length`, we want to
-                // make sure that the state of any *other* part of `length` reflects this call to generate.
-                // TODO maybe inline this use of length()? (And get rid of other uses?)
-                let len = self.length(waveform, out.len());
-                /*
-                println!(
-                    "Fin length returned {} for {:#?} with tmp = {}",
-                    len, waveform, tmp
-                );
-                */
-                // Restore the inner waveform.
-                let Fin {
-                    waveform: inner, ..
-                } = waveform
-                else {
-                    unreachable!()
-                };
-                *inner = tmp;
-                // Note that this might generate less than `len` since the call to `length` above
-                // didn't account for the length of `inner`.
-                let inner_len = self.generate(inner, &mut out[..len]);
-                // Advance inner the rest of the way
-                let _ = self.length(inner, out.len() - len);
-                inner_len
+            Fin {
+                length,
+                waveform: inner,
+            } => {
+                // `out` holds the samples of `length` until `inner` overwrites them. Check the first
+                // sample alone so that a Fin that has already ended (as in a Merge built by
+                // sequencing) costs one sample per call. An ended Fin doesn't advance `length` or
+                // `inner` any further.
+                if self.generate(length, &mut out[..1]) == 0 || out[0] >= 0.0 {
+                    return 0;
+                }
+                // Otherwise, advance `length` all the way to out.len(), even if we won't produce
+                // that many samples. That's because if there is a modification to some part of
+                // `length`, we want to make sure that the state of any *other* part of `length`
+                // reflects this call to generate.
+                let length_len = 1 + self.generate(length, &mut out[1..]);
+                let len = out[..length_len]
+                    .iter()
+                    .position(|&x| x >= 0.0)
+                    .unwrap_or(length_len);
+                self.generate(inner, &mut out[..len])
             }
             Append(_, _, state @ Initial) => {
                 *state = Finished(false);
@@ -332,7 +318,7 @@ impl<'a> Generator<'a> {
             } => {
                 let t_len = self.generate(trigger, out);
                 // TODO we could avoid this allocation by generating runs from one of these...
-                // though maybe we also need to advance them (is length() good enough?)
+                // though both would still need to advance by t_len samples.
                 // TODO maybe consider consts here specially?
                 let mut positive_out = vec![0.0; t_len];
                 self.allocations += t_len;
@@ -906,22 +892,24 @@ impl<'a> Generator<'a> {
             }
 
             println!("Precomputing output for {}", waveform);
-            // Choose a `max` which is long enough to generate any reasonable
-            // waveform.
-            let max_len = 2_usize.pow(28);
-            let computed_len = g.length(&mut waveform.clone(), max_len);
-            if computed_len == max_len {
-                println!("Warning: finite waveform length returned maximum number of samples");
+            // Generate in chunks until the waveform ends, stopping at a `MAX_LEN` which is long
+            // enough for any reasonable waveform.
+            const CHUNK: usize = 1 << 16;
+            const MAX_LEN: usize = 1 << 28;
+            let mut out = Vec::new();
+            loop {
+                let start = out.len();
+                out.resize(start + CHUNK, 0.0);
+                let len = g.generate(&mut waveform, &mut out[start..]);
+                out.truncate(start + len);
+                if len < CHUNK {
+                    break;
+                }
+                if out.len() >= MAX_LEN {
+                    println!("Warning: finite waveform reached the maximum number of samples");
+                    break;
+                }
             }
-            let mut out = vec![0.0; computed_len];
-            let len = g.generate(&mut waveform, &mut out);
-            if len != computed_len {
-                println!(
-                    "Warning: precompute generated unexpected number of samples: {} != {}",
-                    len, computed_len
-                );
-            }
-            out.truncate(len);
 
             println!("  ...generated {} samples", out.len());
 
@@ -1675,6 +1663,27 @@ mod tests {
         );
         run_tests(&w, &[0.0, 1.0, -1.0]);
         check_length(&mut g, &w, 0, 3, 10);
+    }
+
+    #[test]
+    fn test_precompute_longer_than_one_chunk() {
+        // 100,000 samples spans more than one 65,536-sample chunk.
+        let mut g = new_test_generator(1);
+        let w: Waveform = Fin {
+            length: Box::new(BinaryOp(
+                BinaryOperator::Subtract,
+                Box::new(Time(())),
+                Box::new(Const(100_000.0)),
+            )),
+            waveform: Box::new(Const(1.0)),
+        };
+        match g.precompute(w) {
+            Fixed(samples, _) => assert_eq!(samples, vec![1.0; 100_000]),
+            w => panic!(
+                "Expected the fin to be precomputed to a Fixed, but got {}",
+                w
+            ),
+        }
     }
 
     #[test]
