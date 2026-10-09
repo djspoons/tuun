@@ -910,7 +910,9 @@ mod tests {
                 slider_mark_values(a, found);
                 slider_mark_values(b, found);
             }
-            Waveform::Fin { length, waveform } => {
+            Waveform::Fin {
+                length, waveform, ..
+            } => {
                 slider_mark_values(length, found);
                 slider_mark_values(waveform, found);
             }

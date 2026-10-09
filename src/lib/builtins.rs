@@ -195,6 +195,7 @@ where
                     Box::new(Waveform::Fin {
                         length: Box::new(a_offset),
                         waveform: Box::new(Waveform::Const(0.0)),
+                        state: (),
                     }),
                     Box::new(b),
                     (),
@@ -224,6 +225,7 @@ where
                             Box::new(Waveform::Fin {
                                 length: Box::new(a_offset),
                                 waveform: Box::new(Waveform::Const(0.0)),
+                                state: (),
                             }),
                             Box::new(b),
                             (),
@@ -669,6 +671,7 @@ where
                     function: curry(move |waveform: Box<Waveform<M>>| Waveform::Fin {
                         length: Box::new(length.clone()),
                         waveform,
+                        state: (),
                     }),
                 }
             }

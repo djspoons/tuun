@@ -587,6 +587,7 @@ pub fn stop_ramp() -> waveform::Waveform<MarkId> {
                 Box::new(Const(1.0 / STOP_DURATION_SECS)),
             )),
         )),
+        state: (),
     })
 }
 
@@ -625,6 +626,7 @@ fn silence_of_beats(beats: f32, tempo: u32) -> waveform::Waveform<MarkId> {
             Box::new(Const(beats * 60.0 / tempo as f32)),
         )),
         waveform: Box::new(Const(0.0)),
+        state: (),
     }
 }
 

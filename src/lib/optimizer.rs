@@ -56,7 +56,9 @@ where
     match waveform {
         // No changes for these:
         w @ (Const(_) | Time(_) | Noise | Fixed(_, _)) => w,
-        Fin { length, waveform } => {
+        Fin {
+            length, waveform, ..
+        } => {
             let length = optimize(*length);
             match length {
                 // Zero length
@@ -71,6 +73,7 @@ where
                     Fin {
                         length: inner_length,
                         waveform,
+                        ..
                     } => match (first_root(&length), first_root(&*inner_length)) {
                         (Some(Const(a)), Some(Const(b))) => Fin {
                             length: Box::new(optimize(BinaryOp(
@@ -79,18 +82,22 @@ where
                                 Box::new(Const(a.min(b))),
                             ))),
                             waveform,
+                            state: (),
                         },
                         _ => Fin {
                             length: Box::new(length),
                             waveform: Box::new(Fin {
                                 length: inner_length,
                                 waveform,
+                                state: (),
                             }),
+                            state: (),
                         },
                     },
                     waveform => Fin {
                         length: Box::new(length),
                         waveform: Box::new(waveform),
+                        state: (),
                     },
                 },
             }
@@ -171,14 +178,17 @@ where
                     Fin {
                         length: a_length,
                         waveform: a,
+                        ..
                     },
                     Fin {
                         length: b_length,
                         waveform: b,
+                        ..
                     },
                 ) if first_root(&a_length) == first_root(&b_length) => Fin {
                     length: a_length,
                     waveform: Box::new(optimize(BinaryOp(BinaryOperator::Add, a, b))),
+                    state: (),
                 },
                 (a, b) => BinaryOp(BinaryOperator::Add, Box::new(a), Box::new(b)),
             }
@@ -214,16 +224,19 @@ where
                     Fin {
                         length: a_length,
                         waveform: a,
+                        ..
                     },
                     Append(b, c, ()),
                 ) => match *b {
                     Fin {
                         length: b_length,
                         waveform: b,
+                        ..
                     } if first_root(&a_length) == first_root(&b_length) => optimize(Append(
                         Box::new(Fin {
                             length: a_length,
                             waveform: Box::new(BinaryOp(BinaryOperator::Merge, a, b)),
+                            state: (),
                         }),
                         c,
                         (),
@@ -233,6 +246,7 @@ where
                         Box::new(Fin {
                             length: a_length,
                             waveform: a,
+                            state: (),
                         }),
                         Box::new(Append(b, c, ())),
                     ),
@@ -244,10 +258,12 @@ where
                         Fin {
                             length: a_length,
                             waveform: a,
+                            ..
                         },
                         Fin {
                             length: b_length,
                             waveform: b,
+                            ..
                         },
                     ) if first_root(&a_length) == first_root(&b_length) => optimize(Append(
                         Box::new(Marked {
@@ -255,6 +271,7 @@ where
                             waveform: Box::new(Fin {
                                 length: a_length,
                                 waveform: Box::new(BinaryOp(BinaryOperator::Merge, a, b)),
+                                state: (),
                             }),
                         }),
                         c,
@@ -333,21 +350,33 @@ where
                 // ... though currently Alt generates both branches, so better not to do too much work
 
                 // Pull Fin out
-                (Fin { length, waveform }, b) => optimize(Fin {
+                (
+                    Fin {
+                        length, waveform, ..
+                    },
+                    b,
+                ) => optimize(Fin {
                     length,
                     waveform: Box::new(optimize(BinaryOp(
                         BinaryOperator::Multiply,
                         waveform,
                         Box::new(b),
                     ))),
+                    state: (),
                 }),
-                (a, Fin { length, waveform }) => optimize(Fin {
+                (
+                    a,
+                    Fin {
+                        length, waveform, ..
+                    },
+                ) => optimize(Fin {
                     length,
                     waveform: Box::new(optimize(BinaryOp(
                         BinaryOperator::Multiply,
                         Box::new(a),
                         waveform,
                     ))),
+                    state: (),
                 }),
                 (a, b) => BinaryOp(BinaryOperator::Multiply, Box::new(a), Box::new(b)),
             }
@@ -377,21 +406,33 @@ where
                 ),
 
                 // Pull Fin out
-                (Fin { length, waveform }, b) => optimize(Fin {
+                (
+                    Fin {
+                        length, waveform, ..
+                    },
+                    b,
+                ) => optimize(Fin {
                     length,
                     waveform: Box::new(optimize(BinaryOp(
                         BinaryOperator::Divide,
                         waveform,
                         Box::new(b),
                     ))),
+                    state: (),
                 }),
-                (a, Fin { length, waveform }) => optimize(Fin {
+                (
+                    a,
+                    Fin {
+                        length, waveform, ..
+                    },
+                ) => optimize(Fin {
                     length,
                     waveform: Box::new(optimize(BinaryOp(
                         BinaryOperator::Divide,
                         Box::new(a),
                         waveform,
                     ))),
+                    state: (),
                 }),
                 (a, b) => BinaryOp(BinaryOperator::Divide, Box::new(a), Box::new(b)),
             }
@@ -478,6 +519,7 @@ mod tests {
                 Box::new(Const(1.0)),
             )),
             waveform: Box::new(Fixed(vec![], ())),
+            state: (),
         };
         assert_eq!(optimize(fin), Fixed(vec![], ()));
     }
@@ -594,6 +636,7 @@ mod tests {
                     Box::new(Const(-2.0)),
                 )),
                 waveform: Box::new(Const(3.0)),
+                state: (),
             }),
             Box::new(Fin {
                 length: Box::new(BinaryOp(
@@ -602,6 +645,7 @@ mod tests {
                     Box::new(Const(-1.5)),
                 )),
                 waveform: Box::new(Const(5.0)),
+                state: (),
             }),
         );
         assert_eq!(
@@ -613,6 +657,7 @@ mod tests {
                     Box::new(Const(-1.5))
                 )),
                 waveform: Box::new(Const(15.0)),
+                state: ()
             }
         );
     }

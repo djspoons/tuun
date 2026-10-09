@@ -169,7 +169,9 @@ fn count_fins<M, S>(waveform: &waveform::Waveform<M, S>) -> usize {
     use waveform::Waveform::*;
     match waveform {
         Const(_) | Time(_) | Noise | Fixed(_, _) => 0,
-        Fin { length, waveform } => 1 + count_fins(length) + count_fins(waveform),
+        Fin {
+            length, waveform, ..
+        } => 1 + count_fins(length) + count_fins(waveform),
         Append(a, b, _) | BinaryOp(_, a, b) => count_fins(a) + count_fins(b),
         Phase {
             frequency, offset, ..

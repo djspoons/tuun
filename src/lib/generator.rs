@@ -125,28 +125,38 @@ impl<'a> Generator<'a> {
             }
             Fixed(_, _) => unreachable!("Fixed waveform has non-Initial, non-Position state"),
             Fin {
+                state: state @ Initial,
+                ..
+            } => {
+                *state = Finished(false);
+                self.generate(waveform, out)
+            }
+            // Once a Fin has ended, it stays ended.
+            Fin {
+                state: Finished(true),
+                ..
+            } => 0,
+            Fin {
                 length,
                 waveform: inner,
+                state: Finished(ended),
             } => {
-                // Use `out` to temporarily hold the samples of `length`. Check
-                // the first sample alone so that a Fin that has already ended
-                // (as in a Merge built by sequencing) costs one sample per
-                // call. An ended Fin doesn't advance `length` or `inner` any
-                // further.
-                if self.generate(length, &mut out[..1]) == 0 || out[0] >= 0.0 {
-                    return 0;
-                }
-                // Otherwise, advance `length` all the way to out.len(), even if we won't produce
-                // that many samples. That's because if there is a modification to some part of
-                // `length`, we want to make sure that the state of any *other* part of `length`
-                // reflects this call to generate.
-                let length_len = 1 + self.generate(length, &mut out[1..]);
+                // Use `out` to temporarily hold the samples of `length`. Note
+                // that this advances `length` all the way to out.len(), even if
+                // we won't produce that many samples. That's because if there
+                // is a modification to some part of `length`, we want to make
+                // sure that the state of any *other* part of `length` reflects
+                // this call to generate.
+                let length_len = self.generate(length, out);
                 let len = out[..length_len]
                     .iter()
                     .position(|&x| x >= 0.0)
                     .unwrap_or(length_len);
-                self.generate(inner, &mut out[..len])
+                let inner_len = self.generate(inner, &mut out[..len]);
+                *ended = inner_len < out.len();
+                inner_len
             }
+            Fin { .. } => unreachable!("Fin waveform has non-Initial, non-Finished state"),
             Append(_, _, state @ Initial) => {
                 *state = Finished(false);
                 self.generate(waveform, out)
@@ -608,6 +618,7 @@ impl<'a> Generator<'a> {
     ///         Box::new(Waveform::Const(1.0)),
     ///     )),
     ///     waveform: Box::new(Waveform::Noise),
+    ///     state: (),
     /// };
     /// assert_eq!(Generator::new(4).known_length(&w), Some(4));
     /// ```
@@ -616,9 +627,9 @@ impl<'a> Generator<'a> {
         match waveform {
             Const(_) | Time(_) | Noise => Some(usize::MAX),
             Fixed(samples, _) => Some(samples.len()),
-            Fin { length, waveform } => {
-                Some(self.fin_cutoff(length)?.min(self.known_length(waveform)?))
-            }
+            Fin {
+                length, waveform, ..
+            } => Some(self.fin_cutoff(length)?.min(self.known_length(waveform)?)),
             Append(a, b, _) => Some(self.known_length(a)?.saturating_add(self.known_length(b)?)),
             BinaryOp(op, a, b) => {
                 let (a, b) = (self.known_length(a)?, self.known_length(b)?);
@@ -884,7 +895,11 @@ impl<'a> Generator<'a> {
                 Const(_) | Time(_) | Noise => Npc(Infinite, waveform),
                 // Fixed is the quintessential pre-computable waveform.
                 Fixed(_, _) => Pc(waveform),
-                Fin { length, waveform } => match (
+                Fin {
+                    length,
+                    waveform,
+                    state,
+                } => match (
                     precompute_internal(g, *length),
                     precompute_internal(g, *waveform),
                 ) {
@@ -898,6 +913,7 @@ impl<'a> Generator<'a> {
                             Fin {
                                 length: Box::new(length.into()),
                                 waveform: Box::new(waveform),
+                                state,
                             },
                         )
                     }
@@ -911,6 +927,7 @@ impl<'a> Generator<'a> {
                             Fin {
                                 length: Box::new(length),
                                 waveform: Box::new(waveform.into()),
+                                state,
                             },
                         )
                     }
@@ -919,6 +936,7 @@ impl<'a> Generator<'a> {
                     (length, waveform) => Pc(Fin {
                         length: Box::new(length.into()),
                         waveform: Box::new(waveform.into()),
+                        state,
                     }),
                 },
                 Append(a, b, state) => do_two(g, BoundedBy::All, *a, *b, move |a, b| {
@@ -1195,6 +1213,44 @@ mod tests {
     }
 
     #[test]
+    fn test_fin_stays_ended() {
+        use waveform::Waveform::Marked;
+
+        // At one sample per second, the Fin ends at time 2, merged with 24 samples of zeros.
+        let w: Waveform = BinaryOp(
+            BinaryOperator::Merge,
+            Box::new(Fin {
+                length: Box::new(BinaryOp(
+                    BinaryOperator::Subtract,
+                    Box::new(Time(())),
+                    Box::new(Marked {
+                        id: 1,
+                        waveform: Box::new(Const(2.0)),
+                    }),
+                )),
+                waveform: Box::new(Const(1.0)),
+                state: (),
+            }),
+            Box::new(Fixed(vec![0.0; 24], ())),
+        );
+        let mut g = new_test_generator(1);
+        let mut w = initialize_state(w);
+        let mut out = vec![0.0; 4];
+        assert_eq!(g.generate(&mut w, &mut out), 4);
+        assert_eq!(out, [1.0, 1.0, 0.0, 0.0]);
+        // Moving the end past the current time doesn't restart the ended Fin.
+        waveform::substitute(&mut w, &1, &initialize_state::<u32, ()>(Const(14.0)));
+        for _ in 0..3 {
+            assert_eq!(g.generate(&mut w, &mut out), 4);
+            assert_eq!(out, [0.0; 4]);
+        }
+        // Re-initializing it does.
+        waveform::set_state(&mut w, State::Initial);
+        assert_eq!(g.generate(&mut w, &mut out), 4);
+        assert_eq!(out, [1.0; 4]);
+    }
+
+    #[test]
     fn test_fin() {
         let w = BinaryOp(
             BinaryOperator::Multiply,
@@ -1211,6 +1267,7 @@ mod tests {
                         }),
                     )),
                     waveform: Box::new(Const(1.0)),
+                    state: (),
                 }),
                 Box::new(Fixed(vec![1.0, 0.75, 0.5, 0.25], ())),
                 (),
@@ -1234,6 +1291,7 @@ mod tests {
                     }),
                 )),
                 waveform: Box::new(Const(1.0)),
+                state: (),
             }),
             Box::new(Const(0.5)),
             (),
@@ -1265,6 +1323,7 @@ mod tests {
                     }),
                 )),
                 waveform: Box::new(Time(())),
+                state: (),
             }),
             Box::new(Const(0.5)),
             (),
@@ -1510,12 +1569,14 @@ mod tests {
                 Box::new(Const(5.0)),
             )),
             waveform: Box::new(Fixed(vec![1.0; 2], ())),
+            state: (),
         };
         check_known_length(&mut g, &w, Some(2));
         // A Fin length other than `time` offset by a constant is unknown.
         let w = Fin {
             length: Box::new(Fixed(vec![-1.0, 1.0], ())),
             waveform: Box::new(Const(1.0)),
+            state: (),
         };
         check_known_length(&mut g, &w, None);
     }
@@ -1541,6 +1602,7 @@ mod tests {
                     let w = Fin {
                         length: Box::new(length),
                         waveform: Box::new(Const(1.0)),
+                        state: (),
                     };
                     let mut out = vec![0.0; 4 * sample_rate as usize + 1];
                     let generated = g.generate(&mut initialize_state(w.clone()), &mut out);
@@ -1561,6 +1623,7 @@ mod tests {
                 Box::new(Const(100_000.0)),
             )),
             waveform: Box::new(Const(1.0)),
+            state: (),
         };
         match g.precompute(w) {
             Fixed(samples, _) => assert_eq!(samples, vec![1.0; 100_000]),
@@ -1638,6 +1701,7 @@ mod tests {
                     Box::new(Const(6.0)),
                 )),
                 waveform: sin_waveform(0.25, 0.0),
+                state: (),
             }),
             waveform: Box::new(Time(())),
             state: (),
@@ -1653,6 +1717,7 @@ mod tests {
                     Box::new(Const(3.0)),
                 )),
                 waveform: Box::new(Time(())),
+                state: (),
             }),
             state: (),
         };
@@ -1757,6 +1822,7 @@ mod tests {
                 Box::new(Const(1.0)),
                 Box::new(Const(2.0)),
             )),
+            state: (),
         };
         run_tests(&w, &[3.0, 3.0, 3.0, 3.0]);
 
@@ -1804,6 +1870,7 @@ mod tests {
                 Box::new(Const(3.0)),
                 Box::new(Const(2.0)),
             )),
+            state: (),
         };
         run_tests(&w, &[6.0; 8]);
 
@@ -1925,6 +1992,7 @@ mod tests {
                     Box::new(Const(5.0)),
                 )),
                 waveform: Box::new(Time(())),
+                state: (),
             }),
             feed_forward: vec![Const(2.0), Const(2.0), Const(2.0)],
             feedback: vec![],
@@ -1950,6 +2018,7 @@ mod tests {
                     Box::new(Const(8.0)),
                 )),
                 waveform: Box::new(Time(())),
+                state: (),
             }),
             feed_forward: vec![Const(2.0), Const(2.0), Const(2.0), Const(2.0), Const(2.0)],
             feedback: vec![],

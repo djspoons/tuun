@@ -105,6 +105,7 @@ pub fn make_ramp<M>(
                 )),
                 Box::new(Const(last_value)),
             )),
+            state: (),
         }),
         Box::new(Const(new_value)),
         (),

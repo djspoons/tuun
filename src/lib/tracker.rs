@@ -866,6 +866,7 @@ mod tests {
         let unknown = Fin {
             length: Box::new(Fixed(vec![-1.0, 1.0], ())),
             waveform: Box::new(Const(0.0)),
+            state: (),
         };
         // At 4 samples per second, mark 1 lasts one second, mark 2's duration is unknown, mark 3
         // follows an unknown part, and mark 4 is infinite.
@@ -1146,6 +1147,7 @@ mod tests {
                         Box::new(Const(length.as_secs_f32())),
                     )),
                     waveform: Box::new(Const(0.0)),
+                    state: (),
                 }),
             };
             sender

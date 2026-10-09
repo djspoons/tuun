@@ -93,9 +93,11 @@ pub enum Waveform<MarkId, State = ()> {
     /// Generates a finite waveform, truncating the underlying waveform. The length is determined
     /// by the first point at which the `length` waveform is >= 0.0. For example, `Fin(Const(0.0), _)`
     /// is 0 seconds in length and `Fin(Subtract(Time, Const(2.0)), _)` is 2 seconds in length.
+    /// Once it has ended, it generates no more samples, even if `length` is later modified.
     Fin {
         length: Box<Waveform<MarkId, State>>,
         waveform: Box<Waveform<MarkId, State>>,
+        state: State,
     },
     /// Concatenates two waveforms, generating all samples from the first waveform and
     /// then all samples from the second.
@@ -183,7 +185,9 @@ impl<MarkId: Display, State> Display for Waveform<MarkId, State> {
                     )
                 }
             }
-            Fin { length, waveform } => {
+            Fin {
+                length, waveform, ..
+            } => {
                 write!(f, "Fin({}, {})", length, waveform)
             }
             Append(a, b, _) => write!(f, "Append({}, {})", a, b),
@@ -250,9 +254,12 @@ where
         Time(_) => Time(state),
         Noise => Noise,
         Fixed(samples, _) => Fixed(samples, state),
-        Fin { length, waveform } => Fin {
+        Fin {
+            length, waveform, ..
+        } => Fin {
             length: Box::new(initialize_state(*length, state.clone())),
-            waveform: Box::new(initialize_state(*waveform, state)),
+            waveform: Box::new(initialize_state(*waveform, state.clone())),
+            state,
         },
         Append(a, b, _) => Append(
             Box::new(initialize_state(*a, state.clone())),
@@ -327,9 +334,12 @@ pub fn remove_state<M, S>(waveform: Waveform<M, S>) -> Waveform<M> {
         Time(_) => Time(()),
         Noise => Noise,
         Fixed(samples, _) => Fixed(samples, ()),
-        Fin { length, waveform } => Fin {
+        Fin {
+            length, waveform, ..
+        } => Fin {
             length: Box::new(remove_state(*length)),
             waveform: Box::new(remove_state(*waveform)),
+            state: (),
         },
         Append(a, b, _) => Append(Box::new(remove_state(*a)), Box::new(remove_state(*b)), ()),
         Phase {
@@ -393,9 +403,14 @@ where
         Time(state) => *state = new_state,
         Noise => (),
         Fixed(_, state) => *state = new_state,
-        Fin { length, waveform } => {
+        Fin {
+            length,
+            waveform,
+            state,
+        } => {
             set_state(length, new_state.clone());
-            set_state(waveform, new_state);
+            set_state(waveform, new_state.clone());
+            *state = new_state;
         }
         Append(a, b, state) => {
             set_state(a, new_state.clone());
@@ -492,7 +507,9 @@ where
         // Leaf nodes — nothing to recurse into
         Const(_) | Time(_) | Noise | Fixed(..) => {}
 
-        Fin { length, waveform } => {
+        Fin {
+            length, waveform, ..
+        } => {
             substitute(length, mark_id, new_waveform);
             substitute(waveform, mark_id, new_waveform);
         }
