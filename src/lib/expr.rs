@@ -779,6 +779,27 @@ fn binary_op_precedence(op: &str) -> Option<Precedence> {
     }
 }
 
+/// Returns the minimum precedences at which the left and right operands of the
+/// binary operator `op`, at precedence `p`, print without parentheses.
+///
+/// `\` associates to the right and every other binary operator to the left.
+fn operand_precedences<M, S>(op: &str, p: Precedence, rhs: &Expr<M, S>) -> (u8, u8) {
+    let p = p as u8;
+    if op != "\\" {
+        return (p, p + 1);
+    }
+    // Only a nested `\` may sit unparenthesized on the right: a function
+    // literal or `if` shares its precedence but isn't a `\` operand.
+    let rhs_is_followed_by = matches!(
+        rhs,
+        Expr::Application { function, positional, named }
+            if positional.len() == 2
+                && named.is_empty()
+                && matches!(&function.expr, Expr::Variable(name) if name == "\\")
+    );
+    (p + 1, if rhs_is_followed_by { p } else { p + 1 })
+}
+
 fn is_unary_op(op: &str) -> bool {
     matches!(op, "!" | "@" | "$" | "%" | "-" | "?")
 }
@@ -1042,11 +1063,10 @@ where
                         if positional.len() == 2
                             && let Some(p) = binary_op_precedence(name)
                         {
-                            // Left-associative: lhs allows equal-precedence,
-                            // rhs requires strictly tighter precedence.
-                            fmt_at(&positional[0], p as u8, f)?;
+                            let (lhs, rhs) = operand_precedences(name, p, &positional[1].expr);
+                            fmt_at(&positional[0], lhs, f)?;
                             write!(f, " {} ", name)?;
-                            fmt_at(&positional[1], (p as u8) + 1, f)?;
+                            fmt_at(&positional[1], rhs, f)?;
                             return Ok(());
                         }
                         if positional.len() == 1 && is_unary_op(name) {
@@ -1406,9 +1426,10 @@ where
             if arguments.len() == 2
                 && let Some(p) = binary_op_precedence(name)
             {
-                write_preserving_at(&arguments[0], p as u8, source, out)?;
+                let (lhs, rhs) = operand_precedences(name, p, &arguments[1].expr);
+                write_preserving_at(&arguments[0], lhs, source, out)?;
                 write!(out, " {} ", name)?;
-                return write_preserving_at(&arguments[1], (p as u8) + 1, source, out);
+                return write_preserving_at(&arguments[1], rhs, source, out);
             }
             if arguments.len() == 1 && is_unary_op(name) {
                 write!(out, "{}", name)?;

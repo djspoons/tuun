@@ -276,6 +276,8 @@ This example also makes use of the `\` or "followed by" operator. This operator 
 seq(offset, a) \ b     ==> a & append(0 | fin(offset), b)
 ```
 
+(Unlike other operators, the `\` operator is right-associative, so each note's offset is measured from the start of that note. While the associativity is not important in continuous time, it yields different results in discrete time.)
+
 Other operators are overloaded to pass offsets through. For example, when adding a seq waveform, the `seq` is pulled to the outside.
 ```
 seq(offset, a) + b     ==> seq(offset, a + b)

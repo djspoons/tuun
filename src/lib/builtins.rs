@@ -154,6 +154,8 @@ where
     }
 }
 
+/// Returns the merge of two arguments where the second argument delayed until
+/// after the offset of the first (which therefore must be a seq).
 pub fn followed_by<M, S>(mut arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
     M: Debug + Display + Clone + PartialEq,

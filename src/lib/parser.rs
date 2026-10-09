@@ -818,35 +818,43 @@ fn parse_reverse_application<M>(input: Input) -> IResult<SourceExpr<M>> {
 }
 
 fn parse_expr<M>(input: Input) -> IResult<SourceExpr<M>> {
-    let start = input.location_offset();
-    let (mut rest, mut expr) = parse_reverse_application(input)?;
+    // TODO use combinators here?
+    let (mut rest, first) = parse_reverse_application(input)?;
+    // Each operand with the offset where it starts, and each operator.
+    let mut operands = vec![(input.location_offset(), first)];
+    let mut ops = vec![];
+    // `\` binds more loosely than any other operator and associates to the
+    // right: `a \ b \ c` parses as `a \ (b \ c)`.
     loop {
         // The operator is matched by `tag` rather than `char` so its own
         // position is available: like every other operator, `\` becomes a
         // variable, and a variable that spans its source text can be
         // reported on (an unbound-name error, a type query).
-        let attempt = (
-            ws(tag("\\")),
-            expect(
-                parse_reverse_application,
-                "expected expression after \\ operator",
-            ),
+        let Ok((after_op, op)) = ws(tag("\\")).parse(rest) else {
+            break;
+        };
+        let (new_rest, rhs) = expect(
+            parse_reverse_application,
+            "expected expression after \\ operator",
         )
-            .parse(rest);
-        match attempt {
-            Ok((new_rest, (op, rhs))) => {
-                let end = new_rest.location_offset();
-                let rhs = rhs.unwrap_or_else(error_placeholder);
-                let op_var = SourceExpr::with_span(
-                    Expr::Variable("\\".to_string()),
-                    op.location_offset()..op.location_offset() + op.fragment().len(),
-                );
-                let app = Expr::application(op_var, vec![expr, rhs]);
-                expr = SourceExpr::with_span(app, start..end);
-                rest = new_rest;
-            }
-            Err(_) => break,
-        }
+        .parse(after_op)?;
+        ops.push(op);
+        operands.push((
+            after_op.location_offset(),
+            rhs.unwrap_or_else(error_placeholder),
+        ));
+        rest = new_rest;
+    }
+    // Fold from the right: every application ends where the chain ends.
+    let end = rest.location_offset();
+    let (_, mut expr) = operands.pop().unwrap();
+    while let (Some((start, lhs)), Some(op)) = (operands.pop(), ops.pop()) {
+        let op_var = SourceExpr::with_span(
+            Expr::Variable("\\".to_string()),
+            op.location_offset()..op.location_offset() + op.fragment().len(),
+        );
+        let app = Expr::application(op_var, vec![lhs, expr]);
+        expr = SourceExpr::with_span(app, start..end);
     }
     Ok((rest, expr))
 }
@@ -1430,6 +1438,29 @@ mod tests {
             r"$200 | S(0.5, .25) | R(0.5, 1) \ $400",
             r"$200 | S(0.5, 0.25) | R(0.5, 1) \ $400",
         );
+    }
+
+    #[test]
+    fn test_parse_followed_by_is_right_associative() {
+        let Expr::Application {
+            function,
+            positional,
+            ..
+        } = parse_program_unstamped::<u32>(r"$a \ $b \ $c")
+            .unwrap()
+            .expr
+        else {
+            panic!("expected an application of \\");
+        };
+        assert!(matches!(&function.expr, Expr::Variable(op) if op == "\\"));
+        assert_eq!(format!("{}", positional[0]), "$a");
+        assert_eq!(format!("{}", positional[1]), r"$b \ $c");
+
+        assert_round_trip(r"$a \ $b \ $c", r"$a \ $b \ $c");
+        assert_round_trip(r"$a \ ($b \ $c)", r"$a \ $b \ $c");
+        assert_round_trip(r"($a \ $b) \ $c", r"($a \ $b) \ $c");
+        // The right operand is still a pipe chain, not a function literal.
+        assert_round_trip(r"$a \ (fn(x) => x)", r"$a \ (fn(x) => x)");
     }
 
     #[test]
