@@ -387,10 +387,11 @@ impl<'a> Generator<'a> {
 
         // First, generate samples from the inner waveform, if possible.
         let inner_len = self.generate(inner, out);
-        let out_len = out.len().min(inner_len + input.len());
+        // The number of inner samples saved from earlier calls but not yet output.
+        let pending = input.len();
+        let out_len = out.len().min(inner_len + pending);
         // We may read past the end of inner_len, so make sure those samples are initialized.
-        let extra_samples_read = out.len() - inner_len;
-        out[inner_len..inner_len + extra_samples_read].fill(0.0);
+        out[inner_len..].fill(0.0);
 
         let ff_count = feed_forward.len();
         let input_padding = if input.len() == ff_count - 1 {
@@ -497,8 +498,9 @@ impl<'a> Generator<'a> {
 
         // `input` and `output` still contain the last few samples (`ff_count - 1` and
         // `fb_count` respectively). But if `input` was padded with any zeros or if we
-        // copied any zeros from `out`, we don't want to save those.
-        input.truncate(input.len() - (input_padding + extra_samples_read));
+        // copied any zeros from `out`, we don't want to save those: keep only the inner
+        // samples that haven't been output yet, which come before any zeros.
+        input.truncate(pending + inner_len - out_len);
         out_len
     }
 
