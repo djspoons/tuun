@@ -374,7 +374,7 @@ impl<'a> Generator<'a> {
                     Some(writer) => {
                         for x in out[..len].iter() {
                             if let Err(e) = writer.write_sample(*x) {
-                                eprintln!("Error writing sample for {}: {}", file_stem, e);
+                                log::error!("Error writing sample for {}: {}", file_stem, e);
                             }
                         }
                     }
@@ -665,8 +665,8 @@ impl<'a> Generator<'a> {
                         inner_len
                     }
                     MaybeOption::Maybe => {
-                        println!(
-                            "Warning: unable to determine root of Fin length cheaply, generating samples for: {:?}",
+                        log::warn!(
+                            "Unable to determine root of Fin length cheaply, generating samples for: {:?}",
                             length
                         );
                         let mut length_out = vec![0.0; max];
@@ -823,7 +823,7 @@ impl<'a> Generator<'a> {
                             }
                         }
                         */
-                        println!("Warning: in greater_or_equals_at for Append... returning Maybe");
+                        log::warn!("In greater_or_equals_at for Append... returning Maybe");
                         MaybeOption::Maybe
                     }
                     m => m, // Maybe gets passed through
@@ -847,7 +847,7 @@ impl<'a> Generator<'a> {
             }
             // TODO think about Marked here
             _ => {
-                println!("Unhandled case in greater_or_equals_at: {}", waveform);
+                log::warn!("Unhandled case in greater_or_equals_at: {}", waveform);
                 MaybeOption::Maybe
             }
         }
@@ -891,39 +891,40 @@ impl<'a> Generator<'a> {
             M: Clone + Debug + Display,
         {
             if let Waveform::Fixed(_, _) = waveform {
-                println!(
+                log::debug!(
                     "No need to precompute output for {} (already Fixed)",
                     waveform
                 );
                 return waveform;
             }
             if let Waveform::Const(_) = waveform {
-                println!(
+                log::debug!(
                     "Skipping pre-computation for {} (constant waveform)",
                     waveform
                 );
                 return waveform;
             }
 
-            println!("Precomputing output for {}", waveform);
+            log::debug!("Precomputing output for {}", waveform);
             // Choose a `max` which is long enough to generate any reasonable
             // waveform.
             let max_len = 2_usize.pow(28);
             let computed_len = g.length(&mut waveform.clone(), max_len);
             if computed_len == max_len {
-                println!("Warning: finite waveform length returned maximum number of samples");
+                log::warn!("Finite waveform length returned maximum number of samples");
             }
             let mut out = vec![0.0; computed_len];
             let len = g.generate(&mut waveform, &mut out);
             if len != computed_len {
-                println!(
-                    "Warning: precompute generated unexpected number of samples: {} != {}",
-                    len, computed_len
+                log::warn!(
+                    "Precompute generated unexpected number of samples: {} != {}",
+                    len,
+                    computed_len
                 );
             }
             out.truncate(len);
 
-            println!("  ...generated {} samples", out.len());
+            log::debug!("  ...generated {} samples", out.len());
 
             waveform::Waveform::Fixed(out, State::Initial)
         }
@@ -1065,7 +1066,7 @@ impl<'a> Generator<'a> {
                     precompute_internal(g, *waveform),
                 ) {
                     (length, Npc(Dynamic, waveform)) => {
-                        println!(
+                        log::debug!(
                             "Cannot precompute Fin because inner waveform is dynamic: {}",
                             waveform
                         );
@@ -1078,7 +1079,7 @@ impl<'a> Generator<'a> {
                         )
                     }
                     (Npc(Dynamic, length), waveform) => {
-                        println!(
+                        log::debug!(
                             "Cannot precompute Fin because length waveform is dynamic: {}",
                             length
                         );

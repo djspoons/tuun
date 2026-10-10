@@ -52,6 +52,12 @@ cargo run --bin tuun -- test.tuun
 ```
 In this case, try holding the option key, and moving your mouse around.
 
+The terminal shows status messages, full error reports, and output from `debug`. Internal tracing is off by default; turn it on per component with `RUST_LOG`, e.g. to see each command the tracker receives:
+```
+RUST_LOG=tuun::tracker=debug cargo run --bin tuun -- test.tuun
+```
+Useful targets include `tuun::tracker`, `tuun::generator` (precomputation), `tuun::environment` (type-check timing), and `tuun::launchkey` (MIDI controller messages).
+
 
 ### Keyboard Navigation
 

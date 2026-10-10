@@ -152,7 +152,7 @@ pub fn update_launchkey_state(
             launchkey.set_pad_function_color(launchkey::Color::GoldenOrange);
         }
         i => {
-            println!("unexpected repeat_after_measures: {:?}", i);
+            log::warn!("unexpected repeat_after_measures: {:?}", i);
         }
     }
 

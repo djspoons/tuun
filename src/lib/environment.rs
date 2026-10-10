@@ -410,7 +410,6 @@ impl Environment {
             ProgramKind::Keys => infer::Expectation::NoteFunction,
         };
         let start = time::Instant::now();
-        print!("Checking programs... ");
         // A reload observed since the last check may have invalidated cached
         // dependents, so start clean. Reloads are lazy — `resolve` stats per
         // lookup — so a library edit can also surface *mid-check*, after a
@@ -445,10 +444,11 @@ impl Environment {
             self.checked_generation.set(self.modules_generation.get());
             break errors;
         };
-        println!(
-            "{} total errors in {:.3}s",
+        log::debug!(
+            "Checked program {} in {:.3}s: {} errors",
+            set.display_name(index),
+            (time::Instant::now() - start).as_secs_f32(),
             errors.len(),
-            (time::Instant::now() - start).as_secs_f32()
         );
         // A module finding is not this program's diagnostic — returned, it
         // would repeat on every dependent program's check — but neither may
@@ -469,10 +469,7 @@ impl Environment {
                     CheckMode::Errors => self.diagnose(finding, set, index),
                     CheckMode::Warnings => self.diagnose(finding, set, index).as_warning(),
                 };
-                println!("{}: {}", diagnostic.severity.label(), diagnostic);
-                if let Some(snippet) = &diagnostic.snippet {
-                    println!("{}", snippet);
-                }
+                println!("{}", diagnostic.report());
             }
             for finding in &errors {
                 if let Some(Source::Module(id)) = finding.source() {

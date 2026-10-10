@@ -484,7 +484,7 @@ where
         if expected.max(counted) - expected.min(counted) <= MAX_CLOCK_ERROR {
             return counted;
         }
-        println!(
+        log::info!(
             "Resynchronizing tracker clock from {:?} to {:?} (diff is {:.3} ms)",
             counted,
             expected,
@@ -520,14 +520,19 @@ where
                 repeat_every,
             } => {
                 if let Some(duration) = repeat_every {
-                    println!(
+                    log::debug!(
                         "Received command to play waveform {:?} at {:?} and every {:?}: {}",
-                        id, start, duration, waveform
+                        id,
+                        start,
+                        duration,
+                        waveform
                     );
                 } else {
-                    println!(
+                    log::debug!(
                         "Received command to play waveform {:?} at {:?}: {}",
-                        id, start, waveform
+                        id,
+                        start,
+                        waveform
                     );
                 }
                 let start = start.unwrap_or(buffer_start);
@@ -555,15 +560,17 @@ where
                 mark_id,
                 waveform,
             } => {
-                println!(
+                log::debug!(
                     "Received command to replace mark {:?} in waveforms {:?} with new waveform: {}",
-                    mark_id, selector, waveform
+                    mark_id,
+                    selector,
+                    waveform
                 );
                 let waveform = generator::initialize_state(waveform);
                 for active in &mut self.active_waveforms {
                     if selector.matches(&active.id) {
                         waveform::substitute(&mut active.waveform, &mark_id, &waveform);
-                        println!("  new active waveform is: {}", active.waveform);
+                        log::trace!("  new active waveform is: {}", active.waveform);
                         // Recompute the marks
                         active.marks.clear();
                         process_marked(
@@ -582,7 +589,7 @@ where
                 for pending in &mut self.pending_waveforms {
                     if selector.matches(&pending.id) {
                         waveform::substitute(&mut pending.waveform, &mark_id, &waveform);
-                        println!("  new pending waveform is: {}", pending.waveform);
+                        log::trace!("  new pending waveform is: {}", pending.waveform);
                         // Recompute the marks
                         pending.marks.clear();
                         process_marked(
@@ -597,9 +604,10 @@ where
                 }
             }
             Command::RemovePending { selector, after } => {
-                println!(
+                log::debug!(
                     "Received command to remove pending waveforms {:?} after {:?}",
-                    selector, after
+                    selector,
+                    after
                 );
                 match after {
                     None => self.pending_waveforms.retain(|w| !selector.matches(&w.id)),
@@ -625,7 +633,7 @@ where
             match self.command_receiver.try_recv() {
                 Ok(command) => self.process_command(command, buffer_start),
                 Err(mpsc::TryRecvError::Empty) => break,
-                Err(e) => println!("Error receiving command: {:?}", e),
+                Err(e) => log::warn!("Error receiving command: {:?}", e),
             }
         }
     }
@@ -655,7 +663,7 @@ where
                 if self.pending_waveforms[0].start <= segment_start {
                     let mut pending = self.pending_waveforms.remove(0);
                     /*
-                    println!(
+                    log::debug!(
                         "Activating waveform {:?} with start {:?} at time {:?}",
                         pending.id, pending.start, segment_start
                     );
@@ -671,9 +679,10 @@ where
                             .round() as usize;
                         if delta_samples > 0 {
                             if delta_samples > 1 {
-                                println!(
+                                log::debug!(
                                     "Adjusting waveform {:?} position by {} samples",
-                                    pending.id, delta_samples
+                                    pending.id,
+                                    delta_samples
                                 );
                             }
                             // We need to actually generate and discard these samples to make sure that any stateful
@@ -701,7 +710,7 @@ where
                         // Check to see if we've missed one or more repetitions.
                         while pending.start <= segment_start {
                             pending.start += repeat_every;
-                            println!("Missed repetition of waveform {:?}...", pending.id);
+                            log::warn!("Missed repetition of waveform {:?}...", pending.id);
                         }
                         /*
                         println!(

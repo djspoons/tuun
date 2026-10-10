@@ -309,7 +309,7 @@ impl Program {
                     history: EditHistory::default(),
                 })
             } else {
-                println!(
+                log::warn!(
                     "Found source expression without span or invalid span: {:?}",
                     sb
                 );
@@ -627,7 +627,7 @@ impl ProgramSet {
                 if position < programs.len() {
                     programs[position] = program;
                 } else {
-                    println!(
+                    log::warn!(
                         "Ignoring program with out-of-range slot {} (max {})",
                         position + 1,
                         programs.len()

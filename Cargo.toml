@@ -28,7 +28,7 @@ path = "src/misc/midi_test.rs"
 
 [features]
 default = ["native"]
-native = ["sdl2", "clap"]
+native = ["sdl2", "clap", "dep:env_logger"]
 wasm = ["wasm-bindgen", "js-sys", "web-sys", "console_error_panic_hook"]
 
 [dependencies]
@@ -46,6 +46,8 @@ console_error_panic_hook = { version = "0.1", optional = true }
 midly = "0.5.3"
 midir = "0.11"
 thiserror = "2.0.18"
+log = "0.4.34"
+env_logger = { version = "0.11.11", optional = true }
 
 [dependencies.sdl2]
 version = "0.37.0"

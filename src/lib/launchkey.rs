@@ -292,7 +292,7 @@ impl Launchkey {
         event.write(&mut buf).unwrap();
         //println!("Sending event {:?} as {:?}", &event, &buf);
         if let Err(e) = self.daw_output_conn.send(&buf) {
-            println!("launchkey: got error on send: {}", e);
+            log::warn!("launchkey: got error on send: {}", e);
         }
     }
 
@@ -313,7 +313,7 @@ impl Launchkey {
             FEATURE_DAW_ENCODER_RELATIVE,
             127,
         ]) {
-            println!("launchkey: failed to enable encoder relative mode: {}", e);
+            log::warn!("launchkey: failed to enable encoder relative mode: {}", e);
         }
     }
 
@@ -453,11 +453,11 @@ impl Drop for Launchkey {
             FEATURE_DAW_ENCODER_RELATIVE,
             0,
         ]) {
-            println!("launchkey: failed to revert encoder relative mode: {}", e);
+            log::warn!("launchkey: failed to revert encoder relative mode: {}", e);
         }
         // Exit DAW mode.
         if let Err(e) = self.daw_output_conn.send(&[0x9F, 0x0C, 0x00]) {
-            println!("launchkey: failed to exit from DAW mode: {}", e);
+            log::warn!("launchkey: failed to exit from DAW mode: {}", e);
         }
     }
 }
@@ -476,7 +476,7 @@ impl DAWState {
             match self.sender.send(event) {
                 Ok(()) => (),
                 Err(e) => {
-                    println!("Got error sending event: {}", e);
+                    log::warn!("Got error sending event: {}", e);
                 }
             }
         }
@@ -488,7 +488,7 @@ impl DAWState {
         match event {
             LiveEvent::Midi { channel, message } => match message {
                 MidiMessage::Controller { controller, value } => {
-                    println!(
+                    log::debug!(
                         "On channel {}, got controller {} with value {}",
                         channel,
                         controller.as_int(),
@@ -499,17 +499,17 @@ impl DAWState {
                     if ch == ENCODER_MODE_CHANNEL && controller.as_int() == ENCODER_MODE_CC {
                         return match value.as_int() {
                             1 => {
-                                println!("Encoder mode changed to Mixer");
+                                log::debug!("Encoder mode changed to Mixer");
                                 self.encoder_mode = EncoderMode::Mixer;
                                 Some(Event::EncoderModeChanged(EncoderMode::Mixer))
                             }
                             2 => {
-                                println!("Encoder mode changed to Plugin");
+                                log::debug!("Encoder mode changed to Plugin");
                                 self.encoder_mode = EncoderMode::Plugin;
                                 Some(Event::EncoderModeChanged(EncoderMode::Plugin))
                             }
                             other => {
-                                println!("Ignoring encoder mode change to {}", other);
+                                log::debug!("Ignoring encoder mode change to {}", other);
                                 None
                             }
                         };
@@ -590,16 +590,18 @@ impl DAWState {
                         (METRONOME_CC, 0) => None,
 
                         _ => {
-                            println!(
+                            log::debug!(
                                 "Ignoring message Controller({}, {}) on channel {}",
-                                controller, value, channel
+                                controller,
+                                value,
+                                channel
                             );
                             None
                         }
                     }
                 }
                 MidiMessage::NoteOn { key, vel } => {
-                    println!(
+                    log::debug!(
                         "On channel {}, got note-on for key {} with velocity {}",
                         channel,
                         key.as_int(),
@@ -638,12 +640,12 @@ impl DAWState {
                     None
                 }
                 _ => {
-                    println!("Ignoring message {:?} on channel {}", message, channel);
+                    log::debug!("Ignoring message {:?} on channel {}", message, channel);
                     None
                 }
             },
             _ => {
-                println!("Ignoring event {:?}", event);
+                log::debug!("Ignoring event {:?}", event);
                 None
             }
         }
@@ -659,7 +661,7 @@ impl MIDIState {
             match self.sender.send(event) {
                 Ok(()) => (),
                 Err(e) => {
-                    println!("Got error sending event: {}", e);
+                    log::warn!("Got error sending event: {}", e);
                 }
             }
         }
@@ -684,12 +686,12 @@ impl MIDIState {
                     })
                 }
                 _ => {
-                    println!("Ignoring message {:?} on channel {}", message, channel);
+                    log::debug!("Ignoring message {:?} on channel {}", message, channel);
                     None
                 }
             },
             _ => {
-                println!("Ignoring event {:?}", event);
+                log::debug!("Ignoring event {:?}", event);
                 None
             }
         }
