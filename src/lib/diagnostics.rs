@@ -110,6 +110,26 @@ impl Diagnostic {
         self.severity = Severity::Warning;
         self
     }
+
+    /// Returns the full report of this diagnostic: its severity and message
+    /// on the first line, followed by its snippet, if any.
+    ///
+    /// # Example
+    /// ```
+    /// use tuun::diagnostics::Diagnostic;
+    ///
+    /// let diagnostic = Diagnostic::in_program("unknown name".to_string(), 0..4, "nope");
+    /// assert_eq!(
+    ///     diagnostic.report(),
+    ///     "Error: 1:1: unknown name\n  |\n1 | nope\n  | ^^^^"
+    /// );
+    /// ```
+    pub fn report(&self) -> String {
+        match &self.snippet {
+            Some(snippet) => format!("{}: {}\n{}", self.severity.label(), self, snippet),
+            None => format!("{}: {}", self.severity.label(), self),
+        }
+    }
 }
 
 impl fmt::Display for Diagnostic {
@@ -146,15 +166,8 @@ pub fn error_message(diagnostics: &[Diagnostic]) -> String {
         message.push_str(snippet);
     }
     for diagnostic in rest {
-        message.push_str(&format!(
-            "\n{}: {}",
-            diagnostic.severity.label(),
-            diagnostic
-        ));
-        if let Some(snippet) = &diagnostic.snippet {
-            message.push('\n');
-            message.push_str(snippet);
-        }
+        message.push('\n');
+        message.push_str(&diagnostic.report());
     }
     message
 }

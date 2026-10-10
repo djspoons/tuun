@@ -154,7 +154,7 @@ impl EffectRunner {
                     Some(PendingJob::Load { startup, select }) => {
                         self.install(state, loaded, startup, select)
                     }
-                    _ => println!("Got a load reply with no load waiting for it"),
+                    _ => log::warn!("Got a load reply with no load waiting for it"),
                 }
                 return;
             }
@@ -168,7 +168,7 @@ impl EffectRunner {
             message,
         }) = state.processing.pop_front()
         else {
-            println!("Got a program reply with no program waiting for it");
+            log::warn!("Got a program reply with no program waiting for it");
             return;
         };
         // A pending load still owns the status line.

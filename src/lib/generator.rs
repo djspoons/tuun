@@ -364,7 +364,7 @@ impl<'a> Generator<'a> {
                     Some(writer) => {
                         for x in out[..len].iter() {
                             if let Err(e) = writer.write_sample(*x) {
-                                eprintln!("Error writing sample for {}: {}", file_stem, e);
+                                log::error!("Error writing sample for {}: {}", file_stem, e);
                             }
                         }
                     }
@@ -729,21 +729,21 @@ impl<'a> Generator<'a> {
             M: Clone + Debug + Display,
         {
             if let Waveform::Fixed(_, _) = waveform {
-                println!(
+                log::debug!(
                     "No need to precompute output for {} (already Fixed)",
                     waveform
                 );
                 return waveform;
             }
             if let Waveform::Const(_) = waveform {
-                println!(
+                log::debug!(
                     "Skipping pre-computation for {} (constant waveform)",
                     waveform
                 );
                 return waveform;
             }
 
-            println!("Precomputing output for {}", waveform);
+            log::debug!("Precomputing output for {}", waveform);
             // Generate in chunks until the waveform ends, stopping at a `MAX_LEN` which is long
             // enough for any reasonable waveform.
             const CHUNK: usize = 1 << 16;
@@ -758,12 +758,12 @@ impl<'a> Generator<'a> {
                     break;
                 }
                 if out.len() >= MAX_LEN {
-                    println!("Warning: finite waveform reached the maximum number of samples");
+                    log::warn!("Finite waveform reached the maximum number of samples");
                     break;
                 }
             }
 
-            println!("  ...generated {} samples", out.len());
+            log::debug!("  ...generated {} samples", out.len());
 
             waveform::Waveform::Fixed(out, State::Initial)
         }
@@ -909,7 +909,7 @@ impl<'a> Generator<'a> {
                     precompute_internal(g, *waveform),
                 ) {
                     (length, Npc(Dynamic, waveform)) => {
-                        println!(
+                        log::debug!(
                             "Cannot precompute Fin because inner waveform is dynamic: {}",
                             waveform
                         );
@@ -923,7 +923,7 @@ impl<'a> Generator<'a> {
                         )
                     }
                     (Npc(Dynamic, length), waveform) => {
-                        println!(
+                        log::debug!(
                             "Cannot precompute Fin because length waveform is dynamic: {}",
                             length
                         );
