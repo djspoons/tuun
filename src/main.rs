@@ -115,9 +115,7 @@ pub fn main() {
         println!("Starting in non-UI mode");
         // Recoverable parse problems don't stop startup, but in batch mode
         // there is no status line to show the warning on — print it.
-        if !state.message.is_empty() {
-            println!("{}", state.message);
-        }
+        echo_messages(&mut state);
 
         // Nothing drains the samples in batch mode; once the rings fill, the
         // tracker just counts its pushes as dropped.
@@ -500,6 +498,7 @@ pub fn main() {
         if next_render <= now {
             let due = next_render;
             next_render = now + renderer::FRAME_BUDGET;
+            echo_messages(&mut state);
             renderer.render(
                 &state,
                 &status,
@@ -519,6 +518,13 @@ pub fn main() {
                 );
             }
         }
+    }
+}
+
+/// Prints every message posted since the last call.
+fn echo_messages(state: &mut actions::AppState) {
+    for message in state.messages.take_unechoed() {
+        println!("{}", message.text);
     }
 }
 
