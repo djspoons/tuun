@@ -16,6 +16,7 @@ use tuun::effects;
 use tuun::environment;
 use tuun::generator;
 use tuun::launchkey;
+use tuun::messages;
 use tuun::metric;
 use tuun::midi_input;
 use tuun::player;
@@ -101,9 +102,7 @@ pub fn main() {
         println!("Starting in non-UI mode");
         // Recoverable parse problems don't stop startup, but in batch mode
         // there is no status line to show the warning on — print it.
-        if !state.message.is_empty() {
-            println!("{}", state.message);
-        }
+        echo_messages(&mut state);
 
         // TODO the tracker clock resync doesn't really make sense for batch
         // mode... maybe we shouldn't try to resync in this case?
@@ -404,22 +403,24 @@ pub fn main() {
             failed_programs.push(i);
         }
     }
-    // Errors from the initial parse and this sweep would sit in the status
+    // Messages from the initial parse and this sweep would sit in the status
     // line with nothing saying which program they came from — replace them
     // with a pointer to the failing programs; each error resurfaces when
-    // its program is evaluated interactively.
-    state.message = if failed_programs.is_empty() {
-        String::new()
+    // its program is evaluated interactively. (The full messages are echoed
+    // to the terminal.)
+    state.messages.begin_batch();
+    if failed_programs.is_empty() {
+        state.messages.clear();
     } else {
-        format!(
-            "Errors in {}",
-            failed_programs
-                .iter()
-                .map(|&i| state.programs.display_name(i))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    };
+        let names = failed_programs
+            .iter()
+            .map(|&i| state.programs.display_name(i))
+            .collect::<Vec<_>>()
+            .join(", ");
+        state
+            .messages
+            .post(messages::Severity::Error, format!("Errors in {}", names));
+    }
 
     const BUFFER_REFRESH_INTERVAL: Duration = Duration::from_millis(200);
     let mut next_buffer_refresh = Instant::now();
@@ -531,6 +532,7 @@ pub fn main() {
             );
         }
 
+        echo_messages(&mut state);
         renderer.render(
             &ttf_context,
             &state,
@@ -542,6 +544,13 @@ pub fn main() {
         if let Some(launchkey) = launchkey.as_mut() {
             midi_input::update_launchkey_state(&state, &status, launchkey);
         }
+    }
+}
+
+/// Prints every message posted since the last call.
+fn echo_messages(state: &mut actions::AppState) {
+    for message in state.messages.take_unechoed() {
+        println!("{}", message.text);
     }
 }
 

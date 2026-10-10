@@ -12,10 +12,20 @@ use realfft::num_complex::{Complex, ComplexFloat};
 use crate::actions::{AppState, Mode};
 use crate::ids::{MarkId, WaveformId, WaveformSelector};
 use crate::launchkey;
+use crate::messages::{Message, Severity};
 use crate::metric::Metric;
 use crate::programs::{PROGRAMS_PER_BANK, SliderDisplay};
 use crate::recorder::{Finish, Phase};
 use crate::tracker;
+
+/// Returns the status-line color for `message`, by its severity.
+fn message_color(message: &Message) -> Color {
+    match message.severity {
+        Severity::Info => INACTIVE_COLOR,
+        Severity::Warning => WARNING_COLOR,
+        Severity::Error => ERROR_COLOR,
+    }
+}
 
 fn make_texture<'a>(
     font: &Font<'a, 'static>,
@@ -38,6 +48,7 @@ const INACTIVE_COLOR: Color = Color::RGB(0x00, 0xFF, 0xFF);
 const ACTIVE_COLOR: Color = Color::RGB(0x00, 0xFF, 0x00);
 const EDIT_COLOR: Color = Color::RGB(0xFF, 0xFF, 0xFF);
 const ERROR_COLOR: Color = Color::RGB(0xFF, 0xDE, 0x21);
+const WARNING_COLOR: Color = Color::RGB(0xFF, 0xA5, 0x40);
 const RECORD_COLOR: Color = Color::RGB(0xFF, 0x00, 0x00);
 
 pub struct Renderer {
@@ -54,7 +65,6 @@ pub struct Renderer {
     line_height: u32,
     nav_width: u32,
 
-    last_message: String,
     samples: Vec<f32>,
     spectrum: Vec<Complex<f32>>,
 }
@@ -120,7 +130,6 @@ impl Renderer {
             prompt_width,
             line_height,
             nav_width,
-            last_message: String::new(),
             samples: Vec::new(),
             spectrum: Vec::new(),
         }
@@ -140,7 +149,6 @@ impl Renderer {
         let programs = state.programs.programs();
         let mode = &state.mode;
         let active_program_index = state.active_program_index;
-        let message = state.message.as_str();
 
         // TODO so much clean-up
         let now = Instant::now();
@@ -599,13 +607,13 @@ impl Renderer {
             }
         }
 
-        // Draw the message. MoveSliders shows the live slider values
-        // instead of `state.message` — slider feedback is the whole point
-        // of that mode, and replaces any status text while active.
-        let dynamic_slider_message: String;
-        let message: &str = match mode {
+        // Draw the status line. MoveSliders shows the live slider values
+        // instead of the current message — slider feedback is the whole point
+        // of that mode.
+        let slider_readout: String;
+        let status_line: Option<(&str, Color)> = match mode {
             Mode::MoveSliders => {
-                dynamic_slider_message = if slider_display.is_empty() {
+                slider_readout = if slider_display.is_empty() {
                     "No sliders configured".to_string()
                 } else {
                     slider_display
@@ -614,26 +622,25 @@ impl Renderer {
                         .collect::<Vec<_>>()
                         .join(", ")
                 };
-                &dynamic_slider_message
+                Some((&slider_readout, INACTIVE_COLOR))
             }
-            _ => message,
+            _ => state
+                .messages
+                .visible(now)
+                .map(|message| (message.text.as_str(), message_color(message))),
         };
-
-        if !message.is_empty() && message != self.last_message {
-            println!("{}", message);
-        }
-        self.last_message = message.to_string();
         // The status line shows only the message's first line; any further
-        // lines (e.g. error snippets) are context for the terminal echo
-        // above.
-        let mut message = message.lines().next().unwrap_or("");
-        if !message.is_empty() {
+        // lines (e.g. error snippets) are context for the terminal echo.
+        if let Some((text, color)) = status_line
+            && let Some(mut text) = text.lines().next()
+            && !text.is_empty()
+        {
             // Truncate to 45 chars, not bytes — a byte slice can panic
             // mid-character on multi-byte input.
-            if let Some((limit, _)) = message.char_indices().nth(45) {
-                message = &message[..limit];
+            if let Some((limit, _)) = text.char_indices().nth(45) {
+                text = &text[..limit];
             }
-            let message_texture = make_texture(&font, INACTIVE_COLOR, &texture_creator, message);
+            let message_texture = make_texture(&font, color, &texture_creator, text);
             let TextureQuery {
                 width: message_width,
                 height: message_height,

@@ -10,12 +10,12 @@ use std::time::Instant;
 use std::collections::HashMap;
 
 use crate::actions::{self, AppState, Effect};
-use crate::diagnostics;
 use crate::environment;
 use crate::expr;
 use crate::ids::{MarkId, WaveformId, WaveformSelector};
 use crate::keys::Keys;
 use crate::launchkey;
+use crate::messages::Severity;
 use crate::player;
 use crate::programs::{self, PROGRAMS_PER_BANK};
 use crate::slider;
@@ -97,8 +97,14 @@ impl EffectRunner {
         }
     }
 
-    /// Runs every effect against `state` and `world` in order.
+    /// Runs every effect against `state` and `world` in order, as one batch
+    /// of messages.
     pub fn run_all(&mut self, state: &mut AppState, world: &mut World, effects: Vec<Effect>) {
+        state.messages.begin_batch();
+        self.run_effects(state, world, effects);
+    }
+
+    fn run_effects(&mut self, state: &mut AppState, world: &mut World, effects: Vec<Effect>) {
         for effect in effects {
             self.run_one(state, world, effect);
         }
@@ -106,7 +112,7 @@ impl EffectRunner {
 
     /// Runs the full "actions → effects" cycle for one event: applies each
     /// action through the reducer (collecting effects) and then runs all
-    /// resulting effects in order.
+    /// resulting effects in order, all as one batch of messages.
     pub fn dispatch(
         &mut self,
         state: &mut AppState,
@@ -114,6 +120,7 @@ impl EffectRunner {
         actions: Vec<actions::Action>,
     ) {
         //println!("dispatch: actions = {:?}", actions);
+        state.messages.begin_batch();
         let ctx = actions::Context {
             status: world.status,
             now: Instant::now(),
@@ -127,7 +134,7 @@ impl EffectRunner {
             all_effects.extend(actions::apply(state, &ctx, action));
         }
         //println!("  -> effects = {:?}", all_effects);
-        self.run_all(state, world, all_effects);
+        self.run_effects(state, world, all_effects);
     }
 
     fn run_one(&mut self, state: &mut AppState, world: &mut World, effect: Effect) {
@@ -164,7 +171,7 @@ impl EffectRunner {
                 if let Some(message) = message
                     && !matches!(start, player::Start::At(_))
                 {
-                    state.message = message;
+                    state.messages.post(Severity::Info, message);
                 }
             }
             Effect::PlayProgramVoice(program_index) => {
@@ -172,7 +179,7 @@ impl EffectRunner {
                     .player
                     .play_program_voice(&state.programs, program_index)
                 {
-                    state.message = message;
+                    state.messages.post(Severity::Info, message);
                 }
             }
             Effect::PlaySequencerStep {
@@ -188,7 +195,7 @@ impl EffectRunner {
                     world.status,
                     state.repeat_after_measures,
                 ) {
-                    state.message = message;
+                    state.messages.post(Severity::Info, message);
                 }
             }
             Effect::RemovePendingSequencerStep {
@@ -259,12 +266,10 @@ impl EffectRunner {
                         }
                         // Type warnings are informational: the program plays
                         // regardless, and only the status line reports them.
-                        if !warnings.is_empty() {
-                            state.message = diagnostics::error_message(&warnings);
-                        }
+                        state.messages.post_diagnostics(&warnings);
                     }
                     Err(diagnostics) => {
-                        state.message = diagnostics::error_message(&diagnostics);
+                        state.messages.post_diagnostics(&diagnostics);
                         // Hand the diagnostics to the editor so evaluation
                         // errors highlight like parse errors do — whether the
                         // Edit mode comes from `mode_on_failure` or is the
@@ -288,7 +293,7 @@ impl EffectRunner {
 
             Effect::UpdateSource(program_index) => {
                 if let Err(message) = state.programs.splice(program_index) {
-                    state.message = message;
+                    state.messages.post(Severity::Error, message);
                 }
             }
 
@@ -297,7 +302,7 @@ impl EffectRunner {
                 // parse leaves playback and state untouched.
                 let (new_set, warning) = match state.programs.reload_from_disk() {
                     Err(message) => {
-                        state.message = message;
+                        state.messages.post(Severity::Error, message);
                         return;
                     }
                     Ok(reloaded) => reloaded,
@@ -332,13 +337,16 @@ impl EffectRunner {
                     }
                 }
                 let mut message = format!("Reloaded {}", state.programs.display_path());
+                let mut severity = Severity::Info;
                 if !warning.is_empty() {
                     message = format!("{} — {}", message, warning);
+                    severity = Severity::Warning;
                 }
                 if !failed.is_empty() {
                     message = format!("{} — failed: {}", message, failed.join(", "));
+                    severity = Severity::Error;
                 }
-                state.message = message;
+                state.messages.post(severity, message);
             }
 
             Effect::InstallKeys(program_index) => {
@@ -350,19 +358,23 @@ impl EffectRunner {
                         note_off_waveforms: HashMap::new(),
                     };
                     state.keys = Some(new_keys);
-                    state.message = format!(
+                    let message = format!(
                         "Installed keys from program {}",
                         state.programs.display_name(program_index)
                     );
+                    state.messages.post(Severity::Info, message);
                 } else {
-                    state.message = match program.kind() {
-                        programs::ProgramKind::Waveform => {
-                            "Not a keys program (annotate it with #{keys})".to_string()
-                        }
-                        programs::ProgramKind::Keys => {
-                            "Keys program hasn't evaluated; fix its errors first".to_string()
-                        }
+                    let (severity, message) = match program.kind() {
+                        programs::ProgramKind::Waveform => (
+                            Severity::Info,
+                            "Not a keys program (annotate it with #{keys})",
+                        ),
+                        programs::ProgramKind::Keys => (
+                            Severity::Warning,
+                            "Keys program hasn't evaluated; fix its errors first",
+                        ),
                     };
+                    state.messages.post(severity, message);
                 }
             }
 
@@ -393,7 +405,7 @@ impl EffectRunner {
                     Err(error) => {
                         let diagnostic =
                             self.environment.diagnose(&error, &state.programs, keys.id);
-                        state.message = diagnostics::error_message(&[diagnostic]);
+                        state.messages.post_diagnostics(&[diagnostic]);
                     }
                 }
             }
@@ -429,8 +441,11 @@ impl EffectRunner {
                     .send(SliderEvent::UpdateSlider { mark, value });
             }
 
-            Effect::ShowMessage(msg) => {
-                state.message = msg;
+            Effect::ShowMessage(severity, text) => {
+                state.messages.post(severity, text);
+            }
+            Effect::ClearMessage => {
+                state.messages.clear();
             }
 
             Effect::SetEncoderDisplay { index, name, value } => {
@@ -495,8 +510,10 @@ impl EffectRunner {
                                 );
                                 println!("note on: {:#?}", note_on);
                                 println!("note off: {:#?}", note_off);
-                                state.message =
-                                    format!("Printed program {} to console", display_name);
+                                state.messages.post(
+                                    Severity::Info,
+                                    format!("Printed program {} to console", display_name),
+                                );
                             }
                             Err(error) => {
                                 println!("Keys instrument of program {}:", display_name);
@@ -506,20 +523,24 @@ impl EffectRunner {
                                     &state.programs,
                                     program_index,
                                 );
-                                let message = diagnostics::error_message(&[diagnostic]);
-                                println!("Applying it at a sample note failed: {}", message);
-                                state.message = message;
+                                println!("Applying it at a sample note failed:");
+                                state.messages.post_diagnostics(&[diagnostic]);
                             }
                         }
                     }
                     Some(evaluated) => {
                         println!("Evaluated form of program {}:", display_name);
                         println!("{:#?}", evaluated);
-                        state.message = format!("Printed program {} to console", display_name);
+                        state.messages.post(
+                            Severity::Info,
+                            format!("Printed program {} to console", display_name),
+                        );
                     }
                     None => {
-                        println!("Program {} has no evaluated form", display_name);
-                        state.message = format!("Program {} has no evaluated form", display_name);
+                        state.messages.post(
+                            Severity::Info,
+                            format!("Program {} has no evaluated form", display_name),
+                        );
                     }
                 }
             }
@@ -578,6 +599,11 @@ mod tests {
     use crate::waveform;
 
     use super::*;
+
+    /// Returns the text of `state`'s current message, or "" when there is none.
+    fn current_message(state: &AppState) -> &str {
+        state.messages.current().map_or("", |m| m.text.as_str())
+    }
 
     fn empty_status() -> tracker::Status<WaveformId, MarkId> {
         tracker::Status {
@@ -659,7 +685,7 @@ mod tests {
         assert!(
             state.keys.is_some(),
             "keys should install: {}",
-            state.message
+            current_message(&state)
         );
 
         runner.run_one(
@@ -770,9 +796,9 @@ mod tests {
         // The sweep evaluated the reloaded program.
         assert!(state.programs.programs()[0].waveform().is_some());
         assert!(
-            state.message.starts_with("Reloaded"),
+            current_message(&state).starts_with("Reloaded"),
             "got: {}",
-            state.message
+            current_message(&state)
         );
     }
 
@@ -807,14 +833,14 @@ mod tests {
         assert!(
             state.programs.programs()[0].keys_instrument().is_some(),
             "program should evaluate to a keys instrument: {}",
-            state.message
+            current_message(&state)
         );
 
         runner.run_one(&mut state, &mut world, Effect::PrintEvaluatedProgram(0));
         assert!(
-            state.message.starts_with("Printed program"),
+            current_message(&state).starts_with("Printed program"),
             "the sample note application should succeed, got: {}",
-            state.message
+            current_message(&state)
         );
     }
 
@@ -843,7 +869,7 @@ mod tests {
 
         assert!(fast_receiver.try_iter().next().is_none());
         assert_eq!(state.programs.display_name(0), "A:1 (tone)");
-        assert!(!state.message.is_empty());
+        assert!(!current_message(&state).is_empty());
     }
 
     #[test]
@@ -993,6 +1019,55 @@ mod tests {
         assert_eq!(last_slider_values.get(&key), Some(&0.5));
     }
 
+    /// Within one run, a failed evaluation's error stays current over a later
+    /// confirmation; the next run's confirmation replaces it. Every message
+    /// is queued for echoing.
+    #[test]
+    fn an_error_outranks_later_info_until_the_next_run() {
+        let (precompute_sender, _precompute_receiver) = mpsc::channel();
+        let (fast_sender, _fast_receiver) = mpsc::channel();
+        let (slider_sender, _slider_receiver) = mpsc::channel();
+        let player = player::Player::new(60, 4, precompute_sender, fast_sender);
+        let environment = environment::Environment::new(44100, 60, std::path::PathBuf::new());
+        let mut runner = EffectRunner::new(player, environment, slider_sender);
+        let mut state = AppState::from_source(
+            "#{level_db=0}\n_ = nope;\n".to_string(),
+            std::path::PathBuf::new(),
+        )
+        .expect("test source should parse");
+        let status = empty_status();
+        let mut world = World {
+            launchkey: None,
+            status: &status,
+        };
+        runner.run_all(
+            &mut state,
+            &mut world,
+            vec![
+                Effect::EvaluateProgram {
+                    program_index: 0,
+                    mode_on_success: None,
+                    mode_on_failure: None,
+                },
+                Effect::ShowMessage(Severity::Info, "Done".to_string()),
+            ],
+        );
+        assert_eq!(
+            state.messages.current().map(|m| m.severity),
+            Some(Severity::Error),
+            "got: {}",
+            current_message(&state)
+        );
+
+        runner.run_all(
+            &mut state,
+            &mut world,
+            vec![Effect::ShowMessage(Severity::Info, "Done".to_string())],
+        );
+        assert_eq!(current_message(&state), "Done");
+        assert_eq!(state.messages.take_unechoed().len(), 3);
+    }
+
     /// A play from an instant goes straight to the tracker with that start,
     /// repeating per the given measures, and leaves the message alone.
     #[test]
@@ -1008,7 +1083,9 @@ mod tests {
             std::path::PathBuf::new(),
         )
         .expect("test source should parse");
-        state.message = "Recorded 1 note into A:1".to_string();
+        state
+            .messages
+            .post(Severity::Info, "Recorded 1 note into A:1");
         let status = empty_status();
         let mut world = World {
             launchkey: None,
@@ -1044,7 +1121,7 @@ mod tests {
         };
         assert_eq!(start, Some(at));
         assert_eq!(repeat_every, Some(std::time::Duration::from_secs(4)));
-        assert_eq!(state.message, "Recorded 1 note into A:1");
+        assert_eq!(current_message(&state), "Recorded 1 note into A:1");
     }
 
     /// A slider declared on one binding reaches a sounding voice of another
