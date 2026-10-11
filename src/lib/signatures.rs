@@ -109,8 +109,8 @@ pub fn signature(name: &str) -> Option<Type> {
         ]),
         "<" | "<=" | ">" | ">=" => Type::function(vec![Type::float(), Type::float()], Type::Bool),
         "log" => Type::function(vec![Type::float(), Type::float()], Type::float()),
-        "sqrt" | "exp" => Type::function(vec![Type::float()], Type::float()),
-        "sin" => Type::function(vec![Type::waveform()], Type::waveform()),
+        "sqrt" => Type::function(vec![Type::float()], Type::float()),
+        "sin" | "exp" => Type::function(vec![Type::waveform()], Type::waveform()),
         "phase" => Type::function(vec![Type::waveform(), Type::waveform()], Type::waveform()),
         "round" => Type::function(vec![Type::float()], Type::int()),
         "map" => Type::Forall(

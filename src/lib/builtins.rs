@@ -286,20 +286,23 @@ where
     })
 }
 
+/// Returns a waveform combinator that returns the exponential function of each sample.
 pub fn exp<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Debug,
-    S: Debug,
+    M: Clone + Debug,
+    S: Clone + Debug,
 {
     Ok({
-        match arguments[..] {
-            [Expr::Waveform(Waveform::Const(value))] => Expr::float(value.exp()),
+        match &arguments[..] {
+            [Expr::Waveform(a)] => {
+                Expr::Waveform(Waveform::UnaryOp(UnaryOperator::Exp, Box::new(a.clone())))
+            }
             _ => return Err(Error::internal_here("Invalid argument for exp")),
         }
     })
 }
 
-// sin returns the waveform combinator that computes the sine of each sample.
+/// Returns the waveform combinator that computes the sine of each sample.
 pub fn sin<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
     M: Debug + Clone,

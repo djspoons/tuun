@@ -60,6 +60,8 @@ impl BinaryOperator {
 pub enum UnaryOperator {
     // Computes the sine of an angle given in radians.
     Sin,
+    // Computes the exponential function.
+    Exp,
 }
 
 impl UnaryOperator {
@@ -70,11 +72,12 @@ impl UnaryOperator {
     /// ```
     /// use tuun::waveform::UnaryOperator;
     ///
-    /// assert_eq!(UnaryOperator::Sin.apply(std::f32::consts:: FRAC_PI_2), 1.0);
+    /// assert_eq!(UnaryOperator::Sin.apply(std::f32::consts::FRAC_PI_2), 1.0);
     /// ```
     pub fn apply(&self, a: f32) -> f32 {
         match self {
             UnaryOperator::Sin => a.sin(),
+            UnaryOperator::Exp => a.exp(),
         }
     }
 }

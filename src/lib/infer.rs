@@ -3962,13 +3962,14 @@ mod tests {
                 vec![Type::waveform(), Type::waveform()],
                 Type::waveform(),
             )),
+            "f1" => Some(Type::function(vec![Type::float()], Type::float())),
             _ => signatures::signature(name),
         }
     }
 
     /// Builds a prelude mirroring the native one: the built-ins plus
     /// `tempo`, `sample_rate`, `mark`, and `debug`, and then the test
-    /// stand-ins `w2` and `cos`. The extra built-ins get stub closures — the
+    /// stand-ins `w2`, `f1`, and `cos`. The extra built-ins get stub closures — the
     /// checker only looks at their names.
     fn test_prelude<S: Clone + std::fmt::Debug + 'static>() -> Vec<SourceBinding<u32, S>> {
         let mut prelude: Vec<SourceBinding<u32, S>> = Vec::new();
@@ -4004,6 +4005,20 @@ mod tests {
                         .into_iter()
                         .next()
                         .ok_or_else(|| Error::internal_here("w2 takes two arguments"))
+                })),
+            }),
+        ));
+        // `f1`: a built-in of type `float -> float` (see `test_signature`).
+        // Returning its argument keeps evaluation consistent with that type.
+        prelude.push(SourceBinding::definition(
+            Pattern::Identifier("f1".to_string()),
+            SourceExpr::from(Expr::BuiltIn {
+                name: "f1".to_string(),
+                function: BuiltInFn(Rc::new(|arguments: Vec<Expr<u32, S>>| {
+                    arguments
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| Error::internal_here("f1 takes one argument"))
                 })),
             }),
         ));
@@ -4247,9 +4262,9 @@ mod tests {
         assert_errors("unfold(fn(x) => x, 0, 2.5)", &["expected int, found float"]);
         // `nth`'s index is hard-checked integral at runtime.
         assert_errors("nth(2.5, [1, 2, 3])", &["expected int, found float"]);
-        // Contravariant contract flow: `exp` requires constants, and the
+        // Contravariant contract flow: `f1` requires constants, and the
         // list supplies a definite waveform.
-        assert_errors("map(exp, [time])", &["expected [float], found [waveform]"]);
+        assert_errors("map(f1, [time])", &["expected [float], found [waveform]"]);
         // Comparisons are scalar-only at runtime.
         assert_errors("time < 1", &["expected float, found waveform"]);
         // `<>` requires seq elements; a definitely-unseq list errors.
@@ -4657,13 +4672,13 @@ mod tests {
     #[test]
     fn containment_judgments() {
         // A possibly-wrong value is an error: w2 may fold to a float,
-        // and exp requires one.
+        // and f1 requires one.
         assert_errors(
-            "map(exp, [w2(440, 0)])",
+            "map(f1, [w2(440, 0)])",
             &["expected [float], found [waveform]"],
         );
         // Ground containment still passes what it should.
-        assert_clean("exp(2) + w2(440, 0)");
+        assert_clean("f1(2) + w2(440, 0)");
         // Atom coverage: no single conjunct contains waveform-or-seq, but the
         // waveform and seq atoms are covered by different conjuncts.
         assert_clean("(if true then time else seq(0)(1)) * 1");
@@ -5066,7 +5081,7 @@ mod tests {
         assert_clean("let g = fn(v) => v + 1 in nth(1, [g, g])(1)");
         // Lists join their elements, and agreeing branches are unchanged.
         assert_clean("nth(0, [1, time])");
-        assert_clean("(if false then sqrt else exp)(4)");
+        assert_clean("(if false then sqrt else f1)(4)");
         assert_clean("(if false then append else reset)(time, time)");
         // Two arrows with no common domain still have no join.
         assert_errors(
