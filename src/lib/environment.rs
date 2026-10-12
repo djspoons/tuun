@@ -427,7 +427,7 @@ impl Environment {
                 self.checked_generation.set(generation);
             }
             let could_be_stale = !self.module_types.borrow().is_empty();
-            let errors = infer::check_program(
+            let (errors, _) = infer::check_program(
                 |path| self.resolve(path),
                 &bindings,
                 signatures::signature,

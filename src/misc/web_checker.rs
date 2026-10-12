@@ -343,7 +343,7 @@ fn check_block(
     // The checker runs first and findings fail the block, mirroring the
     // native and wasm gates; the expression must be playable, as the
     // browser player requires.
-    let findings = infer::check_program(
+    let (findings, _) = infer::check_program(
         resolve,
         &bindings,
         signatures::signature,

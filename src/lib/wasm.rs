@@ -260,7 +260,7 @@ impl Wasm {
         // mirroring the native `evaluate_and_record`. The expression must
         // be playable — produce a waveform or a seq — matching the
         // waveform check below.
-        let findings = infer::check_program(
+        let (findings, _) = infer::check_program(
             &resolve,
             &bindings,
             signatures::signature,
