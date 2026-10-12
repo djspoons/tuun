@@ -6,71 +6,64 @@
 //! discovery tool: it finds instances of shapes it already knows how to build,
 //! so a new finding usually means adding a case to `gen_expr` first.
 
-use std::rc::Rc;
-
 use tuun::builtins;
 use tuun::eval;
-use tuun::expr::{BuiltInFn, Error, ErrorKind, Expr, Pattern, SourceBinding, SourceExpr};
+use tuun::expr::{Binding, Error, ErrorKind, Expr, Pattern, SourceBinding, SourceExpr};
 use tuun::infer::{ModuleCache, check_program};
-use tuun::parser::parse_program;
-use tuun::signatures;
+use tuun::modules;
+use tuun::parser::{parse_module, parse_program};
+use tuun::signatures::signature;
 use tuun::types::{Refinement, Sort, Type};
 use tuun::waveform::Waveform;
 
-/// Returns the signature of the built-in named `name`: the stand-in `w2`
-/// first, then the native table.
-fn signature(name: &str) -> Option<Type> {
-    match name {
-        "w2" => Some(Type::function(
-            vec![Type::waveform(), Type::waveform()],
-            Type::waveform(),
-        )),
-        _ => signatures::signature(name),
-    }
+/// The bindings generated programs check and evaluate under: the built-ins
+/// and std, as a program that opens std sees them.
+struct Scope {
+    /// The built-ins plus `tempo` and `sample_rate`.
+    prelude: Vec<SourceBinding<u32, u32>>,
+    /// The embedded std module, opening the prelude.
+    std: Vec<SourceBinding<u32, u32>>,
+    /// The bindings a program is checked under: it opens the prelude, then
+    /// std.
+    program: Vec<SourceBinding<u32, u32>>,
 }
 
-/// Builds the bindings generated programs check and evaluate under: the
-/// built-ins, then the stand-ins `w2` and `cos`.
-fn prelude() -> Vec<SourceBinding<u32, u32>> {
-    let mut prelude = Vec::new();
-    builtins::add_bindings(&mut prelude);
-    // `w2`: a built-in of type `(waveform, waveform) -> waveform` (see
-    // `signature`). Returning its first argument keeps evaluation consistent
-    // with that type.
-    prelude.push(SourceBinding::definition(
-        Pattern::Identifier("w2".to_string()),
-        SourceExpr::from(Expr::BuiltIn {
-            name: "w2".to_string(),
-            function: BuiltInFn(Rc::new(|arguments: Vec<Expr<u32, u32>>| {
-                arguments
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| Error::internal_here("w2 takes two arguments"))
-            })),
-        }),
-    ));
-    // `cos`: a definition-bound arrow over waveforms, `fn(x) => w2(0, x + pi /
-    // 2)`.
-    prelude.push(SourceBinding::definition(
-        Pattern::Identifier("cos".to_string()),
-        SourceExpr::function(
-            vec![Pattern::Identifier("x".to_string())],
-            SourceExpr::application(
-                SourceExpr::variable("w2".to_string()),
-                vec![
-                    SourceExpr::float(0.0),
-                    SourceExpr::application(
-                        SourceExpr::variable("+".to_string()),
-                        vec![
-                            SourceExpr::variable("x".to_string()),
-                            SourceExpr::float(std::f32::consts::FRAC_PI_2),
-                        ],
-                    ),
-                ],
-            ),
-        ),
-    ));
-    prelude
+impl Scope {
+    fn new() -> Scope {
+        let open = |path: &str| Binding::Open(vec![path.to_string()]).into();
+        let mut prelude = Vec::new();
+        builtins::add_bindings(&mut prelude);
+        for (name, value) in [("tempo", 120.0), ("sample_rate", 44100.0)] {
+            prelude.push(SourceBinding::definition(
+                Pattern::Identifier(name.to_string()),
+                SourceExpr::float(value),
+            ));
+        }
+        let (_, text) = modules::EMBEDDED_MODULES
+            .iter()
+            .find(|(path, _)| *path == "std")
+            .expect("std is embedded");
+        let (mut std, errors) = parse_module(text, 1u32).expect("std parses");
+        assert!(errors.is_empty(), "std has parse errors");
+        std.insert(0, open("__prelude"));
+        Scope {
+            prelude,
+            std,
+            // Opening std adds about 14 ms to every `eval::evaluate` (measured
+            // on `1 + 2`), since evaluation has no counterpart to the checker's
+            // `ModuleCache`; that is about half of `soundness_fuzz`'s time.
+            program: vec![open("__prelude"), open("std")],
+        }
+    }
+
+    /// Returns the bindings of the module at `path`.
+    fn resolve(&self, path: &[String]) -> Result<&[SourceBinding<u32, u32>], Error<u32>> {
+        match path.join(".").as_str() {
+            "__prelude" => Ok(&self.prelude),
+            "std" => Ok(&self.std),
+            key => Err(Error::eval_here(format!("no module {}", key))),
+        }
+    }
 }
 
 /// Whether a runtime failure is one the sort lattice cannot see — the declared
@@ -142,6 +135,7 @@ const ATOMS: &[&str] = &[
     "log",
     "g",
     "h",
+    "k",
 ];
 const BIN: &[&str] = &["+", "-", "*", "/", "&", "\\", "<", ">", "==", "!="];
 const UN1: &[&str] = &[
@@ -153,7 +147,7 @@ const UN1: &[&str] = &[
     "fin(4)",
     "capture(\"c\")",
 ];
-const FN1: &[&str] = &["sqrt", "exp", "cos", "g", "h"];
+const FN1: &[&str] = &["sqrt", "exp", "cos", "g", "h", "k"];
 const BUILTIN2: &[&str] = &["log", "phase", "reset", "append", "pow"];
 
 fn gen_expr(rng: &mut Rng, depth: usize) -> String {
@@ -325,6 +319,10 @@ fn gen_expr(rng: &mut Rng, depth: usize) -> String {
 
 /// One generated program, wrapped in the prelude the generator's atoms
 /// assume.
+///
+/// The prelude's functions are written as a user would: `g` and `h` take their
+/// types from built-ins with several conjuncts, and `k` from one with a single
+/// arrow.
 fn generated(rng: &mut Rng) -> String {
     // A consumer around the expression gives its *result* a use, so a
     // wrong result type is caught rather than merely inferred.
@@ -347,7 +345,7 @@ fn generated(rng: &mut Rng) -> String {
     let inner = CONSUMERS[rng.below(CONSUMERS.len())].replacen("{}", &inner, 1);
     format!(
         "let x = 1 in let y = time in let g = fn(v) => v + 1 in \
-         let h = fn(v) => v | fin(4) in {}",
+         let h = fn(v) => v | fin(4) in let k = fn(v) => append(v, 0) in {}",
         inner
     )
 }
@@ -358,9 +356,9 @@ fn generated(rng: &mut Rng) -> String {
 /// roughly one program in a thousand; `soundness_fuzz` and
 /// `false_positive_fuzz` are where a finer sweep belongs.
 const CANARY: [(u64, usize, u64); 3] = [
-    (12345, 350, 14351154097893161217),
-    (777, 350, 10136828412485007073),
-    (20260901, 350, 10828246241722905831),
+    (12345, 350, 12924745280370670482),
+    (777, 350, 12246305972029091934),
+    (20260901, 350, 9767260543059777376),
 ];
 
 /// Returns an FNV-1a hash of which generated programs check clean.
@@ -370,22 +368,16 @@ const CANARY: [(u64, usize, u64); 3] = [
 /// constant needs a hash that is.
 fn accept_hash(seed: u64, count: usize) -> u64 {
     let mut rng = Rng(seed);
-    let bindings = prelude();
-    let resolve = |_: &[String]| Err(Error::eval_here("no modules"));
+    let scope = Scope::new();
+    let resolve = |path: &[String]| scope.resolve(path);
+    let mut cache = ModuleCache::default();
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for _ in 0..count {
         let text = generated(&mut rng);
         let accepted = match parse_program::<u32, _>(&text, 0u32) {
-            Ok(expr) => check_program(
-                resolve,
-                &bindings,
-                signature,
-                &expr,
-                None,
-                &mut ModuleCache::default(),
-            )
-            .0
-            .is_empty(),
+            Ok(expr) => check_program(resolve, &scope.program, signature, &expr, None, &mut cache)
+                .0
+                .is_empty(),
             Err(_) => continue,
         };
         hash ^= u64::from(accepted);
@@ -398,10 +390,12 @@ fn accept_hash(seed: u64, count: usize) -> u64 {
 /// set has to say so.
 ///
 /// This is a canary, not a correctness claim: the hash changing does not
-/// mean a change is wrong, only that it moved the boundary. When it fires,
-/// compare the two builds program by program — a fix should move the
-/// boundary in one direction only — and then update the constant here
-/// along with the entry that explains the move.
+/// mean a change is wrong, only that it moved the boundary. Programs check
+/// against the real built-ins and std, so a change to a signature or a std
+/// definition the generator reaches can move it as well as a checker change.
+/// When it fires, compare the two builds program by program — a fix should
+/// move the boundary in one direction only — and then update the constant
+/// here along with the entry that explains the move.
 #[test]
 fn the_accepted_set_is_unchanged() {
     let actual: Vec<(u64, usize, u64)> = CANARY
@@ -433,8 +427,9 @@ fn the_accepted_set_is_unchanged() {
 fn soundness_fuzz() {
     let (seed, count) = sweep_bounds(20000);
     let mut rng = Rng(seed);
-    let bindings = prelude();
-    let resolve = |_: &[String]| Err(Error::eval_here("no modules"));
+    let scope = Scope::new();
+    let resolve = |path: &[String]| scope.resolve(path);
+    let mut cache = ModuleCache::default();
     let (mut found, mut clean) = (0, 0);
     let mut kinds: Vec<String> = Vec::new();
     for _ in 0..count {
@@ -443,16 +438,11 @@ fn soundness_fuzz() {
             continue;
         };
         let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            check_program(
-                resolve,
-                &bindings,
-                signature,
-                &expr,
-                None,
-                &mut ModuleCache::default(),
-            )
+            check_program(resolve, &scope.program, signature, &expr, None, &mut cache)
         }));
         let Ok((errors, ty)) = checked else {
+            // A panic may leave the cache half-built.
+            cache = ModuleCache::default();
             found += 1;
             println!("CHECKER-PANIC[{}] {}", found, text);
             if found > 30 {
@@ -470,7 +460,7 @@ fn soundness_fuzz() {
             _ => None,
         };
         let evaluated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            eval::evaluate(resolve, &bindings, expr)
+            eval::evaluate(resolve, &scope.program, expr)
         }));
         let (kind, detail) = match evaluated {
             Err(_) => ("EVAL-PANIC".to_string(), String::new()),
@@ -524,8 +514,9 @@ fn soundness_fuzz() {
 fn false_positive_fuzz() {
     let (seed, count) = sweep_bounds(20000);
     let mut rng = Rng(seed);
-    let bindings = prelude();
-    let resolve = |_: &[String]| Err(Error::eval_here("no modules"));
+    let scope = Scope::new();
+    let resolve = |path: &[String]| scope.resolve(path);
+    let mut cache = ModuleCache::default();
     let (mut found, mut rejected) = (0, 0);
     let mut kinds: Vec<String> = Vec::new();
     for _ in 0..count {
@@ -534,15 +525,10 @@ fn false_positive_fuzz() {
             continue;
         };
         let Ok((errors, _)) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            check_program(
-                resolve,
-                &bindings,
-                signature,
-                &expr,
-                None,
-                &mut ModuleCache::default(),
-            )
+            check_program(resolve, &scope.program, signature, &expr, None, &mut cache)
         })) else {
+            // A panic may leave the cache half-built.
+            cache = ModuleCache::default();
             continue;
         };
         if errors.is_empty() {
@@ -551,7 +537,7 @@ fn false_positive_fuzz() {
         rejected += 1;
         let messages: Vec<String> = errors.iter().map(|e| e.message().to_string()).collect();
         let evaluated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            eval::evaluate(resolve, &bindings, expr)
+            eval::evaluate(resolve, &scope.program, expr)
         }));
         if !matches!(evaluated, Ok(Ok(_))) {
             continue;
