@@ -12,6 +12,8 @@ clamp01 = clamp(0, 1);
 pi = 3.14159265;
 sinh = fn(x) => (exp(x) - exp(-x)) / 2;
 
+ln = fn(x) => log(x, exp(1));
+
 // WAVES
 // Periodic waveforms should start behave as if they have negative values before the origin 
 // and start with their first positive value (including +0.0) at the origin (at least they 

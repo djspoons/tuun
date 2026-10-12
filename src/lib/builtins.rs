@@ -253,15 +253,16 @@ where
 
 pub fn log<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Debug,
-    S: Debug,
+    M: Clone + Debug,
+    S: Clone + Debug,
 {
     Ok({
-        match arguments[..] {
-            [
-                Expr::Waveform(Waveform::Const(value)),
-                Expr::Waveform(Waveform::Const(base)),
-            ] => Expr::float(value.log(base)),
+        match &arguments[..] {
+            [Expr::Waveform(a), Expr::Waveform(b)] => Expr::Waveform(Waveform::BinaryOp(
+                BinaryOperator::Log,
+                Box::new(a.clone()),
+                Box::new(b.clone()),
+            )),
             _ => return Err(Error::internal_here("Invalid arguments for log")),
         }
     })
@@ -286,36 +287,63 @@ where
     })
 }
 
+/// Returns the result of applying `op` to each sample of a waveform or seq.
+///
+/// A seq keeps its offset, so `op` applies to its waveform only.
+fn unary_op<M, S>(
+    mut arguments: Vec<Expr<M, S>>,
+    name: &str,
+    op: UnaryOperator,
+) -> Result<Expr<M, S>, Error<S>>
+where
+    M: Debug,
+    S: Debug,
+{
+    if arguments.len() != 1 {
+        return Err(Error::internal_here(format!(
+            "Expected one argument for {}, got {:?}",
+            name, arguments
+        )));
+    }
+    Ok(match arguments.remove(0) {
+        Expr::Waveform(a) => Expr::Waveform(Waveform::UnaryOp(op, Box::new(a))),
+        Seq { offset, waveform } => match waveform.expr {
+            Expr::Waveform(a) => Seq {
+                offset,
+                waveform: boxed(Expr::Waveform(Waveform::UnaryOp(op, Box::new(a)))),
+            },
+            expr => {
+                return Err(Error::internal_here(format!(
+                    "Invalid argument to seq in {}: {:?}",
+                    name, expr
+                )));
+            }
+        },
+        expr => {
+            return Err(Error::internal_here(format!(
+                "Invalid argument for {}: {:?}",
+                name, expr
+            )));
+        }
+    })
+}
+
 /// Returns a waveform combinator that returns the exponential function of each sample.
 pub fn exp<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Clone + Debug,
-    S: Clone + Debug,
+    M: Debug,
+    S: Debug,
 {
-    Ok({
-        match &arguments[..] {
-            [Expr::Waveform(a)] => {
-                Expr::Waveform(Waveform::UnaryOp(UnaryOperator::Exp, Box::new(a.clone())))
-            }
-            _ => return Err(Error::internal_here("Invalid argument for exp")),
-        }
-    })
+    unary_op(arguments, "exp", UnaryOperator::Exp)
 }
 
 /// Returns the waveform combinator that computes the sine of each sample.
 pub fn sin<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Debug + Clone,
-    S: Clone + Debug,
+    M: Debug,
+    S: Debug,
 {
-    Ok({
-        match &arguments[..] {
-            [Expr::Waveform(a)] => {
-                Expr::Waveform(Waveform::UnaryOp(UnaryOperator::Sin, Box::new(a.clone())))
-            }
-            _ => return Err(Error::internal_here("Invalid arguments for sin")),
-        }
-    })
+    unary_op(arguments, "sin", UnaryOperator::Sin)
 }
 
 pub fn phase<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
@@ -1243,6 +1271,22 @@ mod tests {
         assert_eq!(offset_root(two.clone()), Some(Waveform::Const(3.0)));
         let three = followed_by(vec![two, seq(4.0)]).unwrap();
         assert_eq!(offset_root(three), Some(Waveform::Const(7.0)));
+    }
+
+    #[test]
+    fn test_unary_op_keeps_seq_offset() {
+        let seq = Seq {
+            offset: boxed(Expr::float(2.0)),
+            waveform: boxed(Expr::Waveform(Waveform::Time(()))),
+        };
+        let Seq { offset, waveform } = exp::<u32, ()>(vec![seq]).unwrap() else {
+            panic!("exp of a seq should be a seq");
+        };
+        assert!(matches!(offset.expr, Expr::Waveform(Waveform::Const(v)) if v == 2.0));
+        assert!(matches!(
+            waveform.expr,
+            Expr::Waveform(Waveform::UnaryOp(UnaryOperator::Exp, a)) if *a == Waveform::Time(())
+        ));
     }
 
     #[test]

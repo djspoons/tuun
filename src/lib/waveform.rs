@@ -9,13 +9,17 @@ pub enum BinaryOperator {
     Subtract,
     /// Computes the product of two samples.
     Multiply,
-    /// Computes the ratio of two samples or yields zero if the second sample is zero.
+    /// Computes the ratio of two samples or yields zero if the second sample is
+    /// zero.
     Divide,
-    /// Computes the sum of two samples or, in the case where only one sample is defined,
-    /// returns that sample.
+    /// Computes the sum of two samples or, in the case where only one sample is
+    /// defined, returns that sample.
     Merge,
     /// Raises the first sample to the power of the second.
     Power,
+    /// Takes the logarithm of the first sample in the base of the second
+    /// sample, or zero if the first sample is not positive.
+    Log,
 }
 
 impl BinaryOperator {
@@ -52,6 +56,13 @@ impl BinaryOperator {
                 }
             }
             BinaryOperator::Power => a.powf(b),
+            BinaryOperator::Log => {
+                if a <= 0.0 {
+                    0.0
+                } else {
+                    a.log(b)
+                }
+            }
         }
     }
 }

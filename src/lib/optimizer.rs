@@ -454,6 +454,27 @@ where
                 (a, b) => BinaryOp(BinaryOperator::Power, Box::new(a), Box::new(b)),
             }
         }
+        BinaryOp(BinaryOperator::Log, a, b) => match (optimize(*a), optimize(*b)) {
+            (Fixed(a, _), _) if a.is_empty() => Fixed(vec![], ()),
+            (_, Fixed(b, _)) if b.is_empty() => Fixed(vec![], ()),
+            // Constant folding.
+            (Const(a), Const(b)) => Const(BinaryOperator::Log.apply(a, b)),
+            // Fixed with a constant base: map element-wise.
+            (Fixed(a, _), Const(b)) => Fixed(
+                a.into_iter()
+                    .map(|x| BinaryOperator::Log.apply(x, b))
+                    .collect(),
+                (),
+            ),
+            // Constant argument with a Fixed base: also element-wise.
+            (Const(a), Fixed(b, _)) => Fixed(
+                b.into_iter()
+                    .map(|y| BinaryOperator::Log.apply(a, y))
+                    .collect(),
+                (),
+            ),
+            (a, b) => BinaryOp(BinaryOperator::Log, Box::new(a), Box::new(b)),
+        },
         UnaryOp(op, a) => match optimize(*a) {
             Fixed(mut a, _) => Fixed(a.iter_mut().map(|x| op.apply(*x)).collect(), ()),
             Const(a) => Const(op.apply(a)),

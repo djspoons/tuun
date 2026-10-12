@@ -108,10 +108,14 @@ pub fn signature(name: &str) -> Option<Type> {
             Type::function(vec![Type::String, Type::String], Type::Bool),
         ]),
         "<" | "<=" | ">" | ">=" => Type::function(vec![Type::float(), Type::float()], Type::Bool),
-        "log" => Type::function(vec![Type::float(), Type::float()], Type::float()),
         "sqrt" => Type::function(vec![Type::float()], Type::float()),
-        "sin" | "exp" => Type::function(vec![Type::waveform()], Type::waveform()),
-        "phase" => Type::function(vec![Type::waveform(), Type::waveform()], Type::waveform()),
+        "exp" | "sin" => Type::intersection(vec![
+            Type::function(vec![Type::waveform()], Type::waveform()),
+            Type::function(vec![Type::seq()], Type::seq()),
+        ]),
+        "log" | "phase" => {
+            Type::function(vec![Type::waveform(), Type::waveform()], Type::waveform())
+        }
         "round" => Type::function(vec![Type::float()], Type::int()),
         "map" => Type::Forall(
             vec![0, 1],

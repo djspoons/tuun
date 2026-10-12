@@ -2588,14 +2588,8 @@ mod tests {
     fn show_type_reports_the_identifier_under_the_cursor() {
         let source = "#{level_db=0}\n_ = test;";
         // A prelude name, with the cursor inside it and just past it.
-        assert_eq!(
-            show_type_message(source, "log(2, 8)", 1),
-            "log : (float, float) -> float"
-        );
-        assert_eq!(
-            show_type_message(source, "log(2, 8)", 3),
-            "log : (float, float) -> float"
-        );
+        assert_eq!(show_type_message(source, "time", 1), "time : waveform");
+        assert_eq!(show_type_message(source, "time", 4), "time : waveform");
         // A parameter reads as what the body settled it to, not as an
         // unknown — the point of reporting after inference finishes.
         assert_eq!(

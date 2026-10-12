@@ -3963,14 +3963,18 @@ mod tests {
                 Type::waveform(),
             )),
             "f1" => Some(Type::function(vec![Type::float()], Type::float())),
+            "f2" => Some(Type::function(
+                vec![Type::float(), Type::float()],
+                Type::float(),
+            )),
             _ => signatures::signature(name),
         }
     }
 
     /// Builds a prelude mirroring the native one: the built-ins plus
     /// `tempo`, `sample_rate`, `mark`, and `debug`, and then the test
-    /// stand-ins `w2`, `f1`, and `cos`. The extra built-ins get stub closures — the
-    /// checker only looks at their names.
+    /// stand-ins `w2`, `f1`, `f2`, and `cos`. The extra built-ins get stub
+    /// closures — the checker only looks at their names.
     fn test_prelude<S: Clone + std::fmt::Debug + 'static>() -> Vec<SourceBinding<u32, S>> {
         let mut prelude: Vec<SourceBinding<u32, S>> = Vec::new();
         builtins::add_bindings(&mut prelude);
@@ -4019,6 +4023,21 @@ mod tests {
                         .into_iter()
                         .next()
                         .ok_or_else(|| Error::internal_here("f1 takes one argument"))
+                })),
+            }),
+        ));
+        // `f2`: a built-in of type `(float, float) -> float` (see
+        // `test_signature`). Returning its first argument keeps evaluation
+        // consistent with that type.
+        prelude.push(SourceBinding::definition(
+            Pattern::Identifier("f2".to_string()),
+            SourceExpr::from(Expr::BuiltIn {
+                name: "f2".to_string(),
+                function: BuiltInFn(Rc::new(|arguments: Vec<Expr<u32, S>>| {
+                    arguments
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| Error::internal_here("f2 takes two arguments"))
                 })),
             }),
         ));
@@ -5065,17 +5084,17 @@ mod tests {
 
     #[test]
     fn branches_join_arrows_with_the_variance() {
-        // w2 takes waveforms and log takes floats; the branch takes what
+        // w2 takes waveforms and f2 takes floats; the branch takes what
         // both take and returns what either returns.
-        assert_clean("(if false then w2 else log)(0.5, 0.5)");
+        assert_clean("(if false then w2 else f2)(0.5, 0.5)");
         // So a waveform argument is rejected — at the argument, which only
         // the joined domain can point at.
         assert_errors(
-            "(if false then w2 else log)(time, 0)",
+            "(if false then w2 else f2)(time, 0)",
             &["expected float, found waveform"],
         );
         // The join is symmetric.
-        assert_clean("(if false then log else w2)(0.5, 0.5)");
+        assert_clean("(if false then f2 else w2)(0.5, 0.5)");
         // An intersection joins with itself, which needs `unify` to know
         // about intersections at all.
         assert_clean("let g = fn(v) => v + 1 in nth(1, [g, g])(1)");
@@ -5691,8 +5710,8 @@ mod tests {
     /// `false_positive_fuzz` are where a finer sweep belongs.
     const CANARY: [(u64, usize, u64); 3] = [
         (12345, 350, 14351154097893161217),
-        (777, 350, 11627419878783254061),
-        (20260901, 350, 5677332001525135284),
+        (777, 350, 10136828412485007073),
+        (20260901, 350, 10828246241722905831),
     ];
 
     /// Returns an FNV-1a hash of which generated programs check clean.
