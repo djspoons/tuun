@@ -3950,13 +3950,10 @@ fn dedup_last_wins<T>(entries: Vec<(String, T)>) -> Vec<(String, T)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::expr::ErrorKind;
     use std::rc::Rc;
 
     use crate::builtins;
-    use crate::eval;
     use crate::expr::BuiltInFn;
-    use crate::modules;
     use crate::parser::{parse_module, parse_program};
     use crate::signatures;
 
@@ -3979,7 +3976,7 @@ mod tests {
 
     /// Builds a prelude mirroring the native one: the built-ins plus
     /// `tempo`, `sample_rate`, `mark`, and `debug`, and then the test
-    /// stand-ins `w2`, `f1`, `f2`, and `cos`. The extra built-ins get stub
+    /// stand-ins `w2`, `f1`, `f2`, and `src_w1`. The extra built-ins get stub
     /// closures — the checker only looks at their names.
     fn test_prelude<S: Clone + std::fmt::Debug + 'static>() -> Vec<SourceBinding<u32, S>> {
         let mut prelude: Vec<SourceBinding<u32, S>> = Vec::new();
@@ -4047,10 +4044,11 @@ mod tests {
                 })),
             }),
         ));
-        // `cos`: the tests' stand-in for a definition-bound arrow over
-        // waveforms, `fn(x) => w2(0, x + pi / 2)`.
+        // `src_w1`: a one-argument waveform function defined in source rather
+        // than built in, for tests that need a definition-bound arrow beside
+        // the built-ins. Its body only has to use `x` numerically.
         prelude.push(SourceBinding::definition(
-            Pattern::Identifier("cos".to_string()),
+            Pattern::Identifier("src_w1".to_string()),
             SourceExpr::function(
                 vec![Pattern::Identifier("x".to_string())],
                 SourceExpr::application(
@@ -4449,7 +4447,7 @@ mod tests {
         // so the two sides read as though they should match.
         assert_errors(
             "let h = fn(v) => v | fin(4) in \
-             let f = fn(x, k = h) => k in nth(f(1, k = cos), [1, 2])",
+             let f = fn(x, k = h) => k in nth(f(1, k = src_w1), [1, 2])",
             &["expected int, found (waveform) -> waveform"],
         );
         // Where either side *is* a numeric, its name states the sort and the
@@ -4474,16 +4472,16 @@ mod tests {
         // arrow of fresh parts, so a fold whose seed and step are different
         // functions settles on the arrow both fit rather than demanding one
         // of them exactly.
-        assert_clean("reduce(fn(acc, x) => cos, sqrt, [1])");
-        assert_clean("unfold(fn(v) => cos, sqrt, 2)");
+        assert_clean("reduce(fn(acc, x) => src_w1, sqrt, [1])");
+        assert_clean("unfold(fn(v) => src_w1, sqrt, 2)");
         // Through a structure, too, where the leaf is the arrow.
-        assert_clean("reduce(fn(acc, x) => [cos], [sqrt], [1])");
-        assert_clean("reduce(fn(acc, x) => (cos, 1), (sqrt, 2), [1])");
+        assert_clean("reduce(fn(acc, x) => [src_w1], [sqrt], [1])");
+        assert_clean("reduce(fn(acc, x) => (src_w1, 1), (sqrt, 2), [1])");
         // Parameters meet and results join, the same answer `join` gives two
         // arrows: `sqrt` takes floats, so the fold's does too.
-        assert_clean("reduce(fn(acc, x) => cos, sqrt, [1])(0.5)");
+        assert_clean("reduce(fn(acc, x) => src_w1, sqrt, [1])(0.5)");
         assert_errors(
-            "reduce(fn(acc, x) => cos, sqrt, [1])(time)",
+            "reduce(fn(acc, x) => src_w1, sqrt, [1])(time)",
             &["expected float, found waveform"],
         );
         // Arrows with no shared parameter shape still have nothing to meet; the
@@ -5154,430 +5152,14 @@ mod tests {
         assert!(checker.unify(&meta, &list).is_err());
     }
 
-    /// Whether a runtime failure is one the sort lattice cannot see — the
-    /// declared residue, which a clean program is allowed to end in.
-    fn declared_residue<S>(error: &Error<S>) -> bool {
-        error.kind() == ErrorKind::Eval
-    }
-
-    /// A closed expression inhabiting `sort`, preferring the most general
-    /// atom the sort admits, for applying exported functions.
-    fn representative_text(sort: Sort) -> &'static str {
-        if !sort.intersect(Sort::NON_INT_ONLY).is_empty() {
-            "0.5"
-        } else if !sort.intersect(Sort::INT).is_empty() {
-            "2"
-        } else if !sort.intersect(Sort::NON_CONST_WAVE).is_empty() {
-            "time"
-        } else {
-            "(time | seq(time - 1))"
-        }
-    }
-
-    /// The runtime sort of an evaluated value; `None` for non-numerics.
-    fn runtime_sort(expr: &Expr<u32, u32>) -> Option<Sort> {
-        match expr {
-            Expr::Waveform(waveform::Waveform::Const(value)) => Some(if value.fract() == 0.0 {
-                Sort::INT
-            } else {
-                Sort::NON_INT_ONLY
-            }),
-            Expr::Waveform(_) => Some(Sort::NON_CONST_WAVE),
-            Expr::Seq { .. } => Some(Sort::SEQ),
-            _ => None,
-        }
-    }
-
-    /// One parsed library module: its path, the source text its spans index
-    /// into, and its bindings.
-    type LibraryModule = (String, &'static str, Vec<SourceBinding<u32, u32>>);
-
-    /// The embedded library, parsed, paired with the source text its spans
-    /// index into.
-    ///
-    /// Each module carries its index as span source, so an error can be
-    /// attributed to the module whose text it came from, and each opens
-    /// `__prelude` — which [`library_resolve`] answers with the test prelude.
-    fn parsed_library() -> Vec<LibraryModule> {
-        modules::EMBEDDED_MODULES
-            .iter()
-            .enumerate()
-            .map(|(index, (path, content))| {
-                let (mut bindings, errors) = parse_module::<u32, _>(content, index as u32).unwrap();
-                assert!(errors.is_empty(), "parse errors in {}", path);
-                bindings.insert(0, Binding::Open(vec!["__prelude".to_string()]).into());
-                (path.to_string(), *content, bindings)
-            })
-            .collect()
-    }
-
-    /// Resolves a module path against the test prelude and a parsed library.
-    ///
-    /// A generic fn item rather than a closure so each call site can pick its
-    /// own lifetime: the binding vectors are call-site-local.
-    fn library_resolve<'a>(
-        prelude: &'a [SourceBinding<u32, u32>],
-        parsed: &'a [LibraryModule],
-        path: &[String],
-    ) -> Result<&'a [SourceBinding<u32, u32>], Error<u32>> {
-        let key = path.join(".");
-        if key == "__prelude" {
-            return Ok(prelude);
-        }
-        parsed
-            .iter()
-            .find(|(name, _, _)| *name == key)
-            .map(|(_, _, bindings)| &bindings[..])
-            .ok_or_else(|| Error::types_here(format!("no module {}", key)))
-    }
-
-    /// The soundness theorem as a regression test, over the library corpus: no
-    /// clean program may evaluate to an error outside the declared residue.
-    ///
-    /// Covers every module as a program root, and every exported function
-    /// applied once per table conjunct at representative arguments — the
-    /// tabulated analog of the builtin conformance test, checking result sorts
-    /// against the conjuncts.
-    #[test]
-    fn differential_library_agreement() {
-        let prelude = test_prelude::<u32>();
-        let parsed = parsed_library();
-        let mut calls = 0;
-        let mut true_positives = 0;
-        let mut residue = 0;
-        // Every module as a program root: its bindings must evaluate, and
-        // checking must agree.
-        for (path, _, bindings) in &parsed {
-            let expr = parse_program::<u32, _>("0", 9999).unwrap();
-            let clean = check_program(
-                |p: &[String]| library_resolve(&prelude, &parsed, p),
-                bindings,
-                test_signature,
-                &expr,
-                None,
-                &mut ModuleCache::default(),
-            )
-            .0
-            .is_empty();
-            let evaluated = eval::evaluate(
-                |p: &[String]| library_resolve(&prelude, &parsed, p),
-                bindings,
-                expr,
-            );
-            if let (true, Err(error)) = (clean, &evaluated) {
-                assert!(
-                    declared_residue(error),
-                    "soundness: module {} is clean but evaluates to: {}",
-                    path,
-                    error.message()
-                );
-            }
-            calls += 1;
-        }
-        // Every exported function applied once per all-numeric table conjunct.
-        // The calls batch into one synthesized module per library module —
-        // one check and one evaluation for all of them — with a
-        // distinct source id per call for attribution.
-        for (_, _, bindings) in &parsed {
-            let mut checker: Infer<u32> = Infer::new(test_signature);
-            let mut context = Vec::new();
-            let mut memo = HashMap::new();
-            let exports = checker.build_context(
-                &|p: &[String]| library_resolve(&prelude, &parsed, p),
-                bindings,
-                &mut context,
-                &mut memo,
-                &mut ModuleCache::default(),
-            );
-            // (name to bind, call text, source id, declared result sort)
-            let mut applied: Vec<(String, String, u32, Option<Sort>)> = Vec::new();
-            for (name, entry) in exports {
-                let ContextEntry::Ty(ty, _) = entry else {
-                    continue;
-                };
-                let body = match &ty {
-                    Type::Forall(_, body) => &**body,
-                    other => other,
-                };
-                let conjuncts: Vec<&Type> = match body {
-                    Type::And(conjuncts) => conjuncts.iter().collect(),
-                    other => vec![other],
-                };
-                for conjunct in conjuncts.iter() {
-                    let Type::Function {
-                        positional, result, ..
-                    } = conjunct
-                    else {
-                        continue;
-                    };
-                    let domains: Option<Vec<Sort>> = positional
-                        .iter()
-                        .map(|domain| match domain {
-                            Type::Numeric(Refinement::Ground(sort)) => Some(*sort),
-                            _ => None,
-                        })
-                        .collect();
-                    let Some(domains) = domains else {
-                        continue;
-                    };
-                    let arguments = domains
-                        .iter()
-                        .map(|domain| representative_text(*domain))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    let declared = match &**result {
-                        Type::Numeric(Refinement::Ground(sort)) => Some(*sort),
-                        _ => None,
-                    };
-                    let id = 10_000 + applied.len() as u32;
-                    let bound = format!("__diff{}", applied.len());
-                    applied.push((bound, format!("{}({})", name, arguments), id, declared));
-                }
-            }
-            let mut extended = bindings.clone();
-            for (bound, text, id, _) in &applied {
-                let Ok(expr) = parse_program::<u32, _>(text, *id) else {
-                    continue;
-                };
-                extended.push(SourceBinding::definition(
-                    Pattern::Identifier(bound.clone()),
-                    expr,
-                ));
-            }
-            calls += applied.len();
-            let expr = parse_program::<u32, _>("0", 9999).unwrap();
-            let errors = check_program(
-                |p: &[String]| library_resolve(&prelude, &parsed, p),
-                &extended,
-                test_signature,
-                &expr,
-                None,
-                &mut ModuleCache::default(),
-            )
-            .0;
-            let flagged: Vec<u32> = errors.iter().filter_map(|error| error.source()).collect();
-            // Classifies one call by evaluating it alone against the
-            // module. An eval error's span points into the failing body,
-            // not the call, so per-call evaluation is the only reliable
-            // attribution; it runs for flagged calls and as the fallback
-            // when the batch fails.
-            let mut classify = |text: &str, id: u32, declared: Option<Sort>| {
-                let expr = parse_program::<u32, _>(text, id).unwrap();
-                let evaluated = eval::evaluate(
-                    |p: &[String]| library_resolve(&prelude, &parsed, p),
-                    bindings,
-                    expr,
-                );
-                match &evaluated {
-                    Err(error) if declared_residue(error) => residue += 1,
-                    Err(error) => {
-                        assert!(
-                            flagged.contains(&id),
-                            "soundness: {:?} is clean but evaluates to: {}",
-                            text,
-                            error.message()
-                        );
-                        true_positives += 1;
-                    }
-                    Ok(value) => {
-                        if let (Some(declared), Some(actual)) =
-                            (declared, runtime_sort(&value.expr))
-                        {
-                            assert!(
-                                actual.is_subset(declared),
-                                "{:?}: runtime sort {} outside the conjunct's declared {}",
-                                text,
-                                actual,
-                                declared
-                            );
-                        }
-                    }
-                }
-            };
-            // Flagged calls are expected to fail: evaluate each alone.
-            for (_, text, id, declared) in &applied {
-                if flagged.contains(id) {
-                    classify(text, *id, *declared);
-                }
-            }
-            // The unflagged calls batch into one evaluation; a batch
-            // failure falls back to per-call attribution.
-            let mut batch = bindings.clone();
-            for (bound, text, id, _) in &applied {
-                if !flagged.contains(id)
-                    && let Ok(expr) = parse_program::<u32, _>(text, *id)
-                {
-                    batch.push(SourceBinding::definition(
-                        Pattern::Identifier(bound.clone()),
-                        expr,
-                    ));
-                }
-            }
-            match eval::evaluate_bindings(
-                |p: &[String]| library_resolve(&prelude, &parsed, p),
-                &batch,
-            ) {
-                Ok(evaluated) => {
-                    for (bound, text, id, declared) in &applied {
-                        if flagged.contains(id) {
-                            continue;
-                        }
-                        let Some((_, value)) =
-                            evaluated.iter().rev().find(|(name, _)| name == bound)
-                        else {
-                            continue;
-                        };
-                        if let (Some(declared), Some(actual)) =
-                            (declared, runtime_sort(&value.expr))
-                        {
-                            assert!(
-                                actual.is_subset(*declared),
-                                "{:?}: runtime sort {} outside the conjunct's declared {}",
-                                text,
-                                actual,
-                                declared
-                            );
-                        }
-                    }
-                }
-                Err(_) => {
-                    for (_, text, id, declared) in &applied {
-                        if !flagged.contains(id) {
-                            classify(text, *id, *declared);
-                        }
-                    }
-                }
-            }
-        }
-        println!(
-            "differential: {} programs, {} true positives, {} residue hits",
-            calls, true_positives, residue
-        );
-        // The harness must be exercising real applied conjuncts.
-        assert!(calls >= 40, "only {} programs checked", calls);
-    }
-
-    // ---- Seeded sweeps ----
-    //
-    // A deterministic random source and the `SEED`/`COUNT` bounds for the
-    // sweeps below.
-
-    struct Rng(u64);
-    impl Rng {
-        fn next(&mut self) -> u64 {
-            self.0 ^= self.0 << 13;
-            self.0 ^= self.0 >> 7;
-            self.0 ^= self.0 << 17;
-            self.0
-        }
-        fn pick<'a>(&mut self, xs: &[&'a str]) -> &'a str {
-            xs[(self.next() % xs.len() as u64) as usize]
-        }
-        fn below(&mut self, n: usize) -> usize {
-            (self.next() % n as u64) as usize
-        }
-    }
-
-    /// The seed and program count for a sweep, from `SEED` and `COUNT`.
-    fn sweep_bounds(default_count: usize) -> (u64, usize) {
-        let seed = std::env::var("SEED")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(12345);
-        let count = std::env::var("COUNT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(default_count);
-        (seed, count)
-    }
-
-    /// Times repeated checks of the embedded library (run with `--ignored
-    /// --nocapture`), for comparing a change against the build before it.
-    #[test]
-    #[ignore]
-    fn library_timing() {
-        let rounds: usize = std::env::var("ROUNDS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(20);
-        let prelude = test_prelude::<u32>();
-        let parsed = parsed_library();
-        let resolve = |p: &[String]| library_resolve(&prelude, &parsed, p);
-        let expr = parse_program::<u32, _>("0", 9999).unwrap();
-        let mut best = f64::MAX;
-        let mut total = 0.0;
-        for _ in 0..rounds {
-            let start = std::time::Instant::now();
-            for (_, _, bindings) in parsed.iter() {
-                std::hint::black_box(
-                    check_program(
-                        resolve,
-                        bindings,
-                        test_signature,
-                        &expr,
-                        None,
-                        &mut ModuleCache::default(),
-                    )
-                    .0,
-                );
-            }
-            let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-            best = best.min(elapsed);
-            total += elapsed;
-        }
-        println!(
-            "TIMING best {:.2}ms  mean {:.2}ms  over {} rounds",
-            best,
-            total / rounds as f64,
-            rounds
-        );
-    }
-
-    /// Times repeated checks of the embedded library with a shared
-    /// [`ModuleCache`] (run with `--ignored --nocapture`) — the session-warm
-    /// counterpart of [`library_timing`].
-    #[test]
-    #[ignore]
-    fn library_timing_warm() {
-        let rounds: usize = std::env::var("ROUNDS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(20);
-        let prelude = test_prelude::<u32>();
-        let parsed = parsed_library();
-        let resolve = |p: &[String]| library_resolve(&prelude, &parsed, p);
-        let expr = parse_program::<u32, _>("0", 9999).unwrap();
-        let mut cache = ModuleCache::default();
-        let mut best = f64::MAX;
-        let mut total = 0.0;
-        for round in 0..rounds {
-            let start = std::time::Instant::now();
-            for (_, _, bindings) in parsed.iter() {
-                std::hint::black_box(
-                    check_program(resolve, bindings, test_signature, &expr, None, &mut cache).0,
-                );
-            }
-            let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-            if round == 0 {
-                println!("TIMING cold first round {:.2}ms", elapsed);
-                continue;
-            }
-            best = best.min(elapsed);
-            total += elapsed;
-        }
-        println!(
-            "TIMING warm best {:.2}ms  mean {:.2}ms  over {} rounds",
-            best,
-            total / (rounds - 1) as f64,
-            rounds - 1
-        );
-    }
-
     // Cached module exports carry no solver state: resolved through the
     // substitution they are settled — no metas, no refinement variables —
     // and closed — no rigid variable outside its own Forall. The insert
     // guard in `module_exports` skips what is unsettled, so a failure here
-    // means the guard and this property have drifted apart.
+    // means the guard and this property have drifted apart. No definition
+    // here (nor in the embedded library) exports an unsettled type, so the
+    // test passes with the guard disabled: it checks the property, not the
+    // guard.
     #[test]
     fn cached_module_exports_are_settled_and_closed() {
         fn free_vars(ty: &Type, bound: &mut Vec<u32>, free: &mut Vec<u32>) {
@@ -5625,27 +5207,71 @@ mod tests {
                 Type::Meta(_) | Type::Numeric(_) | Type::Bool | Type::String | Type::Erroneous => {}
             }
         }
+        // Modules whose exports cover the shapes a definition can take:
+        // polymorphic, tabulated, curried, defaulted, destructured,
+        // function-valued, and erroneous, plus definitions reached through
+        // `open` and `use`.
+        let sources = [
+            (
+                "shapes",
+                "id = fn(x) => x;\n\
+                 apply = fn(f, v) => f(v);\n\
+                 double = fn(x) => x * 2;\n\
+                 add = fn(a) => fn(b) => a + b;\n\
+                 scale = fn(x, k = 2) => x * k;\n\
+                 (lo, hi) = (1, time);\n\
+                 notes = [1, 2, time];\n\
+                 pick = fn(i) => nth(i, [sqrt, src_w1]);\n\
+                 broken = seq(0)(1) + seq(0)(2);",
+            ),
+            (
+                "opener",
+                "open shapes;\n\
+                 quad = fn(x) => double(double(x));\n\
+                 twice = fn(f) => fn(x) => f(f(x));",
+            ),
+            (
+                "user",
+                "use shapes;\nhalf = fn(x) => shapes.scale(x, k = 0.5);",
+            ),
+        ];
         let prelude = test_prelude::<u32>();
-        let parsed = parsed_library();
+        let modules: Vec<(&str, Vec<SourceBinding<u32, u32>>)> = sources
+            .iter()
+            .enumerate()
+            .map(|(index, (path, text))| {
+                let (mut bindings, errors) = parse_module::<u32, _>(text, index as u32).unwrap();
+                assert!(errors.is_empty(), "parse errors in {}", path);
+                bindings.insert(0, Binding::Open(vec!["__prelude".to_string()]).into());
+                (*path, bindings)
+            })
+            .collect();
+        let resolve = |path: &[String]| -> Result<&[SourceBinding<u32, u32>], Error<u32>> {
+            let key = path.join(".");
+            if key == "__prelude" {
+                return Ok(&prelude);
+            }
+            modules
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, bindings)| &bindings[..])
+                .ok_or_else(|| Error::types_here(format!("no module {}", key)))
+        };
         let expr = parse_program::<u32, _>("0", 9999).unwrap();
         let mut cache = ModuleCache::default();
         // Open every module from a root so each one's exports land in the
-        // cache, leaves included. A fresh resolve closure per call lets each
-        // call site pick its own lifetime for the loop-local bindings.
-        for (path, _, _) in parsed.iter() {
-            let segments: Vec<String> = path.split('.').map(str::to_string).collect();
-            let bindings: Vec<SourceBinding<u32, u32>> = vec![
-                Binding::Open(vec!["__prelude".to_string()]).into(),
-                Binding::Open(segments).into(),
-            ];
-            check_program(
-                |p: &[String]| library_resolve(&prelude, &parsed, p),
-                &bindings,
-                test_signature,
-                &expr,
-                None,
-                &mut cache,
-            );
+        // cache. The roots outlive `resolve`, as the checker requires.
+        let roots: Vec<Vec<SourceBinding<u32, u32>>> = modules
+            .iter()
+            .map(|(path, _)| {
+                vec![
+                    Binding::Open(vec!["__prelude".to_string()]).into(),
+                    Binding::Open(vec![path.to_string()]).into(),
+                ]
+            })
+            .collect();
+        for bindings in &roots {
+            check_program(resolve, bindings, test_signature, &expr, None, &mut cache);
         }
         assert!(!cache.is_empty());
         for cached in cache.entries.values() {
@@ -5812,37 +5438,6 @@ mod tests {
         assert_eq!(messages(&cold), messages(&second));
     }
 
-    /// Prints the checker's findings over the embedded library (run with
-    /// `--ignored --nocapture`).
-    #[test]
-    #[ignore]
-    fn library_report() {
-        let prelude = test_prelude::<u32>();
-        let parsed = parsed_library();
-        let resolve = |p: &[String]| library_resolve(&prelude, &parsed, p);
-        let expr = parse_program::<u32, _>("0", 9999).unwrap();
-        for (index, (path, content, bindings)) in parsed.iter().enumerate() {
-            let errors = check_program(
-                resolve,
-                bindings,
-                test_signature,
-                &expr,
-                None,
-                &mut ModuleCache::default(),
-            )
-            .0;
-            let own: Vec<String> = errors
-                .iter()
-                .filter(|error| error.source() == Some(index as u32))
-                .map(|error| error.display_with_source(content))
-                .collect();
-            println!("=== {} ({} errors)", path, own.len());
-            for error in own {
-                println!("  {}", error);
-            }
-        }
-    }
-
     #[test]
     fn a_default_the_body_cannot_use_is_reported() {
         // Every named argument may be left out, so the conjunct that omits one is
@@ -5946,7 +5541,7 @@ mod tests {
         assert_clean("let f = fn(k = true) => 1 in f(k = 0.5)");
         assert_clean("let f = fn(k = true) => k in f(k = 0.5)");
         assert_clean("let f = fn(k = [1, 2]) => 1 in f(k = [time])");
-        assert_clean("let f = fn(k = sqrt) => 1 in f(k = cos)");
+        assert_clean("let f = fn(k = sqrt) => 1 in f(k = src_w1)");
         // The omitted conjunct is the default's own type, which is what keeps
         // this sound: a call that leaves the argument out gets the result
         // the default produces, not a fresh unknown.
@@ -6189,160 +5784,6 @@ mod tests {
         ));
     }
 
-    /// Searches for unsoundness among functions too wide to tabulate.
-    ///
-    /// The invariant is "refused *or* sound", which holds under any budget: a
-    /// definition past `MAX_COARSE_VECTORS` is refused today, and whatever
-    /// falls inside it is tabulated and still has to run. Run it whenever
-    /// either budget or the refusal changes.
-    ///
-    /// This is the harness that showed refusing was necessary. With the
-    /// refusal disabled, the base pass's summary — the fallback the checker
-    /// used before — declared sorts the values did not inhabit: three escapes
-    /// in 450,000 programs across nine seeds, all of the form "declared
-    /// `waveform or seq`, evaluated to a constant".
-    ///
-    /// ```text
-    /// SEED=7 COUNT=50000 cargo test --lib --release wide_function_fuzz -- --ignored --nocapture
-    /// ```
-    #[test]
-    #[ignore]
-    fn wide_function_fuzz() {
-        const OPS: &[&str] = &["+", "-", "*", "/", "&"];
-        const ARGS: &[&str] = &["1", "2", "0.5", "time", "(time | seq(time - 1))"];
-        let (seed, count) = sweep_bounds(20000);
-        let mut rng = Rng(seed);
-        let bindings = test_prelude::<u32>();
-        let resolve = |_: &[String]| Err(Error::eval_here("no modules"));
-        let (mut clean, mut found, mut widest) = (0usize, 0usize, 0usize);
-        let mut seqs = 0usize;
-        let mut kinds: Vec<String> = Vec::new();
-        for _ in 0..count {
-            // 10..14 parameters: past the coarse split's 2^9 budget.
-            let arity = 10 + rng.below(5);
-            let names: Vec<String> = (0..arity).map(|i| format!("p{}", i)).collect();
-            // A body that uses every parameter numerically, so all of them
-            // tabulate (and so the width is real). Each parameter enters
-            // through its own randomly chosen operator and filter, so the
-            // relation the body imposes is not uniform across positions.
-            const FILTERS: &[&str] = &["fin(4)", "unseq()", "capture(\"c\")", "cos", "sqrt"];
-            let wrap = |rng: &mut Rng, term: String| match rng.below(14) {
-                0 => format!("({} | {})", term, rng.pick(FILTERS)),
-                1 => format!("(- {})", term),
-                2 => format!("({} {} {})", term, rng.pick(OPS), rng.pick(ARGS)),
-                _ => term,
-            };
-            let mut body = wrap(&mut rng, names[0].clone());
-            for name in &names[1..] {
-                let term = wrap(&mut rng, name.clone());
-                body = format!("({} {} {})", body, rng.pick(OPS), term);
-            }
-            // A consumer gives the *result* a use, so a wrong result sort is
-            // caught rather than merely inferred.
-            const CONSUMERS: &[&str] = &[
-                "{}",
-                "({} \\ 1)",
-                "nth({}, [1, 2])",
-                "<[{}]>",
-                "sqrt({})",
-                "unseq()({})",
-                "({} + (time | seq(time - 1)))",
-                "fin({})(time)",
-                "{{[{}]}}",
-            ];
-            // Half the time the body stands alone: a consumer that rejects
-            // everything would leave nothing accepted to test.
-            if rng.below(2) == 0 {
-                body = CONSUMERS[rng.below(CONSUMERS.len())].replacen("{}", &body, 1);
-            }
-            let args: Vec<&str> = (0..arity).map(|_| rng.pick(ARGS)).collect();
-            let text = format!(
-                "let f = fn({}) => {} in f({})",
-                names.join(", "),
-                body,
-                args.join(", ")
-            );
-            widest = widest.max(arity);
-            let Ok(expr) = parse_program::<u32, _>(&text, 0u32) else {
-                continue;
-            };
-            if !check_program(
-                resolve,
-                &bindings,
-                test_signature,
-                &expr,
-                None,
-                &mut ModuleCache::default(),
-            )
-            .0
-            .is_empty()
-            {
-                continue;
-            }
-            clean += 1;
-            if text.contains("seq") {
-                seqs += 1;
-            }
-            let mut checker: Infer<u32> = Infer::new(test_signature);
-            let mut context = Vec::new();
-            let mut memo = HashMap::new();
-            checker.build_context(
-                &resolve,
-                &bindings,
-                &mut context,
-                &mut memo,
-                &mut ModuleCache::default(),
-            );
-            let ty = checker.infer(&mut context, &mut Vec::new(), &expr);
-            let declared = match checker.resolve_refinements(&ty.apply(&checker.subst), 0) {
-                Type::Numeric(Refinement::Ground(sort)) => Some(sort),
-                _ => None,
-            };
-            let (kind, detail) = match eval::evaluate(resolve, &bindings, expr) {
-                Err(error) => {
-                    if declared_residue(&error) {
-                        continue;
-                    }
-                    ("eval-error".to_string(), error.message().to_string())
-                }
-                Ok(value) => {
-                    let Some(declared) = declared else { continue };
-                    let Some(actual) = runtime_sort(&value.expr) else {
-                        continue;
-                    };
-                    if actual.is_subset(declared) {
-                        continue;
-                    }
-                    (
-                        "sort-escape".to_string(),
-                        format!("declared {} but evaluated to {}", declared, actual),
-                    )
-                }
-            };
-            let signature = format!("{}: {}", kind, detail);
-            if kinds.contains(&signature) {
-                continue;
-            }
-            kinds.push(signature);
-            found += 1;
-            println!(
-                "WIDE-UNSOUND[{}] ({}) {}\n    {}",
-                found, kind, text, detail
-            );
-            if found > 30 {
-                break;
-            }
-        }
-        println!(
-            "wide: {} of {} accepted ({} of them pass a seq, widest arity {}), {} distinct classes",
-            clean, count, seqs, widest, found
-        );
-        assert_eq!(
-            found, 0,
-            "a function too wide to tabulate was accepted and does not run"
-        );
-    }
-
     /// The ground sort a program's type resolves to, or `None` where the type
     /// is not a ground numeric.
     ///
@@ -6412,41 +5853,5 @@ mod tests {
         assert_eq!(declared_sort("0.5 * 2"), Some(Sort::FLOAT));
         // And the seq arms still thread, which is what coverage is for.
         assert_clean("(seq(0)(w2(440, 0)) * 0.5) \\ 1");
-    }
-
-    /// Pins the checker's verdict on every embedded library module, so
-    /// signature or inference changes that affect the library surface here.
-    ///
-    /// A module's report keeps only errors from its own text — dependencies
-    /// re-typed along the way report under their own entry — and positions
-    /// come from `display_with_source`, so every pinned error can be read
-    /// against the .tuun source.
-    #[test]
-    fn embedded_modules_pinned_errors() {
-        let prelude = test_prelude::<u32>();
-        let parsed = parsed_library();
-        let resolve = |p: &[String]| library_resolve(&prelude, &parsed, p);
-        let expr = parse_program::<u32, _>("0", 9999).unwrap();
-        let mut report: Vec<String> = Vec::new();
-        for (index, (path, content, bindings)) in parsed.iter().enumerate() {
-            let errors = check_program(
-                resolve,
-                bindings,
-                test_signature,
-                &expr,
-                None,
-                &mut ModuleCache::default(),
-            )
-            .0;
-            for error in &errors {
-                if error.source() == Some(index as u32) {
-                    report.push(format!("{}: {}", path, error.display_with_source(content)));
-                }
-            }
-        }
-        // The refinement lattice checks the entire embedded library without a
-        // single error. Anything appearing here needs source-level
-        // verification before being accepted as a new pin.
-        assert_eq!(report, Vec::<String>::new());
     }
 }

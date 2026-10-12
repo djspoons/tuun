@@ -1,121 +1,22 @@
 //! Generated-program sweeps of the checker against evaluation.
 //!
-//! A deterministic generator plus three sweeps over what it produces: a
-//! canary pinning which programs check clean, a soundness search, and a
-//! false-positive search. The generator is a regression net rather than a
-//! discovery tool: it finds instances of shapes it already knows how to build,
-//! so a new finding usually means adding a case to `gen_expr` first.
+//! A deterministic generator plus three sweeps over what it produces: a canary
+//! pinning which programs check clean, a soundness search, and a false-positive
+//! search. The generator is a regression net rather than a discovery tool: it
+//! finds instances of shapes it already knows how to build, so a new finding
+//! usually means adding a case to `gen_expr` first.
+//!
+//! An additional sweep, `wide_function_fuzz`, generates its own programs:
+//! functions too wide to tabulate.
 
-use tuun::builtins;
+mod common;
+
+use common::{Rng, Scope, declared_residue, runtime_sort, sweep_bounds};
 use tuun::eval;
-use tuun::expr::{Binding, Error, ErrorKind, Expr, Pattern, SourceBinding, SourceExpr};
 use tuun::infer::{ModuleCache, check_program};
-use tuun::modules;
-use tuun::parser::{parse_module, parse_program};
+use tuun::parser::parse_program;
 use tuun::signatures::signature;
-use tuun::types::{Refinement, Sort, Type};
-use tuun::waveform::Waveform;
-
-/// The bindings generated programs check and evaluate under: the built-ins
-/// and std, as a program that opens std sees them.
-struct Scope {
-    /// The built-ins plus `tempo` and `sample_rate`.
-    prelude: Vec<SourceBinding<u32, u32>>,
-    /// The embedded std module, opening the prelude.
-    std: Vec<SourceBinding<u32, u32>>,
-    /// The bindings a program is checked under: it opens the prelude, then
-    /// std.
-    program: Vec<SourceBinding<u32, u32>>,
-}
-
-impl Scope {
-    fn new() -> Scope {
-        let open = |path: &str| Binding::Open(vec![path.to_string()]).into();
-        let mut prelude = Vec::new();
-        builtins::add_bindings(&mut prelude);
-        for (name, value) in [("tempo", 120.0), ("sample_rate", 44100.0)] {
-            prelude.push(SourceBinding::definition(
-                Pattern::Identifier(name.to_string()),
-                SourceExpr::float(value),
-            ));
-        }
-        let (_, text) = modules::EMBEDDED_MODULES
-            .iter()
-            .find(|(path, _)| *path == "std")
-            .expect("std is embedded");
-        let (mut std, errors) = parse_module(text, 1u32).expect("std parses");
-        assert!(errors.is_empty(), "std has parse errors");
-        std.insert(0, open("__prelude"));
-        Scope {
-            prelude,
-            std,
-            // Opening std adds about 14 ms to every `eval::evaluate` (measured
-            // on `1 + 2`), since evaluation has no counterpart to the checker's
-            // `ModuleCache`; that is about half of `soundness_fuzz`'s time.
-            program: vec![open("__prelude"), open("std")],
-        }
-    }
-
-    /// Returns the bindings of the module at `path`.
-    fn resolve(&self, path: &[String]) -> Result<&[SourceBinding<u32, u32>], Error<u32>> {
-        match path.join(".").as_str() {
-            "__prelude" => Ok(&self.prelude),
-            "std" => Ok(&self.std),
-            key => Err(Error::eval_here(format!("no module {}", key))),
-        }
-    }
-}
-
-/// Whether a runtime failure is one the sort lattice cannot see — the declared
-/// residue, which a clean program is allowed to end in.
-fn declared_residue<S>(error: &Error<S>) -> bool {
-    error.kind() == ErrorKind::Eval
-}
-
-/// Returns the runtime sort of an evaluated value, or `None` for non-numerics.
-fn runtime_sort(expr: &Expr<u32, u32>) -> Option<Sort> {
-    match expr {
-        Expr::Waveform(Waveform::Const(value)) => Some(if value.fract() == 0.0 {
-            Sort::INT
-        } else {
-            Sort::NON_INT_ONLY
-        }),
-        Expr::Waveform(_) => Some(Sort::NON_CONST_WAVE),
-        Expr::Seq { .. } => Some(Sort::SEQ),
-        _ => None,
-    }
-}
-
-/// A deterministic random source (xorshift).
-struct Rng(u64);
-
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
-    }
-    fn pick<'a>(&mut self, xs: &[&'a str]) -> &'a str {
-        xs[(self.next() % xs.len() as u64) as usize]
-    }
-    fn below(&mut self, n: usize) -> usize {
-        (self.next() % n as u64) as usize
-    }
-}
-
-/// Returns the seed and program count for a sweep, from `SEED` and `COUNT`.
-fn sweep_bounds(default_count: usize) -> (u64, usize) {
-    let seed = std::env::var("SEED")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(12345);
-    let count = std::env::var("COUNT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(default_count);
-    (seed, count)
-}
+use tuun::types::{Refinement, Type};
 
 const ATOMS: &[&str] = &[
     "1",
@@ -556,5 +457,140 @@ fn false_positive_fuzz() {
     println!(
         "false positives: {} of {} rejected, {} distinct classes",
         rejected, count, found
+    );
+}
+
+/// Searches for unsoundness among functions too wide to tabulate.
+///
+/// The invariant is "refused *or* sound", which holds under any budget: a
+/// definition past the checker's coarse-tabulation budget is refused, and
+/// whatever falls inside it is tabulated and still has to run. Run it whenever
+/// either budget or the refusal changes.
+///
+/// This is the harness that showed refusing was necessary. With the refusal
+/// disabled, the summary the checker fell back on declared sorts the values
+/// did not inhabit: three escapes in 450,000 programs across nine seeds, all
+/// of the form "declared `waveform or seq`, evaluated to a constant".
+///
+/// ```text
+/// SEED=7 COUNT=50000 cargo test --release --test checker_fuzz wide_function_fuzz -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore]
+fn wide_function_fuzz() {
+    const OPS: &[&str] = &["+", "-", "*", "/", "&"];
+    const ARGS: &[&str] = &["1", "2", "0.5", "time", "(time | seq(time - 1))"];
+    let (seed, count) = sweep_bounds(20000);
+    let mut rng = Rng(seed);
+    let scope = Scope::new();
+    let resolve = |path: &[String]| scope.resolve(path);
+    let mut cache = ModuleCache::default();
+    let (mut clean, mut found, mut widest) = (0usize, 0usize, 0usize);
+    let mut seqs = 0usize;
+    let mut kinds: Vec<String> = Vec::new();
+    for _ in 0..count {
+        // 10..14 parameters: past the coarse split's 2^9 budget.
+        let arity = 10 + rng.below(5);
+        let names: Vec<String> = (0..arity).map(|i| format!("p{}", i)).collect();
+        // A body that uses every parameter numerically, so all of them
+        // tabulate (and so the width is real). Each parameter enters
+        // through its own randomly chosen operator and filter, so the
+        // relation the body imposes is not uniform across positions.
+        const FILTERS: &[&str] = &["fin(4)", "unseq()", "capture(\"c\")", "cos", "sqrt"];
+        let wrap = |rng: &mut Rng, term: String| match rng.below(14) {
+            0 => format!("({} | {})", term, rng.pick(FILTERS)),
+            1 => format!("(- {})", term),
+            2 => format!("({} {} {})", term, rng.pick(OPS), rng.pick(ARGS)),
+            _ => term,
+        };
+        let mut body = wrap(&mut rng, names[0].clone());
+        for name in &names[1..] {
+            let term = wrap(&mut rng, name.clone());
+            body = format!("({} {} {})", body, rng.pick(OPS), term);
+        }
+        // A consumer gives the *result* a use, so a wrong result sort is
+        // caught rather than merely inferred.
+        const CONSUMERS: &[&str] = &[
+            "{}",
+            "({} \\ 1)",
+            "nth({}, [1, 2])",
+            "<[{}]>",
+            "sqrt({})",
+            "unseq()({})",
+            "({} + (time | seq(time - 1)))",
+            "fin({})(time)",
+            "{{[{}]}}",
+        ];
+        // Half the time the body stands alone: a consumer that rejects
+        // everything would leave nothing accepted to test.
+        if rng.below(2) == 0 {
+            body = CONSUMERS[rng.below(CONSUMERS.len())].replacen("{}", &body, 1);
+        }
+        let args: Vec<&str> = (0..arity).map(|_| rng.pick(ARGS)).collect();
+        let text = format!(
+            "let f = fn({}) => {} in f({})",
+            names.join(", "),
+            body,
+            args.join(", ")
+        );
+        widest = widest.max(arity);
+        let Ok(expr) = parse_program::<u32, _>(&text, 0u32) else {
+            continue;
+        };
+        let (errors, ty) =
+            check_program(resolve, &scope.program, signature, &expr, None, &mut cache);
+        if !errors.is_empty() {
+            continue;
+        }
+        clean += 1;
+        if text.contains("seq") {
+            seqs += 1;
+        }
+        let declared = match ty {
+            Type::Numeric(Refinement::Ground(sort)) => Some(sort),
+            _ => None,
+        };
+        let (kind, detail) = match eval::evaluate(resolve, &scope.program, expr) {
+            Err(error) => {
+                if declared_residue(&error) {
+                    continue;
+                }
+                ("eval-error".to_string(), error.message().to_string())
+            }
+            Ok(value) => {
+                let Some(declared) = declared else { continue };
+                let Some(actual) = runtime_sort(&value.expr) else {
+                    continue;
+                };
+                if actual.is_subset(declared) {
+                    continue;
+                }
+                (
+                    "sort-escape".to_string(),
+                    format!("declared {} but evaluated to {}", declared, actual),
+                )
+            }
+        };
+        let signature = format!("{}: {}", kind, detail);
+        if kinds.contains(&signature) {
+            continue;
+        }
+        kinds.push(signature);
+        found += 1;
+        println!(
+            "WIDE-UNSOUND[{}] ({}) {}\n    {}",
+            found, kind, text, detail
+        );
+        if found > 30 {
+            break;
+        }
+    }
+    println!(
+        "wide: {} of {} accepted ({} of them pass a seq, widest arity {}), {} distinct classes",
+        clean, count, seqs, widest, found
+    );
+    assert_eq!(
+        found, 0,
+        "a function too wide to tabulate was accepted and does not run"
     );
 }
