@@ -1860,8 +1860,9 @@ impl<S: Clone> Infer<S> {
     /// Returns the join of the two types: unification if they agree
     /// structurally, sort union for numerics (mixed float/waveform/seq lists
     /// and branches are common), point-wise for lists and tuples, with the
-    /// variance for arrows, pairwise for two intersections, and
-    /// `Erroneous` with an error where there is none. Quantified types join at an
+    /// variance for arrows, pairwise for two intersections or an
+    /// intersection and an arrow, and `Erroneous` with an error where there
+    /// is none. Quantified types join at an
     /// instance.
     ///
     /// Xie and Oliveira have no join, having no subtyping between base
@@ -1979,48 +1980,17 @@ impl<S: Clone> Infer<S> {
                 }
                 self.rollback(mark);
                 let (xs, ys) = (xs.clone(), ys.clone());
-                // Pairing every conjunct with every conjunct is quadratic, and
-                // two wide tables would spend more here than tabulating either
-                // of them did. This is a budget, not a verdict on the two
-                // types, so it says so: joining them coarsely instead would
-                // hand back a weaker type the caller cannot tell from a precise
-                // one.
-                let pairs = xs.len().saturating_mul(ys.len());
-                if pairs > MAX_JOIN_PAIRS {
-                    let message = format!(
-                        "too many cases to join ({} pairs, limit {})",
-                        pairs, MAX_JOIN_PAIRS
-                    );
-                    self.error(message, span);
-                    return Type::Erroneous;
-                }
-                let mut conjuncts: Vec<Type> = Vec::new();
-                for x in xs.iter() {
-                    for y in ys.iter() {
-                        if !self.same_shape(x, y) {
-                            continue;
-                        }
-                        // A pair that does not join contributes no conjunct — its
-                        // domains do not overlap, or its results disagree —
-                        // the same way a vector whose body does not check
-                        // contributes none to `tabulate`, and its errors are
-                        // exploratory either way.
-                        let before = self.errors.len();
-                        let conjunct = self.join(x.clone(), y.clone(), span);
-                        if self.errors.len() > before {
-                            self.errors.truncate(before);
-                            continue;
-                        }
-                        if !conjuncts.contains(&conjunct) {
-                            conjuncts.push(conjunct);
-                        }
-                    }
-                }
-                if conjuncts.is_empty() {
-                    self.incompatible(&a, &b, span)
-                } else {
-                    Type::intersection(conjuncts)
-                }
+                self.join_conjuncts(&a, &b, &xs, &ys, span)
+            }
+            // A plain arrow joins a table as a table of one conjunct: the
+            // join keeps each conjunct that overlaps the arrow.
+            (Type::And(xs), Type::Function { .. }) => {
+                let xs = xs.clone();
+                self.join_conjuncts(&a, &b, &xs, std::slice::from_ref(&b), span)
+            }
+            (Type::Function { .. }, Type::And(ys)) => {
+                let ys = ys.clone();
+                self.join_conjuncts(&a, &b, std::slice::from_ref(&a), &ys, span)
             }
             _ => {
                 let mark = self.mark();
@@ -2031,6 +2001,63 @@ impl<S: Clone> Infer<S> {
                     self.incompatible(&a, &b, span)
                 }
             }
+        }
+    }
+
+    /// Returns the intersection of every join of a conjunct in `xs` with a
+    /// conjunct in `ys`, the join of tables `a` and `b` with those conjuncts.
+    ///
+    /// Reports `a` and `b` incompatible when no pair joins, and reports a
+    /// budget error when there are too many pairs to try.
+    fn join_conjuncts(
+        &mut self,
+        a: &Type,
+        b: &Type,
+        xs: &[Type],
+        ys: &[Type],
+        span: &Option<Span<S>>,
+    ) -> Type {
+        // Pairing every conjunct with every conjunct is quadratic, and
+        // two wide tables would spend more here than tabulating either
+        // of them did. This is a budget, not a verdict on the two
+        // types, so it says so: joining them coarsely instead would
+        // hand back a weaker type the caller cannot tell from a precise
+        // one.
+        let pairs = xs.len().saturating_mul(ys.len());
+        if pairs > MAX_JOIN_PAIRS {
+            let message = format!(
+                "too many cases to join ({} pairs, limit {})",
+                pairs, MAX_JOIN_PAIRS
+            );
+            self.error(message, span);
+            return Type::Erroneous;
+        }
+        let mut conjuncts: Vec<Type> = Vec::new();
+        for x in xs.iter() {
+            for y in ys.iter() {
+                if !self.same_shape(x, y) {
+                    continue;
+                }
+                // A pair that does not join contributes no conjunct — its
+                // domains do not overlap, or its results disagree —
+                // the same way a vector whose body does not check
+                // contributes none to `tabulate`, and what it solved and
+                // reported is exploratory either way.
+                let mark = self.mark();
+                let conjunct = self.join(x.clone(), y.clone(), span);
+                if self.errors.len() > mark.errors {
+                    self.rollback(mark);
+                    continue;
+                }
+                if !conjuncts.contains(&conjunct) {
+                    conjuncts.push(conjunct);
+                }
+            }
+        }
+        if conjuncts.is_empty() {
+            self.incompatible(a, b, span)
+        } else {
+            Type::intersection(conjuncts)
         }
     }
 
@@ -4207,9 +4234,9 @@ mod tests {
 
     #[test]
     fn builtin_passed_as_argument() {
-        // `sqrt` is referenced under an empty Ψ (rule AS-Empty): its
+        // `f1` is referenced under an empty Ψ (rule AS-Empty): its
         // signature flows to `map` unapplied.
-        assert_clean("map(sqrt, [1, 2])");
+        assert_clean("map(f1, [1, 2])");
     }
 
     // A mismatched argument errors and the error's span points at the
@@ -4397,18 +4424,18 @@ mod tests {
             &["expected [seq], found [bool]"],
         );
         // Coverage binds where it is the only rule that can answer: `p`'s
-        // conjuncts take one numeric atom each, and `sqrt(2)` is int-or-non-int,
+        // conjuncts take one numeric atom each, and `f1(2)` is int-or-non-int,
         // so no single conjunct applies and the commit pass in
         // `select_by_atoms` is what carries the argument's type to the result.
         let p = "let p = fn(n, a) => if n > 0 then a else a in ";
-        assert_clean(&format!("{}nth(p(sqrt(2), 1), [1, 2])", p));
+        assert_clean(&format!("{}nth(p(f1(2), 1), [1, 2])", p));
         assert_errors(
-            &format!("{}nth(p(sqrt(2), \"s\"), [1, 2])", p),
+            &format!("{}nth(p(f1(2), \"s\"), [1, 2])", p),
             &["expected int, found string"],
         );
         // Through a parameter, which is where losing the binding showed: the
         // result was free and the caller solved it at will.
-        let q = format!("{}let q = fn(x) => p(sqrt(2), x) in ", p);
+        let q = format!("{}let q = fn(x) => p(f1(2), x) in ", p);
         assert_clean(&format!("{}nth(q(1), [1, 2])", q));
         assert_errors(
             &format!("{}nth(q(\"s\"), [1, 2])", q),
@@ -4461,7 +4488,7 @@ mod tests {
         // seed settles the accumulator before the step lambda is checked
         // (`check_deferred`), so the step's body is what mismatches.
         assert_errors(
-            "reduce(fn(acc, x) => fixed, sqrt, [1])",
+            "reduce(fn(acc, x) => fixed, f1, [1])",
             &["expected (float) -> float, found ([float]) -> waveform"],
         );
     }
@@ -4472,23 +4499,23 @@ mod tests {
         // arrow of fresh parts, so a fold whose seed and step are different
         // functions settles on the arrow both fit rather than demanding one
         // of them exactly.
-        assert_clean("reduce(fn(acc, x) => src_w1, sqrt, [1])");
-        assert_clean("unfold(fn(v) => src_w1, sqrt, 2)");
+        assert_clean("reduce(fn(acc, x) => src_w1, f1, [1])");
+        assert_clean("unfold(fn(v) => src_w1, f1, 2)");
         // Through a structure, too, where the leaf is the arrow.
-        assert_clean("reduce(fn(acc, x) => [src_w1], [sqrt], [1])");
-        assert_clean("reduce(fn(acc, x) => (src_w1, 1), (sqrt, 2), [1])");
+        assert_clean("reduce(fn(acc, x) => [src_w1], [f1], [1])");
+        assert_clean("reduce(fn(acc, x) => (src_w1, 1), (f1, 2), [1])");
         // Parameters meet and results join, the same answer `join` gives two
-        // arrows: `sqrt` takes floats, so the fold's does too.
-        assert_clean("reduce(fn(acc, x) => src_w1, sqrt, [1])(0.5)");
+        // arrows: `f1` takes floats, so the fold's does too.
+        assert_clean("reduce(fn(acc, x) => src_w1, f1, [1])(0.5)");
         assert_errors(
-            "reduce(fn(acc, x) => src_w1, sqrt, [1])(time)",
+            "reduce(fn(acc, x) => src_w1, f1, [1])(time)",
             &["expected float, found waveform"],
         );
         // Arrows with no shared parameter shape still have nothing to meet; the
         // step lambda checks after the seed settles the accumulator, so its
         // body is where the mismatch reports.
         assert_errors(
-            "reduce(fn(acc, x) => fixed, sqrt, [1])",
+            "reduce(fn(acc, x) => fixed, f1, [1])",
             &["expected (float) -> float, found ([float]) -> waveform"],
         );
         // A function-valued named default still pins its parameter, and a
@@ -4674,7 +4701,7 @@ mod tests {
             &["no use of == accepts ([waveform], [waveform])"],
         );
         assert_errors(
-            "sqrt == sqrt",
+            "f1 == f1",
             &["no use of == accepts ((float) -> float, (float) -> float)"],
         );
         // Both sides must be the same kind.
@@ -5096,6 +5123,29 @@ mod tests {
     }
 
     #[test]
+    fn branches_join_a_table_with_an_arrow() {
+        let table = "let g = fn(v) => v + 1 in ";
+        // `g` takes anything numeric and `f1` takes floats; the branch offers
+        // the conjunct where the two overlap.
+        assert_clean(&format!("{}(if true then g else f1)(0.5)", table));
+        assert_clean(&format!("{}nth(1, [g, f1])(0.5)", table));
+        // The join is symmetric.
+        assert_clean(&format!("{}(if true then f1 else g)(0.5)", table));
+        // Only that conjunct: `g`'s waveform case is not `f1`'s.
+        assert_errors(
+            &format!("{}(if true then g else f1)(time)", table),
+            &["expected float, found waveform"],
+        );
+        // An arrow overlapping none of the conjuncts still has no join.
+        assert_errors(
+            &format!("{}if true then g else fixed", table),
+            &[
+                "incompatible types (int) -> int ∧ (float) -> float ∧ (waveform) -> waveform ∧ (seq) -> seq and ([float]) -> waveform",
+            ],
+        );
+    }
+
+    #[test]
     fn branches_join_arrows_with_the_variance() {
         // w2 takes waveforms and f2 takes floats; the branch takes what
         // both take and returns what either returns.
@@ -5113,11 +5163,11 @@ mod tests {
         assert_clean("let g = fn(v) => v + 1 in nth(1, [g, g])(1)");
         // Lists join their elements, and agreeing branches are unchanged.
         assert_clean("nth(0, [1, time])");
-        assert_clean("(if false then sqrt else f1)(4)");
+        assert_clean("(if false then f1 else f1)(4)");
         assert_clean("(if false then append else reset)(time, time)");
         // Two arrows with no common domain still have no join.
         assert_errors(
-            "if false then sqrt else fixed",
+            "if false then f1 else fixed",
             &["incompatible types (float) -> float and ([float]) -> waveform"],
         );
     }
@@ -5221,7 +5271,7 @@ mod tests {
                  scale = fn(x, k = 2) => x * k;\n\
                  (lo, hi) = (1, time);\n\
                  notes = [1, 2, time];\n\
-                 pick = fn(i) => nth(i, [sqrt, src_w1]);\n\
+                 pick = fn(i) => nth(i, [f1, src_w1]);\n\
                  broken = seq(0)(1) + seq(0)(2);",
             ),
             (
@@ -5461,7 +5511,7 @@ mod tests {
         assert_clean("let f = fn(x = 100) => x + 1 in f(x = time)");
         // And a conjunct dropped for an *atom* is not reported: a caller can
         // simply not pass a seq there.
-        assert_clean("let f = fn(x = 1) => sqrt(x) in f(x = 4)");
+        assert_clean("let f = fn(x = 1) => f1(x) in f(x = 4)");
     }
 
     #[test]
@@ -5541,7 +5591,7 @@ mod tests {
         assert_clean("let f = fn(k = true) => 1 in f(k = 0.5)");
         assert_clean("let f = fn(k = true) => k in f(k = 0.5)");
         assert_clean("let f = fn(k = [1, 2]) => 1 in f(k = [time])");
-        assert_clean("let f = fn(k = sqrt) => 1 in f(k = src_w1)");
+        assert_clean("let f = fn(k = f1) => 1 in f(k = src_w1)");
         // The omitted conjunct is the default's own type, which is what keeps
         // this sound: a call that leaves the argument out gets the result
         // the default produces, not a fresh unknown.

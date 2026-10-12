@@ -257,9 +257,9 @@ fn generated(rng: &mut Rng) -> String {
 /// roughly one program in a thousand; `soundness_fuzz` and
 /// `false_positive_fuzz` are where a finer sweep belongs.
 const CANARY: [(u64, usize, u64); 3] = [
-    (12345, 350, 12924745280370670482),
+    (12345, 350, 1170461391898692706),
     (777, 350, 12246305972029091934),
-    (20260901, 350, 9767260543059777376),
+    (20260901, 350, 9300518567311359572),
 ];
 
 /// Returns an FNV-1a hash of which generated programs check clean.
