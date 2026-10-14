@@ -1,7 +1,7 @@
 # How the audio thread reports samples
 
 Labels: wayfinder:grilling
-Status: open
+Status: closed
 Assignee: djspoons
 Blocked by: none
 
@@ -16,3 +16,23 @@ Options to weigh:
 - A mark-style request carrying main-thread timing such as measure starts. `MarkId` has commented-out `VisualizeTiming` and `ShowSample` variants. Marks today are tied to one waveform, while the scopes show the overall output.
 
 Constraints: the scopes show the overall output; nothing new allocates on the audio thread; the change is small and surgical. Informed by [Lock-free handoff from audio thread to UI in Rust](02-lock-free-handoff.md) when it is resolved.
+
+## Resolution
+
+The tracker pushes every callback's raw output samples to the UI through two lock-free `rtrb` rings. This replaces `Command::SendCurrentBuffer`, `Status.buffer` and `next_buffer_refresh`.
+
+- **Raw samples cross the boundary.** The audio thread only copies samples; the UI computes Scan's per-slice min/max. The slice width stays a UI choice.
+- **Push, every callback,** whether or not a scope is drawn.
+- **Two rings,** both allocated once at startup:
+  - a sample ring of `f32`, holding one second of audio (`sample_rate` samples);
+  - a header ring of plain-value chunk headers: `buffer_start: Instant`, samples written, and samples dropped since the previous header. It is sized so it practically never fills before the sample ring (for example, 1024 headers).
+- **Protocol:**
+  - The audio thread checks that the header ring has a free slot and the sample ring has room for the whole buffer. If so, it pushes the samples, then the header. Otherwise it pushes nothing and adds the buffer's length to a running dropped count, which the next header carries.
+  - The UI pops a header, then reads exactly the number of samples it names.
+  - Hypothesis (unverified): `rtrb`'s pop reads the producer's index with `Acquire`, so seeing a header guarantees its samples are visible. Its push ends with a `Release` store ([research](../research/lock-free-handoff.md)). Confirm by reading `rtrb`'s pop before relying on it.
+- **When the UI falls behind,** the newest samples are dropped and the gap is recorded, so Scan can draw the gap rather than squash time.
+- **Timing:** each chunk's `buffer_start` places its samples on the clock, so the UI can align them with measure starts. No mark-based timing; `MarkId::VisualizeTiming` stays commented out.
+- **Allocation:** only the new path must be allocation-free. The rest of `Status` (including the marks `Vec` and the `mpsc` send) is unchanged.
+- **Snapshot** shows the latest N samples from the stream, decoupled from `--buffer-size`. N is decided in [Scan look](04-scan-look.md).
+- **New dependency:** `rtrb`.
+

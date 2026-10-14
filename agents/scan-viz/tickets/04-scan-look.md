@@ -7,4 +7,4 @@ Blocked by: [How the audio thread reports samples](01-sample-reporting.md), [Sca
 
 ## Question
 
-How should Scan look on screen: window length, scrolling or sweeping, linear or dB amplitude, how clipping is coloured, and which gridlines are drawn? Resolve by building a rough working view to react to.
+How should Scan look on screen: window length, scrolling or sweeping, linear or dB amplitude, how clipping is coloured, which gridlines are drawn, and how many recent samples (N) Snapshot shows? Resolve by building a rough working view to react to.
