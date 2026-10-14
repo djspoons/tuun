@@ -5,6 +5,13 @@
     ]
   },
   "hooks": {
+    "PreToolUse": [{
+      "matcher": "Bash|WebFetch|WebSearch",
+      "hooks": [{
+        "type": "command",
+        "command": "jq -c '.tool_input' | grep -Eio '[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}' | grep -Eiv '^(noreply@anthropic\\.com|[^@]+@users\\.noreply\\.github\\.com|git@[a-z0-9.-]+)$' | grep -q . && { echo 'Blocked: this tool call contains an email address. Never put an email address in a command, URL, header or request body.' >&2; exit 2; } || exit 0"
+      }]
+    }],
     "PostToolUse": [{
       "matcher": "Edit|Write",
       "hooks": [{"type": "command", "command": "cargo fmt"}]

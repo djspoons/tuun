@@ -1,3 +1,7 @@
+## Private Information
+
+Never put the user’s email or name in network requests (headers, URLs, payloads), commit content, or files; when attribution is required, use the user's GitHub handle.
+
 ## Claim Discipline
 
 - Never assert a mechanistic root cause, a soundness property, or the existence of a doc/file until it has been empirically verified (test, fuzz run, or `rg`/`Read` of the actual file) or formally proven. If unverified, label it explicitly as a hypothesis: "Hypothesis (unverified): ...".
