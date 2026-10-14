@@ -110,6 +110,20 @@ _Avoid_: loop, looping, cycle
 The one keys instrument that sounds when MIDI note-on and note-off events arrive, one voice per held key. Taken from a keys program; at most one is installed at a time.
 _Avoid_: the keys, current keys, active instrument
 
+### The screen
+
+**Scope view**:
+How the screen draws the output mix's samples: Snapshot or Scan.
+_Avoid_: waveform view, waveform mode, display mode
+
+**Snapshot**:
+The scope view that draws one short, recent stretch of output samples edge to edge. Suited to periodic sound.
+_Avoid_: oscilloscope, buffer view
+
+**Scan**:
+The scope view that draws a rolling history of the output over seconds, showing each slice's range of sample values, so envelopes and other slow changes are visible.
+_Avoid_: scroll, history, strip chart, envelope view
+
 ### Modes
 
 Five unrelated things here are called a "mode". Always qualify which.
