@@ -2,7 +2,7 @@
 
 Labels: wayfinder:prototype
 Status: open
-Assignee:
+Assignee: djspoons
 Blocked by: [How the audio thread reports samples](01-sample-reporting.md), [Scan's time axis: measures or seconds](03-scan-time-axis.md)
 
 ## Question
