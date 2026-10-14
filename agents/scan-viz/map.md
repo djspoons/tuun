@@ -19,10 +19,10 @@ A spec, in this directory, for adding the Scan scope view alongside Snapshot in 
 - [Lock-free handoff from audio thread to UI in Rust](tickets/02-lock-free-handoff.md): mpsc sometimes allocates and can lock. `rtrb`/`ringbuf` are lock-free with a fixed capacity and drop the newest data when full; `triple_buffer` keeps only the latest; `ArrayQueue::force_push` drops the oldest.
 - [How the audio thread reports samples](tickets/01-sample-reporting.md): raw samples pushed every callback through an `rtrb` sample ring plus a header ring (timestamp, written, dropped), all-or-nothing per callback; newest dropped when full; replaces `SendCurrentBuffer`; Snapshot becomes the latest N samples.
 - [Scan's time axis: measures or seconds](tickets/03-scan-time-axis.md): musical time; the window is a whole number of measures aligned to measure boundaries.
+- [Scan look](tickets/04-scan-look.md): a sweep over two measures, linear amplitude, clipping ticks on the top edge in Snapshot's yellow and red, measure lines only; Snapshot shows the latest 2048 samples.
 
 ## Not yet specified
 
-- Where the spectrum belongs in Scan: kept, hidden, or replaced. Waits on how Scan looks.
 - How to test scope rendering and the sample-reporting protocol.
 
 ## Out of scope
