@@ -9,7 +9,7 @@ This directory holds one wayfinder map and its tickets as Markdown files, standi
 - **Header fields** at the top of each ticket:
   - `Labels:` one `wayfinder:<type>` label (`research`, `prototype`, `grilling`, `task`).
   - `Status:` `open` or `closed`.
-  - `Assignee:` empty when unclaimed. Claim a ticket by setting it, and commit and push, before any other work.
+  - `Assignee:` the GitHub handle of the dev driving the map, or empty when unclaimed. Never an email address or a name derived from one. Claim a ticket by setting it, and commit and push, before any other work.
   - `Blocked by:` links to the tickets that block it, or `none`. This is the blocking edge.
 - **Frontier**: tickets with `Status: open`, an empty `Assignee:`, and every `Blocked by:` ticket closed.
 - **Resolve**: add a `## Resolution` section to the ticket, set `Status: closed`, and add a line to the map's Decisions so far.

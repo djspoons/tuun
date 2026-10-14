@@ -16,6 +16,8 @@ A spec, in this directory, for adding the Scan scope view alongside Snapshot in 
 
 ## Decisions so far
 
+- [Lock-free handoff from audio thread to UI in Rust](tickets/02-lock-free-handoff.md): mpsc sometimes allocates and can lock. `rtrb`/`ringbuf` are lock-free with a fixed capacity and drop the newest data when full; `triple_buffer` keeps only the latest; `ArrayQueue::force_push` drops the oldest.
+
 ## Not yet specified
 
 - Where the spectrum belongs in Scan: kept, hidden, or replaced. Waits on how Scan looks.
