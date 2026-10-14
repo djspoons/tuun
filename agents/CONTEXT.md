@@ -121,7 +121,7 @@ The scope view that draws one short, recent stretch of output samples edge to ed
 _Avoid_: oscilloscope, buffer view
 
 **Scan**:
-The scope view that draws a rolling history of the output over seconds, showing each slice's range of sample values, so envelopes and other slow changes are visible.
+The scope view that draws a rolling history of the output over a whole number of measures, aligned to measure boundaries, showing each slice's range of sample values, so envelopes and other slow changes are visible.
 _Avoid_: scroll, history, strip chart, envelope view
 
 ### Modes
