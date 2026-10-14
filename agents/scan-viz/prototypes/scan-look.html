@@ -1,0 +1,333 @@
+<title>Tuun Scan Variants</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;600&display=swap">
+<style>
+/* PROTOTYPE, throw away. Answers the "Scan look" wayfinder ticket.
+   Layout: a mock of the tuun window on top, the knobs and live state below, a variant switcher pinned to the bottom.
+   Single dark look on purpose: it mirrors the native SDL screen. */
+:root {
+  color-scheme: dark;
+  --bg: #0b0d0c;
+  --panel: #141816;
+  --line: #27302b;
+  --fg: #d9e4dd;
+  --muted: #8a9a90;
+  --scope: #00ff00;      /* tuun's ACTIVE_COLOR / waveform green */
+  --cyan: #00ffff;       /* tuun's INACTIVE_COLOR */
+  --warn: #ffde21;       /* tuun's ERROR_COLOR, also used for |x| in (0.95, 1] */
+  --clip: #ff0000;       /* tuun's RECORD_COLOR, also used for |x| > 1 */
+  --sans: "IBM Plex Sans", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+}
+html, body { height: 100%; }
+body {
+  background: var(--bg); color: var(--fg); font-family: var(--sans);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 16px 96px;
+}
+.wrap { max-width: 1100px; margin: 0 auto; display: grid; gap: 16px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; }
+h1 { font: 600 1.1rem var(--mono); margin: 0; letter-spacing: .02em; }
+header p { margin: 0; color: var(--muted); font-size: .9rem; }
+.screen { position: relative; background: #000; border: 1px solid var(--line); aspect-ratio: 16 / 9; max-width: 100%; }
+canvas { display: block; width: 100%; height: 100%; }
+.panel { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+fieldset { border: 1px solid var(--line); background: var(--panel); margin: 0; padding: 12px; display: grid; gap: 8px; min-width: 0; align-content: start; }
+.wide { grid-column: span 2; }
+@media (max-width: 560px) { .wide { grid-column: auto; } }
+legend { font: 600 .72rem var(--mono); text-transform: uppercase; letter-spacing: .08em; color: var(--muted); padding: 0 4px; }
+.seg { display: flex; flex-wrap: wrap; gap: 4px; align-items: flex-start; }
+.seg button { font: .82rem var(--mono); background: transparent; color: var(--fg); border: 1px solid var(--line); padding: 4px 8px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--scope); color: #000; border-color: var(--scope); }
+.seg button:focus-visible, .bar button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+.hint { font-size: .8rem; color: var(--muted); margin: 0; }
+pre { margin: 0; font: .78rem/1.5 var(--mono); color: var(--muted); white-space: pre-wrap; min-width: 0; }
+.bar {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  display: flex; align-items: center; gap: 8px; background: #fff; color: #000;
+  border-radius: 999px; padding: 6px 8px; box-shadow: 0 4px 20px rgba(0,0,0,.6); font: 600 .85rem var(--mono);
+  max-width: calc(100% - 32px);
+}
+.bar button { border: 0; background: #000; color: #fff; border-radius: 999px; width: 32px; height: 32px; cursor: pointer; font-size: 1rem; }
+.bar span { padding: 0 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Scan look · prototype</h1>
+    <p>Synthesized output at 120 bpm, 4/4. Clips on beat 4 of every 4th measure; drops 60 ms every 7 s.</p>
+  </header>
+
+  <div class="screen"><canvas id="scope"></canvas></div>
+
+  <div class="panel">
+    <fieldset>
+      <legend>Scope view <kbd>Tab</kbd></legend>
+      <div class="seg" id="view"></div>
+      <p class="hint">Snapshot draws the latest N samples edge to edge.</p>
+      <div class="seg" id="snapN"></div>
+    </fieldset>
+    <fieldset>
+      <legend>Window</legend>
+      <div class="seg" id="measures"></div>
+      <p class="hint">Whole measures, aligned to measure starts.</p>
+    </fieldset>
+    <fieldset>
+      <legend>Amplitude</legend>
+      <div class="seg" id="amp"></div>
+      <p class="hint">dB maps −48 dBFS…0 dBFS to the half-height.</p>
+    </fieldset>
+    <fieldset>
+      <legend>Clipping</legend>
+      <div class="seg" id="clipStyle"></div>
+    </fieldset>
+    <fieldset>
+      <legend>Gridlines</legend>
+      <div class="seg" id="grid"></div>
+    </fieldset>
+    <fieldset class="wide">
+      <legend>State</legend>
+      <pre id="state"></pre>
+    </fieldset>
+  </div>
+</div>
+
+<div class="bar" role="group" aria-label="Variant switcher">
+  <button id="prev" aria-label="Previous variant">←</button>
+  <span id="vlabel"></span>
+  <button id="next" aria-label="Next variant">→</button>
+</div>
+
+<script>
+// ---------- settings ----------
+const VARIANTS = [
+  { key: 'A', name: 'Sweep', blurb: 'Write head sweeps left to right; the previous pass shows dimmed ahead of it.' },
+  { key: 'B', name: 'Measure step', blurb: 'Newest measure at the right; the window shifts left one measure at a time.' },
+  { key: 'C', name: 'Stacked measures', blurb: 'One row per measure, newest at the bottom, so beats line up vertically.' },
+];
+const S = {
+  variant: 0, view: 'Scan', snapN: 1024, measures: 2, amp: 'Linear',
+  clipStyle: 'Yellow + red', grid: 'Measures + beats',
+};
+try { const v = localStorage.getItem('scanVariant'); if (v !== null) S.variant = +v % VARIANTS.length; } catch (e) {}
+if (/^#[ABC]$/.test(location.hash)) S.variant = 'ABC'.indexOf(location.hash[1]);
+
+const options = {
+  view: ['Snapshot', 'Scan'], snapN: [256, 512, 1024, 2048, 4096], measures: [1, 2, 4, 8],
+  amp: ['Linear', 'dB'], clipStyle: ['Yellow + red', 'Red only', 'Top-edge ticks'],
+  grid: ['Measures', 'Measures + beats', 'None'],
+};
+for (const [k, vals] of Object.entries(options)) {
+  const el = document.getElementById(k);
+  for (const v of vals) {
+    const b = document.createElement('button');
+    b.textContent = k === 'snapN' ? `N=${v}` : k === 'measures' ? `${v} meas.` : v;
+    b.id = `${k}-${v}`;
+    b.onclick = () => { S[k] = v; sync(); };
+    el.appendChild(b);
+  }
+}
+function sync() {
+  for (const [k, vals] of Object.entries(options))
+    for (const v of vals) document.getElementById(`${k}-${v}`).setAttribute('aria-pressed', S[k] === v);
+  const v = VARIANTS[S.variant];
+  document.getElementById('vlabel').textContent = `${v.key} (${v.name})`;
+  try { localStorage.setItem('scanVariant', S.variant); } catch (e) {}
+}
+function cycle(d) { S.variant = (S.variant + d + VARIANTS.length) % VARIANTS.length; sync(); }
+document.getElementById('prev').onclick = () => cycle(-1);
+document.getElementById('next').onclick = () => cycle(1);
+addEventListener('keydown', e => {
+  if (e.target.closest('input,textarea,[contenteditable]')) return;
+  if (e.key === 'ArrowLeft') cycle(-1);
+  else if (e.key === 'ArrowRight') cycle(1);
+  else if (e.key === 'Tab') { e.preventDefault(); S.view = S.view === 'Scan' ? 'Snapshot' : 'Scan'; sync(); }
+});
+sync();
+
+// ---------- synthesized output mix ----------
+const SR = 48000, BPM = 120, BEATS = 4;
+const BEAT = SR * 60 / BPM, MEAS = BEAT * BEATS;
+const HIST = MEAS * 8 + SR;               // 8 measures of history plus slack
+const hist = new Float32Array(HIST);       // ring of samples; NaN marks dropped samples
+let written = 0;                           // total samples produced since start
+let seed = 1;
+const noise = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 2147483648 - 1);
+function sample(n) {
+  const t = n / SR, inBeat = n % BEAT, b = Math.floor(n / BEAT), m = Math.floor(n / MEAS);
+  const bt = inBeat / SR;
+  // kick on every beat
+  const f = 50 + 100 * Math.exp(-bt * 30);
+  let x = 0.55 * Math.sin(2 * Math.PI * f * bt) * Math.exp(-bt * 9);
+  // bass on the off-beat eighth
+  const half = BEAT / 2, ob = (n % BEAT) - half;
+  if (ob >= 0) { const ot = ob / SR; x += 0.25 * (((55 * ot) % 1) * 2 - 1) * Math.exp(-ot * 6); }
+  // pad swelling over each pair of measures
+  const ph = (n % (MEAS * 2)) / (MEAS * 2);
+  x += 0.18 * Math.sin(Math.PI * ph) ** 2 * (Math.sin(2 * Math.PI * 220 * t) + 0.6 * Math.sin(2 * Math.PI * 330 * t));
+  // loud snare on beat 4 of every 4th measure: this one clips
+  if (m % 4 === 3 && b % BEATS === 3) x += 1.1 * noise() * Math.exp(-bt * 7);
+  // quiet hi-hat on every beat 2 and 4
+  else if (b % 2 === 1) x += 0.12 * noise() * Math.exp(-bt * 40);
+  return x;
+}
+let t0 = null;
+function produce(now) {
+  if (t0 === null) t0 = now;
+  const target = Math.floor((now - t0) / 1000 * SR);
+  while (written < target) {
+    const n = written;
+    const dropped = (n % (SR * 7)) < SR * 0.06 && n > SR;   // header ring would report these as dropped
+    hist[n % HIST] = dropped ? NaN : sample(n);
+    written++;
+  }
+}
+const at = n => hist[((n % HIST) + HIST) % HIST];
+
+// ---------- drawing ----------
+const cv = document.getElementById('scope'), g = cv.getContext('2d');
+const css = k => getComputedStyle(document.documentElement).getPropertyValue(k).trim();
+const C = { scope: css('--scope'), warn: css('--warn'), clip: css('--clip'), cyan: css('--cyan') };
+function fit() {
+  const r = cv.getBoundingClientRect(), d = devicePixelRatio || 1;
+  cv.width = Math.round(r.width * d); cv.height = Math.round(r.height * d);
+}
+addEventListener('resize', fit); fit();
+
+function amp(v) {          // maps |v| in [0, ∞) to [0, 1+] of the half-height
+  if (S.amp === 'Linear') return v / 1.2;
+  const db = 20 * Math.log10(Math.max(v, 1e-6));
+  return Math.max(0, (db + 48) / 48);
+}
+function colorFor(peak) {
+  if (S.clipStyle === 'Yellow + red') return peak > 1 ? C.clip : peak > 0.95 ? C.warn : C.scope;
+  if (S.clipStyle === 'Red only') return peak > 1 ? C.clip : C.scope;
+  return C.scope;
+}
+// min/max over [a, b) samples; null when all dropped
+function slice(a, b) {
+  let lo = Infinity, hi = -Infinity, gap = false;
+  const step = Math.max(1, Math.floor((b - a) / 64));     // decimate for speed; fine for a prototype
+  for (let n = a; n < b; n += step) { const v = at(n); if (v !== v) { gap = true; continue; } if (v < lo) lo = v; if (v > hi) hi = v; }
+  return lo === Infinity ? null : { lo, hi, gap };
+}
+// draws one strip of measures from sample s0 for `len` samples into rect (x, y, w, h)
+function strip(s0, len, x, y, w, h, alpha, limit) {
+  const mid = y + h / 2, half = h / 2;
+  const cols = Math.floor(w);
+  for (let c = 0; c < cols; c++) {
+    const a = s0 + Math.floor(c * len / cols), b = s0 + Math.floor((c + 1) * len / cols);
+    if (b > limit || a < written - HIST + SR) continue;   // not produced yet, or forgotten
+    const s = slice(a, b);
+    if (!s) {   // dropped: draw a faint hatch so the gap reads as a gap
+      g.globalAlpha = 0.35 * alpha; g.fillStyle = C.clip;
+      if (c % 3 === 0) g.fillRect(x + c, mid - half * 0.9, 1, half * 1.8);
+      continue;
+    }
+    const peak = Math.max(Math.abs(s.lo), Math.abs(s.hi));
+    g.globalAlpha = alpha; g.fillStyle = colorFor(peak);
+    let top, bot;
+    if (S.amp === 'Linear') { top = mid - amp(Math.max(s.hi, 0)) * half; bot = mid + amp(Math.max(-s.lo, 0)) * half; }
+    else { const e = amp(peak) * half; top = mid - e; bot = mid + e; }   // dB has no sign: mirrored envelope
+    g.fillRect(x + c, top, 1, Math.max(1, bot - top));
+    if (S.clipStyle === 'Top-edge ticks' && peak > 1) { g.fillStyle = C.clip; g.fillRect(x + c, y, 1, 6 * devicePixelRatio); }
+  }
+  g.globalAlpha = 1;
+}
+function gridlines(x, y, w, h, measures) {
+  if (S.grid === 'None') return;
+  for (let m = 0; m <= measures; m++) {
+    for (let b = 0; b < BEATS; b++) {
+      if (m === measures && b > 0) break;
+      const xx = Math.round(x + (m * BEATS + b) / (measures * BEATS) * w) + 0.5;
+      if (b === 0) { g.strokeStyle = 'rgba(0,255,255,0.45)'; g.setLineDash([]); }
+      else if (S.grid === 'Measures + beats') { g.strokeStyle = 'rgba(0,255,255,0.18)'; g.setLineDash([2, 4]); }
+      else continue;
+      g.beginPath(); g.moveTo(xx, y); g.lineTo(xx, y + h); g.stroke();
+    }
+  }
+  g.setLineDash([]);
+  g.strokeStyle = 'rgba(0,255,0,0.15)';
+  g.beginPath(); g.moveTo(x, y + h / 2 + 0.5); g.lineTo(x + w, y + h / 2 + 0.5); g.stroke();
+}
+
+function drawSweep(x, y, w, h) {
+  const len = S.measures * MEAS;
+  const start = Math.floor(written / len) * len;      // current pass starts on a measure boundary
+  strip(start - len, len, x, y, w, h, 0.3, start);      // previous pass, dimmed (shown only ahead of the head)
+  g.fillStyle = '#000';
+  const head = x + (written - start) / len * w;
+  g.fillRect(x, y, head - x, h);
+  strip(start, len, x, y, w, h, 1, written);
+  gridlines(x, y, w, h, S.measures);
+  g.fillStyle = C.cyan; g.fillRect(head, y, 2, h);
+}
+function drawStep(x, y, w, h) {
+  const curM = Math.floor(written / MEAS);
+  const start = (curM - S.measures + 1) * MEAS;       // newest (partial) measure occupies the rightmost slot
+  gridlines(x, y, w, h, S.measures);
+  strip(start, S.measures * MEAS, x, y, w, h, 1, written);
+}
+function drawStacked(x, y, w, h) {
+  const rows = S.measures, rh = h / rows, curM = Math.floor(written / MEAS);
+  for (let r = 0; r < rows; r++) {
+    const m = curM - (rows - 1 - r);
+    const ry = y + r * rh;
+    gridlines(x, ry + 2, w, rh - 4, 1);
+    const age = rows - 1 - r;
+    strip(m * MEAS, MEAS, x, ry + 2, w, rh - 4, Math.max(0.35, 1 - age * 0.2), written);
+    g.fillStyle = 'rgba(0,255,255,0.6)'; g.font = `${11 * devicePixelRatio}px ${css('--mono')}`;
+    g.fillText(m >= 0 ? `m${m + 1}` : '', x + 4 * devicePixelRatio, ry + 14 * devicePixelRatio);
+  }
+}
+function drawSnapshot(x, y, w, h) {
+  const N = S.snapN, mid = y + h / 2, half = h / 2.4;
+  g.strokeStyle = 'rgba(0,255,0,0.15)'; g.beginPath(); g.moveTo(x, mid); g.lineTo(x + w, mid); g.stroke();
+  let last = null;
+  for (let i = 0; i < N; i++) {
+    const v = at(written - N + i);
+    if (v !== v) { last = null; continue; }
+    const xx = x + i / N * w, yy = mid - v * half;
+    g.strokeStyle = colorFor(Math.abs(v));
+    if (last) { g.beginPath(); g.moveTo(last[0], last[1]); g.lineTo(xx, yy); g.stroke(); }
+    last = [xx, yy];
+  }
+}
+// mock program list, drawn over the scope as tuun does
+const PROGRAMS = ['kick = sine_sweep(150, 50) * decay(9)', 'bass = saw(55) | on_beats([1.5, 2.5, 3.5, 4.5])',
+  'pad = swell(2) * (sine(220) + 0.6 * sine(330))', 'snare = noise * decay(7)', '', '', '', ''];
+function drawText(w, h) {
+  const d = devicePixelRatio, fs = Math.max(10, w / d / 60) * d;
+  g.font = `${fs}px ${css('--mono')}`;
+  PROGRAMS.forEach((p, i) => {
+    g.fillStyle = i === 0 ? '#00ff00' : C.cyan;
+    g.globalAlpha = 0.85;
+    g.fillText(`${i + 1} ${p}`, 10 * d, (i + 1) * fs * 1.5);
+  });
+  g.globalAlpha = 1;
+}
+
+function frame(now) {
+  produce(now);
+  const W = cv.width, H = cv.height;
+  g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
+  const sh = Math.floor(H * 3 / 5);    // tuun gives the waveform the top 3/5
+  if (S.view === 'Snapshot') { g.lineWidth = Math.max(1, devicePixelRatio); drawSnapshot(0, 0, W, sh); }
+  else [drawSweep, drawStep, drawStacked][S.variant](0, 0, W, sh);
+  g.lineWidth = 1;
+  drawText(W, H);
+  const v = VARIANTS[S.variant], m = Math.floor(written / MEAS), b = Math.floor((written % MEAS) / BEAT);
+  document.getElementById('state').textContent =
+`view      ${S.view}${S.view === 'Snapshot' ? `  N=${S.snapN} (${(S.snapN / SR * 1000).toFixed(1)} ms)` : ''}
+variant   ${v.key} ${v.name}
+          ${v.blurb}
+window    ${S.measures} meas. = ${(S.measures * MEAS / SR).toFixed(1)} s, ${Math.round((S.variant === 2 ? MEAS : S.measures * MEAS) / W)} samples/px
+amplitude ${S.amp}   clip ${S.clipStyle}
+grid      ${S.grid}
+clock     measure ${m + 1}, beat ${b + 1}`;
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>

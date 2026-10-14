@@ -8,3 +8,5 @@ Blocked by: [How the audio thread reports samples](01-sample-reporting.md), [Sca
 ## Question
 
 How should Scan look on screen: window length, scrolling or sweeping, linear or dB amplitude, how clipping is coloured, which gridlines are drawn, and how many recent samples (N) Snapshot shows? Resolve by building a rough working view to react to.
+
+Prototype: [prototypes/scan-look.html](../prototypes/scan-look.html) (open in a browser; ←/→ switch variants, Tab switches scope view).
