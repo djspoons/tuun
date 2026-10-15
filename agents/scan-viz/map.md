@@ -34,3 +34,4 @@ A spec, in this directory, for adding the Scan scope view alongside Snapshot in 
 - Snapshot triggering (for example, aligning to zero crossings).
 - Freezing or pausing the scope.
 - Moving existing app-state key bindings to Ctrl combinations: a standing preference, not part of this effort.
+- Auditing the main thread for long-running work: a separate effort.
