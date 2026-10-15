@@ -25,7 +25,7 @@ use tuun::sdl2_input;
 use tuun::tracker;
 use tuun::waveform;
 
-use loop_timing::{Input, LoopTiming, Step};
+use loop_timing::{Helper, Input, LoopTiming, Step};
 use metric::Metric;
 use renderer::Renderer;
 use tracker::Command;
@@ -69,7 +69,7 @@ struct Args {
     input_file: String,
     #[arg(short = 'O', long, default_value = ".")]
     output_dir: String, // Captures waveforms to the specified directory
-    /// Shows on screen how long each main-loop step and each kind of input takes.
+    /// Shows on screen how long each main-loop step, each kind of input and each Edit-mode helper takes.
     #[arg(long)]
     show_loop_timing: bool,
 }
@@ -454,6 +454,8 @@ pub fn main() {
         for event in event_pump.poll_iter() {
             let sdl_actions = sdl2_handler.classify(&event, &state);
             if let Some(actions) = sdl_actions {
+                let helper = edit_helper(&actions);
+                let dispatch_start = Instant::now();
                 dispatch_actions(
                     &mut effect_runner,
                     &mut state,
@@ -461,6 +463,9 @@ pub fn main() {
                     &status,
                     actions,
                 );
+                if let (Some(timing), Some(helper)) = (metrics.loop_timing.as_mut(), helper) {
+                    timing.record_helper(helper, dispatch_start.elapsed());
+                }
             } else {
                 // classify() should cover every SDL event we care about.
                 println!("Unhandled SDL event: {:?}", event);
@@ -602,6 +607,25 @@ fn run_effects(
 ) {
     let mut world = effects::World { launchkey, status };
     runner.run_all(state, &mut world, effects);
+}
+
+/// Returns the Edit-mode helper that `actions` run, when they are one action
+/// that runs a helper.
+fn edit_helper(actions: &[actions::Action]) -> Option<Helper> {
+    use actions::Action;
+    match actions {
+        [Action::Complete] => Some(Helper::Complete),
+        [Action::ShowType] => Some(Helper::ShowType),
+        [
+            Action::InsertText(_)
+            | Action::DeleteCharBeforeCursor
+            | Action::DeleteCharAfterCursor
+            | Action::DeleteWordBeforeCursor
+            | Action::DeleteWordAfterCursor
+            | Action::DeleteToEndOfLine,
+        ] => Some(Helper::TextEdit),
+        _ => None,
+    }
 }
 
 /// Dispatches `actions` through the reducer against a `World` built from the
