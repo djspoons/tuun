@@ -11,6 +11,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path;
+use std::sync::Arc;
 use std::time;
 
 use crate::builtins;
@@ -194,7 +195,7 @@ impl Environment {
             "mark",
             SourceExpr::from(expr::Expr::BuiltIn {
                 name: "mark".to_string(),
-                function: expr::BuiltInFn(std::rc::Rc::new(mark)),
+                function: expr::BuiltInFn(Arc::new(mark)),
             }),
         ));
         prelude.push(def(

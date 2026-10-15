@@ -3991,7 +3991,7 @@ fn dedup_last_wins<T>(entries: Vec<(String, T)>) -> Vec<(String, T)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::rc::Rc;
+    use std::sync::Arc;
 
     use crate::builtins;
     use crate::expr::BuiltInFn;
@@ -4034,7 +4034,7 @@ mod tests {
             Pattern::Identifier("mark".to_string()),
             SourceExpr::from(Expr::BuiltIn {
                 name: "mark".to_string(),
-                function: BuiltInFn(Rc::new(|_| Err(Error::internal_here("stub")))),
+                function: BuiltInFn(Arc::new(|_| Err(Error::internal_here("stub")))),
             }),
         ));
         prelude.push(SourceBinding::definition(
@@ -4048,7 +4048,7 @@ mod tests {
             Pattern::Identifier("w2".to_string()),
             SourceExpr::from(Expr::BuiltIn {
                 name: "w2".to_string(),
-                function: BuiltInFn(Rc::new(|arguments: Vec<Expr<u32, S>>| {
+                function: BuiltInFn(Arc::new(|arguments: Vec<Expr<u32, S>>| {
                     arguments
                         .into_iter()
                         .next()
@@ -4062,7 +4062,7 @@ mod tests {
             Pattern::Identifier("f1".to_string()),
             SourceExpr::from(Expr::BuiltIn {
                 name: "f1".to_string(),
-                function: BuiltInFn(Rc::new(|arguments: Vec<Expr<u32, S>>| {
+                function: BuiltInFn(Arc::new(|arguments: Vec<Expr<u32, S>>| {
                     arguments
                         .into_iter()
                         .next()
@@ -4077,7 +4077,7 @@ mod tests {
             Pattern::Identifier("f2".to_string()),
             SourceExpr::from(Expr::BuiltIn {
                 name: "f2".to_string(),
-                function: BuiltInFn(Rc::new(|arguments: Vec<Expr<u32, S>>| {
+                function: BuiltInFn(Arc::new(|arguments: Vec<Expr<u32, S>>| {
                     arguments
                         .into_iter()
                         .next()

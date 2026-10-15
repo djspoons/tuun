@@ -5,7 +5,7 @@
 // Each test crate compiles this module and uses only part of it.
 #![allow(dead_code)]
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use tuun::builtins;
 use tuun::expr::{Binding, BuiltInFn, Error, ErrorKind, Expr, Pattern, SourceBinding, SourceExpr};
@@ -60,7 +60,7 @@ impl Scope {
             Pattern::Identifier("mark".to_string()),
             SourceExpr::from(Expr::BuiltIn {
                 name: "mark".to_string(),
-                function: BuiltInFn(Rc::new(|_| Err(Error::eval_here("mark needs a voice")))),
+                function: BuiltInFn(Arc::new(|_| Err(Error::eval_here("mark needs a voice")))),
             }),
         ));
         prelude.push(SourceBinding::definition(
