@@ -24,6 +24,7 @@ A spec, in this directory, that ranks the work on the native UI's main thread by
 - [Where the note function runs](tickets/03-note-function.md): it stays on the main thread. The budget is about 5 ms per loop pass, chords included. A note-on costs about 0.1–0.9 ms in release and 0.3–2.4 ms in debug, and it never moves to the processing thread. Cheaper note-ons are code TODOs.
 - [Font loading per frame](tickets/05-font-loading.md): fonts are loaded once and held by `Renderer<'ttf>`. That is estimated to save 1–4 ms per frame, most of it, by hypothesis, from the glyph cache that each fresh font throws away.
 - [The 10 ms status wait](tickets/04-status-wait.md): removed. The loop blocks in SDL's `wait_event_timeout`; SDL input, Launchkey events and processing results wake it, statuses don't. It renders at most 60 Hz and sleeps until the next render, tick or buffer refresh, so an input waits only behind a render in progress (target: about 6 ms max keyboard latency).
+- [Measure render cost](tickets/08-measure-render.md): `present()` doesn't wait (Metal, vsync off); text textures are about two thirds of a 5–6 ms render at about 0.14–0.19 ms each; Edit mode on a long program needs about 112 and takes about 22.8 ms, over a 60 Hz frame.
 
 ## Not yet specified
 
