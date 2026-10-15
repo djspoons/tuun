@@ -2,7 +2,7 @@
 
 Labels: wayfinder:grilling
 Status: open
-Assignee:
+Assignee: djspoons
 Blocked by: [Measure on the dev's machine](02-measure.md)
 
 ## Question
