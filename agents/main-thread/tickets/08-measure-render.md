@@ -24,7 +24,7 @@ Done when the numbers are recorded in this ticket's resolution. They decide whet
 - `render fonts`, `render text`, `render other`, `render present`: the four parts of one render, in ms, as `current second (10 s max)` like the other lines. `render text` covers `font.render(..).blended(..)` plus `create_texture_from_surface`; `render other` is the time before `present()` less fonts and text; `render present` is `present()` alone. The `render` step line still covers the whole call.
 - `text textures`: the most text textures one render created.
 
-The timing display draws its own 16 lines as text textures, so with the flag on, `render text` and `text textures` include them.
+The timing display draws its own 15 lines as text textures, so with the flag on, `render text` and `text textures` include them.
 
 Code: `RenderPart` and `LoopTiming::record_render_part` / `record_text_textures` in `src/lib/loop_timing.rs`; `FrameCost`, `load_font` and the timed `make_texture` in `src/lib/renderer.rs`. The `CLAUDE.md` checks pass. It has not been run with a display: the container has neither the display nor the macOS font.
 
