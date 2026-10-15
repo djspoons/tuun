@@ -4,10 +4,10 @@ open std;
 
 // Create waveforms for the four parts of the envelope.
 Aw = fn(dur) => linear(0.0, 1.0 / dur) | fin(time - dur) | seq(time - dur);
-Dw = fn(dur, a) => linear(1.0, (a - 1.0) / dur) | fin(time - dur) | seq(time - dur);
-Sw = fn(dur, a) => a | fin(time - dur) | seq(time - dur);
+Dw = fn(dur, sustain_level) => linear(1.0, (sustain_level - 1.0) / dur) | fin(time - dur) | seq(time - dur);
+Sw = fn(dur, sustain_level) => sustain_level | fin(time - dur) | seq(time - dur);
 // N.B. that R and Rw are not seq, since they are assumed to be the last part of the envelope.
-Rw = fn(dur, level) => linear(level, -level / dur) | fin(time - dur);
+Rw = fn(dur, sustain_level) => linear(sustain_level, -sustain_level / dur) | fin(time - dur);
 
 // The shortest attack, decay, or release. Dividing by zero gives zero, so a
 // zero duration would give a flat segment instead of a step.

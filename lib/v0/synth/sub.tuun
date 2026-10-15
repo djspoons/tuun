@@ -2,6 +2,7 @@ open std;
 use filters.rbj;
 use env.minmax;
 use env.finseq;
+use env.expfil;
 
 // An example of subtractive synthesis from Welsh's Synthesizer Cookbook
 harmonica = fn(dur, freq) =>
@@ -21,17 +22,25 @@ harmonica = fn(dur, freq) =>
     | fin(time - dur) // redundant with the ADSR
     | seq(time - dur);
 
-// Played on a harmonica
-// I = I(harmonica);
-// II = II(harmonica);
-// III = III(harmonica);
-// i = i(harmonica);
 
-// Just notes on harmonica
-// Hh = fn(freq) => harmonica(H, freq) | seq(time - H);
+tuned_kick_drum = fn() => fn(dur, freq_hz) =>
+  let
+    lpf_cutoff = 300,
+    Q = 0.707,
+    freq_hz = freq_hz / 8, // Lower three octaves
+    freq_env_mul = 4,
+    freq_env_dur = 0.02,
+    freq_env = max(linear(freq_env_mul, -1/freq_env_dur), 1)
+  in
+    (0.08 * noise | expfil.R(0.01, 1.0))
+    &
+    (1.1 * triangle(freq_hz * freq_env)
+      | rbj.lpf(Q, lpf_cutoff)
+      | expfil.R(0.2, 1.0))
+      | seq(time - dur);
 
-// <[I H, III H, i H]>
-// <[Hh(@67), Hh(@69)]>
+// Defaults to C
+kick_drum = fn() => fn(dur) => tuned_kick_drum()(dur, @60);
 
 _flute_osc = fn(freq_hz, lpf_Q = 0.6, lpf_cutoff = 1600, hpf_Q = 0.6, hpf_cutoff = 1600) =>
   sawtooth(freq_hz)

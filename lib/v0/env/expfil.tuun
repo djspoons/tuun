@@ -1,0 +1,31 @@
+open std;
+
+// Exponential decay envelopes implemented using `filter`. Best for constant
+// duration envelopes, since otherwise the `factor` must be recomputed on every
+// sample. For non-constant duration envelopes, use the implementation in
+// expexp.tuun.
+
+// ~60 dB
+_amp_threshold = 0.001;
+
+// Returns an exponential decay envelope waveform from 1 down to `level`.
+Dw = fn(dur, level) =>
+  let
+    // 0.001 ~ -60 dB
+    factor = exp(ln(_amp_threshold) / (dur * sample_rate))
+  in
+    append(fixed([1]), (1 - factor) * level) | filter([1], [-factor])
+      | fin(time - dur) | seq(time - dur);
+
+D = fn(dur, level) => fn(w) => w * (Dw(dur, level) \ 1); // XXX should this be "followed by 1" or "followed by level"?
+
+// Returns an exponential decay envelope waveform from `level` down to zero.
+Rw = fn(dur, level) =>
+  let
+    // 0.001 ~ -60 dB
+    factor = exp(ln(_amp_threshold) / (dur * sample_rate))
+  in
+    append(fixed([level]), 0) | filter([1], [-factor])
+      | fin(time - dur);
+
+R = fn(dur, level) => fn(w) => w * Rw(dur, level);
