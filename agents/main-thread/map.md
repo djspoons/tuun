@@ -22,10 +22,11 @@ A spec, in this directory, that ranks the work on the native UI's main thread by
 - [Measure on the dev's machine](tickets/02-measure.md): idle passes spend about 11 ms in the status wait and 5-7 ms rendering; source reload blocks about 2.6 s and leaving Edit mode about 233 ms; a note-on takes at most about 1 ms; pad and Launchkey key latency not yet measured.
 - [Where program processing runs](tickets/06-evaluation.md): parsing, type checking and evaluating programs move to one processing thread that owns its own `Environment`. First, built-ins become `Send`. Leaving Edit mode, reloading and startup show "Processing…" while input keeps working. The write-back stays on the main thread. Evaluation, not type checking or I/O, is about 93–95% of the cost.
 - [Where the note function runs](tickets/03-note-function.md): it stays on the main thread. The budget is about 5 ms per loop pass, chords included. A note-on costs about 0.1–0.9 ms in release and 0.3–2.4 ms in debug, and it never moves to the processing thread. Cheaper note-ons are code TODOs.
+- [Font loading per frame](tickets/05-font-loading.md): fonts are loaded once and held by `Renderer<'ttf>`. That is estimated to save 1–4 ms per frame, most of it, by hypothesis, from the glyph cache that each fresh font throws away.
 
 ## Not yet specified
 
-- Render cost beyond font loading, and whether `present()` waits for vsync.
+- Render cost beyond font loading, and whether `present()` waits for vsync. Every text texture is rebuilt each frame; with fonts kept, that is the largest remaining text cost (about 0.7 ms on a software renderer, not yet measured on the dev's machine). Caching textures meets a `TextureCreator` lifetime.
 - Whether input should be handled on its own thread rather than in the main loop.
 - Whether note-on stays within budget as keys instruments get heavier, and for chords in debug builds (a four-note flute chord is about 8–10 ms).
 - Cost of the Edit-mode helpers (completion and parameter hints evaluate all preceding bindings; ShowType; the per-keystroke parse).
@@ -34,3 +35,4 @@ A spec, in this directory, that ranks the work on the native UI's main thread by
 
 - The audio thread, the precompute thread, and the web/wasm UI.
 - Making the moves themselves: this map ends at the spec.
+- The hard-coded macOS font path in `src/lib/renderer.rs`: portability, not latency ([Font loading per frame](tickets/05-font-loading.md)).
