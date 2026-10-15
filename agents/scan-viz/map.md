@@ -21,7 +21,8 @@ A spec, in this directory, for adding the Scan scope view alongside Snapshot in 
 - [How the audio thread reports samples](tickets/01-sample-reporting.md): raw samples pushed every callback through an `rtrb` sample ring plus a header ring (timestamp, written, dropped), all-or-nothing per callback; newest dropped when full; replaces `SendCurrentBuffer`; Snapshot becomes the latest N samples.
 - [Scan's time axis: measures or seconds](tickets/03-scan-time-axis.md): musical time; the window is a whole number of measures aligned to measure boundaries.
 - [Scan look](tickets/04-scan-look.md): a sweep over two measures, linear amplitude, clipping ticks on the top edge in Snapshot's yellow and red, measure lines only; Snapshot shows the latest 2048 samples.
-- [Switching scope views](tickets/05-switching-scope-views.md): Ctrl+S toggles in every editor mode where possible; Snapshot by default; `--scope_view` CLI flag sets the startup view; a status message on each switch; no Launchkey button.
+- [Switching scope views](tickets/05-switching-scope-views.md): Ctrl+S toggles in every editor mode where possible; Snapshot by default; `--scope-view` CLI flag sets the startup view; a status message on each switch; no Launchkey button.
+- [The spectrum in Scan](tickets/06-spectrum-in-scan.md): kept below the scope in both views; Snapshot and the spectrum redraw on a UI timer set by a CLI flag (default 200 ms).
 
 ## Not yet specified
 
