@@ -33,17 +33,19 @@ Code: `RenderPart` and `LoopTiming::record_render_part` / `record_text_textures`
 
 Each value is `current second / 10 s max`, in ms, on the dev's machine.
 
-| Line | Idle |
-|---|---|
-| render driver | metal, vsync off |
-| render | 6.1 / 17.1 |
-| render fonts | 0.8 / 1.5 |
-| render text | 4.0 / 14.8 |
-| render other | 1.2 / 2.7 |
-| render present | 0.0 / 0.0 |
-| text textures | 28 / 113 |
+| Line | Idle | Several programs playing |
+|---|---|---|
+| render driver | metal, vsync off | metal, vsync off |
+| render | 6.1 / 17.1 | 5.8 / 6.4 |
+| render fonts | 0.8 / 1.5 | 0.7 / 1.1 |
+| render text | 4.0 / 14.8 | 4.0 / 4.1 |
+| render other | 1.2 / 2.7 | 1.2 / 1.4 |
+| render present | 0.0 / 0.0 | 0.0 / 0.0 |
+| text textures | 28 / 113 | 27 / 27 |
 
 - **`present()` doesn't wait.** Metal runs with vsync off and `present()` rounds to 0.0 ms, so nothing paces rendering but the loop itself.
 - **Text is about two thirds of an idle render** (4.0 of 6.1 ms), at about 0.14 ms per texture. Font loading is 0.8 ms.
 - **15 of the 28 idle textures are the timing display itself,** so without the flag an idle frame makes about 13.
 - Hypothesis (unverified): some of `render text` is glyph rasterization that a font kept across frames would cache, so keeping fonts ([Font loading per frame](05-font-loading.md)) may lower `render text` as well as `render fonts`.
+- **Several programs playing looks like idle:** render 5.8 ms, of which text is 4.0 ms over 27 textures. Playing adds no measurable render cost; the idle maximums (17.1 ms, 113 textures) were one-off spikes not seen here.
+
