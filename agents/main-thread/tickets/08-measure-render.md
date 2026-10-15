@@ -28,3 +28,22 @@ The timing display draws its own 15 lines as text textures, so with the flag on,
 
 Code: `RenderPart` and `LoopTiming::record_render_part` / `record_text_textures` in `src/lib/loop_timing.rs`; `FrameCost`, `load_font` and the timed `make_texture` in `src/lib/renderer.rs`. The `CLAUDE.md` checks pass. It has not been run with a display: the container has neither the display nor the macOS font.
 
+
+## Measurements
+
+Each value is `current second / 10 s max`, in ms, on the dev's machine.
+
+| Line | Idle |
+|---|---|
+| render driver | metal, vsync off |
+| render | 6.1 / 17.1 |
+| render fonts | 0.8 / 1.5 |
+| render text | 4.0 / 14.8 |
+| render other | 1.2 / 2.7 |
+| render present | 0.0 / 0.0 |
+| text textures | 28 / 113 |
+
+- **`present()` doesn't wait.** Metal runs with vsync off and `present()` rounds to 0.0 ms, so nothing paces rendering but the loop itself.
+- **Text is about two thirds of an idle render** (4.0 of 6.1 ms), at about 0.14 ms per texture. Font loading is 0.8 ms.
+- **15 of the 28 idle textures are the timing display itself,** so without the flag an idle frame makes about 13.
+- Hypothesis (unverified): some of `render text` is glyph rasterization that a font kept across frames would cache, so keeping fonts ([Font loading per frame](05-font-loading.md)) may lower `render text` as well as `render fonts`.
