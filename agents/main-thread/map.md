@@ -25,9 +25,11 @@ A spec, in this directory, that ranks the work on the native UI's main thread by
 - [Font loading per frame](tickets/05-font-loading.md): fonts are loaded once and held by `Renderer<'ttf>`. That is estimated to save 1–4 ms per frame, most of it, by hypothesis, from the glyph cache that each fresh font throws away.
 - [The 10 ms status wait](tickets/04-status-wait.md): removed. The loop blocks in SDL's `wait_event_timeout`; SDL input, Launchkey events and processing results wake it, statuses don't. It renders at most 60 Hz and sleeps until the next render, tick or buffer refresh, so an input waits only behind a render in progress (target: about 6 ms max keyboard latency).
 - [Measure render cost](tickets/08-measure-render.md): `present()` doesn't wait (Metal, vsync off); text textures are about two thirds of a 5–6 ms render at about 0.14–0.19 ms each; Edit mode on a long program needs about 112 and takes about 22.8 ms, over a 60 Hz frame.
+- [Caching text textures](tickets/10-text-textures.md): no cache; the active Edit-mode line is drawn in runs of one colour instead of one texture per character, with the cursor placed by `font.size_of`; acceptance is an Edit-mode render under 16.7 ms.
 
 ## Not yet specified
 
+- A text texture cache kept across frames, if later measurements show ordinary frames over budget.
 - Whether note-on stays within budget as keys instruments get heavier, and for chords in debug builds (a four-note flute chord is about 8–10 ms).
 
 ## Out of scope
