@@ -2617,7 +2617,8 @@ impl<S: Clone> Infer<S> {
                 // Every conjunct's domain here is numeric and the conjuncts are all
                 // the arms there are, so an unconstrained argument may be
                 // any numeric; `record_selection_contracts` is what commits
-                // it, once selection succeeds.
+                // it, once selection succeeds, and narrowing commits it to
+                // numeric alone when it empties a slot.
                 Type::Meta(id) => (Unknown::Meta(id), Sort::TOP),
                 // `Erroneous` passes everything and imposes nothing.
                 _ => {
@@ -2739,6 +2740,19 @@ impl<S: Clone> Infer<S> {
                     .map(|(atom, _)| *atom)
                     .collect();
                 if kept.is_empty() {
+                    // Narrowing judges the arguments jointly, so it can
+                    // empty a slot the table would accept in another
+                    // combination. Whatever the verdict, every open
+                    // argument is numeric — every admitting conjunct's
+                    // domain at its position is — and recording that is
+                    // what lets an enclosing definition tabulate and judge
+                    // the arguments atom by atom.
+                    for (unknown, _) in &open {
+                        if let Unknown::Meta(meta) = unknown {
+                            let fresh = self.fresh_refinement();
+                            self.solve(*meta, Type::Numeric(fresh));
+                        }
+                    }
                     return Selection::NoApplicableConjunct;
                 }
                 slots[slot].1 = kept;
@@ -5581,6 +5595,21 @@ mod tests {
         assert_clean("let ap = fn(f, v) => f(v) in ap(fn(x) => (x != 0.5), 1.5)");
         // Two unknowns narrow nothing, so the table demands nothing.
         assert_clean("let f = fn(x) => fn(y) => 1 in f(1)(2)");
+    }
+
+    #[test]
+    fn a_table_called_with_open_arguments_still_tabulates_its_caller() {
+        // `g` excludes a seq at `a` whatever `b` is, so no single contract
+        // per position covers what `h` passes through. `h`'s parameters are
+        // still numeric, which is what lets `h` tabulate and check each
+        // combination with ground arguments.
+        let defs = "let g = fn(a, b) => w2(a, 1) + b in let h = fn(a, b) => g(a, b) in";
+        assert_clean(&format!("{} h(1, 2)", defs));
+        assert_clean(&format!("{} h(1, (time | seq(time - 1)))", defs));
+        assert_errors(
+            &format!("{} h((time | seq(time - 1)), 2)", defs),
+            &["expected waveform, found seq"],
+        );
     }
 
     #[test]
