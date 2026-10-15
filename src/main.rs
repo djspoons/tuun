@@ -465,8 +465,12 @@ pub fn main() {
                 // classify() should cover every SDL event we care about.
                 println!("Unhandled SDL event: {:?}", event);
             }
-            if let (Some(timing), sdl2::event::Event::KeyDown { timestamp, .. }) =
-                (metrics.loop_timing.as_mut(), &event)
+            // Typed characters (digits that select a program, for example) arrive as TextInput.
+            if let (
+                Some(timing),
+                sdl2::event::Event::KeyDown { timestamp, .. }
+                | sdl2::event::Event::TextInput { timestamp, .. },
+            ) = (metrics.loop_timing.as_mut(), &event)
             {
                 let latency_ms = sdl_timer.ticks().saturating_sub(*timestamp);
                 timing.record_input(Input::Keyboard, Duration::from_millis(latency_ms as u64));

@@ -17,7 +17,7 @@ Run the native UI with `--show-loop-timing`. Nine lines appear in the top-right 
 
 - **Steps of each main-loop pass:** `SDL events`, `Launchkey events`, `status wait` (includes the up-to-10 ms `recv_timeout`), `tick`, `render` (includes `present()`), `Launchkey update`. Each is the time the step took, including the handling of every event it dispatched.
 - **Input latency,** from arrival to the end of the event's handling (after `dispatch_actions` returns):
-  - `keyboard input`: every SDL key-down. Measured from SDL's event timestamp with SDL's millisecond clock. Hypothesis (unverified): SDL stamps an event when it pumps it from the OS, at the start of the `SDL events` step, so this excludes the time the key waited for the loop to come round. Treat it as a lower bound.
+  - `keyboard input`: every SDL key-down and text input (typed characters such as the digits that select a program arrive as text input). Measured from SDL's event timestamp with SDL's millisecond clock. Hypothesis (unverified): SDL stamps an event when it pumps it from the OS, at the start of the `SDL events` step, so this excludes the time the key waited for the loop to come round. Treat it as a lower bound.
   - `pad input`: Launchkey top and bottom pad presses in DAW mode.
   - `piano key input`: Launchkey note-ons.
   - Pad and piano-key events are stamped on the MIDI input thread when their message arrives, so these include the wait for the loop.
