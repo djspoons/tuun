@@ -23,11 +23,11 @@ A spec, in this directory, that ranks the work on the native UI's main thread by
 - [Where program processing runs](tickets/06-evaluation.md): parsing, type checking and evaluating programs move to one processing thread that owns its own `Environment`. First, built-ins become `Send`. Leaving Edit mode, reloading and startup show "Processing…" while input keeps working. The write-back stays on the main thread. Evaluation, not type checking or I/O, is about 93–95% of the cost.
 - [Where the note function runs](tickets/03-note-function.md): it stays on the main thread. The budget is about 5 ms per loop pass, chords included. A note-on costs about 0.1–0.9 ms in release and 0.3–2.4 ms in debug, and it never moves to the processing thread. Cheaper note-ons are code TODOs.
 - [Font loading per frame](tickets/05-font-loading.md): fonts are loaded once and held by `Renderer<'ttf>`. That is estimated to save 1–4 ms per frame, most of it, by hypothesis, from the glyph cache that each fresh font throws away.
+- [The 10 ms status wait](tickets/04-status-wait.md): removed. The loop blocks in SDL's `wait_event_timeout`; SDL input, Launchkey events and processing results wake it, statuses don't. It renders at most 60 Hz and sleeps until the next render, tick or buffer refresh, so an input waits only behind a render in progress (target: about 6 ms max keyboard latency).
 
 ## Not yet specified
 
-- Render cost beyond font loading, and whether `present()` waits for vsync. Every text texture is rebuilt each frame; with fonts kept, that is the largest remaining text cost (about 0.7 ms on a software renderer, not yet measured on the dev's machine). Caching textures meets a `TextureCreator` lifetime.
-- Whether input should be handled on its own thread rather than in the main loop.
+- Render cost beyond font loading, and whether `present()` waits for vsync. Every text texture is rebuilt each frame; with fonts kept, that is the largest remaining text cost (about 0.7 ms on a software renderer, not yet measured on the dev's machine). Caching textures meets a `TextureCreator` lifetime. Input waits behind a render in progress, so if render cost can't be kept within the 60 Hz frame budget, revisit handling input on its own thread.
 - Whether note-on stays within budget as keys instruments get heavier, and for chords in debug builds (a four-note flute chord is about 8–10 ms).
 - Cost of the Edit-mode helpers (completion and parameter hints evaluate all preceding bindings; ShowType; the per-keystroke parse).
 
