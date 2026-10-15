@@ -16,6 +16,7 @@ use tuun::effects;
 use tuun::environment;
 use tuun::generator;
 use tuun::launchkey;
+use tuun::loop_timing;
 use tuun::metric;
 use tuun::midi_input;
 use tuun::player;
@@ -24,6 +25,7 @@ use tuun::sdl2_input;
 use tuun::tracker;
 use tuun::waveform;
 
+use loop_timing::{Input, LoopTiming, Step};
 use metric::Metric;
 use renderer::Renderer;
 use tracker::Command;
@@ -67,6 +69,9 @@ struct Args {
     input_file: String,
     #[arg(short = 'O', long, default_value = ".")]
     output_dir: String, // Captures waveforms to the specified directory
+    /// Shows on screen how long each main-loop step and each kind of input takes.
+    #[arg(long)]
+    show_loop_timing: bool,
 }
 
 pub fn main() {
@@ -359,6 +364,8 @@ pub fn main() {
     );
     renderer.video_subsystem.text_input().start();
     let mut event_pump = sdl_context.event_pump().unwrap();
+    // SDL stamps events in milliseconds since it started; compare against its own clock.
+    let sdl_timer = sdl_context.timer().unwrap();
 
     let sdl2_handler =
         sdl2_input::InputHandler::new(launchkey.is_err(), renderer.width, renderer.height);
@@ -376,6 +383,7 @@ pub fn main() {
     let mut metrics = renderer::Metrics {
         tracker_load: Metric::new(Duration::from_secs(10), 100),
         allocations_per_sample: Metric::new(Duration::from_secs(10), 100),
+        loop_timing: args.show_loop_timing.then(LoopTiming::new),
     };
 
     // Populate each program's cached_waveform / cached_keys_instrument from
@@ -442,6 +450,7 @@ pub fn main() {
         if state.should_exit {
             return;
         }
+        let step_start = Instant::now();
         for event in event_pump.poll_iter() {
             let sdl_actions = sdl2_handler.classify(&event, &state);
             if let Some(actions) = sdl_actions {
@@ -456,12 +465,20 @@ pub fn main() {
                 // classify() should cover every SDL event we care about.
                 println!("Unhandled SDL event: {:?}", event);
             }
+            if let (Some(timing), sdl2::event::Event::KeyDown { timestamp, .. }) =
+                (metrics.loop_timing.as_mut(), &event)
+            {
+                let latency_ms = sdl_timer.ticks().saturating_sub(*timestamp);
+                timing.record_input(Input::Keyboard, Duration::from_millis(latency_ms as u64));
+            }
         }
+        record_step(&mut metrics, Step::SdlEvents, step_start);
 
+        let step_start = Instant::now();
         if let Some(launchkey) = launchkey.as_mut() {
             loop {
                 match launchkey.events.try_recv() {
-                    Ok(event) => {
+                    Ok((arrived, event)) => {
                         let actions = midi_input::classify(&event, &state);
                         if let Some(actions) = actions {
                             dispatch_actions(
@@ -476,6 +493,15 @@ pub fn main() {
                             // events.
                             println!("Unhandled launchkey event: {:?}", event);
                         }
+                        let input = match event {
+                            launchkey::Event::NoteOn { .. } => Some(Input::PianoKey),
+                            launchkey::Event::DAWTopPadDown { .. }
+                            | launchkey::Event::DAWBottomPadDown { .. } => Some(Input::Pad),
+                            _ => None,
+                        };
+                        if let (Some(timing), Some(input)) = (metrics.loop_timing.as_mut(), input) {
+                            timing.record_input(input, arrived.elapsed());
+                        }
                     }
                     Err(mpsc::TryRecvError::Empty) => {
                         break;
@@ -488,6 +514,8 @@ pub fn main() {
             }
         }
 
+        record_step(&mut metrics, Step::LaunchkeyEvents, step_start);
+
         if next_buffer_refresh <= Instant::now() {
             command_sender.send(Command::SendCurrentBuffer).unwrap();
             next_buffer_refresh = Instant::now() + BUFFER_REFRESH_INTERVAL;
@@ -495,6 +523,7 @@ pub fn main() {
 
         // Drain the status buffer, using the last status received. But don't wait more too long
         // if there are no statuses available. (And don't wait at all if we've already received one).
+        let step_start = Instant::now();
         let mut statuses_received = 0;
         loop {
             match status_receiver.try_recv() {
@@ -518,8 +547,10 @@ pub fn main() {
                 Err(e) => println!("Error receiving status: {:?}", e),
             }
         }
+        record_step(&mut metrics, Step::StatusWait, step_start);
         // TODO could consider the case where a tick is due soon and use a
         // different timeout above.
+        let step_start = Instant::now();
         if state.take_tick_due(Instant::now()) {
             dispatch_actions(
                 &mut effect_runner,
@@ -530,6 +561,9 @@ pub fn main() {
             );
         }
 
+        record_step(&mut metrics, Step::Tick, step_start);
+
+        let step_start = Instant::now();
         renderer.render(
             &ttf_context,
             &state,
@@ -537,10 +571,20 @@ pub fn main() {
             &mut metrics,
             launchkey.as_ref().map(|l| l.encoder_mode),
         );
+        record_step(&mut metrics, Step::Render, step_start);
 
+        let step_start = Instant::now();
         if let Some(launchkey) = launchkey.as_mut() {
             midi_input::update_launchkey_state(&state, &status, launchkey);
         }
+        record_step(&mut metrics, Step::LaunchkeyUpdate, step_start);
+    }
+}
+
+/// Records the time since `start` as one run of `step`, when loop timing is shown.
+fn record_step(metrics: &mut renderer::Metrics, step: Step, start: Instant) {
+    if let Some(timing) = metrics.loop_timing.as_mut() {
+        timing.record_step(step, start.elapsed());
     }
 }
 

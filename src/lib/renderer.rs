@@ -12,6 +12,7 @@ use realfft::num_complex::{Complex, ComplexFloat};
 use crate::actions::{AppState, Mode};
 use crate::ids::{MarkId, WaveformId, WaveformSelector};
 use crate::launchkey;
+use crate::loop_timing::LoopTiming;
 use crate::metric::Metric;
 use crate::programs::{PROGRAMS_PER_BANK, SliderDisplay};
 use crate::recorder::{Finish, Phase};
@@ -62,6 +63,8 @@ pub struct Renderer {
 pub struct Metrics {
     pub tracker_load: Metric<f32>,
     pub allocations_per_sample: Metric<f32>,
+    /// Main-loop step and input timings, drawn only when present.
+    pub loop_timing: Option<LoopTiming>,
 }
 
 const FONT_PATH: &str = "/Library/Fonts/Arial Unicode.ttf";
@@ -713,6 +716,29 @@ impl Renderer {
             metrics_height,
             &mut metrics.allocations_per_sample,
         );
+
+        if let Some(timing) = metrics.loop_timing.as_mut() {
+            // Drawn at half the 48 pt font's size, right-aligned in the top-right corner.
+            let mut y = 10;
+            for line in timing.lines() {
+                let texture = make_texture(&font, INACTIVE_COLOR, &texture_creator, &line);
+                let TextureQuery { width, height, .. } = texture.query();
+                let (width, height) = (width / 2, height / 2);
+                self.canvas
+                    .copy(
+                        &texture,
+                        None,
+                        Some(sdl2::rect::Rect::new(
+                            (self.width - width - 20) as i32,
+                            y,
+                            width,
+                            height,
+                        )),
+                    )
+                    .unwrap();
+                y += height as i32;
+            }
+        }
 
         self.canvas.present();
     }

@@ -18,6 +18,7 @@ A spec, in this directory, that ranks the work on the native UI's main thread by
 
 ## Decisions so far
 
+- [Instrument the main loop](tickets/01-instrument-main-loop.md): `--show-loop-timing` shows each step's time and each input's latency on screen; keyboard latency is a lower bound.
 ## Not yet specified
 
 - Program evaluation on Enter or source reload: how long it takes and whether it matters for input latency.

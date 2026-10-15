@@ -13,7 +13,8 @@ pub struct Launchkey {
     daw_input_conn: MidiInputConnection<()>,
     midi_input_conn: MidiInputConnection<()>,
 
-    pub events: mpsc::Receiver<Event>,
+    /// Decoded events, each paired with the moment its message arrived.
+    pub events: mpsc::Receiver<(Instant, Event)>,
     /// Main-thread mirror of `DAWState::encoder_mode`, kept in sync by
     /// observing `Event::EncoderModeChanged`. Lets the runner decide what
     /// to push back without crossing the input-thread boundary.
@@ -47,12 +48,12 @@ struct DAWState {
     pad_mode: PadMode,
     /// Whether the Shift button is held, tracked from its press and release.
     shift_held: bool,
-    sender: mpsc::Sender<Event>,
+    sender: mpsc::Sender<(Instant, Event)>,
 }
 
 /// Responsible for decoding and forwarding messages received on the MIDI connection.
 struct MIDIState {
-    sender: mpsc::Sender<Event>,
+    sender: mpsc::Sender<(Instant, Event)>,
 }
 
 #[derive(Debug)]
@@ -473,7 +474,7 @@ impl Launchkey {
 impl DAWState {
     fn handle_message(&mut self, _stamp: u64, message: &[u8], _info: &mut ()) {
         if let Some(event) = self.decode(message) {
-            match self.sender.send(event) {
+            match self.sender.send((Instant::now(), event)) {
                 Ok(()) => (),
                 Err(e) => {
                     println!("Got error sending event: {}", e);
@@ -656,7 +657,7 @@ impl MIDIState {
         // recorder compares note times against `Instant`s from the tracker.
         let stamp = Instant::now();
         if let Some(event) = self.decode(message, stamp) {
-            match self.sender.send(event) {
+            match self.sender.send((stamp, event)) {
                 Ok(()) => (),
                 Err(e) => {
                     println!("Got error sending event: {}", e);
