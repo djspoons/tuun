@@ -37,7 +37,7 @@ Timed outside the UI on a 4-core Linux container, not the dev's machine, so only
 - `medium.tuun`: 26 programs using `std`, `synth.sub`, `synth.pm`, `filters.rbj` and `env.minmax`.
 - `large.tuun`: 51 programs, the first 24 of them named.
 
-The README runs the UI as a debug build (`cargo run`).
+The README runs the UI as a debug build (`cargo run`). The harness and stand-in files are in [research/processing-timing](../research/processing-timing/README.md).
 
 | Reload of medium.tuun, warm environment | release | debug |
 |---|---|---|

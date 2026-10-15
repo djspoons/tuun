@@ -1,0 +1,169 @@
+open std;
+use synth.sub;
+use midi.notes;
+
+// TODO figure out why this can't be typed when used
+//as_midi_notes = fn(dur, inst) => fn(notes) => <map(fn(n) => inst(dur, @n), notes)>;
+
+use synth.pm;
+
+#{level_db=0,keys}
+keys = pm.brass_keys;
+
+brass_notes = fn(dur) => fn(notes) => <map(fn(n) => pm.brass(dur, @n), notes)>;
+
+(C2, C#2, D2, D#2, E2, F2, F#2, G2, G#2, A2, A#2, B2) = notes.midi_octave(2);
+(C, C#, D, D#, E, F, F#, G, G#, A, A#, B) = notes.midi_octave(4);
+(C3, C#3, D3, D#3, E3, F3, F#3, G3, G#3, A3, A#3, B3) = notes.midi_octave(3);
+(C5, C#5, D5, D#5, E5, F5, F#5, G5, G#5, A5, A#5, B5) = notes.midi_octave(5);
+
+// Fux's dorian first species cantus firmus
+#{level_db=-9}
+fux_dorian_c_f =                 [D, F, E, D, G, F, A, G, F, E, D] | brass_notes(Q);
+
+#{level_db=-9}
+fux_dorian_c_p_upper =           [A, A, G, A, B, C5, C5, B, D5, C#5, D5] | brass_notes(Q);
+
+// Some variations on a counterpoint to Fux's dorian
+#{level_db=-9}
+dorian_c_p_upper_1 =             [D5, D5, C5, D5, E5, D5, C5, D5, D5, C#5, D5] | brass_notes(Q);
+#{level_db=-9}
+dorian_c_p_upper_2 =             [D5, D5, C5, D5, B, D5, C5, B, D5, C#5, D5] | brass_notes(Q);
+
+#{level_db=-9}
+fux_dorian_c_p_lower =           [G3, D, A3, F3, E3, D3, F3, C, D, C#, D] | brass_notes(Q);
+#{level_db=-9}
+fux_dorian_c_p_lower_corrected = [D3, D3, A3, F3, E3, D3, F3, C, D, C#, D] | brass_notes(Q);
+
+#{level_db=-9}
+dorian_c_p_lower_1 =             [D3, D3, G3, F3, E3, F3, C, C, A3, C#, D] | brass_notes(Q);
+
+// Fux's lydian first species cantus firmus
+#{level_db=-9}
+// Written with a vocal tenor clef
+fux_lydian_c_f       = [F3, G3, A3, F3, D3, E3, F3, C, A3, F3, G3, F3] | brass_notes(Q);
+#{level_db=-9}
+fux_lydian_c_p_upper = [F, E, C, F, F, G, A, G, C, F, E, F] | brass_notes(Q);
+
+// Some alternative counterpoints
+#{level_db=-9}
+lydian_c_p_upper_1 =   [C, A#3, C, D, D, C, C, E, C, C, E, F] | brass_notes(Q);
+#{level_db=-9}
+lydian_c_p_upper_2 = [F, E, C, D, F, E, A, G, F, A, E, F] | brass_notes(Q);
+
+#{level_db=-9}
+fux_lydian_c_p_lower = [F3, E3, F3, A3, A#3, G3, A3, E3, F3, D3, E3, F3] | brass_notes(Q);
+
+// Some alternative counterpoints
+#{level_db=-4}
+lydian_c_p_lower_1 =   [F3, E3, D3, D3, D3, C3, A2, A2, C3, D3, E3, F3] | brass_notes(Q);
+
+
+// Fux's mixolydian first species cantus firmus
+#{level_db=-9}
+fux_mixol_c_f = [G3, C, B3, G3, C, E, D, G, E, C, D, B3, A3, G3] | brass_notes(Q);
+#{level_db=-9}
+fux_mixol_c_p_upper = [G, E, D, G, G, G, A, B, G, E5, D5, G, F#, G] | brass_notes(Q);
+#{level_db=-9}
+fux_mixol_c_p_upper_corrected = [G, E, D, G, G, G, A, B, G, C5, A, G, F#, G] | brass_notes(Q);
+
+// Some alternative counterpoints
+#{level_db=-9}
+mixol_c_p_upper1 = [D, E, D, D, E, C, D, C, C, E, B, G, F#, G] | brass_notes(Q);
+
+#{level_db=-9}
+morley_c_f =   [C, F, E, D, C, F, G, A, G, E, D, C] | brass_notes(Q);
+// This one is pretty boring
+#{level_db=-9}
+morley_c_p_upper1 = [G, A, G, F, G, A, B, C5, B, C5, B, C5] | brass_notes(Q);
+// This c.p. sort of jumps the gun on the c.f.'s high note
+#{level_db=-9}
+morley_c_p_upper2 = [C5, D5, C5, F, G, A, E5, C5, B, C5, B, C5] | brass_notes(Q);
+#{level_db=-9}
+morley_c_p_upper2 = [C5, D5, C5, F, G, A, B, C5, E5, C5, B, C5] | brass_notes(Q);
+
+
+#{level_db=-9}
+kirnberger_c_f = [C, G, E, A, G, F, E, D, C] | brass_notes(Q);
+#{level_db=-9}
+kirnberger_c_p_upper1 = [C5, B, B, C5, D5, D5, C5, B, C5] | brass_notes(Q);
+#{level_db=-9}
+kirnberger_c_p_upper2 = [C5, B, B, C5, D5, A, B, B, C5] | brass_notes(Q);
+
+// Subtractive synthesis from synth.sub
+#{level_db=-9}
+harm_line = [1, 2, 3, 4] | on_beats(sub.harmonica(Q, 220) | unseq());
+#{level_db=-9}
+flute_line = [1, 1.5, 2, 3] | on_beats(sub.flute(E, 440));
+#{level_db=-9}
+_ = sub.harmonica(H, 330);
+#{level_db=-9}
+_ = sub.flute(H, 660, lpf_cutoff = 2400);
+#{level_db=-9, keys}
+flute_k = sub.flute_keys(lpf_Q = 0.8);
+#{level_db=-9}
+_ = <[sub.harmonica(Q, 220), sub.harmonica(Q, 247), sub.harmonica(H, 262)]>;
+#{level_db=-9}
+_ = [1, 2, 2.5, 3, 4] | on_beats(sub.flute(E, 523));
+#{level_db=-9}
+_ = {[sub.flute(W, 220), sub.harmonica(W, 330) | unseq()]};
+
+use synth.pm;
+
+#{level_db=0}
+_ = $220;
+#{level_db=0}
+_ = {map(over(220), [1,3,5,7,9,11,13,15,17,19,21])};
+#{level_db=0}
+_ = square(220);
+#{level_db=0}
+_ = sawtooth(220);
+#{level_db=0}
+_ = triangle(220);
+#{level_db=0}
+_ = pulse(0.8, 220);
+// PWM
+#{level_db=0}
+_ = pulse($44, 220);
+// PM
+#{level_db=0}
+_ = pm.pure(linear(0,0.2), 3, 220);
+
+
+// Amplitude
+#{color=rgb(255, 200, 80),sliders=["amplitude:0.5:0:1"]}
+_ = $220 * amplitude;
+
+// Duration (best in 4 beats per measure)
+#{color=rgb(122, 167, 120),sliders=["scale:0.5:0:1"]}
+_ = let w = $220 | fin(time - (scale * duration_from_beats(1))) | seq(time - (duration_from_beats(2))) in <[w, w]>;
+
+// Pulse width modulation
+#{level_db=-12, color=rgb(183, 230, 40),sliders=["width:0.5:0:1"]}
+_ = pulse(width, 220);
+#{level_db=-12, color=rgb(110, 144, 255),sliders=["frequency:25:1:110","depth:0.5:0:1"]}
+_ = pulse($frequency * depth, 220);
+
+use filters.rbj;
+
+// Filters
+#{color=rgb(231, 130, 251),sliders=["Q:0.707:0.1:1","cutoff:0.637:fn(x) => 100 * pow(110, x)"]}
+_ = square(220) | rbj.lpf(Q, cutoff);
+// Frequency
+#{color=rgb(255, 185, 190),sliders=["frequency:0.463:fn(x) => 50 * pow(20, x)"]}
+_ = $(frequency);
+
+open env.minmax;
+
+// Amplitude envelope
+#{color=rgb(250, 132, 105),sliders=["attack:0.5:0:1","decay:0.5:0:1"]}
+_ = $220 | ADSR(attack + decay, attack, decay, 0, 0);
+#{color=rgb(250, 82, 82),sliders=["sustain_level:0.5:0:1","release:0.5:0:1"]}
+_ = $220 | ADSR(0.5 + release, 0.0, 0.0, sustain_level, release);
+
+// Harmonics
+#{level_db=-3, color=rgb(246, 94, 239),sliders=["harmonics:2:0:20"]}
+_ = let freq = 220, over = fn(n) => clamp01(harmonics - (n + 1)/2 + 1) * $(freq * n) / n in {map(over, [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 33, 35, 37, 39])};
+
+#{level_db=-3, color=rgb(8, 210, 58), sliders=["harmonics:2:0:20"]}
+_ = let freq = 220, over = fn(n) => clamp01(harmonics - abs(n) + 1) * $(freq * abs(n)) / n in (2 / pi) * {map(over, [-1, 2, -3, 4, -5, 6, -7, 8, -9, 10, -11, 12, -13, 14, -15, 16, -17, 18, -19, 20])};

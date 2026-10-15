@@ -1,0 +1,231 @@
+diff --git a/src/lib/environment.rs b/src/lib/environment.rs
+index cc5b961..ca6f222 100644
+--- a/src/lib/environment.rs
++++ b/src/lib/environment.rs
+@@ -243,6 +243,7 @@ impl Environment {
+ 
+         // Stat the file once. If the cache has a matching mtime, return the
+         // cached slice without re-reading or re-parsing.
++        let __t = time::Instant::now();
+         let current_mtime = fs::metadata(&file_path)
+             .and_then(|m| m.modified())
+             .map_err(|e| {
+@@ -255,6 +256,7 @@ impl Environment {
+         if let Some(entry) = self.modules.borrow().get(path)
+             && entry.mtime == current_mtime
+         {
++            crate::prof::add("resolve.hit (stat only)", __t);
+             return Ok(entry.bindings);
+         }
+ 
+@@ -305,6 +307,7 @@ impl Environment {
+         // the type cache watches this counter (see `module_types`).
+         self.modules_generation
+             .set(self.modules_generation.get() + 1);
++        crate::prof::add("resolve.miss (stat+read+parse)", __t);
+         Ok(leaked)
+     }
+ 
+@@ -399,7 +402,9 @@ impl Environment {
+     /// — the first time a check surfaces it, and again only after the
+     /// module reloads. Parse failures return no findings.
+     pub fn check_program(&self, set: &ProgramSet, index: usize) -> Vec<Diagnostic> {
++        let __t = time::Instant::now();
+         let mut bindings = set.evaluation_bindings(index);
++        crate::prof::add("check.1_evaluation_bindings", __t);
+         bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
+         let text = set.programs()[index].text();
+         let Ok(expr) = parser::parse_program(text, Source::Program) else {
+@@ -427,6 +432,7 @@ impl Environment {
+                 self.checked_generation.set(generation);
+             }
+             let could_be_stale = !self.module_types.borrow().is_empty();
++            let __t = time::Instant::now();
+             let (errors, _) = infer::check_program(
+                 |path| self.resolve(path),
+                 &bindings,
+@@ -435,6 +441,7 @@ impl Environment {
+                 Some(expectation),
+                 &mut self.module_types.borrow_mut(),
+             );
++            crate::prof::add("check.2_infer_check_program", __t);
+             if self.modules_generation.get() != generation && could_be_stale {
+                 continue;
+             }
+@@ -589,7 +596,9 @@ impl Environment {
+         // Programs and their file's sibling bindings see the prelude through an
+         // implicit leading `open __prelude`, the same way modules do (see
+         // `resolve`).
++        let __t = time::Instant::now();
+         let mut bindings = set.evaluation_bindings(index);
++        crate::prof::add("eval.1_evaluation_bindings", __t);
+         bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
+         let kind = set.programs()[index].kind();
+         let text = set.programs()[index].text();
+@@ -603,7 +612,10 @@ impl Environment {
+             }
+             Ok(expr) => expr,
+         };
+-        let expr = match eval::evaluate(|path| self.resolve(path), &bindings, expr) {
++        let __t = time::Instant::now();
++        let expr = eval::evaluate(|path| self.resolve(path), &bindings, expr);
++        crate::prof::add("eval.2_eval_evaluate", __t);
++        let expr = match expr {
+             Err(error) => {
+                 return Err(vec![self.diagnose(&error, set, index)]);
+             }
+@@ -659,6 +671,7 @@ impl Environment {
+         index: usize,
+         waveform: waveform::Waveform<MarkId>,
+     ) -> Evaluated {
++        let __t = time::Instant::now();
+         let sequence = sequencer::analyze(set.programs()[index].text()).and_then(|shape| {
+             let step_waveform =
+                 self.evaluate_program_waveform_expr(set, index, &shape.waveform_expr)?;
+@@ -667,10 +680,11 @@ impl Environment {
+                 step_waveform,
+             })
+         });
+-        Evaluated::Waveform {
+-            waveform: optimizer::optimize(waveform),
+-            sequence,
+-        }
++        crate::prof::add("eval.3_sequence_analyze_and_step_eval", __t);
++        let __t = time::Instant::now();
++        let waveform = optimizer::optimize(waveform);
++        crate::prof::add("eval.4_optimize", __t);
++        Evaluated::Waveform { waveform, sequence }
+     }
+ 
+     /// Returns the evaluated (name, value) context the program at `index` is
+diff --git a/src/lib/eval.rs b/src/lib/eval.rs
+index d0218db..0e34e21 100644
+--- a/src/lib/eval.rs
++++ b/src/lib/eval.rs
+@@ -466,7 +466,10 @@ where
+     S: Clone + Debug,
+ {
+     let context = evaluate_bindings(resolve, bindings)?;
+-    evaluate_with_context(&context, expr)
++    let __t = std::time::Instant::now();
++    let r = evaluate_with_context(&context, expr);
++    crate::prof::add("evalctx.program_expr", __t);
++    r
+ }
+ 
+ /// Evaluates `bindings` and returns the resulting context: one entry per
+@@ -548,8 +551,11 @@ where
+     for source_binding in bindings {
+         match &source_binding.binding {
+             Binding::Open(path) => {
++                let __top = open.is_empty();
++                let __t = std::time::Instant::now();
+                 let module = resolve(path)?;
+                 let exports = module_exports(resolve, module, open, path, &source_binding.span)?;
++                if __top { crate::prof::add(Box::leak(format!("evalctx.top_open {}", path.join(".")).into_boxed_str()), __t); }
+                 context.extend(exports);
+             }
+             Binding::Use(path) => {
+@@ -559,16 +565,22 @@ where
+                         source_binding.span.clone(),
+                     ));
+                 };
++                let __top = open.is_empty();
++                let __t = std::time::Instant::now();
+                 let module = resolve(path)?;
+                 let exports = module_exports(resolve, module, open, path, &source_binding.span)?;
++                if __top { crate::prof::add(Box::leak(format!("evalctx.top_use {}", path.join(".")).into_boxed_str()), __t); }
+                 context.push((
+                     name.clone(),
+                     SourceExpr::from(Expr::BoundModule(dedup_last_wins(exports))),
+                 ));
+             }
+             Binding::Definition(pattern, def_expr) => {
++                let __top = open.is_empty();
++                let __t = std::time::Instant::now();
+                 let substituted = substitute(context, def_expr.clone())?;
+                 let value = evaluate_closed(substituted)?;
++                if __top { crate::prof::add("evalctx.top_file_definition", __t); }
+                 let before = context.len();
+                 extend_context(context, pattern, &value)?;
+                 own.extend_from_slice(&context[before..]);
+diff --git a/src/lib/mod.rs b/src/lib/mod.rs
+index ec97e22..65888da 100644
+--- a/src/lib/mod.rs
++++ b/src/lib/mod.rs
+@@ -49,3 +49,25 @@ pub mod tracker;
+ // WASM module (only compiled when targeting wasm32 or when wasm feature is enabled for testing)
+ #[cfg(any(target_arch = "wasm32", feature = "wasm"))]
+ pub mod wasm;
++
++/// TEMPORARY timing accumulators (scratch worktree only).
++pub mod prof {
++    use std::cell::RefCell;
++    use std::collections::BTreeMap;
++    thread_local! {
++        static T: RefCell<BTreeMap<&'static str, (f64, f64, u32)>> = RefCell::new(BTreeMap::new());
++    }
++    pub fn add(key: &'static str, start: std::time::Instant) {
++        let ms = start.elapsed().as_secs_f64() * 1000.0;
++        T.with(|t| {
++            let mut t = t.borrow_mut();
++            let e = t.entry(key).or_insert((0.0, 0.0, 0));
++            e.0 += ms;
++            e.1 = e.1.max(ms);
++            e.2 += 1;
++        });
++    }
++    pub fn take() -> BTreeMap<&'static str, (f64, f64, u32)> {
++        T.with(|t| std::mem::take(&mut *t.borrow_mut()))
++    }
++}
+diff --git a/src/lib/programs.rs b/src/lib/programs.rs
+index 18ecf18..d57bdae 100644
+--- a/src/lib/programs.rs
++++ b/src/lib/programs.rs
+@@ -603,7 +603,9 @@ impl ProgramSet {
+         input_path: path::PathBuf,
+     ) -> Result<(ProgramSet, String), Vec<expr::Error<Source>>> {
+         let mut message = String::new();
++        let __t = std::time::Instant::now();
+         let (bindings, errors) = parser::parse_module::<MarkId, _>(&source, Source::File)?;
++        crate::prof::add("from_source.parse_module", __t);
+         // TODO sort of a bummer that we don't know which binding this error was
+         // in... some opportunity here to improve the type of parse_module.
+         if !errors.is_empty() {
+@@ -1473,6 +1475,7 @@ impl ProgramSet {
+         // sort and so lands first in the text.
+         edits.extend(new_binding_edit);
+ 
++        let __t = std::time::Instant::now();
+         let mut new_source = self.source.clone();
+         edits.sort_by_key(|(span, _)| cmp::Reverse(span.start));
+         for (span, replacement) in edits {
+@@ -1482,8 +1485,11 @@ impl ProgramSet {
+         // It's ok to drop the errors here: if parse_module succeeded then we know
+         // that the resulting bindings span the entire input (even if there are
+         // errors).
++        crate::prof::add("splice.1_apply_edits", __t);
++        let __t = std::time::Instant::now();
+         let (new_bindings, _errors) = parser::parse_module::<MarkId, _>(&new_source, Source::File)
+             .map_err(|errs| format!("Warning: source re-parse failed: {:?}", errs))?;
++        crate::prof::add("splice.2_reparse", __t);
+ 
+         // Realign each program to its position in the re-parsed source by
+         // running the same position walk used at load time.
+@@ -1523,6 +1529,7 @@ impl ProgramSet {
+ 
+         // Skip the file write when no path is set — tests use an empty
+         // `PathBuf` so they can exercise the splice without touching disk.
++        let __t = std::time::Instant::now();
+         if !self.input_path.as_os_str().is_empty() {
+             if let Err(e) = fs::write(&self.input_path, &new_source) {
+                 return Err(format!(
+@@ -1533,6 +1540,7 @@ impl ProgramSet {
+             }
+             self.synced_mtime = file_mtime(&self.input_path);
+         }
++        crate::prof::add("splice.3_write_and_stat", __t);
+ 
+         self.source = new_source;
+         self.bindings = new_bindings;
