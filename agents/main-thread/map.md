@@ -20,11 +20,13 @@ A spec, in this directory, that ranks the work on the native UI's main thread by
 
 - [Instrument the main loop](tickets/01-instrument-main-loop.md): `--show-loop-timing` shows each step's time and each input's latency on screen; keyboard latency is a lower bound.
 - [Measure on the dev's machine](tickets/02-measure.md): idle passes spend about 11 ms in the status wait and 5-7 ms rendering; source reload blocks about 2.6 s and leaving Edit mode about 233 ms; a note-on takes at most about 1 ms; pad and Launchkey key latency not yet measured.
+- [Where program processing runs](tickets/06-evaluation.md): parsing, type checking and evaluating programs move to one processing thread that owns its own `Environment`. First, built-ins become `Send`. Leaving Edit mode, reloading and startup show "Processing…" while input keeps working. The write-back stays on the main thread. Evaluation, not type checking or I/O, is about 93–95% of the cost.
 
 ## Not yet specified
 
 - Render cost beyond font loading, and whether `present()` waits for vsync.
 - Whether input should be handled on its own thread rather than in the main loop.
+- Cost of the Edit-mode helpers (completion and parameter hints evaluate all preceding bindings; ShowType; the per-keystroke parse).
 
 ## Out of scope
 
