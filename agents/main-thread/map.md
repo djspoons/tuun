@@ -19,9 +19,9 @@ A spec, in this directory, that ranks the work on the native UI's main thread by
 ## Decisions so far
 
 - [Instrument the main loop](tickets/01-instrument-main-loop.md): `--show-loop-timing` shows each step's time and each input's latency on screen; keyboard latency is a lower bound.
+- [Measure on the dev's machine](tickets/02-measure.md): idle passes spend about 11 ms in the status wait and 5-7 ms rendering; source reload blocks about 2.6 s and leaving Edit mode about 233 ms; a note-on takes at most about 1 ms; pad and Launchkey key latency not yet measured.
 ## Not yet specified
 
-- Program evaluation on Enter or source reload: how long it takes and whether it matters for input latency.
 - Render cost beyond font loading, and whether `present()` waits for vsync.
 - Whether input should be handled on its own thread rather than in the main loop.
 

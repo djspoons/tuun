@@ -1,7 +1,7 @@
 # Measure on the dev's machine
 
 Labels: wayfinder:task
-Status: open
+Status: closed
 Assignee: djspoons
 Blocked by: [Instrument the main loop](01-instrument-main-loop.md)
 
@@ -17,7 +17,7 @@ Run the instrumented build and record each step's time and the input latency for
 
 Done when the numbers are recorded in this ticket's resolution.
 
-## Results so far
+## Resolution
 
 Each value is `current second / 10 s max`, in ms.
 
@@ -40,3 +40,5 @@ Notes:
 - **A large source file:** the source reload column was measured on a large file with many dependencies, including `synth.sub`, so it also covers this scenario.
 - **Pads and Launchkey piano keys** are not measured yet: the Launchkey hardware isn't available for now.
 - **Keys instrument, computer keyboard:** notes played in Keys mode at commit `5aafa08` (keyboard input includes typed characters). Each note-on, including evaluating the note function, took at most about 1 ms. SDL's clock has 1 ms resolution, so smaller costs read as 0 or 1.
+- **Closed with a gap:** pad and Launchkey piano-key latency were not measured (no hardware at hand). Measure them when the Launchkey is available; they should show the effect of the 11 ms status wait.
+
