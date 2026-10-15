@@ -27,9 +27,7 @@ A spec, in this directory, that ranks the work on the native UI's main thread by
 
 ## Not yet specified
 
-- Render cost beyond font loading, and whether `present()` waits for vsync. Every text texture is rebuilt each frame; with fonts kept, that is the largest remaining text cost (about 0.7 ms on a software renderer, not yet measured on the dev's machine). Caching textures meets a `TextureCreator` lifetime. Input waits behind a render in progress, so if render cost can't be kept within the 60 Hz frame budget, revisit handling input on its own thread.
 - Whether note-on stays within budget as keys instruments get heavier, and for chords in debug builds (a four-note flute chord is about 8–10 ms).
-- Cost of the Edit-mode helpers (completion and parameter hints evaluate all preceding bindings; ShowType; the per-keystroke parse). If they prove too slow, caching evaluated bindings in the main thread's `Environment` is one candidate fix.
 
 ## Out of scope
 
