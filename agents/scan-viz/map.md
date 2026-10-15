@@ -26,7 +26,6 @@ A spec, in this directory, for adding the Scan scope view alongside Snapshot in 
 
 ## Not yet specified
 
-- How to test scope rendering and the sample-reporting protocol.
 
 ## Out of scope
 
