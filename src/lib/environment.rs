@@ -716,6 +716,10 @@ impl Environment {
                 "Didn't expect to resolve in apply_note_function".to_string(),
             ))
         };
+        // TODO most of each call is `eval::substitute` cloning the closure's
+        // body and its arguments at every use (about 0.7 ms per note-on for
+        // `sub.flute_keys` in release, about 2 ms in debug); cloning less
+        // would make note-on cheaper.
         let expr = eval::evaluate(resolve, &bindings, expr)?;
         match expr.expr {
             Tuple(mut exprs) => {

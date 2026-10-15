@@ -387,6 +387,9 @@ impl EffectRunner {
                         // `note_on`'s `Marked(Slider { .. })` nodes still hold
                         // the values from when the instrument was originally
                         // evaluated, so swap in the current runtime ones.
+                        // TODO this walks `note_on` once for every slider in
+                        // every program; substituting only the sliders the
+                        // instrument uses would be cheaper.
                         player::substitute_current_slider_values(&mut note_on, &state.programs);
                         self.player.play_note(key, note_on, program.level_db());
                     }
