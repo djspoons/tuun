@@ -37,3 +37,5 @@ Notes:
 - **Source reload** blocks the main thread for about 2.6 s inside the SDL events step: the reload key's handling took 2585 ms. Any pad, piano key or typed key arriving during that time waits for it.
 - **Several programs playing:** one SDL events pass took 9.2 ms, but no keyboard input above 0 was recorded. Until the fix noted in [Instrument the main loop](01-instrument-main-loop.md), keyboard input counted only key-downs, not typed characters (text input); the 9.2 ms may have come from one of those or from another event.
 - **Entering a program** (editing it, then leaving Edit mode with Return) while other programs play blocks the main thread for about 233 ms in the SDL events step.
+- **A large source file:** the source reload column was measured on a large file with many dependencies, including `synth.sub`, so it also covers this scenario.
+- **Pads and Launchkey piano keys** are not measured yet: the Launchkey hardware isn't available for now.
