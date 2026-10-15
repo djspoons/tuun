@@ -1,8 +1,10 @@
+use std::cell::Cell;
 use std::time::{Duration, Instant};
 
 use sdl2::Sdl;
 use sdl2::pixels::Color;
 use sdl2::render::{TextureCreator, TextureQuery};
+use sdl2::sys::SDL_RendererFlags;
 use sdl2::ttf::{Font, Sdl2TtfContext};
 use sdl2::video::WindowContext;
 
@@ -12,11 +14,38 @@ use realfft::num_complex::{Complex, ComplexFloat};
 use crate::actions::{AppState, Mode};
 use crate::ids::{MarkId, WaveformId, WaveformSelector};
 use crate::launchkey;
-use crate::loop_timing::LoopTiming;
+use crate::loop_timing::{LoopTiming, RenderPart};
 use crate::metric::Metric;
 use crate::programs::{PROGRAMS_PER_BANK, SliderDisplay};
 use crate::recorder::{Finish, Phase};
 use crate::tracker;
+
+/// The time spent loading fonts and making text textures, and the number of
+/// text textures made, since the last reset.
+#[derive(Debug, Clone, Copy, Default)]
+struct FrameCost {
+    fonts: Duration,
+    text: Duration,
+    text_textures: u32,
+}
+
+thread_local! {
+    // Kept here rather than passed down because fonts and text textures are
+    // made from many places in a frame; `Renderer::render` resets it.
+    static FRAME_COST: Cell<FrameCost> = Cell::new(FrameCost::default());
+}
+
+/// Loads the UI font at `point_size`, adding the time taken to the frame's cost.
+fn load_font<'ttf>(ttf_context: &'ttf Sdl2TtfContext, point_size: u16) -> Font<'ttf, 'static> {
+    let start = Instant::now();
+    let font = ttf_context.load_font(FONT_PATH, point_size).unwrap();
+    FRAME_COST.with(|cost| {
+        let mut c = cost.get();
+        c.fonts += start.elapsed();
+        cost.set(c);
+    });
+    font
+}
 
 fn make_texture<'a>(
     font: &Font<'a, 'static>,
@@ -24,15 +53,23 @@ fn make_texture<'a>(
     texture_creator: &'a TextureCreator<WindowContext>,
     s: &str,
 ) -> sdl2::render::Texture<'a> {
+    let start = Instant::now();
     let surface = font
         .render(s)
         .blended(color)
         .map_err(|e| e.to_string())
         .unwrap();
-    texture_creator
+    let texture = texture_creator
         .create_texture_from_surface(&surface)
         .map_err(|e| e.to_string())
-        .unwrap()
+        .unwrap();
+    FRAME_COST.with(|cost| {
+        let mut c = cost.get();
+        c.text += start.elapsed();
+        c.text_textures += 1;
+        cost.set(c);
+    });
+    texture
 }
 
 const INACTIVE_COLOR: Color = Color::RGB(0x00, 0xFF, 0xFF);
@@ -97,7 +134,7 @@ impl Renderer {
             .map_err(|e| e.to_string())
             .unwrap();
         let texture_creator = canvas.texture_creator();
-        let font = ttf_context.load_font(FONT_PATH, 48).unwrap();
+        let font = load_font(ttf_context, 48);
 
         let prompt_texture = make_texture(&font, INACTIVE_COLOR, &texture_creator, " ▸ ");
         let TextureQuery {
@@ -145,6 +182,9 @@ impl Renderer {
         let active_program_index = state.active_program_index;
         let message = state.message.as_str();
 
+        FRAME_COST.with(|cost| cost.set(FrameCost::default()));
+        let render_start = Instant::now();
+
         // TODO so much clean-up
         let now = Instant::now();
         let (current_beat, current_beat_start, current_beat_duration) =
@@ -153,8 +193,8 @@ impl Renderer {
         let beat_fade = u8::MAX
             - (beat_phase(now, current_beat_start, current_beat_duration) * u8::MAX as f32) as u8;
         let texture_creator = self.canvas.texture_creator();
-        let font = ttf_context.load_font(FONT_PATH, 48).unwrap();
-        let circle_font = ttf_context.load_font(FONT_PATH, 108).unwrap();
+        let font = load_font(ttf_context, 48);
+        let circle_font = load_font(ttf_context, 108);
 
         self.canvas.set_draw_color(Color::RGB(0x00, 0x00, 0x00));
         self.canvas.clear();
@@ -450,7 +490,7 @@ impl Renderer {
 
         // Draw the marks
         let programs_bottom = (20 + PROGRAMS_PER_BANK as i32 * self.line_height as i32) as f32;
-        let beat_font = ttf_context.load_font(FONT_PATH, 64).unwrap();
+        let beat_font = load_font(ttf_context, 64);
         let beat_height = beat_font.size_of("0").unwrap().1 as f32;
         let marks_bottom = self.height as f32 - beat_height - 10.0;
         let marks_total_height = (marks_bottom - programs_bottom).max(0.0);
@@ -720,7 +760,7 @@ impl Renderer {
         if let Some(timing) = metrics.loop_timing.as_mut() {
             // Drawn at half the 48 pt font's size, right-aligned in the top-right corner.
             let mut y = 10;
-            for line in timing.lines() {
+            for line in std::iter::once(self.driver_line()).chain(timing.lines()) {
                 let texture = make_texture(&font, INACTIVE_COLOR, &texture_creator, &line);
                 let TextureQuery { width, height, .. } = texture.query();
                 let (width, height) = (width / 2, height / 2);
@@ -740,7 +780,29 @@ impl Renderer {
             }
         }
 
+        let cost = FRAME_COST.with(Cell::get);
+        let present_start = Instant::now();
         self.canvas.present();
+        if let Some(timing) = metrics.loop_timing.as_mut() {
+            let other = (present_start - render_start).saturating_sub(cost.fonts + cost.text);
+            timing.record_render_part(RenderPart::Fonts, cost.fonts);
+            timing.record_render_part(RenderPart::Text, cost.text);
+            timing.record_render_part(RenderPart::Other, other);
+            timing.record_render_part(RenderPart::Present, present_start.elapsed());
+            timing.record_text_textures(cost.text_textures);
+        }
+    }
+
+    /// Returns the name of SDL's render driver and whether it waits for vsync
+    /// when presenting.
+    fn driver_line(&self) -> String {
+        let info = self.canvas.info();
+        let vsync = info.flags & SDL_RendererFlags::SDL_RENDERER_PRESENTVSYNC as u32 != 0;
+        format!(
+            "render driver: {} (vsync {})",
+            info.name,
+            if vsync { "on" } else { "off" }
+        )
     }
 
     /// Draws the large circle around the slot number on the row at `y`.
@@ -782,7 +844,7 @@ impl Renderer {
         y: i32,
         texture_creator: &TextureCreator<WindowContext>,
     ) {
-        let font = ttf_context.load_font(FONT_PATH, 48).unwrap();
+        let font = load_font(ttf_context, 48);
         let cursor_texture = make_texture(&font, color, texture_creator, "‸");
         let TextureQuery {
             width: cursor_width,
@@ -814,7 +876,7 @@ impl Renderer {
         height: u32,
         metric: &mut Metric<f32>,
     ) {
-        let font = ttf_context.load_font(FONT_PATH, 48).unwrap();
+        let font = load_font(ttf_context, 48);
         let default_color = Color::RGBA(0, 255, 0, 128);
         let points: Vec<f32> = metric.iter().collect();
         if !points.is_empty() {

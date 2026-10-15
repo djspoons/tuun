@@ -55,13 +55,47 @@ impl Input {
     }
 }
 
-/// The worst recent times of each main-loop step and each input's latency.
+/// One part of the render step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderPart {
+    /// Loading fonts from disk.
+    Fonts,
+    /// Rendering text to surfaces and creating textures from them.
+    Text,
+    /// Drawing everything else, before `present()`.
+    Other,
+    /// `present()`, including any wait for vsync.
+    Present,
+}
+
+impl RenderPart {
+    const ALL: [RenderPart; 4] = [
+        RenderPart::Fonts,
+        RenderPart::Text,
+        RenderPart::Other,
+        RenderPart::Present,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            RenderPart::Fonts => "render fonts",
+            RenderPart::Text => "render text",
+            RenderPart::Other => "render other",
+            RenderPart::Present => "render present",
+        }
+    }
+}
+
+/// The worst recent times of each main-loop step, each input's latency and each
+/// part of the render step, and the most text textures created in one frame.
 ///
-/// Times are kept in milliseconds, as the largest value seen in each second of
-/// the last ten seconds.
+/// Values are kept as the largest seen in each second of the last ten seconds;
+/// times are in milliseconds.
 pub struct LoopTiming {
     steps: Vec<Metric<f32>>,
     inputs: Vec<Metric<f32>>,
+    render_parts: Vec<Metric<f32>>,
+    text_textures: Metric<f32>,
 }
 
 impl Default for LoopTiming {
@@ -77,6 +111,8 @@ impl LoopTiming {
         LoopTiming {
             steps: Step::ALL.iter().map(|_| metric()).collect(),
             inputs: Input::ALL.iter().map(|_| metric()).collect(),
+            render_parts: RenderPart::ALL.iter().map(|_| metric()).collect(),
+            text_textures: metric(),
         }
     }
 
@@ -90,8 +126,19 @@ impl LoopTiming {
         self.inputs[input as usize].set_max(millis(latency));
     }
 
-    /// Returns one line per step and input: its worst time in the current second
-    /// and its worst time over the last ten seconds.
+    /// Records how long `part` of one render took.
+    pub fn record_render_part(&mut self, part: RenderPart, elapsed: Duration) {
+        self.render_parts[part as usize].set_max(millis(elapsed));
+    }
+
+    /// Records how many text textures one render created.
+    pub fn record_text_textures(&mut self, count: u32) {
+        self.text_textures.set_max(count as f32);
+    }
+
+    /// Returns one line per step, input and render part, with its worst time in
+    /// the current second and its worst time over the last ten seconds, then a
+    /// line with the most text textures created in one frame, likewise.
     ///
     /// # Example
     ///
@@ -106,17 +153,32 @@ impl LoopTiming {
     pub fn lines(&mut self) -> Vec<String> {
         let steps = Step::ALL.iter().map(|s| s.label());
         let inputs = Input::ALL.iter().map(|i| i.label());
-        steps
+        let parts = RenderPart::ALL.iter().map(|p| p.label());
+        let mut lines: Vec<String> = steps
             .chain(inputs)
-            .zip(self.steps.iter_mut().chain(self.inputs.iter_mut()))
+            .chain(parts)
+            .zip(
+                self.steps
+                    .iter_mut()
+                    .chain(self.inputs.iter_mut())
+                    .chain(self.render_parts.iter_mut()),
+            )
             .map(|(label, metric)| {
-                let values: Vec<f32> = metric.iter().collect();
-                let current = values.last().copied().unwrap_or_default();
-                let max = values.iter().copied().fold(0.0, f32::max);
+                let (current, max) = current_and_max(metric);
                 format!("{label}: {current:.1} ms (10 s max {max:.1})")
             })
-            .collect()
+            .collect();
+        let (current, max) = current_and_max(&mut self.text_textures);
+        lines.push(format!("text textures: {current} (10 s max {max})"));
+        lines
     }
+}
+
+fn current_and_max(metric: &mut Metric<f32>) -> (f32, f32) {
+    let values: Vec<f32> = metric.iter().collect();
+    let current = values.last().copied().unwrap_or_default();
+    let max = values.iter().copied().fold(0.0, f32::max);
+    (current, max)
 }
 
 fn millis(duration: Duration) -> f32 {
@@ -137,8 +199,21 @@ mod tests {
         timing.record_input(Input::Pad, Duration::from_millis(3));
 
         let lines = timing.lines();
-        assert_eq!(lines.len(), 9);
+        assert_eq!(lines.len(), 14);
         assert_eq!(lines[0], "SDL events: 0.0 ms (10 s max 0.0)");
         assert_eq!(lines[7], "pad input: 3.0 ms (10 s max 12.0)");
+    }
+
+    #[test]
+    fn lines_end_with_render_parts_and_text_textures() {
+        MockClock::set_time(Duration::from_secs(60));
+        let mut timing = LoopTiming::new();
+        timing.record_render_part(RenderPart::Present, Duration::from_micros(1500));
+        timing.record_text_textures(40);
+        timing.record_text_textures(25);
+
+        let lines = timing.lines();
+        assert_eq!(lines[12], "render present: 1.5 ms (10 s max 1.5)");
+        assert_eq!(lines[13], "text textures: 40 (10 s max 40)");
     }
 }
