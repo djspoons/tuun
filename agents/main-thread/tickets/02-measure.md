@@ -21,15 +21,15 @@ Done when the numbers are recorded in this ticket's resolution.
 
 Each value is `current second / 10 s max`, in ms.
 
-| Step or input | Idle |
-|---|---|
-| SDL events | 0.0 / 0.2 |
-| Launchkey events | 0.0 / 0.0 |
-| status wait | 11.0 / 11.0 |
-| tick | 0.0 / 0.0 |
-| render | 5.0 / 5.5 |
-| Launchkey update | 0.0 / 0.0 |
-| keyboard input | 0.0 / 0.0 |
-| pad input | 0.0 / 0.0 |
-| piano key input | 0.0 / 0.0 |
+| Step or input | Idle | Idle, switching apps |
+|---|---|---|
+| SDL events | 0.0 / 0.2 | 0.0 / 12.7 |
+| Launchkey events | 0.0 / 0.0 | 0.0 / 0.0 |
+| status wait | 11.0 / 11.0 | 11.0 / 11.1 |
+| tick | 0.0 / 0.0 | 0.0 / 0.0 |
+| render | 5.0 / 5.5 | 4.9 / 44.5 |
+| Launchkey update | 0.0 / 0.0 | 0.0 / 0.0 |
+| keyboard input | 0.0 / 0.0 | 0.0 / 1.0 |
+| pad input | 0.0 / 0.0 | 0.0 / 0.0 |
+| piano key input | 0.0 / 0.0 | 0.0 / 0.0 |
 
