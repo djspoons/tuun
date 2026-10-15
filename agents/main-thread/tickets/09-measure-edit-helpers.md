@@ -2,7 +2,7 @@
 
 Labels: wayfinder:task
 Status: open
-Assignee:
+Assignee: djspoons
 Blocked by: none
 
 ## Question
