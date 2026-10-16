@@ -1,7 +1,7 @@
 # Measure the Edit-mode helpers
 
 Labels: wayfinder:task
-Status: open
+Status: closed
 Assignee: djspoons
 Blocked by: none
 
@@ -36,11 +36,17 @@ Run with `--show-loop-timing` on `large.tuun` from [research/processing-timing](
 3. Wait 10 s. After the name of a function and `(`, press Cmd-/ once. Record `complete` as parameter hint.
 4. With the cursor in a name, press Ctrl-H. Record `show type`.
 
-Fill in the table, each cell `current second / 10 s max`:
+## Resolution
+
+Measured by the dev on `large.tuun`. Each value is the 10 s max, in ms; "completion" is Cmd-/ after an identifier fragment, "parameter hint" is Cmd-/ after `(`.
 
 | Program | Build | completion | parameter hint | show type | text edit |
 |---|---|---|---|---|---|
-| near start | debug | | | | |
-| near end | debug | | | | |
-| near start | release | | | | |
-| near end | release | | | | |
+| near start | debug | 192.8 | 191.5 | 2.0 | 0.5 |
+| near end | debug | 920.1 | 918.4 | 2.5 | 0.1 |
+| near start | release | 69.5 | 69.1 | 0.4 | 0.1 |
+| near end | release | 317.1 | 316.5 | 0.5 | 0.1 |
+
+- **The per-keystroke parse and ShowType are cheap:** at most 0.5 ms and 2.5 ms. They can stay on the main thread.
+- **Completion and parameter hints are long-running:** 69–317 ms in release and 193–920 ms in debug, far over a 16 ms frame, and they grow with the program's position in the file. Completion and parameter hints cost the same, consistent with both being dominated by evaluating every binding before the program. Hypothesis (unverified): that evaluation, not the completion lookup itself, is nearly all the cost, as for leaving Edit mode in [Where program processing runs](06-evaluation.md).
+

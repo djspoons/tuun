@@ -26,6 +26,7 @@ A spec, in this directory, that ranks the work on the native UI's main thread by
 - [The 10 ms status wait](tickets/04-status-wait.md): removed. The loop blocks in SDL's `wait_event_timeout`; SDL input, Launchkey events and processing results wake it, statuses don't. It renders at most 60 Hz and sleeps until the next render, tick or buffer refresh, so an input waits only behind a render in progress (target: about 6 ms max keyboard latency).
 - [Measure render cost](tickets/08-measure-render.md): `present()` doesn't wait (Metal, vsync off); text textures are about two thirds of a 5–6 ms render at about 0.14–0.19 ms each; Edit mode on a long program needs about 112 and takes about 22.8 ms, over a 60 Hz frame.
 - [Caching text textures](tickets/10-text-textures.md): no cache; the active Edit-mode line is drawn in runs of one colour instead of one texture per character, with the cursor placed by `font.size_of`; acceptance is an Edit-mode render under 16.7 ms.
+- [Measure the Edit-mode helpers](tickets/09-measure-edit-helpers.md): the per-keystroke parse and ShowType stay on the main thread (at most 0.5 and 2.5 ms); completion and parameter hints take 69–317 ms in release and 193–920 ms in debug on a large file.
 
 ## Not yet specified
 
