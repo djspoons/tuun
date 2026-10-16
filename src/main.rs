@@ -341,7 +341,13 @@ pub fn main() {
         }
     });
 
-    let launchkey = launchkey::Launchkey::new();
+    // Other threads wake the main loop by posting this payload-free event.
+    let event_subsystem = sdl_context.event().unwrap();
+    // SAFETY: the type is only matched by number, never read as a custom
+    // event with `as_user_event_type`.
+    let wake_event_type = unsafe { event_subsystem.register_event() }.unwrap();
+
+    let launchkey = launchkey::Launchkey::new(main_loop_waker(&event_subsystem, wake_event_type));
     if let Err(e) = &launchkey {
         println!(
             "Couldn't find Launchkey... falling back on mouse slider controls ({})",
@@ -439,11 +445,36 @@ pub fn main() {
             ],
         );
     }
+    let mut next_render = Instant::now();
     loop {
         if state.should_exit {
             return;
         }
-        for event in event_pump.poll_iter() {
+
+        // Sleep until an input or a wake event arrives, or until the next
+        // deadline.
+        let mut deadline = next_render.min(next_buffer_refresh);
+        if let Some(tick) = state.next_take_tick() {
+            deadline = deadline.min(tick);
+        }
+        let first_event = match deadline.checked_duration_since(Instant::now()) {
+            // Round up: waking before the deadline would only wait again.
+            Some(wait) if !wait.is_zero() => {
+                event_pump.wait_event_timeout(wait.as_micros().div_ceil(1000) as u32)
+            }
+            _ => event_pump.poll_event(),
+        };
+
+        // Statuses don't wake the loop; use the latest that has arrived.
+        while let Ok(tracker_status) = status_receiver.try_recv() {
+            apply_status(tracker_status, &mut metrics, &mut status);
+        }
+
+        for event in first_event.into_iter().chain(event_pump.poll_iter()) {
+            if matches!(event, sdl2::event::Event::User { type_, .. } if type_ == wake_event_type) {
+                // The events behind a wake are drained from their own channels.
+                continue;
+            }
             let sdl_actions = sdl2_handler.classify(&event, &state);
             if let Some(actions) = sdl_actions {
                 dispatch_actions(
@@ -494,33 +525,6 @@ pub fn main() {
             next_buffer_refresh = Instant::now() + BUFFER_REFRESH_INTERVAL;
         }
 
-        // Drain the status buffer, using the last status received. But don't wait more too long
-        // if there are no statuses available. (And don't wait at all if we've already received one).
-        let mut statuses_received = 0;
-        loop {
-            match status_receiver.try_recv() {
-                Ok(tracker_status) => {
-                    apply_status(tracker_status, &mut metrics, &mut status);
-                    statuses_received += 1;
-                }
-                Err(mpsc::TryRecvError::Empty) => {
-                    if statuses_received > 0 {
-                        break;
-                    }
-                    match status_receiver.recv_timeout(Duration::from_millis(10)) {
-                        Ok(tracker_status) => {
-                            apply_status(tracker_status, &mut metrics, &mut status);
-                            statuses_received += 1;
-                        }
-                        Err(mpsc::RecvTimeoutError::Timeout) => break,
-                        Err(e) => println!("Error receiving status with timeout: {:?}", e),
-                    }
-                }
-                Err(e) => println!("Error receiving status: {:?}", e),
-            }
-        }
-        // TODO could consider the case where a tick is due soon and use a
-        // different timeout above.
         if state.take_tick_due(Instant::now()) {
             dispatch_actions(
                 &mut effect_runner,
@@ -531,15 +535,21 @@ pub fn main() {
             );
         }
 
-        renderer.render(
-            &state,
-            &status,
-            &mut metrics,
-            launchkey.as_ref().map(|l| l.encoder_mode),
-        );
+        // Render at most once a frame; inputs only wait behind a render
+        // that has already started.
+        let now = Instant::now();
+        if next_render <= now {
+            next_render = now + renderer::FRAME_BUDGET;
+            renderer.render(
+                &state,
+                &status,
+                &mut metrics,
+                launchkey.as_ref().map(|l| l.encoder_mode),
+            );
 
-        if let Some(launchkey) = launchkey.as_mut() {
-            midi_input::update_launchkey_state(&state, &status, launchkey);
+            if let Some(launchkey) = launchkey.as_mut() {
+                midi_input::update_launchkey_state(&state, &status, launchkey);
+            }
         }
     }
 }
@@ -567,6 +577,27 @@ fn dispatch_actions(
 ) {
     let mut world = effects::World { launchkey, status };
     runner.dispatch(state, &mut world, actions);
+}
+
+/// Returns a function that wakes the main loop from any thread.
+fn main_loop_waker(
+    event_subsystem: &sdl2::EventSubsystem,
+    wake_event_type: u32,
+) -> impl Fn() + Send + Sync + 'static {
+    let sender = event_subsystem.event_sender();
+    // Posts a payload-free SDL event of type `wake_event_type`.
+    move || {
+        let event = sdl2::event::Event::User {
+            timestamp: 0,
+            window_id: 0,
+            type_: wake_event_type,
+            code: 0,
+            data1: std::ptr::null_mut(),
+            data2: std::ptr::null_mut(),
+        };
+        // A full queue already wakes the loop.
+        let _ = sender.push_event(event);
+    }
 }
 
 /// Applies a freshly received tracker status: folds its metrics into

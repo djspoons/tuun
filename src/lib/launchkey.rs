@@ -1,4 +1,4 @@
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
 use midir::{Ignore, MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
@@ -47,12 +47,34 @@ struct DAWState {
     pad_mode: PadMode,
     /// Whether the Shift button is held, tracked from its press and release.
     shift_held: bool,
-    sender: mpsc::Sender<Event>,
+    events: EventSink,
 }
 
 /// Responsible for decoding and forwarding messages received on the MIDI connection.
 struct MIDIState {
+    events: EventSink,
+}
+
+/// The sending end of [`Launchkey::events`].
+///
+/// Sends each event, then calls `wake` so that a receiver blocked on
+/// something other than the channel notices it.
+#[derive(Clone)]
+struct EventSink {
     sender: mpsc::Sender<Event>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl EventSink {
+    /// Sends `event` on the channel, then wakes its receiver.
+    fn send(&self, event: Event) {
+        match self.sender.send(event) {
+            Ok(()) => (self.wake)(),
+            Err(e) => {
+                println!("Got error sending event: {}", e);
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -212,7 +234,11 @@ const CONFIGURE_DISPLAY: [u8; 1] = [4];
 const SET_DISPLAY_TEXT_FIELD: [u8; 1] = [6];
 
 impl Launchkey {
-    pub fn new() -> Result<Self, Error> {
+    /// Connects to the Launchkey and puts it into DAW mode.
+    ///
+    /// Decoded input arrives on [`Launchkey::events`]; `wake` is called on
+    /// MIDI's input thread after each event is sent there.
+    pub fn new(wake: impl Fn() + Send + Sync + 'static) -> Result<Self, Error> {
         // First, find the DAW input channel, connect it to our input, and put the controller into DAW mode
         let midi_output = MidiOutput::new("tuun sending output")?;
         let mut daw_output_conn;
@@ -230,11 +256,15 @@ impl Launchkey {
 
         // Second, set up the output channels for both "DAW" and "MIDI".
         let (sender, receiver) = mpsc::channel();
+        let events = EventSink {
+            sender,
+            wake: Arc::new(wake),
+        };
         let mut daw_state = DAWState {
             encoder_mode: EncoderMode::Plugin,
             pad_mode: PadMode::DAW,
             shift_held: false,
-            sender: sender.clone(),
+            events: events.clone(),
         };
         let mut daw_input = MidiInput::new("tuun reading DAW input")?;
         daw_input.ignore(Ignore::Time);
@@ -254,7 +284,7 @@ impl Launchkey {
             ));
         }
 
-        let mut midi_state = MIDIState { sender };
+        let mut midi_state = MIDIState { events };
         let mut midi_input = MidiInput::new("tuun reading MIDI input")?;
         midi_input.ignore(Ignore::Time);
         let midi_input_conn;
@@ -473,12 +503,7 @@ impl Launchkey {
 impl DAWState {
     fn handle_message(&mut self, _stamp: u64, message: &[u8], _info: &mut ()) {
         if let Some(event) = self.decode(message) {
-            match self.sender.send(event) {
-                Ok(()) => (),
-                Err(e) => {
-                    println!("Got error sending event: {}", e);
-                }
-            }
+            self.events.send(event);
         }
     }
 
@@ -656,12 +681,7 @@ impl MIDIState {
         // recorder compares note times against `Instant`s from the tracker.
         let stamp = Instant::now();
         if let Some(event) = self.decode(message, stamp) {
-            match self.sender.send(event) {
-                Ok(()) => (),
-                Err(e) => {
-                    println!("Got error sending event: {}", e);
-                }
-            }
+            self.events.send(event);
         }
     }
 
@@ -1242,19 +1262,54 @@ impl Color {
 mod tests {
     use super::*;
 
-    fn midi_state() -> MIDIState {
+    /// Returns a sink whose receiver is dropped and whose wake does nothing.
+    fn event_sink() -> EventSink {
         let (sender, _receiver) = mpsc::channel();
-        MIDIState { sender }
+        EventSink {
+            sender,
+            wake: Arc::new(|| ()),
+        }
+    }
+
+    fn midi_state() -> MIDIState {
+        MIDIState {
+            events: event_sink(),
+        }
     }
 
     fn daw_state() -> DAWState {
-        let (sender, _receiver) = mpsc::channel();
         DAWState {
             encoder_mode: EncoderMode::Plugin,
             pad_mode: PadMode::DAW,
             shift_held: false,
-            sender,
+            events: event_sink(),
         }
+    }
+
+    #[test]
+    fn sink_wakes_only_after_a_sent_event() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (sender, receiver) = mpsc::channel();
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let sink = EventSink {
+            sender,
+            wake: Arc::new({
+                let wakes = wakes.clone();
+                move || {
+                    wakes.fetch_add(1, Ordering::SeqCst);
+                }
+            }),
+        };
+
+        sink.send(Event::PlayDown);
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        assert!(matches!(receiver.try_recv(), Ok(Event::PlayDown)));
+
+        // With the receiver gone the send fails, and nothing is woken.
+        drop(receiver);
+        sink.send(Event::PlayDown);
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
     }
 
     #[test]
