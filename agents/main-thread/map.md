@@ -6,6 +6,8 @@ Labels: wayfinder:map
 
 A spec, in this directory, that ranks the work on the native UI's main thread by its effect on input latency, with a decision for each item: keep it there, cache it, or move it to another thread.
 
+Draft: [spec.md](spec.md).
+
 ## Notes
 
 - Input latency: the time from an input event (computer keyboard in Keys mode, Launchkey pad, Launchkey piano key) to its command reaching the tracker. All three paths pass through the main loop in `src/main.rs`.
