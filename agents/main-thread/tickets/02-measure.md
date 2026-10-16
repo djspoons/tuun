@@ -19,7 +19,7 @@ Done when the numbers are recorded in this ticket's resolution.
 
 ## Resolution
 
-Each value is `current second / 10 s max`, in ms.
+Measured in a release build. Each value is `current second / 10 s max`, in ms.
 
 | Step or input | Idle | Idle, switching apps | Several programs playing | Source reload | Enter a program while others play | Keys instrument, computer keyboard |
 |---|---|---|---|---|---|---|

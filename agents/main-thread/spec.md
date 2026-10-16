@@ -8,13 +8,13 @@ Out of scope: the audio thread, the precompute thread, the web/wasm UI, and maki
 
 ## Ranking
 
-Ranked by the worst time measured on the dev's machine with `--show-loop-timing`. The build behind [Measure on the dev's machine](tickets/02-measure.md) was not recorded. Items measured only on a 4-core Linux container are ranked by those numbers and marked *(container)*; only their proportions transfer to the dev's machine.
+Ranked by the worst time measured on the dev's machine with `--show-loop-timing`, comparing release builds where both builds were measured. Items measured only on a 4-core Linux container are ranked by those numbers and marked *(container)*; only their proportions transfer to the dev's machine.
 
 | # | Work | Worst measured | Decision |
 |---|---|---|---|
-| 1 | Program processing on source reload and startup | 2585 ms | **Move** to the processing thread |
-| 2 | Completion and parameter hints (Cmd-/) | 920 ms debug, 317 ms release | **Move** the evaluation to the processing thread; **cache** its result for the Edit session |
-| 3 | Program processing on leaving Edit mode, recording, sequencer toggles, undo/redo | 233 ms | **Move** to the processing thread |
+| 1 | Program processing on source reload and startup | 2585 ms release | **Move** to the processing thread |
+| 2 | Completion and parameter hints (Cmd-/) | 317 ms release, 920 ms debug | **Move** the evaluation to the processing thread; **cache** its result for the Edit session |
+| 3 | Program processing on leaving Edit mode, recording, sequencer toggles, undo/redo | 233 ms release | **Move** to the processing thread |
 | 4 | Rendering text in Edit mode | 22.8 ms render, 20.9 ms of it text | **Keep**; draw the active line in runs |
 | 5 | The status wait (`recv_timeout`) | 10 ms per pass | **Remove**; the loop waits on SDL events |
 | 6 | Note-on (the keys instrument's note function) | about 1 ms; 8–10 ms for a four-note chord in debug *(container)* | **Keep** |
