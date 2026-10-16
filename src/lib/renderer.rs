@@ -17,12 +17,12 @@ use crate::programs::{PROGRAMS_PER_BANK, SliderDisplay};
 use crate::recorder::{Finish, Phase};
 use crate::tracker;
 
-fn make_texture<'a>(
-    font: &Font<'a, 'static>,
+fn make_texture<'t>(
+    font: &Font<'_, 'static>,
     color: Color,
-    texture_creator: &'a TextureCreator<WindowContext>,
+    texture_creator: &'t TextureCreator<WindowContext>,
     s: &str,
-) -> sdl2::render::Texture<'a> {
+) -> sdl2::render::Texture<'t> {
     let surface = font
         .render(s)
         .blended(color)
@@ -40,9 +40,13 @@ const EDIT_COLOR: Color = Color::RGB(0xFF, 0xFF, 0xFF);
 const ERROR_COLOR: Color = Color::RGB(0xFF, 0xDE, 0x21);
 const RECORD_COLOR: Color = Color::RGB(0xFF, 0x00, 0x00);
 
-pub struct Renderer {
+pub struct Renderer<'ttf> {
     pub video_subsystem: sdl2::VideoSubsystem,
     canvas: sdl2::render::Canvas<sdl2::video::Window>,
+
+    font: Font<'ttf, 'static>,
+    circle_font: Font<'ttf, 'static>,
+    beat_font: Font<'ttf, 'static>,
 
     tempo: u32,
     beats_per_measure: u32,
@@ -66,14 +70,14 @@ pub struct Metrics {
 
 const FONT_PATH: &str = "/Library/Fonts/Arial Unicode.ttf";
 
-impl Renderer {
+impl<'ttf> Renderer<'ttf> {
     pub fn new(
         sdl_context: &Sdl,
-        ttf_context: &Sdl2TtfContext,
+        ttf_context: &'ttf Sdl2TtfContext,
         tempo: u32,
         beats_per_measure: u32,
         sample_rate: u32,
-    ) -> Renderer {
+    ) -> Renderer<'ttf> {
         let video_subsystem = sdl_context.video().unwrap();
         let display_mode = video_subsystem
             .current_display_mode(0)
@@ -95,6 +99,8 @@ impl Renderer {
             .unwrap();
         let texture_creator = canvas.texture_creator();
         let font = ttf_context.load_font(FONT_PATH, 48).unwrap();
+        let circle_font = ttf_context.load_font(FONT_PATH, 108).unwrap();
+        let beat_font = ttf_context.load_font(FONT_PATH, 64).unwrap();
 
         let prompt_texture = make_texture(&font, INACTIVE_COLOR, &texture_creator, " ▸ ");
         let TextureQuery {
@@ -112,6 +118,9 @@ impl Renderer {
         Renderer {
             video_subsystem,
             canvas,
+            font,
+            circle_font,
+            beat_font,
             tempo,
             beats_per_measure,
             sample_rate,
@@ -128,7 +137,6 @@ impl Renderer {
 
     pub fn render(
         &mut self,
-        ttf_context: &Sdl2TtfContext,
         state: &AppState,
         status: &tracker::Status<WaveformId, MarkId>,
         metrics: &mut Metrics,
@@ -150,9 +158,6 @@ impl Renderer {
         let beat_fade = u8::MAX
             - (beat_phase(now, current_beat_start, current_beat_duration) * u8::MAX as f32) as u8;
         let texture_creator = self.canvas.texture_creator();
-        let font = ttf_context.load_font(FONT_PATH, 48).unwrap();
-        let circle_font = ttf_context.load_font(FONT_PATH, 108).unwrap();
-
         self.canvas.set_draw_color(Color::RGB(0x00, 0x00, 0x00));
         self.canvas.clear();
 
@@ -250,7 +255,7 @@ impl Renderer {
                 _ => (program_color, u8::MAX),
             };
             let number = char::from_u32(0x31 + i as u32).unwrap().to_string();
-            let mut number_texture = make_texture(&font, color, &texture_creator, &number);
+            let mut number_texture = make_texture(&self.font, color, &texture_creator, &number);
             number_texture.set_alpha_mod(alpha);
             let TextureQuery {
                 width: number_width,
@@ -283,13 +288,7 @@ impl Renderer {
                     .then_some((ACTIVE_COLOR, u8::MAX)),
             };
             if let Some((circle_color, circle_alpha)) = circle {
-                self.draw_circle(
-                    &circle_font,
-                    &texture_creator,
-                    circle_color,
-                    circle_alpha,
-                    y,
-                );
+                self.draw_circle(&texture_creator, circle_color, circle_alpha, y);
             }
 
             match *mode {
@@ -299,8 +298,12 @@ impl Renderer {
                     ..
                 } => {
                     if active_program_index != index && !program.is_empty() {
-                        let text_texture =
-                            make_texture(&font, program_color, &texture_creator, program.text());
+                        let text_texture = make_texture(
+                            &self.font,
+                            program_color,
+                            &texture_creator,
+                            program.text(),
+                        );
                         let TextureQuery {
                             width: text_width,
                             height: text_height,
@@ -332,10 +335,10 @@ impl Renderer {
                                 EDIT_COLOR
                             };
                             if cursor_position == j {
-                                self.draw_cursor(ttf_context, color, x, y, &texture_creator);
+                                self.draw_cursor(color, x, y, &texture_creator);
                             }
                             let char_texture =
-                                make_texture(&font, color, &texture_creator, &c.to_string());
+                                make_texture(&self.font, color, &texture_creator, &c.to_string());
                             let TextureQuery {
                                 width: char_width,
                                 height: char_height,
@@ -357,7 +360,7 @@ impl Renderer {
                             } else {
                                 EDIT_COLOR
                             };
-                            self.draw_cursor(ttf_context, color, x, y, &texture_creator);
+                            self.draw_cursor(color, x, y, &texture_creator);
                         }
                     }
                 }
@@ -367,7 +370,8 @@ impl Renderer {
                             Mode::MoveSliders => ACTIVE_COLOR,
                             _ => INACTIVE_COLOR, // Select
                         };
-                        let prompt_texture = make_texture(&font, color, &texture_creator, " ▸ ");
+                        let prompt_texture =
+                            make_texture(&self.font, color, &texture_creator, " ▸ ");
                         self.canvas
                             .copy(
                                 &prompt_texture,
@@ -383,8 +387,12 @@ impl Renderer {
                     }
 
                     if !program.is_empty() {
-                        let text_texture =
-                            make_texture(&font, program_color, &texture_creator, program.text());
+                        let text_texture = make_texture(
+                            &self.font,
+                            program_color,
+                            &texture_creator,
+                            program.text(),
+                        );
                         let TextureQuery {
                             width: text_width,
                             height: text_height,
@@ -447,8 +455,7 @@ impl Renderer {
 
         // Draw the marks
         let programs_bottom = (20 + PROGRAMS_PER_BANK as i32 * self.line_height as i32) as f32;
-        let beat_font = ttf_context.load_font(FONT_PATH, 64).unwrap();
-        let beat_height = beat_font.size_of("0").unwrap().1 as f32;
+        let beat_height = self.beat_font.size_of("0").unwrap().1 as f32;
         let marks_bottom = self.height as f32 - beat_height - 10.0;
         let marks_total_height = (marks_bottom - programs_bottom).max(0.0);
         let marks_row_height = marks_total_height / PROGRAMS_PER_BANK as f32;
@@ -638,7 +645,8 @@ impl Renderer {
             if let Some((limit, _)) = message.char_indices().nth(45) {
                 message = &message[..limit];
             }
-            let message_texture = make_texture(&font, INACTIVE_COLOR, &texture_creator, message);
+            let message_texture =
+                make_texture(&self.font, INACTIVE_COLOR, &texture_creator, message);
             let TextureQuery {
                 width: message_width,
                 height: message_height,
@@ -660,7 +668,7 @@ impl Renderer {
 
         // Draw the current beat
         let beat_texture = make_texture(
-            &beat_font,
+            &self.beat_font,
             ACTIVE_COLOR,
             &texture_creator,
             format!(
@@ -693,7 +701,6 @@ impl Renderer {
         let x = (self.width - metrics_width - 20) as i32;
         let y = self.height as i32 / 2;
         self.draw_metric(
-            ttf_context,
             &texture_creator,
             x,
             y,
@@ -705,7 +712,6 @@ impl Renderer {
         let x = (self.width - 2 * metrics_width - 20) as i32;
         let y = self.height as i32 / 2;
         self.draw_metric(
-            ttf_context,
             &texture_creator,
             x,
             y,
@@ -718,16 +724,15 @@ impl Renderer {
     }
 
     /// Draws the large circle around the slot number on the row at `y`.
-    fn draw_circle<'a>(
+    fn draw_circle(
         &mut self,
-        circle_font: &Font<'a, 'static>,
-        texture_creator: &'a TextureCreator<WindowContext>,
+        texture_creator: &TextureCreator<WindowContext>,
         color: Color,
         alpha: u8,
         y: i32,
     ) {
         let circle = char::from_u32(0x25EF).unwrap().to_string();
-        let mut circle_texture = make_texture(circle_font, color, texture_creator, &circle);
+        let mut circle_texture = make_texture(&self.circle_font, color, texture_creator, &circle);
         circle_texture.set_alpha_mod(alpha);
         let TextureQuery {
             width: circle_width,
@@ -749,15 +754,13 @@ impl Renderer {
     }
 
     fn draw_cursor(
-        self: &mut Renderer,
-        ttf_context: &Sdl2TtfContext,
+        &mut self,
         color: Color,
         x: i32,
         y: i32,
         texture_creator: &TextureCreator<WindowContext>,
     ) {
-        let font = ttf_context.load_font(FONT_PATH, 48).unwrap();
-        let cursor_texture = make_texture(&font, color, texture_creator, "‸");
+        let cursor_texture = make_texture(&self.font, color, texture_creator, "‸");
         let TextureQuery {
             width: cursor_width,
             height: cursor_height,
@@ -777,10 +780,8 @@ impl Renderer {
             .unwrap();
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn draw_metric(
-        self: &mut Renderer,
-        ttf_context: &Sdl2TtfContext,
+        &mut self,
         texture_creator: &TextureCreator<WindowContext>,
         x: i32,
         y: i32,
@@ -788,12 +789,11 @@ impl Renderer {
         height: u32,
         metric: &mut Metric<f32>,
     ) {
-        let font = ttf_context.load_font(FONT_PATH, 48).unwrap();
         let default_color = Color::RGBA(0, 255, 0, 128);
         let points: Vec<f32> = metric.iter().collect();
         if !points.is_empty() {
             let last_value_texture = make_texture(
-                &font,
+                &self.font,
                 default_color,
                 texture_creator,
                 format!("{:.2}", points.last().unwrap()).as_str(),

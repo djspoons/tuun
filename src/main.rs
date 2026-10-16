@@ -531,7 +531,6 @@ pub fn main() {
         }
 
         renderer.render(
-            &ttf_context,
             &state,
             &status,
             &mut metrics,
