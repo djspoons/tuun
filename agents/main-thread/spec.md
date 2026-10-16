@@ -33,7 +33,7 @@ Note-on and the write-back rank above their usual cost because their worst cases
 
 From [Where program processing runs](tickets/06-evaluation.md):
 - Parsing, type checking and evaluating programs move to one thread, started with the app, that owns its own `Environment`. Jobs reach it in order over an mpsc channel and carry copies of everything they read. Results come back to the main loop and wake it.
-- **First step:** built-ins (`BuiltInImpl` in `src/lib/expr.rs`) become `Arc<dyn Fn … + Send + Sync>`, so evaluated expressions can cross threads.
+- **Prerequisite, done on `main`:** built-ins (`BuiltInImpl` in `src/lib/expr.rs`) are `Arc<dyn Fn … + Send + Sync>`, so evaluated expressions (`SourceExpr`) can cross threads.
 - While a job is pending the user sees "Processing…" and input keeps working:
   - Leaving Edit mode keeps the program in Edit mode until its result arrives, and drops keystrokes for that program meanwhile.
   - During a reload, playback, pads and sliders keep working against the old programs, and actions that change source are refused.
@@ -84,11 +84,12 @@ From [Where the note function runs](tickets/03-note-function.md):
 
 Each step can land on its own:
 
+Making built-ins `Send`, the prerequisite for items 1–3, is already on `main`.
+
 1. Load fonts once (item 8) and draw the Edit-mode line in runs (item 4). Neither depends on anything else.
-2. Make built-ins `Send` (the first step of items 1–3).
-3. Add the processing thread and move program processing onto it (items 1 and 3).
-4. Prefetch the Edit-mode context on it (item 2).
-5. Remove the status wait (item 5). It can come before step 3; processing-thread results join its wake sources when the thread exists.
+2. Add the processing thread and move program processing onto it (items 1 and 3).
+3. Prefetch the Edit-mode context on it (item 2).
+4. Remove the status wait (item 5). It can come before step 2; processing-thread results join its wake sources when the thread exists.
 
 ## Acceptance
 
