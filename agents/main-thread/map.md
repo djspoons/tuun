@@ -27,6 +27,7 @@ A spec, in this directory, that ranks the work on the native UI's main thread by
 - [Measure render cost](tickets/08-measure-render.md): `present()` doesn't wait (Metal, vsync off); text textures are about two thirds of a 5–6 ms render at about 0.14–0.19 ms each; Edit mode on a long program needs about 112 and takes about 22.8 ms, over a 60 Hz frame.
 - [Caching text textures](tickets/10-text-textures.md): no cache; the active Edit-mode line is drawn in runs of one colour instead of one texture per character, with the cursor placed by `font.size_of`; acceptance is an Edit-mode render under 16.7 ms.
 - [Measure the Edit-mode helpers](tickets/09-measure-edit-helpers.md): the per-keystroke parse and ShowType stay on the main thread (at most 0.5 and 2.5 ms); completion and parameter hints take 69–317 ms in release and 193–920 ms in debug on a large file.
+- [Where completion and parameter hints run](tickets/11-completion.md): entering Edit mode prefetches the program's context on the processing thread; Cmd-/ looks names up in it, or shows "Preparing completions…" until it arrives. Only the context of the program being edited is kept; reload refetches it, slider moves don't.
 
 ## Not yet specified
 
