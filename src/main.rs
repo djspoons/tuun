@@ -376,6 +376,7 @@ pub fn main() {
     let mut metrics = renderer::Metrics {
         tracker_load: Metric::new(Duration::from_secs(10), 100),
         allocations_per_sample: Metric::new(Duration::from_secs(10), 100),
+        renderer_load: Metric::new(Duration::from_secs(10), 100),
     };
 
     // Populate each program's cached_waveform / cached_keys_instrument from

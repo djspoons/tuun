@@ -66,7 +66,14 @@ pub struct Renderer<'ttf> {
 pub struct Metrics {
     pub tracker_load: Metric<f32>,
     pub allocations_per_sample: Metric<f32>,
+    /// The time spent rendering a frame, as a share of [`FRAME_BUDGET`].
+    ///
+    /// Values above 1.0 mean the frame took longer than its budget.
+    pub renderer_load: Metric<f32>,
 }
+
+/// The time between frames at 60 Hz.
+pub const FRAME_BUDGET: Duration = Duration::from_nanos(1_000_000_000 / 60);
 
 const FONT_PATH: &str = "/Library/Fonts/Arial Unicode.ttf";
 
@@ -720,7 +727,23 @@ impl<'ttf> Renderer<'ttf> {
             &mut metrics.allocations_per_sample,
         );
 
+        let x = (self.width - 3 * metrics_width - 20) as i32;
+        let y = self.height as i32 / 2;
+        self.draw_metric(
+            &texture_creator,
+            x,
+            y,
+            metrics_width,
+            metrics_height,
+            &mut metrics.renderer_load,
+        );
+
         self.canvas.present();
+
+        // This frame's load is drawn with the next frame.
+        metrics
+            .renderer_load
+            .set(now.elapsed().div_duration_f32(FRAME_BUDGET));
     }
 
     /// Draws the large circle around the slot number on the row at `y`.
