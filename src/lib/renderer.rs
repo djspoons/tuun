@@ -329,44 +329,61 @@ impl<'ttf> Renderer<'ttf> {
                             )
                             .unwrap();
                     } else if active_program_index == index {
-                        // Loop over each character in program and check to see if it's in any of the error
-                        // ranges. `char_indices` yields byte offsets, matching
-                        // both `cursor_position` and the errors' byte ranges.
-                        let mut x = self.nav_width as i32;
-                        for (j, c) in program.text().char_indices() {
-                            let color = if errors.iter().any(
+                        // Draw the text in runs of one color, split where it
+                        // enters or leaves an error range. `char_indices`
+                        // yields byte offsets, matching both `cursor_position`
+                        // and the errors' byte ranges.
+                        let text = program.text();
+                        let color_at = |j: usize| {
+                            if errors.iter().any(
                                 |e| matches!(&e.program_range, Some(range) if range.contains(&j)),
                             ) {
                                 ERROR_COLOR
                             } else {
                                 EDIT_COLOR
-                            };
-                            if cursor_position == j {
-                                self.draw_cursor(color, x, y, &texture_creator);
                             }
-                            let char_texture =
-                                make_texture(&self.font, color, &texture_creator, &c.to_string());
+                        };
+                        // The byte offset where each run starts, and its color.
+                        let mut runs: Vec<(usize, Color)> = Vec::new();
+                        for (j, _) in text.char_indices() {
+                            let color = color_at(j);
+                            if runs.last().is_none_or(|&(_, last)| last != color) {
+                                runs.push((j, color));
+                            }
+                        }
+                        for (k, &(start, color)) in runs.iter().enumerate() {
+                            let end = runs.get(k + 1).map_or(text.len(), |&(next, _)| next);
+                            // Measure the whole prefix, not the earlier runs, so
+                            // that runs and the cursor keep the font's kerning.
+                            let x = self.nav_width as i32 + self.text_width(&text[..start]);
+                            let run_texture = make_texture(
+                                &self.font,
+                                color,
+                                &texture_creator,
+                                &text[start..end],
+                            );
                             let TextureQuery {
-                                width: char_width,
-                                height: char_height,
+                                width: run_width,
+                                height: run_height,
                                 ..
-                            } = char_texture.query();
+                            } = run_texture.query();
                             self.canvas
                                 .copy(
-                                    &char_texture,
+                                    &run_texture,
                                     None,
-                                    Some(sdl2::rect::Rect::new(x, y, char_width, char_height)),
+                                    Some(sdl2::rect::Rect::new(x, y, run_width, run_height)),
                                 )
                                 .unwrap();
-                            x += char_width as i32;
                         }
-                        if cursor_position == program.text().len() {
-                            // Draw the cursor at the end of the line
-                            let color = if !errors.is_empty() {
+                        if let Some(before_cursor) = text.get(..cursor_position) {
+                            let color = if cursor_position < text.len() {
+                                color_at(cursor_position)
+                            } else if !errors.is_empty() {
                                 ERROR_COLOR
                             } else {
                                 EDIT_COLOR
                             };
+                            let x = self.nav_width as i32 + self.text_width(before_cursor);
                             self.draw_cursor(color, x, y, &texture_creator);
                         }
                     }
@@ -774,6 +791,15 @@ impl<'ttf> Renderer<'ttf> {
                 )),
             )
             .unwrap();
+    }
+
+    /// Returns the width of `s` in the text font, in pixels.
+    fn text_width(&self, s: &str) -> i32 {
+        // Empty text has no width; skip the call into SDL_ttf.
+        if s.is_empty() {
+            return 0;
+        }
+        self.font.size_of(s).unwrap().0 as i32
     }
 
     fn draw_cursor(
