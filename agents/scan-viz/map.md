@@ -6,6 +6,8 @@ Labels: wayfinder:map
 
 A spec, in this directory, for adding the Scan scope view alongside Snapshot in the native UI, ready to hand to an implementation session.
 
+Reached: [spec.md](spec.md).
+
 ## Notes
 
 - Domain: the native SDL2 UI (`src/lib/renderer.rs`, `src/main.rs`) and the tracker's reporting of samples to it (`src/lib/tracker.rs`).
