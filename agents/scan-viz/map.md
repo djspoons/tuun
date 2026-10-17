@@ -24,6 +24,7 @@ A spec, in this directory, for adding the Scan scope view alongside Snapshot in 
 - [Scan look](tickets/04-scan-look.md): a sweep over two measures, linear amplitude, clipping ticks on the top edge in Snapshot's yellow and red, measure lines only; Snapshot shows the latest 2048 samples.
 - [Switching scope views](tickets/05-switching-scope-views.md): Ctrl+S toggles in every editor mode where possible; Snapshot by default; `--scope-view` CLI flag sets the startup view; a status message on each switch; no Launchkey button.
 - [The spectrum in Scan](tickets/06-spectrum-in-scan.md): kept below the scope in both views; Snapshot and the spectrum redraw on a UI timer set by a CLI flag (default 200 ms).
+- [Testing the sample path and scope views](tickets/07-testing.md): tracker push tested by calling `callback` on tiny injected rings; scope logic in a drawing-free module with unit tests; drawing checked by eye; acceptance on `allocations`, `renderer_load` and a by-eye checklist; `--show-loop-timing` stays temporary.
 
 ## Not yet specified
 
