@@ -65,8 +65,10 @@ pub struct Renderer<'ttf> {
 
 pub struct Metrics {
     pub tracker_load: Metric<f32>,
-    pub allocations_per_sample: Metric<f32>,
-    /// The time spent rendering a frame, as a share of [`FRAME_BUDGET`].
+    /// The number of buffers the tracker allocated in one audio callback.
+    pub allocations: Metric<f32>,
+    /// The time from when a frame was due until it was presented, as a fraction
+    /// of [`FRAME_BUDGET`].
     ///
     /// Values above 1.0 mean the frame took longer than its budget.
     pub renderer_load: Metric<f32>,
@@ -142,12 +144,14 @@ impl<'ttf> Renderer<'ttf> {
         }
     }
 
+    /// Draws and presents one frame that was due at `due`.
     pub fn render(
         &mut self,
         state: &AppState,
         status: &tracker::Status<WaveformId, MarkId>,
         metrics: &mut Metrics,
         encoder_mode: Option<launchkey::EncoderMode>,
+        due: Instant,
     ) {
         // Alias the AppState fields the body uses so the rest of this
         // function (still mostly written against unbound locals) keeps
@@ -728,9 +732,9 @@ impl<'ttf> Renderer<'ttf> {
             &texture_creator,
             x,
             y,
-            metrics_width,
             metrics_height,
             &mut metrics.tracker_load,
+            1.0,
         );
 
         let x = (self.width - 2 * metrics_width - 20) as i32;
@@ -739,9 +743,9 @@ impl<'ttf> Renderer<'ttf> {
             &texture_creator,
             x,
             y,
-            metrics_width,
             metrics_height,
-            &mut metrics.allocations_per_sample,
+            &mut metrics.allocations,
+            1000.0,
         );
 
         let x = (self.width - 3 * metrics_width - 20) as i32;
@@ -750,9 +754,9 @@ impl<'ttf> Renderer<'ttf> {
             &texture_creator,
             x,
             y,
-            metrics_width,
             metrics_height,
             &mut metrics.renderer_load,
+            1.0,
         );
 
         self.canvas.present();
@@ -760,7 +764,7 @@ impl<'ttf> Renderer<'ttf> {
         // This frame's load is drawn with the next frame.
         metrics
             .renderer_load
-            .set(now.elapsed().div_duration_f32(FRAME_BUDGET));
+            .set_max(due.elapsed().div_duration_f32(FRAME_BUDGET));
     }
 
     /// Draws the large circle around the slot number on the row at `y`.
@@ -829,14 +833,18 @@ impl<'ttf> Renderer<'ttf> {
             .unwrap();
     }
 
+    /// Draws `metric`'s latest value and a graph of its history at (`x`, `y`).
+    ///
+    /// A value of `full_scale` is drawn at the graph's full `height`; the
+    /// line turns yellow at 0.7 × `full_scale` and red at 0.9 × `full_scale`.
     fn draw_metric(
         &mut self,
         texture_creator: &TextureCreator<WindowContext>,
         x: i32,
         y: i32,
-        _width: u32,
         height: u32,
         metric: &mut Metric<f32>,
+        full_scale: f32,
     ) {
         let default_color = Color::RGBA(0, 255, 0, 128);
         let points: Vec<f32> = metric.iter().collect();
@@ -865,16 +873,17 @@ impl<'ttf> Renderer<'ttf> {
                 )
                 .unwrap();
 
-            let mut last_y = y + height as i32 - (points[0] * height as f32) as i32;
+            let mut last_y = y + height as i32 - (points[0] / full_scale * height as f32) as i32;
             for (i, &point) in points.iter().enumerate() {
                 if i == points.len() - 1 && point == 0.0 {
                     continue; // Skip the last point if it's zero
                 }
-                let value = y + height as i32 - (point * height as f32) as i32;
+                let level = point / full_scale;
+                let value = y + height as i32 - (level * height as f32) as i32;
                 // TODO these thresholds don't make sense for arbitrary metrics
-                if point < 0.7 {
+                if level < 0.7 {
                     self.canvas.set_draw_color(default_color);
-                } else if point < 0.9 {
+                } else if level < 0.9 {
                     self.canvas.set_draw_color(Color::RGBA(127, 222, 33, 128));
                 } else {
                     self.canvas.set_draw_color(Color::RGBA(127, 0, 0, 128));

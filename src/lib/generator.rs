@@ -50,7 +50,7 @@ pub type CaptureState<'a> =
 pub struct Generator<'a> {
     sample_rate: u32,
     pub capture_state: CaptureState<'a>,
-    // Total number of samples allocated as part of generation
+    // Number of buffers allocated as part of generation
     pub allocations: usize,
 }
 
@@ -197,7 +197,7 @@ impl<'a> Generator<'a> {
                 let f_len = self.generate(frequency, out);
                 // Instantaneous phase offset.
                 let mut o_out = vec![0.0; f_len];
-                self.allocations += f_len;
+                self.allocations += 1;
                 // Output is the length of the shorter one.
                 let o_len = self.generate(offset, &mut o_out);
                 // The accumulator is wrapped once per chunk rather than once
@@ -235,7 +235,7 @@ impl<'a> Generator<'a> {
                 let ff_count = feed_forward.len();
                 assert!(ff_count >= 1);
                 let mut input = vec![0.0; ff_count - 1];
-                self.allocations += ff_count - 1;
+                self.allocations += 1;
                 let inner_len = self.generate(inner, &mut input);
                 // Remove any unset elements from input.
                 input.truncate(inner_len);
@@ -243,7 +243,7 @@ impl<'a> Generator<'a> {
                 // Fill the previous output samples with zeros to match the number of feedback coefficients.
                 let fb_count = feedback.len();
                 let output = VecDeque::from(vec![0.0; fb_count]);
-                self.allocations += fb_count;
+                self.allocations += 1;
                 /*
                 println!(
                     "Started generate for Filter with {} feed-forward and {} feedback coefficients",
@@ -325,10 +325,10 @@ impl<'a> Generator<'a> {
                 // though both would still need to advance by t_len samples.
                 // TODO maybe consider consts here specially?
                 let mut positive_out = vec![0.0; t_len];
-                self.allocations += t_len;
+                self.allocations += 1;
                 let _ = self.generate(positive_waveform, &mut positive_out);
                 let mut negative_out = vec![0.0; t_len];
-                self.allocations += t_len;
+                self.allocations += 1;
                 let _ = self.generate(negative_waveform, &mut negative_out);
                 for (i, x) in out[..t_len].iter_mut().enumerate() {
                     if *x >= 0.0 {
@@ -440,6 +440,7 @@ impl<'a> Generator<'a> {
 
         let mut ff_coeffs = vec![0.0; ff_count];
         let mut fb_coeffs = vec![0.0; fb_count];
+        self.allocations += 2;
         // These are only used in the case where at least one coefficient is not constant.
         let mut ff_outs = vec![];
         let mut fb_outs = vec![];
@@ -465,13 +466,13 @@ impl<'a> Generator<'a> {
             // we'll copy over later (inside the loop).
             for ff in feed_forward.iter_mut() {
                 let mut ff_out = vec![0.0; out_len];
-                self.allocations += out_len;
+                self.allocations += 1;
                 _ = self.generate(ff, &mut ff_out);
                 ff_outs.push(ff_out);
             }
             for fb in feedback.iter_mut() {
                 let mut fb_out = vec![0.0; out_len];
-                self.allocations += out_len;
+                self.allocations += 1;
                 _ = self.generate(fb, &mut fb_out);
                 fb_outs.push(fb_out);
             }
@@ -549,7 +550,7 @@ impl<'a> Generator<'a> {
             }
             _ => {
                 let mut b_out = vec![0.0; len];
-                self.allocations += len;
+                self.allocations += 1;
                 let b_len = self.generate(b, &mut b_out);
                 // Now we know both lengths, so determine the output length.
                 let len = if extend_to_longer {
@@ -1801,6 +1802,36 @@ mod tests {
         if let Fixed(_, _) = g.precompute(w) {
             panic!("append with an infinite tail must not precompute to Fixed")
         }
+    }
+
+    #[test]
+    fn allocations_count_buffers_not_samples() {
+        // Each non-constant right-hand side needs one buffer, however long the output.
+        let w: Waveform = BinaryOp(
+            BinaryOperator::Add,
+            Box::new(Time(())),
+            Box::new(BinaryOp(
+                BinaryOperator::Add,
+                Box::new(Time(())),
+                Box::new(Time(())),
+            )),
+        );
+        for len in [1, 64, 1024] {
+            let mut g = new_test_generator(1);
+            let mut w = initialize_state(w.clone());
+            g.generate(&mut w, &mut vec![0.0; len]);
+            assert_eq!(g.allocations, 2, "for {} samples", len);
+        }
+
+        // A constant right-hand side is applied in place.
+        let w: Waveform = BinaryOp(
+            BinaryOperator::Add,
+            Box::new(Time(())),
+            Box::new(Const(1.0)),
+        );
+        let mut g = new_test_generator(1);
+        g.generate(&mut initialize_state(w), &mut [0.0; 8]);
+        assert_eq!(g.allocations, 0);
     }
 
     #[test]

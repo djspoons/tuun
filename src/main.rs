@@ -377,11 +377,11 @@ pub fn main() {
         marks: Vec::new(),
         buffer: None,
         tracker_load: None,
-        allocations_per_sample: None,
+        allocations: None,
     };
     let mut metrics = renderer::Metrics {
         tracker_load: Metric::new(Duration::from_secs(10), 100),
-        allocations_per_sample: Metric::new(Duration::from_secs(10), 100),
+        allocations: Metric::new(Duration::from_secs(10), 100),
         renderer_load: Metric::new(Duration::from_secs(10), 100),
     };
 
@@ -539,12 +539,14 @@ pub fn main() {
         // that has already started.
         let now = Instant::now();
         if next_render <= now {
+            let due = next_render;
             next_render = now + renderer::FRAME_BUDGET;
             renderer.render(
                 &state,
                 &status,
                 &mut metrics,
                 launchkey.as_ref().map(|l| l.encoder_mode),
+                due,
             );
 
             if let Some(launchkey) = launchkey.as_mut() {
@@ -608,10 +610,10 @@ fn apply_status(
     status: &mut tracker::Status<WaveformId, MarkId>,
 ) {
     if let Some(ratio) = new_status.tracker_load {
-        metrics.tracker_load.set(ratio);
+        metrics.tracker_load.set_max(ratio);
     }
-    if let Some(allocations) = new_status.allocations_per_sample {
-        metrics.allocations_per_sample.set(allocations);
+    if let Some(allocations) = new_status.allocations {
+        metrics.allocations.set_max(allocations as f32);
     }
     *status = new_status;
 }

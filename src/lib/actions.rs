@@ -2137,7 +2137,7 @@ mod tests {
             marks: vec![],
             buffer: None,
             tracker_load: None,
-            allocations_per_sample: None,
+            allocations: None,
         }
     }
 
