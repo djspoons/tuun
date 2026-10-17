@@ -1,0 +1,20 @@
+open std;
+use midi.notes;
+use synth.pm;
+
+#{level_db=0,keys}
+keys = pm.brass_keys;
+
+brass_notes = fn(dur) => fn(notes) => <map(fn(n) => pm.brass(dur, @n), notes)>;
+
+(C2, C#2, D2, D#2, E2, F2, F#2, G2, G#2, A2, A#2, B2) = notes.midi_octave(2);
+(C3, C#3, D3, D#3, E3, F3, F#3, G3, G#3, A3, A#3, B3) = notes.midi_octave(3);
+(C, C#, D, D#, E, F, F#, G, G#, A, A#, B) = notes.midi_octave(4);
+(C5, C#5, D5, D#5, E5, F5, F#5, G5, G#5, A5, A#5, B5) = notes.midi_octave(5);
+
+// Fux's dorian cantus firmus
+#{level_db=-9}
+fux_dorian_c_f =                 [D, F, E, D, G, F, A, G, F, E, D] | brass_notes(H);
+
+#{level_db=-9}
+dorian_c_p_upper_1 =             [D5, B, A, B, C5, E5, F5, E5, D5, B, D5, F5, C5, D5, E5, B, A, D5, B, C#5, D5, D5] | brass_notes(H/2);

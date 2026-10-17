@@ -724,17 +724,16 @@ mod tests {
 
     #[test]
     fn test_named_defaults_evaluate_once() {
-        use std::cell::RefCell;
-        use std::rc::Rc;
+        use std::sync::{Arc, Mutex};
 
-        let printed: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
-        let sink = Rc::clone(&printed);
+        let printed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&printed);
         let mut bindings: Vec<SourceBinding<u32, ()>> = Vec::new();
         builtins::add_bindings(&mut bindings);
         bindings.push(
             Binding::Definition(
                 Pattern::Identifier("debug".to_string()),
-                builtins::debug(move |line| sink.borrow_mut().push(line.to_string())),
+                builtins::debug(move |line| sink.lock().unwrap().push(line.to_string())),
             )
             .into(),
         );
@@ -749,14 +748,14 @@ mod tests {
         .unwrap();
         let evaluated = evaluate(resolve, &bindings, expr).unwrap();
         assert_eq!(format!("{}", evaluated), "3");
-        assert_eq!(printed.borrow().as_slice(), ["[DEBUG] once: 1"]);
+        assert_eq!(printed.lock().unwrap().as_slice(), ["[DEBUG] once: 1"]);
 
         // Even a function that is never applied evaluates its defaults.
-        printed.borrow_mut().clear();
+        printed.lock().unwrap().clear();
         let expr = parse_program::<u32, _>("let f = fn(x, y = 1 | debug(\"once\")) => x in 0", ())
             .unwrap();
         evaluate(resolve, &bindings, expr).unwrap();
-        assert_eq!(printed.borrow().as_slice(), ["[DEBUG] once: 1"]);
+        assert_eq!(printed.lock().unwrap().as_slice(), ["[DEBUG] once: 1"]);
     }
 
     #[test]

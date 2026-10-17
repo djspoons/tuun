@@ -5,7 +5,7 @@
 use std::fmt;
 use std::fmt::{Debug, Display};
 use std::ops::Range;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::waveform;
 
@@ -211,7 +211,8 @@ impl<S> Display for Error<S> {
 /// vector of values to a value.
 // TODO carry element-level spans, so `map` can point at the failing
 // element's origin rather than at the whole call.
-pub type BuiltInImpl<M, S> = Rc<dyn Fn(Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>>;
+pub type BuiltInImpl<M, S> =
+    Arc<dyn Fn(Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct BuiltInFn<M, S = ()>(pub BuiltInImpl<M, S>);
@@ -1538,6 +1539,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_source_expr_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<SourceExpr<u32, ()>>();
+    }
 
     #[test]
     fn test_line_col() {

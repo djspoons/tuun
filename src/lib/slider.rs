@@ -83,6 +83,7 @@ pub fn append_slider_bindings<M, S, F>(
 /// Builds a `mark_id` mark around a waveform that ramps linearly from
 /// `last_value` to `new_value` over `ramp_duration_secs`, then holds
 /// `new_value` forever.
+// TODO: consider an exponential ramp
 pub fn make_ramp<M>(
     mark_id: M,
     last_value: f32,

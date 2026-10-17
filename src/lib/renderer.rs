@@ -17,12 +17,12 @@ use crate::programs::{PROGRAMS_PER_BANK, SliderDisplay};
 use crate::recorder::{Finish, Phase};
 use crate::tracker;
 
-fn make_texture<'a>(
-    font: &Font<'a, 'static>,
+fn make_texture<'t>(
+    font: &Font<'_, 'static>,
     color: Color,
-    texture_creator: &'a TextureCreator<WindowContext>,
+    texture_creator: &'t TextureCreator<WindowContext>,
     s: &str,
-) -> sdl2::render::Texture<'a> {
+) -> sdl2::render::Texture<'t> {
     let surface = font
         .render(s)
         .blended(color)
@@ -40,9 +40,13 @@ const EDIT_COLOR: Color = Color::RGB(0xFF, 0xFF, 0xFF);
 const ERROR_COLOR: Color = Color::RGB(0xFF, 0xDE, 0x21);
 const RECORD_COLOR: Color = Color::RGB(0xFF, 0x00, 0x00);
 
-pub struct Renderer {
+pub struct Renderer<'ttf> {
     pub video_subsystem: sdl2::VideoSubsystem,
     canvas: sdl2::render::Canvas<sdl2::video::Window>,
+
+    font: Font<'ttf, 'static>,
+    circle_font: Font<'ttf, 'static>,
+    beat_font: Font<'ttf, 'static>,
 
     tempo: u32,
     beats_per_measure: u32,
@@ -61,19 +65,28 @@ pub struct Renderer {
 
 pub struct Metrics {
     pub tracker_load: Metric<f32>,
-    pub allocations_per_sample: Metric<f32>,
+    /// The number of buffers the tracker allocated in one audio callback.
+    pub allocations: Metric<f32>,
+    /// The time from when a frame was due until it was presented, as a fraction
+    /// of [`FRAME_BUDGET`].
+    ///
+    /// Values above 1.0 mean the frame took longer than its budget.
+    pub renderer_load: Metric<f32>,
 }
+
+/// The time between frames at 60 Hz.
+pub const FRAME_BUDGET: Duration = Duration::from_nanos(1_000_000_000 / 60);
 
 const FONT_PATH: &str = "/Library/Fonts/Arial Unicode.ttf";
 
-impl Renderer {
+impl<'ttf> Renderer<'ttf> {
     pub fn new(
         sdl_context: &Sdl,
-        ttf_context: &Sdl2TtfContext,
+        ttf_context: &'ttf Sdl2TtfContext,
         tempo: u32,
         beats_per_measure: u32,
         sample_rate: u32,
-    ) -> Renderer {
+    ) -> Renderer<'ttf> {
         let video_subsystem = sdl_context.video().unwrap();
         let display_mode = video_subsystem
             .current_display_mode(0)
@@ -95,6 +108,8 @@ impl Renderer {
             .unwrap();
         let texture_creator = canvas.texture_creator();
         let font = ttf_context.load_font(FONT_PATH, 48).unwrap();
+        let circle_font = ttf_context.load_font(FONT_PATH, 108).unwrap();
+        let beat_font = ttf_context.load_font(FONT_PATH, 64).unwrap();
 
         let prompt_texture = make_texture(&font, INACTIVE_COLOR, &texture_creator, " ▸ ");
         let TextureQuery {
@@ -112,6 +127,9 @@ impl Renderer {
         Renderer {
             video_subsystem,
             canvas,
+            font,
+            circle_font,
+            beat_font,
             tempo,
             beats_per_measure,
             sample_rate,
@@ -126,13 +144,14 @@ impl Renderer {
         }
     }
 
+    /// Draws and presents one frame that was due at `due`.
     pub fn render(
         &mut self,
-        ttf_context: &Sdl2TtfContext,
         state: &AppState,
         status: &tracker::Status<WaveformId, MarkId>,
         metrics: &mut Metrics,
         encoder_mode: Option<launchkey::EncoderMode>,
+        due: Instant,
     ) {
         // Alias the AppState fields the body uses so the rest of this
         // function (still mostly written against unbound locals) keeps
@@ -150,9 +169,6 @@ impl Renderer {
         let beat_fade = u8::MAX
             - (beat_phase(now, current_beat_start, current_beat_duration) * u8::MAX as f32) as u8;
         let texture_creator = self.canvas.texture_creator();
-        let font = ttf_context.load_font(FONT_PATH, 48).unwrap();
-        let circle_font = ttf_context.load_font(FONT_PATH, 108).unwrap();
-
         self.canvas.set_draw_color(Color::RGB(0x00, 0x00, 0x00));
         self.canvas.clear();
 
@@ -250,7 +266,7 @@ impl Renderer {
                 _ => (program_color, u8::MAX),
             };
             let number = char::from_u32(0x31 + i as u32).unwrap().to_string();
-            let mut number_texture = make_texture(&font, color, &texture_creator, &number);
+            let mut number_texture = make_texture(&self.font, color, &texture_creator, &number);
             number_texture.set_alpha_mod(alpha);
             let TextureQuery {
                 width: number_width,
@@ -283,13 +299,7 @@ impl Renderer {
                     .then_some((ACTIVE_COLOR, u8::MAX)),
             };
             if let Some((circle_color, circle_alpha)) = circle {
-                self.draw_circle(
-                    &circle_font,
-                    &texture_creator,
-                    circle_color,
-                    circle_alpha,
-                    y,
-                );
+                self.draw_circle(&texture_creator, circle_color, circle_alpha, y);
             }
 
             match *mode {
@@ -299,8 +309,12 @@ impl Renderer {
                     ..
                 } => {
                     if active_program_index != index && !program.is_empty() {
-                        let text_texture =
-                            make_texture(&font, program_color, &texture_creator, program.text());
+                        let text_texture = make_texture(
+                            &self.font,
+                            program_color,
+                            &texture_creator,
+                            program.text(),
+                        );
                         let TextureQuery {
                             width: text_width,
                             height: text_height,
@@ -319,45 +333,62 @@ impl Renderer {
                             )
                             .unwrap();
                     } else if active_program_index == index {
-                        // Loop over each character in program and check to see if it's in any of the error
-                        // ranges. `char_indices` yields byte offsets, matching
-                        // both `cursor_position` and the errors' byte ranges.
-                        let mut x = self.nav_width as i32;
-                        for (j, c) in program.text().char_indices() {
-                            let color = if errors.iter().any(
+                        // Draw the text in runs of one color, split where it
+                        // enters or leaves an error range. `char_indices`
+                        // yields byte offsets, matching both `cursor_position`
+                        // and the errors' byte ranges.
+                        let text = program.text();
+                        let color_at = |j: usize| {
+                            if errors.iter().any(
                                 |e| matches!(&e.program_range, Some(range) if range.contains(&j)),
                             ) {
                                 ERROR_COLOR
                             } else {
                                 EDIT_COLOR
-                            };
-                            if cursor_position == j {
-                                self.draw_cursor(ttf_context, color, x, y, &texture_creator);
                             }
-                            let char_texture =
-                                make_texture(&font, color, &texture_creator, &c.to_string());
+                        };
+                        // The byte offset where each run starts, and its color.
+                        let mut runs: Vec<(usize, Color)> = Vec::new();
+                        for (j, _) in text.char_indices() {
+                            let color = color_at(j);
+                            if runs.last().is_none_or(|&(_, last)| last != color) {
+                                runs.push((j, color));
+                            }
+                        }
+                        for (k, &(start, color)) in runs.iter().enumerate() {
+                            let end = runs.get(k + 1).map_or(text.len(), |&(next, _)| next);
+                            // Measure the whole prefix, not the earlier runs, so
+                            // that runs and the cursor keep the font's kerning.
+                            let x = self.nav_width as i32 + self.text_width(&text[..start]);
+                            let run_texture = make_texture(
+                                &self.font,
+                                color,
+                                &texture_creator,
+                                &text[start..end],
+                            );
                             let TextureQuery {
-                                width: char_width,
-                                height: char_height,
+                                width: run_width,
+                                height: run_height,
                                 ..
-                            } = char_texture.query();
+                            } = run_texture.query();
                             self.canvas
                                 .copy(
-                                    &char_texture,
+                                    &run_texture,
                                     None,
-                                    Some(sdl2::rect::Rect::new(x, y, char_width, char_height)),
+                                    Some(sdl2::rect::Rect::new(x, y, run_width, run_height)),
                                 )
                                 .unwrap();
-                            x += char_width as i32;
                         }
-                        if cursor_position == program.text().len() {
-                            // Draw the cursor at the end of the line
-                            let color = if !errors.is_empty() {
+                        if let Some(before_cursor) = text.get(..cursor_position) {
+                            let color = if cursor_position < text.len() {
+                                color_at(cursor_position)
+                            } else if !errors.is_empty() {
                                 ERROR_COLOR
                             } else {
                                 EDIT_COLOR
                             };
-                            self.draw_cursor(ttf_context, color, x, y, &texture_creator);
+                            let x = self.nav_width as i32 + self.text_width(before_cursor);
+                            self.draw_cursor(color, x, y, &texture_creator);
                         }
                     }
                 }
@@ -367,7 +398,8 @@ impl Renderer {
                             Mode::MoveSliders => ACTIVE_COLOR,
                             _ => INACTIVE_COLOR, // Select
                         };
-                        let prompt_texture = make_texture(&font, color, &texture_creator, " ▸ ");
+                        let prompt_texture =
+                            make_texture(&self.font, color, &texture_creator, " ▸ ");
                         self.canvas
                             .copy(
                                 &prompt_texture,
@@ -383,8 +415,12 @@ impl Renderer {
                     }
 
                     if !program.is_empty() {
-                        let text_texture =
-                            make_texture(&font, program_color, &texture_creator, program.text());
+                        let text_texture = make_texture(
+                            &self.font,
+                            program_color,
+                            &texture_creator,
+                            program.text(),
+                        );
                         let TextureQuery {
                             width: text_width,
                             height: text_height,
@@ -447,8 +483,7 @@ impl Renderer {
 
         // Draw the marks
         let programs_bottom = (20 + PROGRAMS_PER_BANK as i32 * self.line_height as i32) as f32;
-        let beat_font = ttf_context.load_font(FONT_PATH, 64).unwrap();
-        let beat_height = beat_font.size_of("0").unwrap().1 as f32;
+        let beat_height = self.beat_font.size_of("0").unwrap().1 as f32;
         let marks_bottom = self.height as f32 - beat_height - 10.0;
         let marks_total_height = (marks_bottom - programs_bottom).max(0.0);
         let marks_row_height = marks_total_height / PROGRAMS_PER_BANK as f32;
@@ -638,7 +673,8 @@ impl Renderer {
             if let Some((limit, _)) = message.char_indices().nth(45) {
                 message = &message[..limit];
             }
-            let message_texture = make_texture(&font, INACTIVE_COLOR, &texture_creator, message);
+            let message_texture =
+                make_texture(&self.font, INACTIVE_COLOR, &texture_creator, message);
             let TextureQuery {
                 width: message_width,
                 height: message_height,
@@ -660,7 +696,7 @@ impl Renderer {
 
         // Draw the current beat
         let beat_texture = make_texture(
-            &beat_font,
+            &self.beat_font,
             ACTIVE_COLOR,
             &texture_creator,
             format!(
@@ -693,41 +729,54 @@ impl Renderer {
         let x = (self.width - metrics_width - 20) as i32;
         let y = self.height as i32 / 2;
         self.draw_metric(
-            ttf_context,
             &texture_creator,
             x,
             y,
-            metrics_width,
             metrics_height,
             &mut metrics.tracker_load,
+            1.0,
         );
 
         let x = (self.width - 2 * metrics_width - 20) as i32;
         let y = self.height as i32 / 2;
         self.draw_metric(
-            ttf_context,
             &texture_creator,
             x,
             y,
-            metrics_width,
             metrics_height,
-            &mut metrics.allocations_per_sample,
+            &mut metrics.allocations,
+            1000.0,
+        );
+
+        let x = (self.width - 3 * metrics_width - 20) as i32;
+        let y = self.height as i32 / 2;
+        self.draw_metric(
+            &texture_creator,
+            x,
+            y,
+            metrics_height,
+            &mut metrics.renderer_load,
+            1.0,
         );
 
         self.canvas.present();
+
+        // This frame's load is drawn with the next frame.
+        metrics
+            .renderer_load
+            .set_max(due.elapsed().div_duration_f32(FRAME_BUDGET));
     }
 
     /// Draws the large circle around the slot number on the row at `y`.
-    fn draw_circle<'a>(
+    fn draw_circle(
         &mut self,
-        circle_font: &Font<'a, 'static>,
-        texture_creator: &'a TextureCreator<WindowContext>,
+        texture_creator: &TextureCreator<WindowContext>,
         color: Color,
         alpha: u8,
         y: i32,
     ) {
         let circle = char::from_u32(0x25EF).unwrap().to_string();
-        let mut circle_texture = make_texture(circle_font, color, texture_creator, &circle);
+        let mut circle_texture = make_texture(&self.circle_font, color, texture_creator, &circle);
         circle_texture.set_alpha_mod(alpha);
         let TextureQuery {
             width: circle_width,
@@ -748,16 +797,23 @@ impl Renderer {
             .unwrap();
     }
 
+    /// Returns the width of `s` in the text font, in pixels.
+    fn text_width(&self, s: &str) -> i32 {
+        // Empty text has no width; skip the call into SDL_ttf.
+        if s.is_empty() {
+            return 0;
+        }
+        self.font.size_of(s).unwrap().0 as i32
+    }
+
     fn draw_cursor(
-        self: &mut Renderer,
-        ttf_context: &Sdl2TtfContext,
+        &mut self,
         color: Color,
         x: i32,
         y: i32,
         texture_creator: &TextureCreator<WindowContext>,
     ) {
-        let font = ttf_context.load_font(FONT_PATH, 48).unwrap();
-        let cursor_texture = make_texture(&font, color, texture_creator, "‸");
+        let cursor_texture = make_texture(&self.font, color, texture_creator, "‸");
         let TextureQuery {
             width: cursor_width,
             height: cursor_height,
@@ -777,23 +833,24 @@ impl Renderer {
             .unwrap();
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// Draws `metric`'s latest value and a graph of its history at (`x`, `y`).
+    ///
+    /// A value of `full_scale` is drawn at the graph's full `height`; the
+    /// line turns yellow at 0.7 × `full_scale` and red at 0.9 × `full_scale`.
     fn draw_metric(
-        self: &mut Renderer,
-        ttf_context: &Sdl2TtfContext,
+        &mut self,
         texture_creator: &TextureCreator<WindowContext>,
         x: i32,
         y: i32,
-        _width: u32,
         height: u32,
         metric: &mut Metric<f32>,
+        full_scale: f32,
     ) {
-        let font = ttf_context.load_font(FONT_PATH, 48).unwrap();
         let default_color = Color::RGBA(0, 255, 0, 128);
         let points: Vec<f32> = metric.iter().collect();
         if !points.is_empty() {
             let last_value_texture = make_texture(
-                &font,
+                &self.font,
                 default_color,
                 texture_creator,
                 format!("{:.2}", points.last().unwrap()).as_str(),
@@ -816,16 +873,17 @@ impl Renderer {
                 )
                 .unwrap();
 
-            let mut last_y = y + height as i32 - (points[0] * height as f32) as i32;
+            let mut last_y = y + height as i32 - (points[0] / full_scale * height as f32) as i32;
             for (i, &point) in points.iter().enumerate() {
                 if i == points.len() - 1 && point == 0.0 {
                     continue; // Skip the last point if it's zero
                 }
-                let value = y + height as i32 - (point * height as f32) as i32;
+                let level = point / full_scale;
+                let value = y + height as i32 - (level * height as f32) as i32;
                 // TODO these thresholds don't make sense for arbitrary metrics
-                if point < 0.7 {
+                if level < 0.7 {
                     self.canvas.set_draw_color(default_color);
-                } else if point < 0.9 {
+                } else if level < 0.9 {
                     self.canvas.set_draw_color(Color::RGBA(127, 222, 33, 128));
                 } else {
                     self.canvas.set_draw_color(Color::RGBA(127, 0, 0, 128));

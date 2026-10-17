@@ -187,12 +187,17 @@ impl AppState {
         &self.programs.programs()[self.active_program_index]
     }
 
+    /// Returns when the take being recorded next needs a tick, if it does.
+    pub fn next_take_tick(&self) -> Option<Instant> {
+        match &self.mode {
+            Mode::Record { take, .. } => take.next_tick(),
+            _ => None,
+        }
+    }
+
     /// Returns whether a take is waiting on a tick that is due at `now`.
     pub fn take_tick_due(&self, now: Instant) -> bool {
-        match &self.mode {
-            Mode::Record { take, .. } => take.next_tick().is_some_and(|due| due <= now),
-            _ => false,
-        }
+        self.next_take_tick().is_some_and(|due| due <= now)
     }
 }
 
@@ -2132,7 +2137,7 @@ mod tests {
             marks: vec![],
             buffer: None,
             tracker_load: None,
-            allocations_per_sample: None,
+            allocations: None,
         }
     }
 

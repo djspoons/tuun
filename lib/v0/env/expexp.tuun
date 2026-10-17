@@ -1,0 +1,24 @@
+open std;
+
+// Exponential decay envelopes implemented using `exp`. Best for non-constant
+// duration envelopes, since those cannot be implemented cheaply using a recursive
+// difference equation. For constant duration envelopes, use the implementation in
+// expfil.tuun.
+
+// ~60 dB
+_amp_threshold = 0.001;
+
+// TODO finish this
+//Dw = fn(dur, sustain_level) =>
+//  let
+//  in
+//    0;
+//
+
+Rw = fn(dur, level) =>
+  let
+    scale = dur / -ln(_amp_threshold),
+  in
+    level * exp(-time / scale) | fin(time - dur);
+
+R = fn(dur, level) => fn(w) => w * Rw(dur, level);

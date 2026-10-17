@@ -12,6 +12,8 @@ pub const EMBEDDED_MODULES: &[(&str, &str)] = &[
     ("std", include_str!("../../lib/v0/std.tuun")),
     ("env.minmax", include_str!("../../lib/v0/env/minmax.tuun")),
     ("env.finseq", include_str!("../../lib/v0/env/finseq.tuun")),
+    ("env.expfil", include_str!("../../lib/v0/env/expfil.tuun")),
+    ("env.expexp", include_str!("../../lib/v0/env/expexp.tuun")),
     (
         "filters.basic",
         include_str!("../../lib/v0/filters/basic.tuun"),

@@ -1,5 +1,5 @@
 use std::fmt::{Debug, Display};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::eval;
 use crate::expr;
@@ -647,11 +647,13 @@ where
     })
 }
 
-pub fn curry<M, S>(f: impl Fn(Box<Waveform<M>>) -> Waveform<M> + 'static) -> BuiltInFn<M, S>
+pub fn curry<M, S>(
+    f: impl Fn(Box<Waveform<M>>) -> Waveform<M> + Send + Sync + 'static,
+) -> BuiltInFn<M, S>
 where
     M: Display,
 {
-    BuiltInFn(Rc::new(
+    BuiltInFn(Arc::new(
         move |mut arguments: Vec<Expr<M, S>>| -> Result<Expr<M, S>, Error<S>> {
             if arguments.len() != 1 {
                 return Err(Error::internal_here("Expected waveform"));
@@ -684,7 +686,7 @@ where
 
 pub fn fin<M, S>(mut arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Debug + Clone + Display + 'static,
+    M: Debug + Clone + Display + Send + Sync + 'static,
 {
     Ok({
         if arguments.len() != 1 {
@@ -713,7 +715,7 @@ where
 
 pub fn seq<M, S>(mut arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Debug + Clone + Display + 'static,
+    M: Debug + Clone + Display + Send + Sync + 'static,
 {
     Ok({
         if arguments.len() != 1 {
@@ -734,7 +736,7 @@ where
         let name = format!("seq({})", offset);
         BuiltIn {
             name,
-            function: BuiltInFn(Rc::new(
+            function: BuiltInFn(Arc::new(
                 move |mut arguments: Vec<Expr<M, S>>| -> Result<Expr<M, S>, Error<S>> {
                     let offset = offset.clone();
                     if arguments.len() != 1 {
@@ -775,7 +777,7 @@ where
         }
         Expr::BuiltIn {
             name: "unseq()".to_string(),
-            function: BuiltInFn(Rc::new(
+            function: BuiltInFn(Arc::new(
                 |mut arguments: Vec<Expr<M, S>>| -> Result<Expr<M, S>, Error<S>> {
                     if arguments.len() != 1 {
                         return Err(Error::internal_here(format!(
@@ -821,7 +823,7 @@ pub fn waveform_convolution(mut arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>
 
 pub fn waveform_filter<M, S>(mut arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Debug + Clone + Display + 'static,
+    M: Debug + Clone + Display + Send + Sync + 'static,
 {
     Ok({
         if arguments.len() != 2 {
@@ -1062,14 +1064,14 @@ where
 /// ```tuun
 /// $(440 | debug("freq"))   // logs `[DEBUG] freq: 440`, plays $440
 /// ```
-pub fn debug<M, S>(print: impl Fn(&str) + Clone + 'static) -> SourceExpr<M, S>
+pub fn debug<M, S>(print: impl Fn(&str) + Clone + Send + Sync + 'static) -> SourceExpr<M, S>
 where
     M: Display + 'static,
     S: 'static,
 {
     SourceExpr::from(Expr::BuiltIn {
         name: "debug".to_string(),
-        function: BuiltInFn(Rc::new(move |mut arguments: Vec<Expr<M, S>>| {
+        function: BuiltInFn(Arc::new(move |mut arguments: Vec<Expr<M, S>>| {
             if arguments.len() != 1 {
                 return Err(Error::internal_here("Expected one argument for debug"));
             }
@@ -1082,7 +1084,7 @@ where
             let print = print.clone();
             Ok(BuiltIn {
                 name: format!("debug({})", label),
-                function: BuiltInFn(Rc::new(move |mut arguments: Vec<Expr<M, S>>| {
+                function: BuiltInFn(Arc::new(move |mut arguments: Vec<Expr<M, S>>| {
                     if arguments.len() != 1 {
                         return Err(Error::internal_here("Expected one argument"));
                     }
@@ -1097,7 +1099,7 @@ where
 /// Adds all of the built-ins to `bindings`.
 pub fn add_bindings<M, S>(bindings: &mut Vec<expr::SourceBinding<M, S>>)
 where
-    M: Debug + Clone + Display + PartialEq + 'static,
+    M: Debug + Clone + Display + PartialEq + Send + Sync + 'static,
     S: Clone + Debug + 'static,
 {
     fn def<M, S>(id: &str, expr: expr::SourceExpr<M, S>) -> expr::SourceBinding<M, S> {
@@ -1159,7 +1161,7 @@ where
             name,
             SourceExpr::from(Expr::BuiltIn {
                 name: name.to_string(),
-                function: BuiltInFn(Rc::new(function)),
+                function: BuiltInFn(Arc::new(function)),
             }),
         ));
     }
@@ -1173,10 +1175,10 @@ mod tests {
 
     #[test]
     fn test_debug() {
-        use std::cell::RefCell;
-        let printed: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
-        let sink = Rc::clone(&printed);
-        let debug = debug::<u32, ()>(move |line| sink.borrow_mut().push(line.to_string()));
+        use std::sync::Mutex;
+        let printed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&printed);
+        let debug = debug::<u32, ()>(move |line| sink.lock().unwrap().push(line.to_string()));
         let Expr::BuiltIn { function, .. } = debug.expr else {
             panic!("debug should build a BuiltIn");
         };
@@ -1187,7 +1189,7 @@ mod tests {
             _ => panic!("debug applied to label should be a BuiltIn"),
         };
         assert_eq!(format!("{}", result.clone().unwrap()), "440");
-        assert_eq!(printed.borrow().as_slice(), ["[DEBUG] freq: 440"]);
+        assert_eq!(printed.lock().unwrap().as_slice(), ["[DEBUG] freq: 440"]);
     }
 
     #[test]
@@ -1219,7 +1221,7 @@ mod tests {
         let result = map(vec![
             BuiltIn {
                 name: "minus".to_string(),
-                function: BuiltInFn(Rc::new(minus)),
+                function: BuiltInFn(Arc::new(minus)),
             },
             List(exprs),
         ]);
@@ -1236,7 +1238,7 @@ mod tests {
         let result = reduce(vec![
             BuiltIn {
                 name: "plus".to_string(),
-                function: BuiltInFn(Rc::new(plus)),
+                function: BuiltInFn(Arc::new(plus)),
             },
             Expr::float(1.0),
             List(exprs),

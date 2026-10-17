@@ -6,8 +6,8 @@ use mock_instant::thread_local::Instant;
 #[cfg(not(test))]
 use std::time::Instant;
 
-/* A simple time series metric that stores values for a finite period of time and with a
- * fixed set of time buckets. */
+/// A simple time series metric that stores values for a finite period of time
+/// and with a fixed set of time buckets.
 pub struct Metric<T>
 where
     T: Add + Copy + Default,
@@ -65,9 +65,38 @@ where
         self.data[bucket] = self.data[bucket] + value;
     }
     */
+
+    /// Records `value` in the current bucket overwriting previously recorded
+    /// values.
     pub fn set(&mut self, value: T) {
         let bucket = self.current_bucket(true);
         self.data[bucket] = value;
+    }
+
+    /// Records `value` in the current bucket if it exceeds what the bucket holds.
+    ///
+    /// Each bucket then holds the largest value recorded during its time.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use tuun::metric::Metric;
+    ///
+    /// let mut metric = Metric::new(Duration::from_secs(10), 10);
+    /// metric.set_max(3.0);
+    /// metric.set_max(5.0);
+    /// metric.set_max(4.0);
+    /// assert_eq!(metric.iter().last(), Some(5.0));
+    /// ```
+    pub fn set_max(&mut self, value: T)
+    where
+        T: PartialOrd,
+    {
+        let bucket = self.current_bucket(true);
+        if value > self.data[bucket] {
+            self.data[bucket] = value;
+        }
     }
 
     // Returns an iterator over the data in the metric, starting from the oldest bucket.
@@ -117,5 +146,19 @@ mod tests {
         MockClock::advance(Duration::from_secs(9));
         metric.set(8);
         assert_eq!(metric.iter().collect::<Vec<_>>(), vec![0, 0, 0, 0, 8]);
+    }
+
+    #[test]
+    fn set_max_keeps_the_largest_value_per_bucket() {
+        MockClock::set_time(Duration::from_secs(60));
+        let mut metric = Metric::new(Duration::from_secs(3), 3);
+        metric.set_max(2);
+        metric.set_max(7);
+        metric.set_max(4);
+        assert_eq!(metric.iter().collect::<Vec<_>>(), vec![0, 0, 7]);
+
+        MockClock::advance(Duration::from_secs(1));
+        metric.set_max(1);
+        assert_eq!(metric.iter().collect::<Vec<_>>(), vec![0, 7, 1]);
     }
 }

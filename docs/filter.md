@@ -89,9 +89,59 @@ $$
 
 The feedback coefficients are labeled starting with $a_1$ with the assumption that the coefficient $a_0$ for $y[t_n]$ is equal to $1$. If you are implementing a feedback filter where $a_0 \ne 1$, simply divide all of the other coefficients by $a_0$, as in the low-pass filter example below.
 
-Note that it's very easy to provide feedback parameters which cause the output to diverge! In general, even if the input samples go to $0.0$, there's no guarantee that the output samples will. As such, feedback filters are sometimes called *infinite* impulse response filters.
+It's very easy to provide feedback parameters which cause the output to diverge! In general, even if the input samples go to 0.0, there's no guarantee that the output samples will. As such, feedback filters are sometimes called *infinite* impulse response filters.
 
-Determining feedback coefficients can be a subtle art, and Tuun's library includes several functions that can help. The following example uses a feedback filter defined in [Robert Bristow-Johnson's Cookbook](https://webaudio.github.io/Audio-EQ-Cookbook/Audio-EQ-Cookbook.txt).
+### Exponential Decay
+
+A simple example that uses a feedback filter is an exponential decay envelope. Exponential decay is useful in creating percussion instruments where you want a short, intense burst of sound followed by a fast but smooth drop in amplitude. You can create exponential decay using the exponential function `exp` but it can be computationally cheaper to do so with `filter` instead.
+
+ In this example, we create an envelope by combining an impulse with a filter that has a single feedback parameter. You can control `f` with the slider below. (Due to rounding in the display, it will sometimes show "1.0" when the actual value is slightly less than $1.0$.) The slider is limited to values less than 1.0, since the filter output diverges when `f` is greater than 1.0.
+
+<div class="container">
+  <tuun-synth
+    open='["std"]'
+    sliders='["f:0.5:fn(x) => 1 - pow(10000, -(x+1)/2)"]'>
+  let
+    env = append(fixed([1]), 0) | filter([1], [-f])
+  in
+    reset($(1/2), triangle(60) * env | fin(time - 1))
+  </tuun-synth>
+</div>
+
+The envelope in this example implements the following equations:
+
+$$
+y[t_0] = 1
+\\[1em]
+y[t_n] = f \cdot y[t_{n-1}]
+$$
+
+That is, each output sample is a constant factor times the previous output sample. This is equivalent to:
+
+$$
+y[t_n] = f^n \cdot y[t_{0}] = f^n
+$$
+
+Since there is only one feed-forward and one feedback parameter, and they are both constant, we can simplify the equation above. Here $x[t_n]$ is the input to the filter (the impulse). 
+
+$$
+y[t_n] = w[t_n] + f \cdot y[t_{n - 1}]
+$$
+
+Recall that $y[t_n]$ for $n < 0$ is equal to $0.0$. The first five output values are given for $f = 0.995$ in the table below.
+
+
+$t_n$ | $x[t_n]$ | $y[t_n]$
+|---  |--------  |---------
+0     | 1.0      | 1.00000
+1     | 0.0      | 0.99500
+2     | 0.0      | 0.99002
+3     | 0.0      | 0.98507
+4     | 0.0      | 0.98015
+
+### Biquad Low-Pass Filter
+
+Determining feedback coefficients can be a subtle art, and Tuun's library includes several functions that can help. The following example uses a biquad feedback filter described in [Robert Bristow-Johnson's Cookbook](https://webaudio.github.io/Audio-EQ-Cookbook/Audio-EQ-Cookbook.txt). This filter attenuates frequencies above `f_c` (the "center frequency") and passes through those below it.
 
 <div class="container">
   <tuun-synth
@@ -99,9 +149,9 @@ Determining feedback coefficients can be a subtle art, and Tuun's library includ
     sliders='["frequency:0.5:fn(x) => 100 * pow(100, x)"]'>
     let
       // RBJ Cookbook low-pass filter
-      lpf = fn(Q, fc) =>
+      lpf = fn(Q, f_c) =>
         let
-          w0 = 2*pi*fc/sample_rate,
+          w0 = 2*pi*f_c/sample_rate,
           alpha = sin(w0)/(2*Q),
           b0 = (1 - cos(w0))/2,
           b1 =  1 - cos(w0),
@@ -112,16 +162,15 @@ Determining feedback coefficients can be a subtle art, and Tuun's library includ
         in
           filter([b0/a0, b1/a0, b2/a0], [a1/a0, a2/a0]),
       in
-        square(220) | lpf(0.707, frequency)
+        0.5 * square(220) | lpf(0.707, frequency)
   </tuun-synth>
 </div>
-
 
 
 ## A Note on Length
 
 Tuun `Filter` waveforms are always the same length as their input. As noted above, finite waveforms are extended by $K-1$ samples (where $K$ is the number of feed-forward coefficients) since the first $K-1$ input samples are consumed for the first output sample. In most cases the coefficient waveforms will be infinite; if they are not, they are extended with zeros to match the length of the input.
 
-Finally, note that because the length of a `Filter` waveform is independent of the coefficients (including their values), even an *infinite* impulse response filter could have a *finite* length. Similarly, a *finite* impulse response filter could have an *infinite* length.
+Finally, note that because the length of a `Filter` waveform is independent of the *values* of the coefficients, an *infinite* impulse response filter can have a *finite* length. Similarly, a *finite* impulse response filter can have an *infinite* length (though the output will still eventually go to $0.0$).
 
 <script type="module" src="tuun/tuun-synth.js"></script>

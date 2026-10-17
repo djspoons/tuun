@@ -88,8 +88,8 @@ where
     pub buffer: Option<Vec<f32>>,
     // The current tracker load, the ratio of sample frequency to samples generated per second
     pub tracker_load: Option<f32>,
-    // The number of samples allocated internally as part of generating one sample (on average)
-    pub allocations_per_sample: Option<f32>,
+    // The number of buffers allocated while generating this status's buffer
+    pub allocations: Option<usize>,
 }
 
 impl<I, M> Status<I, M>
@@ -444,7 +444,7 @@ where
             buffer_start,
             marks: Vec::new(),
             tracker_load: None,
-            allocations_per_sample: None,
+            allocations: None,
             buffer: None,
         };
 
@@ -454,7 +454,7 @@ where
         status_to_send.tracker_load = Some(
             self.sample_rate as f32 / (out.len() as f32 / generate_start.elapsed().as_secs_f32()),
         );
-        status_to_send.allocations_per_sample = Some(allocations as f32 / self.sample_rate as f32);
+        status_to_send.allocations = Some(allocations);
 
         // Copy the marks from finished waveforms into the status
         for active in finished {
@@ -696,7 +696,7 @@ where
                             let capture_state = RefCell::new(&mut capture_state);
                             generator.capture_state = Some(capture_state);
                             let mut tmp = vec![0.0; delta_samples];
-                            allocations += delta_samples;
+                            allocations += 1;
                             _ = generator.generate(&mut waveform, &mut tmp);
                             allocations += generator.allocations;
                         }
@@ -762,7 +762,7 @@ where
 
             let mut i = 0;
             let mut tmp = vec![0.0; segment_length];
-            allocations += segment_length;
+            allocations += 1;
             while i < self.active_waveforms.len() {
                 let active = &mut self.active_waveforms[i];
                 let len;
@@ -1066,7 +1066,7 @@ mod tests {
             ],
             buffer: None,
             tracker_load: None,
-            allocations_per_sample: None,
+            allocations: None,
         };
 
         let voices = WaveformSelector::ProgramVoices(3);
