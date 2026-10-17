@@ -372,46 +372,23 @@ pub fn main() {
         sdl2_input::InputHandler::new(launchkey.is_err(), renderer.width, renderer.height);
 
     let mut launchkey = launchkey.ok();
-    let mut effect_runner = effects::EffectRunner::new(player, environment, slider_sender.clone());
 
-    let mut status = tracker::Status {
-        buffer_start: Instant::now(),
-        marks: Vec::new(),
-        buffer: None,
-        tracker_load: None,
-        allocations: None,
-    };
-    let mut metrics = renderer::Metrics {
-        tracker_load: Metric::new(Duration::from_secs(10), 100),
-        allocations: Metric::new(Duration::from_secs(10), 100),
-        renderer_load: Metric::new(Duration::from_secs(10), 100),
-    };
-
-    // Populate each program's cached_waveform / cached_keys_instrument from
-    // its initial source so that playback and InstallKeys work without
-    // needing to enter and exit Edit mode first.
-    let mut failed_programs: Vec<usize> = Vec::new();
-    for i in 0..state.programs.programs().len() {
-        if state.programs.programs()[i].is_empty() {
-            continue;
+    // Evaluate each program from its initial source so that playback and
+    // InstallKeys work without needing to enter and exit Edit mode first.
+    // TODO evaluate through the processing thread (with the program set
+    // installed on its reply) so the window comes up at once.
+    let input_path = state.programs.input_path().to_path_buf();
+    let failed_programs = match processing::load(&environment, input, input_path) {
+        Ok(loaded) => {
+            state.programs = loaded.set;
+            loaded.failed
         }
-        run_effects(
-            &mut effect_runner,
-            &mut state,
-            launchkey.as_mut(),
-            &status,
-            vec![actions::Effect::EvaluateProgram {
-                program_index: i,
-                mode_on_success: Some(actions::Mode::Select),
-                mode_on_failure: Some(actions::Mode::Select),
-            }],
-        );
-        // A failed evaluation leaves both caches empty.
-        let program = &state.programs.programs()[i];
-        if program.waveform().is_none() && program.keys_instrument().is_none() {
-            failed_programs.push(i);
+        // Not expected: the same source parsed above.
+        Err(message) => {
+            println!("Couldn't evaluate the programs at startup: {}", message);
+            Vec::new()
         }
-    }
+    };
     // Errors from the initial parse and this sweep would sit in the status
     // line with nothing saying which program they came from — replace them
     // with a pointer to the failing programs; each error resurfaces when
@@ -427,6 +404,30 @@ pub fn main() {
                 .collect::<Vec<_>>()
                 .join(", ")
         )
+    };
+
+    let (job_sender, replies) = processing::spawn(
+        args.sample_rate,
+        args.tempo,
+        args.library_root.clone(),
+        args.check,
+        environment.module_table(),
+        main_loop_waker(&event_subsystem, wake_event_type),
+    );
+    let mut effect_runner =
+        effects::EffectRunner::new(player, environment, slider_sender.clone(), job_sender);
+
+    let mut status = tracker::Status {
+        buffer_start: Instant::now(),
+        marks: Vec::new(),
+        buffer: None,
+        tracker_load: None,
+        allocations: None,
+    };
+    let mut metrics = renderer::Metrics {
+        tracker_load: Metric::new(Duration::from_secs(10), 100),
+        allocations: Metric::new(Duration::from_secs(10), 100),
+        renderer_load: Metric::new(Duration::from_secs(10), 100),
     };
 
     const BUFFER_REFRESH_INTERVAL: Duration = Duration::from_millis(200);
@@ -470,6 +471,23 @@ pub fn main() {
         // Statuses don't wake the loop; use the latest that has arrived.
         while let Ok(tracker_status) = status_receiver.try_recv() {
             apply_status(tracker_status, &mut metrics, &mut status);
+        }
+
+        // Before input, so that an input in this pass sees the results.
+        loop {
+            match replies.try_recv() {
+                Ok(reply) => finish_job(
+                    &mut effect_runner,
+                    &mut state,
+                    launchkey.as_mut(),
+                    &status,
+                    reply,
+                ),
+                Err(mpsc::TryRecvError::Empty) => break,
+                // Only a panic stops the thread while the loop holds its
+                // job sender.
+                Err(mpsc::TryRecvError::Disconnected) => panic!("The processing thread stopped"),
+            }
         }
 
         for event in first_event.into_iter().chain(event_pump.poll_iter()) {
@@ -568,6 +586,19 @@ fn run_effects(
 ) {
     let mut world = effects::World { launchkey, status };
     runner.run_all(state, &mut world, effects);
+}
+
+/// Applies the processing thread's `reply` against a `World` built from the
+/// given arguments.
+fn finish_job(
+    runner: &mut effects::EffectRunner,
+    state: &mut actions::AppState,
+    launchkey: Option<&mut launchkey::Launchkey>,
+    status: &tracker::Status<WaveformId, MarkId>,
+    reply: processing::Reply,
+) {
+    let mut world = effects::World { launchkey, status };
+    runner.finish(state, &mut world, reply);
 }
 
 /// Dispatches `actions` through the reducer against a `World` built from the

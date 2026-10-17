@@ -1,12 +1,66 @@
-//! Program processing — checking and evaluating programs, and loading a
-//! source file's whole program set — expressed over copies of what it reads,
-//! so it can run away from the [`ProgramSet`] it was copied from.
+//! Program processing — checking and evaluating programs, and loading a source
+//! file's whole program set — expressed over copies of what it reads, so it can
+//! run away from the [`ProgramSet`] it was copied from, on the thread [`spawn`]
+//! starts.
 
 use std::path;
+use std::sync::mpsc;
+use std::thread;
 
 use crate::diagnostics::Severity;
-use crate::environment::Environment;
+use crate::environment::{CheckMode, Environment, ModuleTable};
 use crate::programs::{EvaluationInput, Outcome, ProgramSet};
+
+/// Work for the processing thread.
+pub enum Job {
+    /// Check and evaluate one program (see [`process`]).
+    Program(EvaluationInput),
+}
+
+/// The processing thread's answer to one [`Job`].
+#[derive(Debug)]
+pub enum Reply {
+    /// The outcome of a [`Job::Program`].
+    Program(Outcome),
+}
+
+/// Starts the processing thread and returns the sender its jobs go to and the
+/// receiver its replies come from.
+///
+/// The thread evaluates in its own environment, built from the arguments as
+/// [`Environment::with_module_table`] builds one, with `check_mode` set. It
+/// handles jobs one at a time in the order they are sent, sends one reply per
+/// job in the same order, and calls `wake` after each reply. It exits once
+/// the job sender or the reply receiver is dropped.
+pub fn spawn(
+    sample_rate: u32,
+    tempo: u32,
+    library_root: path::PathBuf,
+    check_mode: CheckMode,
+    module_table: ModuleTable,
+    wake: impl Fn() + Send + 'static,
+) -> (mpsc::Sender<Job>, mpsc::Receiver<Reply>) {
+    let (job_sender, jobs) = mpsc::channel();
+    let (reply_sender, replies) = mpsc::channel();
+    thread::Builder::new()
+        .name("processing".to_string())
+        .spawn(move || {
+            let mut environment =
+                Environment::with_module_table(sample_rate, tempo, library_root, module_table);
+            environment.set_check_mode(check_mode);
+            for job in jobs {
+                let reply = match job {
+                    Job::Program(input) => Reply::Program(process(&environment, &input)),
+                };
+                if reply_sender.send(reply).is_err() {
+                    return;
+                }
+                wake();
+            }
+        })
+        .expect("failed to spawn the processing thread");
+    (job_sender, replies)
+}
 
 /// A program set built from a source file, with every program evaluated.
 pub struct Loaded {
@@ -81,7 +135,6 @@ pub fn load(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::environment::CheckMode;
     use crate::programs::Evaluated;
     use std::fs;
     use std::path::PathBuf;
@@ -93,6 +146,49 @@ mod tests {
         assert_send::<EvaluationInput>();
         assert_send::<Outcome>();
         assert_send::<Loaded>();
+        assert_send::<Job>();
+        assert_send::<Reply>();
+    }
+
+    /// The thread evaluates what it is sent, in order, and wakes the receiver
+    /// after each reply.
+    #[test]
+    fn the_thread_replies_to_each_job_in_order() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let mut set = set_from("#{level_db=0}\ngood = 1 | fin(time - 1);\n");
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let counted = wakes.clone();
+        let (jobs, replies) = spawn(
+            8000,
+            90,
+            PathBuf::new(),
+            CheckMode::Errors,
+            ModuleTable::default(),
+            move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+
+        jobs.send(Job::Program(set.evaluation_input(0))).unwrap();
+        set.program_mut(0)
+            .unwrap()
+            .set_text("time | fin(\"a\")".to_string());
+        jobs.send(Job::Program(set.evaluation_input(0))).unwrap();
+
+        let timeout = Duration::from_secs(30);
+        let Reply::Program(first) = replies.recv_timeout(timeout).expect("first reply");
+        assert!(matches!(first, Ok((Some(Evaluated::Waveform { .. }), _))));
+        let Reply::Program(second) = replies.recv_timeout(timeout).expect("second reply");
+        assert!(second.is_err(), "got {:?}", second);
+        // The wake follows the send, so it may land just after the reply.
+        let deadline = std::time::Instant::now() + timeout;
+        while wakes.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_eq!(wakes.load(Ordering::SeqCst), 2);
     }
 
     /// Returns the set for `source`, which must parse cleanly.

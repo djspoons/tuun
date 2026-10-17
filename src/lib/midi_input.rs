@@ -425,15 +425,10 @@ fn update_pads_sequencer(
     current_beat_duration: std::time::Duration,
 ) {
     let program = state.active_program();
-    let steps: Option<Vec<f32>> = program
-        .sequence()
-        .map(|sequence| sequence.steps.clone())
-        .or_else(|| {
-            // A program that was edited (but not yet re-evaluated) or that
-            // isn't playable can still show its pattern from the text.
-            sequencer::analyze(program.text())
-                .map(|shape| shape.steps.iter().map(|(beat, _)| *beat).collect())
-        });
+    // From the text, which the evaluated sequence can lag behind while an
+    // edit is being evaluated.
+    let steps: Option<Vec<f32>> = sequencer::analyze(program.text())
+        .map(|shape| shape.steps.iter().map(|(beat, _)| *beat).collect());
 
     // The playhead only shows while the step family is sounding: its
     // absolute sixteenth is measured from the current cycle's anchor start,

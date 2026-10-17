@@ -253,11 +253,14 @@ pub struct Program {
     level_db: f32,
     /// The declared kind, from a `#{keys}` annotation (or its absence).
     kind: ProgramKind,
-    /// Cached result of the last evaluation of the current text; `None` when
-    /// never evaluated, failed, or the text is empty.
+    /// Result of the last evaluation recorded, which may be of an earlier text;
+    /// `None` when never evaluated, when the last evaluation failed, or when it
+    /// was of an empty text.
     evaluated: Option<Evaluated>,
     /// Undo/redo history for Edit-mode text changes.
     history: EditHistory,
+    /// Counts the replacements of `text` by [`Program::set_text`].
+    generation: u64,
 }
 
 impl Program {
@@ -273,6 +276,7 @@ impl Program {
             kind: ProgramKind::Waveform,
             evaluated: None,
             history: EditHistory::default(),
+            generation: 0,
         }
     }
 
@@ -328,6 +332,7 @@ impl Program {
                     kind,
                     evaluated: None,
                     history: EditHistory::default(),
+                    generation: 0,
                 })
             } else {
                 println!(
@@ -372,17 +377,18 @@ impl Program {
         &self.sliders
     }
 
-    /// Returns what the current text evaluated to, if it has been evaluated
-    /// and did so successfully.
+    /// Returns the result of the program's last recorded evaluation, if that
+    /// evaluation succeeded.
     ///
-    /// The result reflects the evaluation context (sibling bindings, opened
-    /// modules) as of the evaluation: a dependency edited since is not
-    /// reflected until the program is evaluated again.
+    /// The result reflects the text and the evaluation context (sibling
+    /// bindings, opened modules) as of the evaluation: a text replaced since,
+    /// or a dependency edited since, is not reflected until the program is
+    /// evaluated again.
     pub fn evaluated(&self) -> Option<&Evaluated> {
         self.evaluated.as_ref()
     }
 
-    /// Returns the waveform if the current text evaluated to one.
+    /// Returns the waveform if the last recorded evaluation produced one.
     pub fn waveform(&self) -> Option<&waveform::Waveform<MarkId>> {
         match &self.evaluated {
             Some(Evaluated::Waveform { waveform, .. }) => Some(waveform),
@@ -390,8 +396,8 @@ impl Program {
         }
     }
 
-    /// Returns the keys-instrument function if the current text evaluated
-    /// to one.
+    /// Returns the keys-instrument function if the last recorded evaluation
+    /// produced one.
     pub fn keys_instrument(&self) -> Option<&expr::SourceExpr<MarkId, Source>> {
         match &self.evaluated {
             Some(Evaluated::KeysInstrument(expr)) => Some(expr),
@@ -399,8 +405,8 @@ impl Program {
         }
     }
 
-    /// Returns the decomposed sequence if the current text evaluated to a
-    /// sequenceable waveform.
+    /// Returns the decomposed sequence if the last recorded evaluation produced
+    /// a sequenceable waveform.
     pub fn sequence(&self) -> Option<&sequencer::Sequence> {
         match &self.evaluated {
             Some(Evaluated::Waveform { sequence, .. }) => sequence.as_ref(),
@@ -408,10 +414,20 @@ impl Program {
         }
     }
 
-    /// Replaces the program's `text`, dropping any evaluation result.
+    /// Replaces the program's `text` and advances its generation.
+    ///
+    /// The last evaluation's result stays until the next one is recorded.
     pub fn set_text(&mut self, text: String) {
         self.text = text;
-        self.evaluated = None;
+        self.generation += 1;
+    }
+
+    /// Returns the program's generation: how many times its text has been
+    /// replaced by [`Program::set_text`].
+    ///
+    /// Comparing two generations tells whether the text changed in between.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Returns the final character of the last coalesced insertion, or
@@ -516,7 +532,7 @@ impl Program {
 
     /// Replaces `text` with the program's binding in `source`. However, the
     /// text must be unchanged semantically. This does *not* update the
-    /// evaluation results.
+    /// evaluation results or the generation.
     fn resync_text(&mut self, source: &str) {
         self.text = source[self.span.clone()].to_string();
     }
@@ -939,9 +955,7 @@ impl ProgramSet {
     /// and returns its diagnostics: the warnings on success, the errors (and
     /// any warnings) on failure.
     ///
-    /// A failure drops any previous result: even though editing already drops
-    /// it, the failure may have come from a changed dependency rather than
-    /// this program's own text.
+    /// A failure drops any previous result.
     pub fn record(
         &mut self,
         index: usize,
@@ -1514,7 +1528,11 @@ impl ProgramSet {
             // The deleted slot starts over as a fresh padding program; don't
             // let level/slider/color state from the removed binding linger on
             // it.
+            // It keeps its generation, so a result for the deleting text
+            // still matches it.
+            let generation = self.programs[program_index].generation;
             self.programs[program_index] = Program::from_string("", new_bindings.len());
+            self.programs[program_index].generation = generation;
         }
 
         // Skip the file write when no path is set — tests use an empty
@@ -1687,11 +1705,9 @@ mod tests {
         assert!(program.keys_instrument().is_some());
         assert!(program.sequence().is_none());
 
-        // Any text change invalidates the cache.
+        // A text change keeps the result until the next one is recorded.
         program.set_text("y".to_string());
-        assert!(program.evaluated().is_none());
-        assert!(program.waveform().is_none());
-        assert!(program.keys_instrument().is_none());
+        assert!(program.keys_instrument().is_some());
     }
 
     #[test]
@@ -1923,6 +1939,29 @@ kick = pulse(120);
 #{level_db=0}
 synth = saw(440) * 0.5;"
         );
+    }
+
+    /// The generation counts text replacements: the splice's re-read of the
+    /// text it saved is not one, and a deleted slot keeps its count.
+    #[test]
+    fn generation_counts_text_replacements() {
+        let mut state = state_from("#{level_db=0}\nkick = pulse(120);\n#{level_db=0}\nhat = 1;");
+        assert_eq!(state.programs()[0].generation(), 0);
+
+        // The trailing semicolon is stripped by the splice's re-read.
+        state
+            .program_mut(0)
+            .unwrap()
+            .set_text("pulse(60);".to_string());
+        assert_eq!(state.programs()[0].generation(), 1);
+        state.splice(0).expect("splice should succeed");
+        assert_eq!(state.programs()[0].text(), "pulse(60)");
+        assert_eq!(state.programs()[0].generation(), 1);
+
+        state.program_mut(1).unwrap().set_text(String::new());
+        state.splice(1).expect("splice should succeed");
+        assert!(state.programs()[1].is_empty());
+        assert_eq!(state.programs()[1].generation(), 1);
     }
 
     #[test]
