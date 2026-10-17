@@ -1,17 +1,18 @@
-//! The environment program text is parsed, checked, and evaluated in —
-//! compute only, no tracker I/O.
+//! The environment program text is parsed, checked, and evaluated in — compute
+//! only, no tracker I/O.
 //!
 //! `Environment` owns the prelude (built-ins plus `tempo`, `sample_rate`,
-//! `mark`, and `debug`), the module cache backing `open` directives, and the
-//! module table that locates an error in its source file when it becomes a
-//! [`Diagnostic`]. The checking and evaluation entry points take `&self`;
-//! their mutable state hides behind `Cell`s and `RefCell`s.
+//! `mark`, and `debug`) and the module cache backing `open` directives, and
+//! shares the module table that locates an error in its source file when it
+//! becomes a [`Diagnostic`]. The checking and evaluation entry points take
+//! `&self`; their mutable state hides behind `Cell`s and `RefCell`s, and the
+//! module table behind a `Mutex`.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time;
 
 use crate::builtins;
@@ -22,7 +23,7 @@ use crate::ids::MarkId;
 use crate::infer;
 use crate::optimizer;
 use crate::parser;
-use crate::programs::{Evaluated, ProgramKind, ProgramSet};
+use crate::programs::{Evaluated, EvaluationInput, ProgramKind, ProgramSet};
 use crate::sequencer;
 use crate::signatures;
 use crate::waveform;
@@ -97,6 +98,25 @@ struct ModuleInfo {
     source: String,
 }
 
+/// The module ids environments assign, shareable between environments so
+/// that an id names the same module in each of them.
+///
+/// Spans carry module ids, so an error raised in one environment can be
+/// diagnosed in another that shares its table.
+#[derive(Clone, Default)]
+pub struct ModuleTable(Arc<Mutex<Vec<ModuleInfo>>>);
+
+impl ModuleTable {
+    /// Returns the path and latest source of each module, indexed by id.
+    fn lock(&self) -> MutexGuard<'_, Vec<ModuleInfo>> {
+        // A panic while holding the lock leaves at worst a stale source
+        // text, which `diagnose` already tolerates.
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 /// What `check_program`'s findings become: errors or warnings.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CheckMode {
@@ -153,7 +173,7 @@ pub struct Environment {
     modules: RefCell<HashMap<Vec<String>, ModuleCacheEntry>>,
     /// Path and latest source for each assigned module id (index = id).
     /// Ids are stable across mtime reloads of the same module.
-    module_info: RefCell<Vec<ModuleInfo>>,
+    module_info: ModuleTable,
     /// Module export types and findings, carried between checks so an
     /// unchanged module is typed once per session, not once per check.
     ///
@@ -179,6 +199,17 @@ impl Environment {
     /// Builds an environment whose prelude defines `tempo`, `sample_rate`,
     /// `mark`, and `debug` alongside the built-ins.
     pub fn new(sample_rate: u32, tempo: u32, library_root: path::PathBuf) -> Environment {
+        Environment::with_module_table(sample_rate, tempo, library_root, ModuleTable::default())
+    }
+
+    /// Builds an environment as [`Environment::new`] does, assigning module
+    /// ids in `module_table`.
+    pub fn with_module_table(
+        sample_rate: u32,
+        tempo: u32,
+        library_root: path::PathBuf,
+        module_table: ModuleTable,
+    ) -> Environment {
         let mut prelude = Vec::new();
         builtins::add_bindings(&mut prelude);
 
@@ -208,7 +239,7 @@ impl Environment {
             prelude,
             library_root,
             modules: RefCell::new(HashMap::new()),
-            module_info: RefCell::new(Vec::new()),
+            module_info: module_table,
             module_types: RefCell::new(infer::ModuleCache::default()),
             modules_generation: Cell::new(0),
             checked_generation: Cell::new(0),
@@ -271,14 +302,12 @@ impl Environment {
                 e
             ))
         })?;
-        let id = self.record_module_info(path, contents);
-        let module_info = self.module_info.borrow();
-        let contents = &module_info[id as usize].source;
+        let id = self.record_module_info(path, contents.clone());
 
         // A module that parses with recoverable errors is still broken —
         // report it rather than evaluating with error placeholders.
         let (mut bindings, errors) =
-            parser::parse_module::<MarkId, _>(contents, Source::Module(id))
+            parser::parse_module::<MarkId, _>(&contents, Source::Module(id))
                 .map_err(first_module_error)?;
         if !errors.is_empty() {
             return Err(first_module_error(errors));
@@ -312,7 +341,7 @@ impl Environment {
     /// Records `source` as the latest text of the module at `path` and
     /// returns the module's id, assigning the next free one on first sight.
     fn record_module_info(&self, path: &[String], source: String) -> u32 {
-        let mut module_info = self.module_info.borrow_mut();
+        let mut module_info = self.module_info.lock();
         match module_info.iter().position(|info| info.path == path) {
             Some(id) => {
                 module_info[id].source = source;
@@ -334,7 +363,8 @@ impl Environment {
         self.library_root.join(module_display_path(path))
     }
 
-    /// Resolves `error` into a [`Diagnostic`] for program `index` of `set`,
+    /// Resolves `error` into a [`Diagnostic`] for the program whose text is
+    /// `program_text`, in the backing file whose text is `file_source`,
     /// according to the error's span source: module errors carry their module's
     /// display file and position; program-local errors carry a bare position
     /// relative to the program's own text (matching the editor's display);
@@ -343,31 +373,28 @@ impl Environment {
     pub(crate) fn diagnose(
         &self,
         error: &expr::Error<Source>,
-        set: &ProgramSet,
-        index: usize,
+        program_text: &str,
+        file_source: &str,
     ) -> Diagnostic {
         let message = error.message().to_string();
         match (error.source(), error.range()) {
             (Some(Source::Program), Some(range)) => {
-                Diagnostic::in_program(message, range, set.programs()[index].text())
+                Diagnostic::in_program(message, range, program_text)
             }
-            (Some(Source::File), Some(range)) => match set.source_position(range.start) {
-                Some(position) => Diagnostic {
-                    file: None,
-                    position: Some(position),
-                    program_range: None,
-                    snippet: Some(render_snippet(set.source(), &range)),
-                    message,
-                    severity: Severity::Error,
-                },
-                None => Diagnostic::message_only(message),
+            (Some(Source::File), Some(range)) if range.start <= file_source.len() => Diagnostic {
+                file: None,
+                position: Some(expr::line_col(file_source, range.start)),
+                program_range: None,
+                snippet: Some(render_snippet(file_source, &range)),
+                message,
+                severity: Severity::Error,
             },
             (Some(Source::Module(id)), Some(range)) => {
                 // After an mtime reload, positions resolve against the newest
                 // source text, which can drift from the leaked bindings an
                 // in-flight error came from — the same staleness the binding
                 // cache already accepts.
-                let module_info = self.module_info.borrow();
+                let module_info = self.module_info.lock();
                 match module_info.get(id as usize) {
                     Some(info) => Diagnostic {
                         file: Some(module_display_path(&info.path)),
@@ -384,12 +411,17 @@ impl Environment {
         }
     }
 
+    /// Returns the table this environment assigns module ids in.
+    pub fn module_table(&self) -> ModuleTable {
+        self.module_info.clone()
+    }
+
     /// Sets what checker findings become (see [`CheckMode`]).
     pub fn set_check_mode(&mut self, mode: CheckMode) {
         self.check_mode = mode;
     }
 
-    /// Type-checks the program at `index` and returns the findings as
+    /// Type-checks the program `input` describes and returns the findings as
     /// diagnostics.
     ///
     /// Mirrors [`Environment::evaluate_program`]'s setup — same bindings,
@@ -399,14 +431,13 @@ impl Environment {
     /// program, so it is printed instead — path-qualified, with its snippet
     /// — the first time a check surfaces it, and again only after the
     /// module reloads. Parse failures return no findings.
-    pub fn check_program(&self, set: &ProgramSet, index: usize) -> Vec<Diagnostic> {
-        let mut bindings = set.evaluation_bindings(index);
+    pub fn check_program(&self, input: &EvaluationInput) -> Vec<Diagnostic> {
+        let mut bindings = input.bindings.clone();
         bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
-        let text = set.programs()[index].text();
-        let Ok(expr) = parser::parse_program(text, Source::Program) else {
+        let Ok(expr) = parser::parse_program(&input.text, Source::Program) else {
             return Vec::new();
         };
-        let expectation = match set.programs()[index].kind() {
+        let expectation = match input.kind {
             ProgramKind::Waveform => infer::Expectation::Playable,
             ProgramKind::Keys => infer::Expectation::NoteFunction,
         };
@@ -466,9 +497,10 @@ impl Environment {
                 if reported.contains(&id) {
                     continue;
                 }
+                let diagnostic = self.diagnose(finding, &input.text, &input.source);
                 let diagnostic = match self.check_mode {
-                    CheckMode::Errors => self.diagnose(finding, set, index),
-                    CheckMode::Warnings => self.diagnose(finding, set, index).as_warning(),
+                    CheckMode::Errors => diagnostic,
+                    CheckMode::Warnings => diagnostic.as_warning(),
                 };
                 println!("{}: {}", diagnostic.severity.label(), diagnostic);
                 if let Some(snippet) = &diagnostic.snippet {
@@ -487,7 +519,7 @@ impl Environment {
                 matches!(finding.source(), Some(Source::Program) | Some(Source::File))
             })
             .map(|finding| {
-                let diagnostic = self.diagnose(finding, set, index);
+                let diagnostic = self.diagnose(finding, &input.text, &input.source);
                 match self.check_mode {
                     CheckMode::Errors => diagnostic,
                     CheckMode::Warnings => diagnostic.as_warning(),
@@ -548,19 +580,18 @@ impl Environment {
         eval::evaluate(|path| self.resolve(path), bindings, expr).map_err(|error| error.to_string())
     }
 
-    /// Evaluates a sub-expression of the program at `index` in that program's
-    /// evaluation context, expecting a waveform result.
+    /// Evaluates a sub-expression of the program `input` describes in that
+    /// program's evaluation context, expecting a waveform result.
     ///
     /// The waveform is returned optimized. Returns `None` when evaluation fails
     /// or the result is neither a bare nor a `seq`-wrapped waveform (the `seq`
     /// wrapper is stripped).
     pub fn evaluate_program_waveform_expr(
         &self,
-        set: &ProgramSet,
-        index: usize,
+        input: &EvaluationInput,
         expr: &expr::SourceExpr<MarkId, Source>,
     ) -> Option<waveform::Waveform<MarkId>> {
-        let mut bindings = set.evaluation_bindings(index);
+        let mut bindings = input.bindings.clone();
         bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
         let expr = eval::evaluate(|path| self.resolve(path), &bindings, expr.clone()).ok()?;
         let waveform = match expr.expr {
@@ -574,7 +605,7 @@ impl Environment {
         Some(optimizer::optimize(waveform))
     }
 
-    /// Evaluates the program at `index` against its declared kind: an unmarked
+    /// Evaluates the program `input` describes against its declared kind: an unmarked
     /// program must evaluate to a playable waveform, and one marked `#{keys}`
     /// must evaluate to a keys-instrument note function. Returns the
     /// user-visible diagnostics as the error otherwise.
@@ -582,45 +613,39 @@ impl Environment {
     /// Keys instruments are sanity-checked by actually invoking them with dummy
     /// note/velocity arguments. Waveform results additionally carry their
     /// decomposed sequence when the text has the sequenceable `on_beats` shape.
-    pub fn evaluate_program(
-        &self,
-        set: &ProgramSet,
-        index: usize,
-    ) -> Result<Evaluated, Vec<Diagnostic>> {
+    pub fn evaluate_program(&self, input: &EvaluationInput) -> Result<Evaluated, Vec<Diagnostic>> {
         // Programs and their file's sibling bindings see the prelude through an
         // implicit leading `open __prelude`, the same way modules do (see
         // `resolve`).
-        let mut bindings = set.evaluation_bindings(index);
+        let mut bindings = input.bindings.clone();
         bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
-        let kind = set.programs()[index].kind();
-        let text = set.programs()[index].text();
+        let kind = input.kind;
+        let diagnose =
+            |error: &expr::Error<Source>| self.diagnose(error, &input.text, &input.source);
 
-        let expr = match parser::parse_program(text, Source::Program) {
+        let expr = match parser::parse_program(&input.text, Source::Program) {
             Err(errors) => {
-                return Err(errors
-                    .iter()
-                    .map(|error| self.diagnose(error, set, index))
-                    .collect());
+                return Err(errors.iter().map(diagnose).collect());
             }
             Ok(expr) => expr,
         };
         let expr = match eval::evaluate(|path| self.resolve(path), &bindings, expr) {
             Err(error) => {
-                return Err(vec![self.diagnose(&error, set, index)]);
+                return Err(vec![diagnose(&error)]);
             }
             Ok(expr) => expr,
         };
         let message_only = |message: &str| vec![Diagnostic::message_only(message.to_string())];
         match expr.expr {
             expr::Expr::Waveform(w) => match kind {
-                ProgramKind::Waveform => Ok(self.evaluated_waveform(set, index, w)),
+                ProgramKind::Waveform => Ok(self.evaluated_waveform(input, w)),
                 ProgramKind::Keys => Err(message_only(
                     "Program is marked #{keys} but evaluates to a waveform",
                 )),
             },
             expr::Expr::Seq { waveform, .. } => match (kind, waveform.expr) {
                 (ProgramKind::Waveform, expr::Expr::Waveform(w)) => {
-                    Ok(self.evaluated_waveform(set, index, w))
+                    Ok(self.evaluated_waveform(input, w))
                 }
                 (ProgramKind::Keys, expr::Expr::Waveform(_)) => Err(message_only(
                     "Program is marked #{keys} but evaluates to a waveform",
@@ -637,7 +662,7 @@ impl Environment {
                         vec![expr::SourceExpr::float(60.0), expr::SourceExpr::float(0.7)],
                     ) {
                         Ok(_) => Ok(Evaluated::KeysInstrument(expr)),
-                        Err(error) => Err(vec![self.diagnose(&error, set, index)]),
+                        Err(error) => Err(vec![diagnose(&error)]),
                     }
                 }
                 ProgramKind::Waveform => Err(message_only(
@@ -651,18 +676,16 @@ impl Environment {
         }
     }
 
-    /// Builds the `Evaluated::Waveform` result for the program at `index`,
-    /// attaching the decomposed sequence when the program's text has the
-    /// sequenceable `on_beats` shape.
+    /// Builds the `Evaluated::Waveform` result for the program `input`
+    /// describes, attaching the decomposed sequence when the program's text
+    /// has the sequenceable `on_beats` shape.
     fn evaluated_waveform(
         &self,
-        set: &ProgramSet,
-        index: usize,
+        input: &EvaluationInput,
         waveform: waveform::Waveform<MarkId>,
     ) -> Evaluated {
-        let sequence = sequencer::analyze(set.programs()[index].text()).and_then(|shape| {
-            let step_waveform =
-                self.evaluate_program_waveform_expr(set, index, &shape.waveform_expr)?;
+        let sequence = sequencer::analyze(&input.text).and_then(|shape| {
+            let step_waveform = self.evaluate_program_waveform_expr(input, &shape.waveform_expr)?;
             Some(sequencer::Sequence {
                 steps: shape.steps.iter().map(|(beat, _)| *beat).collect(),
                 step_waveform,
@@ -755,54 +778,6 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    /// A program that uses a broken module definition gets its own
-    /// diagnostic at the use site and gates — evaluation is never
-    /// attempted, so the module's mistake cannot surface as a runtime
-    /// error.
-    #[test]
-    fn uses_of_erroneous_module_definitions_gate() {
-        let root =
-            std::env::temp_dir().join(format!("tuun-module-gate-test-{}", std::process::id()));
-        fs::create_dir_all(&root).expect("create temp library root");
-        // The mistake hides inside a function body (like an instrument
-        // definition), so the module itself still evaluates — only calls
-        // would fail.
-        fs::write(
-            root.join("m.tuun"),
-            "broken = fn(dur) => seq(0)(1) + seq(0)(dur);\nv = 440;\n",
-        )
-        .expect("write module");
-        // The healthy program comes first: program bindings are in scope
-        // for the programs after them, so a later broken sibling would
-        // (correctly) report on this one's check as a file finding.
-        let (mut set, warning) = ProgramSet::from_source(
-            "open m;\n#{level_db=0}\nu = time | fin(v);\n#{level_db=0}\nw = time | fin(broken);\n"
-                .to_string(),
-            PathBuf::from("song.tuun"),
-        )
-        .expect("test source should parse");
-        assert_eq!(warning, "");
-        let environment = Environment::new(44100, 90, root.clone());
-
-        // A program using only the module's healthy exports is untouched.
-        let diagnostics = environment.check_program(&set, 0);
-        assert_eq!(diagnostics.len(), 0, "got {:?}", diagnostics);
-        set.evaluate_and_record(&environment, 0)
-            .expect("healthy exports evaluate");
-
-        // The use site carries the diagnostic and the gate fires.
-        let diagnostics = environment.check_program(&set, 1);
-        assert_eq!(diagnostics.len(), 1, "got {:?}", diagnostics);
-        assert_eq!(
-            diagnostics[0].to_string(),
-            "1:12: 'broken' has a type error"
-        );
-        set.evaluate_and_record(&environment, 1)
-            .expect_err("a use of a broken definition gates evaluation");
-
-        fs::remove_dir_all(&root).ok();
-    }
-
     /// A module's own findings are reported once per loaded version: not
     /// among any program's diagnostics, marked reported after the first
     /// check that surfaces them, and cleared for re-reporting only when a
@@ -824,20 +799,20 @@ mod tests {
 
         // The module's finding is not among the program's diagnostics, and
         // the module is marked reported by the first check.
-        let diagnostics = environment.check_program(&set, 0);
+        let diagnostics = environment.check_program(&set.evaluation_input(0));
         assert_eq!(diagnostics.len(), 0, "got {:?}", diagnostics);
         assert_eq!(environment.reported_modules.borrow().len(), 1);
 
         // A second check re-surfaces the cached finding but the module
         // stays reported — nothing prints twice.
-        let diagnostics = environment.check_program(&set, 0);
+        let diagnostics = environment.check_program(&set.evaluation_input(0));
         assert_eq!(diagnostics.len(), 0, "got {:?}", diagnostics);
         assert_eq!(environment.reported_modules.borrow().len(), 1);
 
         // Fixing the module clears the reported set with the reload, and no
         // finding refills it.
         fs::write(&module, "v = 440;\n").expect("rewrite module");
-        let diagnostics = environment.check_program(&set, 0);
+        let diagnostics = environment.check_program(&set.evaluation_input(0));
         assert_eq!(diagnostics.len(), 0, "got {:?}", diagnostics);
         assert!(environment.reported_modules.borrow().is_empty());
 
@@ -862,7 +837,7 @@ mod tests {
         assert_eq!(warning, "");
         let environment = Environment::new(44100, 90, root.clone());
 
-        let diagnostics = environment.check_program(&set, 0);
+        let diagnostics = environment.check_program(&set.evaluation_input(0));
         assert_eq!(diagnostics.len(), 0, "got {:?}", diagnostics);
         assert!(!environment.module_types.borrow().is_empty());
 
@@ -870,7 +845,7 @@ mod tests {
         // the module, clears the type cache, and reports against the new
         // text — `v` is a string now, and `fin` rejects it.
         fs::write(&module, "v = \"s\";\n").expect("rewrite module");
-        let diagnostics = environment.check_program(&set, 0);
+        let diagnostics = environment.check_program(&set.evaluation_input(0));
         assert_eq!(diagnostics.len(), 1, "got {:?}", diagnostics);
         assert_eq!(
             diagnostics[0].to_string(),
@@ -879,7 +854,7 @@ mod tests {
 
         // Unchanged on disk: the cache serves the module and the finding
         // repeats.
-        let diagnostics = environment.check_program(&set, 0);
+        let diagnostics = environment.check_program(&set.evaluation_input(0));
         assert_eq!(diagnostics.len(), 1, "got {:?}", diagnostics);
 
         fs::remove_dir_all(&root).ok();
@@ -934,7 +909,9 @@ mod tests {
         let environment = Environment::new(44100, 90, PathBuf::new());
 
         // The program classifies as a keys instrument.
-        let Ok(Evaluated::KeysInstrument(function)) = environment.evaluate_program(&set, 0) else {
+        let Ok(Evaluated::KeysInstrument(function)) =
+            environment.evaluate_program(&set.evaluation_input(0))
+        else {
             panic!("expected a keys instrument");
         };
 
@@ -975,7 +952,7 @@ mod tests {
         assert_eq!(warning, "");
         let environment = Environment::new(44100, 90, std::path::PathBuf::from("./lib/v0"));
 
-        let function = match environment.evaluate_program(&set, 0) {
+        let function = match environment.evaluate_program(&set.evaluation_input(0)) {
             Ok(Evaluated::KeysInstrument(function)) => function,
             Err(diagnostics) => panic!("invalid: {:?}", diagnostics),
             Ok(Evaluated::Waveform { .. }) => panic!("classified as waveform"),
@@ -1015,7 +992,7 @@ mod tests {
             "boom".to_string(),
             Some(expr::Span::new(Source::Program, 0..4)),
         );
-        let diagnostic = environment.diagnose(&error, &set, 0);
+        let diagnostic = environment.diagnose(&error, set.programs()[0].text(), set.source());
         assert_eq!(diagnostic.to_string(), "1:1: boom");
         assert_eq!(diagnostic.program_range, Some(0..4));
         assert!(diagnostic.file.is_none());
@@ -1029,7 +1006,7 @@ mod tests {
                 range: 24..27,
             }),
         );
-        let diagnostic = environment.diagnose(&error, &set, 0);
+        let diagnostic = environment.diagnose(&error, set.programs()[0].text(), set.source());
         assert_eq!(diagnostic.to_string(), "3:1: boom");
         assert!(diagnostic.program_range.is_none());
 
@@ -1046,7 +1023,7 @@ mod tests {
                 range: 0..1,
             }),
         );
-        let diagnostic = environment.diagnose(&error, &set, 0);
+        let diagnostic = environment.diagnose(&error, set.programs()[0].text(), set.source());
         assert_eq!(diagnostic.to_string(), "std.tuun:1:1: boom");
         assert!(diagnostic.program_range.is_none());
 
@@ -1058,100 +1035,68 @@ mod tests {
                 range: 0..1,
             }),
         );
-        let diagnostic = environment.diagnose(&error, &set, 0);
+        let diagnostic = environment.diagnose(&error, set.programs()[0].text(), set.source());
         assert!(diagnostic.file.is_none());
         assert!(diagnostic.position.is_none());
         assert_eq!(diagnostic.message, "boom");
     }
 
+    /// A note-on error raised inside a module by an instrument evaluated in
+    /// one environment names that module when another environment diagnoses
+    /// it, even though the two loaded their modules in different orders.
     #[test]
-    fn check_program_findings_gate_or_warn() {
-        let (mut set, warning) = ProgramSet::from_source(
-            "#{level_db=0}\nw = time | fin(\"a\");\n".to_string(),
+    fn module_errors_diagnose_across_environments() {
+        let root =
+            std::env::temp_dir().join(format!("tuun-module-ids-test-{}", std::process::id()));
+        fs::create_dir_all(&root).expect("create temp library root");
+        fs::write(root.join("first.tuun"), "unused = 1;\n").expect("write module");
+        // Note 60 picks an element; note 64 runs off the end of the list.
+        fs::write(
+            root.join("second.tuun"),
+            "pick = fn(note) => nth(note - 60, [1, 2]);\n",
+        )
+        .expect("write module");
+        let (set, warning) = ProgramSet::from_source(
+            "open first;\nopen second;\n#{keys}\nk = fn(note, vel) => (pick(note), 1);\n"
+                .to_string(),
             PathBuf::from("song.tuun"),
         )
         .expect("test source should parse");
         assert_eq!(warning, "");
-        let mut environment = Environment::new(44100, 90, PathBuf::from("./lib/v0"));
 
-        // Default mode: findings are errors, positioned in the program's
-        // own text (`"a"` starts at column 12), and they gate — evaluation
-        // is never attempted, so the checker's finding stands alone.
-        let diagnostics = environment.check_program(&set, 0);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].severity, Severity::Error);
-        assert_eq!(
-            diagnostics[0].to_string(),
-            "1:12: expected waveform, found string"
-        );
-        assert_eq!(diagnostics[0].program_range, Some(11..14));
-        let diagnostics = set
-            .evaluate_and_record(&environment, 0)
-            .expect_err("error findings gate evaluation");
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].severity, Severity::Error);
-        assert_eq!(
-            diagnostics[0].to_string(),
-            "1:12: expected waveform, found string"
+        // The evaluating environment loads `first` then `second`.
+        let evaluating = Environment::new(44100, 90, root.clone());
+        let Ok(Evaluated::KeysInstrument(function)) =
+            evaluating.evaluate_program(&set.evaluation_input(0))
+        else {
+            panic!("expected a keys instrument");
+        };
+        let error = evaluating
+            .apply_note_function(
+                &function,
+                vec![expr::SourceExpr::float(64.0), expr::SourceExpr::float(0.7)],
+            )
+            .expect_err("note 64 is out of range");
+        assert!(
+            matches!(error.source(), Some(Source::Module(_))),
+            "expected an error inside a module, got {:?}",
+            error
         );
 
-        // Warnings mode: the same finding reports as a warning, first, and
-        // evaluation proceeds to its own error — side by side.
-        environment.set_check_mode(CheckMode::Warnings);
-        let diagnostics = set
-            .evaluate_and_record(&environment, 0)
-            .expect_err("fin(\"a\") fails at evaluation");
-        assert_eq!(diagnostics.len(), 2);
-        assert_eq!(diagnostics[0].severity, Severity::Warning);
-        assert_eq!(
-            diagnostics[0].to_string(),
-            "1:12: expected waveform, found string"
-        );
-        assert_eq!(diagnostics[1].severity, Severity::Error);
+        // The diagnosing environment shares the evaluating one's module
+        // table but loads the modules the other way round.
+        let diagnosing =
+            Environment::with_module_table(44100, 90, root.clone(), evaluating.module_table());
+        diagnosing
+            .resolve(&["second".to_string()])
+            .expect("second resolves");
+        diagnosing
+            .resolve(&["first".to_string()])
+            .expect("first resolves");
+        let diagnostic = diagnosing.diagnose(&error, set.programs()[0].text(), set.source());
+        assert_eq!(diagnostic.file, Some(PathBuf::from("second.tuun")));
 
-        // Clean programs evaluate with no findings in either mode,
-        // including computed indexes.
-        environment.set_check_mode(CheckMode::Errors);
-        set.program_mut(0).unwrap().set_text("time".to_string());
-        assert_eq!(set.evaluate_and_record(&environment, 0), Ok(Vec::new()));
-        set.program_mut(0)
-            .unwrap()
-            .set_text("fin(nth(1 + 2, [1, 2, 4, 8]))(time)".to_string());
-        assert_eq!(set.evaluate_and_record(&environment, 0), Ok(Vec::new()));
-
-        // A fractional index gates before evaluation can fail; column 9
-        // points at `2.5` — the mismatched argument itself.
-        set.program_mut(0)
-            .unwrap()
-            .set_text("fin(nth(2.5, [1, 2, 4, 8]))(time)".to_string());
-        let diagnostics = set
-            .evaluate_and_record(&environment, 0)
-            .expect_err("the fractional index gates");
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].severity, Severity::Error);
-        assert_eq!(diagnostics[0].to_string(), "1:9: expected int, found float");
-
-        // The gate is conservative where evaluation is lazy: a mistake
-        // inside a never-called function still gates (evaluation would
-        // have succeeded); warnings mode lets it through, reported.
-        set.program_mut(0)
-            .unwrap()
-            .set_text("let f = fn(x) => nth(2.5, [1, 2]) in time".to_string());
-        let diagnostics = set
-            .evaluate_and_record(&environment, 0)
-            .expect_err("the unused function's finding gates");
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(
-            diagnostics[0].to_string(),
-            "1:22: expected int, found float"
-        );
-        environment.set_check_mode(CheckMode::Warnings);
-        let warnings = set
-            .evaluate_and_record(&environment, 0)
-            .expect("the unused function body never evaluates");
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].severity, Severity::Warning);
-        assert_eq!(warnings[0].to_string(), "1:22: expected int, found float");
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -1172,7 +1117,7 @@ mod tests {
         let error = environment
             .resolve(&["bad_mod".to_string()])
             .expect_err("bad module should not resolve");
-        let diagnostic = environment.diagnose(&error, &set, 0);
+        let diagnostic = environment.diagnose(&error, set.programs()[0].text(), set.source());
         assert_eq!(diagnostic.file, Some(PathBuf::from("bad_mod.tuun")));
         assert!(
             diagnostic.position.is_some(),
@@ -1183,6 +1128,27 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_program_attaches_sequence_to_waveform_programs() {
+        let (set, _) = ProgramSet::from_source(
+            "on_beats = fn(w) => fn(bs) => w;\n\
+             #{level_db=0}\n\
+             _ = [1, 2.5] | on_beats(1 | fin(time - 1));\n"
+                .to_string(),
+            PathBuf::new(),
+        )
+        .expect("test source should parse");
+        let environment = Environment::new(8000, 90, PathBuf::new());
+        let Ok(Evaluated::Waveform {
+            sequence: Some(sequence),
+            ..
+        }) = environment.evaluate_program(&set.evaluation_input(0))
+        else {
+            panic!("expected a waveform with an attached sequence");
+        };
+        assert_eq!(sequence.steps, vec![1.0, 2.5]);
+    }
+
+    #[test]
     fn programs_see_the_prelude_without_any_open() {
         let (set, _) = ProgramSet::from_source(
             "#{level_db=0}\n_ = (0.7 | debug(\"level\")) * time | fin(0.1);\n".to_string(),
@@ -1190,7 +1156,7 @@ mod tests {
         )
         .expect("test source should parse");
         let environment = Environment::new(44100, 90, PathBuf::new());
-        match environment.evaluate_program(&set, 0) {
+        match environment.evaluate_program(&set.evaluation_input(0)) {
             Ok(Evaluated::Waveform { .. }) => {}
             Err(diagnostics) => {
                 panic!("prelude names should resolve, got: {}", diagnostics[0])
@@ -1209,7 +1175,7 @@ mod tests {
         )
         .expect("test source should parse");
         let environment = Environment::new(44100, 90, PathBuf::new());
-        let Err(diagnostics) = environment.evaluate_program(&set, 0) else {
+        let Err(diagnostics) = environment.evaluate_program(&set.evaluation_input(0)) else {
             panic!("expected an error for an unmarked function");
         };
         assert!(
@@ -1228,7 +1194,7 @@ mod tests {
         )
         .expect("test source should parse");
         let environment = Environment::new(44100, 90, PathBuf::new());
-        let Err(diagnostics) = environment.evaluate_program(&set, 0) else {
+        let Err(diagnostics) = environment.evaluate_program(&set.evaluation_input(0)) else {
             panic!("expected an error for a marked waveform");
         };
         assert!(
@@ -1246,7 +1212,7 @@ mod tests {
         )
         .expect("test source should parse");
         let environment = Environment::new(44100, 90, PathBuf::new());
-        let Err(diagnostics) = environment.evaluate_program(&set, 0) else {
+        let Err(diagnostics) = environment.evaluate_program(&set.evaluation_input(0)) else {
             panic!("expected an invalid evaluation");
         };
         assert_eq!(diagnostics.len(), 1);

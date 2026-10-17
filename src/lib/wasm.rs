@@ -257,7 +257,7 @@ impl Wasm {
         };
 
         // The checker runs first and error findings gate the install,
-        // mirroring the native `evaluate_and_record`. The expression must
+        // mirroring the native `processing::process`. The expression must
         // be playable — produce a waveform or a seq — matching the
         // waveform check below.
         let (findings, _) = infer::check_program(

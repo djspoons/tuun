@@ -17,6 +17,7 @@ use crate::ids::{MarkId, WaveformId, WaveformSelector};
 use crate::keys::Keys;
 use crate::launchkey;
 use crate::player;
+use crate::processing;
 use crate::programs::{self, PROGRAMS_PER_BANK};
 use crate::slider;
 use crate::tracker;
@@ -249,10 +250,11 @@ impl EffectRunner {
                 mode_on_success,
                 mode_on_failure,
             } => {
-                match state
-                    .programs
-                    .evaluate_and_record(&self.environment, program_index)
-                {
+                let outcome = processing::process(
+                    &self.environment,
+                    &state.programs.evaluation_input(program_index),
+                );
+                match state.programs.record(program_index, outcome) {
                     Ok(warnings) => {
                         if let Some(mode) = mode_on_success {
                             state.mode = mode;
@@ -293,14 +295,26 @@ impl EffectRunner {
             }
 
             Effect::ReloadSource => {
-                // Validate before silencing: a file that doesn't read or
-                // parse leaves playback and state untouched.
-                let (new_set, warning) = match state.programs.reload_from_disk() {
+                // Read, parse and evaluate before silencing: a file that
+                // doesn't read or parse leaves playback and state untouched,
+                // and playback continues while the new set evaluates.
+                let loaded = state.programs.read_backing_file().and_then(|source| {
+                    processing::load(
+                        &self.environment,
+                        source,
+                        state.programs.input_path().to_path_buf(),
+                    )
+                });
+                let processing::Loaded {
+                    set: new_set,
+                    warning,
+                    failed,
+                } = match loaded {
                     Err(message) => {
                         state.message = message;
                         return;
                     }
-                    Ok(reloaded) => reloaded,
+                    Ok(loaded) => loaded,
                 };
                 // TODO this can cause audible artifacts if a waveform is
                 // already in the middle of being stopped. For example, if a
@@ -318,19 +332,10 @@ impl EffectRunner {
                 let _ = self
                     .slider_sender
                     .send(SliderEvent::SetBaselines(slider_values(&state.programs)));
-                let mut failed: Vec<String> = Vec::new();
-                for i in 0..state.programs.programs().len() {
-                    if state.programs.programs()[i].is_empty() {
-                        continue;
-                    }
-                    if state
-                        .programs
-                        .evaluate_and_record(&self.environment, i)
-                        .is_err()
-                    {
-                        failed.push(state.programs.display_name(i));
-                    }
-                }
+                let failed: Vec<String> = failed
+                    .into_iter()
+                    .map(|i| state.programs.display_name(i))
+                    .collect();
                 let mut message = format!("Reloaded {}", state.programs.display_path());
                 if !warning.is_empty() {
                     message = format!("{} — {}", message, warning);
@@ -391,8 +396,11 @@ impl EffectRunner {
                         self.player.play_note(key, note_on, program.level_db());
                     }
                     Err(error) => {
-                        let diagnostic =
-                            self.environment.diagnose(&error, &state.programs, keys.id);
+                        let diagnostic = self.environment.diagnose(
+                            &error,
+                            program.text(),
+                            state.programs.source(),
+                        );
                         state.message = diagnostics::error_message(&[diagnostic]);
                     }
                 }
@@ -503,8 +511,8 @@ impl EffectRunner {
                                 println!("{}", function);
                                 let diagnostic = self.environment.diagnose(
                                     &error,
-                                    &state.programs,
-                                    program_index,
+                                    state.programs.programs()[program_index].text(),
+                                    state.programs.source(),
                                 );
                                 let message = diagnostics::error_message(&[diagnostic]);
                                 println!("Applying it at a sample note failed: {}", message);

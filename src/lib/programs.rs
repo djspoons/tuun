@@ -7,7 +7,7 @@ use std::ops::Range;
 use std::path;
 use std::time;
 
-use crate::diagnostics::{Diagnostic, Severity, Source};
+use crate::diagnostics::{Diagnostic, Source};
 use crate::environment::Environment;
 use crate::expr;
 use crate::ids::MarkId;
@@ -176,6 +176,27 @@ pub enum Evaluated {
     /// The program evaluated to a function usable as a keys instrument.
     KeysInstrument(expr::SourceExpr<MarkId, Source>),
 }
+
+/// What evaluating one program reads, copied out of its [`ProgramSet`] so
+/// that the program can be evaluated without the set.
+#[derive(Debug, Clone)]
+pub struct EvaluationInput {
+    /// The program's text.
+    pub text: String,
+    /// The program's declared kind.
+    pub kind: ProgramKind,
+    /// The bindings the program is evaluated under (see
+    /// [`ProgramSet::evaluation_bindings`]).
+    pub bindings: Vec<expr::SourceBinding<MarkId, Source>>,
+    /// The backing file's text, which errors located in the file resolve
+    /// against.
+    pub source: String,
+}
+
+/// The result of checking and evaluating one program: on success, what it
+/// evaluated to (`None` for an empty program) and the checker's warnings; on
+/// failure, the diagnostics.
+pub type Outcome = Result<(Option<Evaluated>, Vec<Diagnostic>), Vec<Diagnostic>>;
 
 /// Maximum number of undo units kept per program; recording past the cap drops
 /// the oldest unit.
@@ -658,28 +679,24 @@ impl ProgramSet {
         }
     }
 
-    /// Reads the backing file again and builds a fresh program set from it.
-    ///
-    /// Returns the new set and the parse-warning message, or the error message
-    /// when the file can't be read or parsed (in which case nothing has
-    /// changed).
-    pub fn reload_from_disk(&self) -> Result<(ProgramSet, String), String> {
+    /// Returns the current contents of the backing file, or the error message
+    /// when there is no backing file or it can't be read.
+    pub fn read_backing_file(&self) -> Result<String, String> {
         if self.input_path.as_os_str().is_empty() {
             return Err("No backing file to reload".to_string());
         }
-        let source = fs::read_to_string(&self.input_path).map_err(|e| {
+        fs::read_to_string(&self.input_path).map_err(|e| {
             format!(
                 "Failed to read {}: {}",
                 self.input_path.to_string_lossy(),
                 e
             )
-        })?;
-        ProgramSet::from_source(source, self.input_path.clone()).map_err(|errors| {
-            match errors.first() {
-                Some(error) => format!("Parse error: {}", error),
-                None => "Parse error".to_string(),
-            }
         })
+    }
+
+    /// Returns the path of the backing file (empty when there is none).
+    pub fn input_path(&self) -> &path::Path {
+        &self.input_path
     }
 
     /// Returns the backing file's name for user-visible messages.
@@ -902,63 +919,42 @@ impl ProgramSet {
         wrapped
     }
 
+    /// Returns a copy of what evaluating the program at `index` reads.
+    pub fn evaluation_input(&self, index: usize) -> EvaluationInput {
+        let program = &self.programs[index];
+        EvaluationInput {
+            text: program.text.clone(),
+            kind: program.kind,
+            bindings: self.evaluation_bindings(index),
+            source: self.source.clone(),
+        }
+    }
+
     /// Returns the backing source text the program set was loaded from.
     pub fn source(&self) -> &str {
         &self.source
     }
 
-    /// Maps byte `offset` in the backing source to its 1-based
-    /// (line, column).
+    /// Records `outcome` as the result of evaluating the program at `index`,
+    /// and returns its diagnostics: the warnings on success, the errors (and
+    /// any warnings) on failure.
     ///
-    /// Returns `None` when `offset` falls outside the source.
-    pub fn source_position(&self, offset: usize) -> Option<(usize, usize)> {
-        if offset > self.source.len() {
-            return None;
-        }
-        Some(expr::line_col(&self.source, offset))
-    }
-
-    /// Evaluates the program at `index` and records the result on the
-    /// program. The type checker runs in either case: on success its
-    /// warnings (possibly empty; see [`Environment::check_program`]) are the
-    /// `Ok` value, and on failure they are appended after the evaluation
-    /// diagnostics in the `Err` value, so both views of a problem show side
-    /// by side (a failure drops any previous result: even though editing
-    /// already drops it, the failure may have come from a changed dependency
-    /// rather than this program's own text).
-    pub fn evaluate_and_record(
+    /// A failure drops any previous result: even though editing already drops
+    /// it, the failure may have come from a changed dependency rather than
+    /// this program's own text.
+    pub fn record(
         &mut self,
-        environment: &Environment,
         index: usize,
+        outcome: Outcome,
     ) -> Result<Vec<Diagnostic>, Vec<Diagnostic>> {
-        // An empty program is a deletion, not a parse error: clear the cache
-        // and succeed so the editor can leave Edit mode (the splice that
-        // follows removes the binding from source).
-        if self.programs[index].text().trim().is_empty() {
-            self.programs[index].evaluated = None;
-            return Ok(Vec::new());
-        }
-        // The checker runs first, and error-severity findings gate: evaluation
-        // is not attempted. Warning-severity findings report and evaluation
-        // proceeds leading any evaluation errors.
-        let findings = environment.check_program(self, index);
-        if findings
-            .iter()
-            .any(|finding| finding.severity == Severity::Error)
-        {
-            self.programs[index].evaluated = None;
-            return Err(findings);
-        }
-        match environment.evaluate_program(self, index) {
-            Ok(evaluated) => {
-                self.programs[index].evaluated = Some(evaluated);
-                Ok(findings)
+        match outcome {
+            Ok((evaluated, warnings)) => {
+                self.programs[index].evaluated = evaluated;
+                Ok(warnings)
             }
             Err(diagnostics) => {
                 self.programs[index].evaluated = None;
-                let mut all = findings;
-                all.extend(diagnostics);
-                Err(all)
+                Err(diagnostics)
             }
         }
     }
@@ -1579,15 +1575,6 @@ mod tests {
     }
 
     #[test]
-    fn source_position_maps_offsets_to_line_and_column() {
-        let set = state_from("#{level_db=0}\ntone = saw(220);");
-        assert_eq!(set.source_position(0), Some((1, 1)));
-        // Offset 21 is the `s` of `saw(220)` on line 2.
-        assert_eq!(set.source_position(21), Some((2, 8)));
-        assert!(set.source_position(1000).is_none());
-    }
-
-    #[test]
     fn set_slider_normalized_clamps_and_rejects_out_of_range() {
         let source = "#{sliders=[\"vol:0.5:0:1\"]}\ntone = saw(220);";
         let mut set = state_from(source);
@@ -1607,29 +1594,6 @@ mod tests {
         assert_eq!(change.label, "vol");
         assert!((change.value - 1.0).abs() < 1e-6);
         assert!((set.programs()[0].sliders().normalized_values()[0] - 1.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn evaluate_and_record_attaches_sequence_to_waveform_programs() {
-        let (mut set, _) = ProgramSet::from_source(
-            "on_beats = fn(w) => fn(bs) => w;\n\
-             #{level_db=0}\n\
-             _ = [1, 2.5] | on_beats(1 | fin(time - 1));\n"
-                .to_string(),
-            PathBuf::new(),
-        )
-        .expect("test source should parse");
-        let environment = Environment::new(8000, 90, PathBuf::new());
-        set.evaluate_and_record(&environment, 0)
-            .expect("test program should evaluate");
-        let Some(Evaluated::Waveform {
-            sequence: Some(sequence),
-            ..
-        }) = set.programs()[0].evaluated()
-        else {
-            panic!("expected a waveform with an attached sequence");
-        };
-        assert_eq!(sequence.steps, vec![1.0, 2.5]);
     }
 
     #[test]
@@ -1657,7 +1621,9 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), external);
 
         // Reloading adopts the external content and clears the staleness.
-        let (mut new_set, _) = set.reload_from_disk().expect("reload should succeed");
+        let source = set.read_backing_file().expect("the file reads");
+        let (mut new_set, _) =
+            ProgramSet::from_source(source, path.clone()).expect("the file parses");
         assert_eq!(new_set.display_name(0), "A:1 (external)");
         new_set.program_mut(0).unwrap().set_text("3".to_string());
         new_set.splice(0).expect("fresh set should splice");
@@ -1665,51 +1631,30 @@ mod tests {
     }
 
     #[test]
-    fn reload_from_disk_rejects_empty_input_path() {
+    fn read_backing_file_rejects_empty_input_path() {
         let (set, _) = ProgramSet::from_source(
             "#{level_db=0}\n_ = 1 | fin(time - 1);\n".to_string(),
             PathBuf::new(),
         )
         .expect("test source should parse");
-        assert!(set.reload_from_disk().is_err());
+        assert!(set.read_backing_file().is_err());
     }
 
     #[test]
-    fn reload_from_disk_picks_up_external_edits() {
-        let path = temp_dir().join(format!("tuun_reload_edits_{}.tuun", std::process::id()));
-        fs::write(&path, "#{level_db=0}\ntone = 1 | fin(time - 1);\n").unwrap();
-        let (set, _) = ProgramSet::from_source(fs::read_to_string(&path).unwrap(), path.clone())
-            .expect("test source should parse");
-        assert_eq!(set.programs()[0].kind(), ProgramKind::Waveform);
-
-        // An external edit renames the program and marks it as keys.
-        fs::write(&path, "#{level_db=0, keys}\nk = fn(note, vel) => (1, 1);\n").unwrap();
-        let (new_set, warning) = set.reload_from_disk().expect("reload should succeed");
-        fs::remove_file(&path).ok();
-        assert_eq!(warning, "");
-        assert_eq!(new_set.programs()[0].kind(), ProgramKind::Keys);
-        assert_eq!(new_set.display_name(0), "A:1 (k)");
-    }
-
-    #[test]
-    fn reload_from_disk_surfaces_parse_warnings_and_read_failures() {
-        let path = temp_dir().join(format!("tuun_reload_bad_{}.tuun", std::process::id()));
+    fn read_backing_file_picks_up_external_edits_and_fails_when_missing() {
+        let path = temp_dir().join(format!("tuun_read_backing_{}.tuun", std::process::id()));
         fs::write(&path, "#{level_db=0}\ntone = 1 | fin(time - 1);\n").unwrap();
         let (set, _) = ProgramSet::from_source(fs::read_to_string(&path).unwrap(), path.clone())
             .expect("test source should parse");
 
-        // A garbled binding is recoverable, exactly as at startup: the
-        // reload succeeds with a parse warning and the binding skipped.
-        fs::write(&path, "#{level_db=0}\ntone = ((;\n").unwrap();
-        let (_new_set, warning) = set.reload_from_disk().expect("recoverable garble reloads");
-        assert!(warning.contains("Parse error"), "got: {}", warning);
+        let external = "#{level_db=0, keys}\nk = fn(note, vel) => (1, 1);\n";
+        fs::write(&path, external).unwrap();
+        assert_eq!(set.read_backing_file(), Ok(external.to_string()));
 
-        // A missing file is a hard failure.
         fs::remove_file(&path).ok();
-        let error = match set.reload_from_disk() {
-            Ok(_) => panic!("missing file should fail"),
-            Err(error) => error,
-        };
+        let error = set
+            .read_backing_file()
+            .expect_err("missing file should fail");
         assert!(error.contains("Failed to read"), "got: {}", error);
     }
 
@@ -1807,19 +1752,20 @@ mod tests {
 m = mix;
 #{level_db=0}
 later = mix;";
-        let mut set = state_from(source);
+        let set = state_from(source);
         // `m` is in scope for the later program; the slider it declares is not
         // a binding of its own.
         assert_eq!(binding_names(&set.evaluation_bindings(1)), vec!["m"]);
 
         let environment = Environment::new(8000, 90, PathBuf::new());
-        // The declaring binding still evaluates — the name is in scope for its
-        // own right-hand side.
-        set.evaluate_and_record(&environment, 0)
+        // The declaring binding still checks and evaluates — the name is in
+        // scope for its own right-hand side.
+        let input = set.evaluation_input(0);
+        assert_eq!(environment.check_program(&input), Vec::new());
+        environment
+            .evaluate_program(&input)
             .expect("the declaring binding sees its own slider");
-        let diagnostics = set
-            .evaluate_and_record(&environment, 1)
-            .expect_err("`mix` belongs to the binding that declares it");
+        let diagnostics = environment.check_program(&set.evaluation_input(1));
         // Located in the later program's own text, not in the file.
         assert_eq!(diagnostics.len(), 1, "got {:?}", diagnostics);
         assert_eq!(diagnostics[0].to_string(), "1:1: unbound variable 'mix'");
@@ -2594,18 +2540,6 @@ _ = ;";
 #{level_db=0}
 kick = pulse(60);"
         );
-    }
-
-    #[test]
-    fn evaluating_an_empty_program_succeeds_and_clears_caches() {
-        // Clearing a program's text must not surface a parse error from the
-        // environment — an empty program is a deletion in progress.
-        let mut state = state_from("#{level_db=0}\nkick = pulse(60);");
-        state.program_mut(0).unwrap().set_text("  ".to_string());
-        let environment = Environment::new(44100, 90, std::path::PathBuf::new());
-        assert!(state.evaluate_and_record(&environment, 0).is_ok());
-        assert!(state.programs()[0].waveform().is_none());
-        assert!(state.programs()[0].keys_instrument().is_none());
     }
 
     #[test]

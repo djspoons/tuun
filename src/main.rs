@@ -19,6 +19,7 @@ use tuun::launchkey;
 use tuun::metric;
 use tuun::midi_input;
 use tuun::player;
+use tuun::processing;
 use tuun::renderer;
 use tuun::sdl2_input;
 use tuun::tracker;
@@ -140,10 +141,11 @@ pub fn main() {
                 display_name,
                 state.programs.programs()[program_index].text()
             );
-            match state
-                .programs
-                .evaluate_and_record(&environment, program_index)
-            {
+            let outcome = processing::process(
+                &environment,
+                &state.programs.evaluation_input(program_index),
+            );
+            match state.programs.record(program_index, outcome) {
                 Ok(warnings) => {
                     for warning in &warnings {
                         println!("Warning: {}", warning);

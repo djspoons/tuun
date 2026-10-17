@@ -32,6 +32,8 @@ pub mod midi_input;
 #[cfg(feature = "native")]
 pub mod player;
 #[cfg(feature = "native")]
+pub mod processing;
+#[cfg(feature = "native")]
 pub mod programs;
 #[cfg(feature = "native")]
 pub mod recorder;

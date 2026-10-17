@@ -792,8 +792,11 @@ mod tests {
                 .expect("test source should parse");
         assert!(message.is_empty(), "{}", message);
         let environment = Environment::new(8000, 90, std::path::PathBuf::new());
-        set.evaluate_and_record(&environment, 0)
+        let evaluated = environment
+            .evaluate_program(&set.evaluation_input(0))
             .expect("test program should evaluate");
+        set.record(0, Ok((Some(evaluated), Vec::new())))
+            .expect("a success records");
         assert!(set.program(0).unwrap().sequence().is_some());
         set
     }
@@ -917,8 +920,11 @@ mod tests {
                 .expect("test source should parse");
         assert!(message.is_empty(), "{}", message);
         let environment = Environment::new(8000, 90, std::path::PathBuf::new());
-        set.evaluate_and_record(&environment, 0)
+        let evaluated = environment
+            .evaluate_program(&set.evaluation_input(0))
             .expect("test program should evaluate");
+        set.record(0, Ok((Some(evaluated), Vec::new())))
+            .expect("a success records");
         assert!(set.program(0).unwrap().sequence().is_none());
 
         let (player, _precompute_receiver, fast_receiver) = test_player();
