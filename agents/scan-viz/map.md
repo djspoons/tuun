@@ -10,6 +10,7 @@ A spec, in this directory, for adding the Scan scope view alongside Snapshot in 
 
 - Domain: the native SDL2 UI (`src/lib/renderer.rs`, `src/main.rs`) and the tracker's reporting of samples to it (`src/lib/tracker.rs`).
 - Follow `CLAUDE.md`. Use the terms **Scope view**, **Snapshot** and **Scan** from `agents/CONTEXT.md`.
+- The main loop (`src/main.rs`) sleeps in SDL's `wait_event_timeout` until an input, a wake event, or its next render, tick or buffer refresh; it renders at most once per `renderer::FRAME_BUDGET` (60 Hz), and statuses don't wake it. The main-thread work map (`agents/main-thread/` on `claude/main-thread`) owns that loop's design.
 - Keep work off the audio thread unless it's allocation-free.
 - Prefer small, surgical changes to how the audio thread reports samples.
 - Bind app-state and other less common changes to Ctrl key combinations.
