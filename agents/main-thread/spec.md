@@ -94,6 +94,7 @@ Making built-ins `Send`, the prerequisite for items 1–3, is already on `main`.
 ## Acceptance
 
 Re-measure with `--show-loop-timing` on the dev's machine:
+- **`--show-loop-timing` is temporary.** Its detail doesn't need to outlive this work: keep it in one self-contained commit (`src/lib/loop_timing.rs` and its call sites) so it can be reverted cleanly once these checks pass.
 - **Keyboard latency** has a maximum of about 6 ms in the "Several programs playing" and "Keys instrument" scenarios of [Measure on the dev's machine](tickets/02-measure.md).
 - **Source reload, leaving Edit mode and Cmd-/** no longer show in `SDL events` or `keyboard input` beyond a few ms.
 - **An Edit-mode render** of a long program takes under 16.7 ms.
