@@ -1,7 +1,7 @@
-//! Program processing — checking and evaluating programs, and loading a source
-//! file's whole program set — expressed over copies of what it reads, so it can
-//! run away from the [`ProgramSet`] it was copied from, on the thread [`spawn`]
-//! starts.
+//! Program processing — checking, evaluating and precomputing programs, and
+//! loading a source file's whole program set — expressed over copies of what it
+//! reads, so it can run away from the [`ProgramSet`] it was copied from, on the
+//! thread [`spawn`] starts.
 
 use std::path;
 use std::sync::mpsc;
@@ -9,7 +9,9 @@ use std::thread;
 
 use crate::diagnostics::Severity;
 use crate::environment::{CheckMode, Environment, ModuleTable};
-use crate::programs::{EvaluationInput, Outcome, ProgramSet};
+use crate::generator::Generator;
+use crate::programs::{Evaluated, EvaluationInput, Outcome, ProgramSet};
+use crate::sequencer;
 
 /// Work for the processing thread.
 pub enum Job {
@@ -35,15 +37,17 @@ pub enum Reply {
 /// receiver its replies come from.
 ///
 /// The thread evaluates in its own environment, built from the arguments as
-/// [`Environment::with_module_table`] builds one, with `check_mode` set. It
-/// handles jobs one at a time in the order they are sent, sends one reply per
-/// job in the same order, and calls `wake` after each reply. It exits once
+/// [`Environment::with_module_table`] builds one, with `check_mode` set, and
+/// pre-computes what it evaluates when `precompute` is set (see [`process`]).
+/// It handles jobs one at a time in the order they are sent, sends one reply
+/// per job in the same order, and calls `wake` after each reply. It exits once
 /// the job sender or the reply receiver is dropped.
 pub fn spawn(
     sample_rate: u32,
     tempo: u32,
     library_root: path::PathBuf,
     check_mode: CheckMode,
+    precompute: bool,
     module_table: ModuleTable,
     wake: impl Fn() + Send + 'static,
 ) -> (mpsc::Sender<Job>, mpsc::Receiver<Reply>) {
@@ -57,9 +61,11 @@ pub fn spawn(
             environment.set_check_mode(check_mode);
             for job in jobs {
                 let reply = match job {
-                    Job::Program(input) => Reply::Program(process(&environment, &input)),
+                    Job::Program(input) => {
+                        Reply::Program(process(&environment, &input, precompute))
+                    }
                     Job::Load { source, input_path } => {
-                        Reply::Loaded(load(&environment, source, input_path))
+                        Reply::Loaded(load(&environment, source, input_path, precompute))
                     }
                 };
                 if reply_sender.send(reply).is_err() {
@@ -90,7 +96,11 @@ pub struct Loaded {
 /// findings fail without evaluating; warning-severity findings are the
 /// warnings on success and lead the evaluation's diagnostics on failure, so
 /// both views of a problem show side by side.
-pub fn process(environment: &Environment, input: &EvaluationInput) -> Outcome {
+///
+/// With `precompute`, the waveform the result plays (a sequence's step
+/// waveform) comes back with its finite parts replaced by their samples (see
+/// [`Generator::precompute`]).
+pub fn process(environment: &Environment, input: &EvaluationInput, precompute: bool) -> Outcome {
     if input.text.trim().is_empty() {
         return Ok((None, Vec::new()));
     }
@@ -102,6 +112,10 @@ pub fn process(environment: &Environment, input: &EvaluationInput) -> Outcome {
         return Err(findings);
     }
     match environment.evaluate_program(input) {
+        Ok(evaluated) if precompute => Ok((
+            Some(precomputed(evaluated, environment.sample_rate())),
+            findings,
+        )),
         Ok(evaluated) => Ok((Some(evaluated), findings)),
         Err(diagnostics) => {
             let mut all = findings;
@@ -111,14 +125,30 @@ pub fn process(environment: &Environment, input: &EvaluationInput) -> Outcome {
     }
 }
 
+/// Returns `evaluated` with the finite parts of the waveform it plays replaced
+/// by their samples generated at `sample_rate`.
+fn precomputed(evaluated: Evaluated, sample_rate: u32) -> Evaluated {
+    let mut generator = Generator::new(sample_rate);
+    match evaluated {
+        Evaluated::Waveform(waveform) => Evaluated::Waveform(generator.precompute(waveform)),
+        Evaluated::Sequence(sequence) => Evaluated::Sequence(sequencer::Sequence {
+            step_waveform: generator.precompute(sequence.step_waveform),
+            ..sequence
+        }),
+        Evaluated::KeysInstrument(function) => Evaluated::KeysInstrument(function),
+    }
+}
+
 /// Builds the program set for `source`, the contents of the file at
-/// `input_path`, and processes each of its programs.
+/// `input_path`, and processes each of its programs, precomputing them when
+/// `precompute` is set (see [`process`]).
 ///
 /// Returns the error message when `source` doesn't parse.
 pub fn load(
     environment: &Environment,
     source: String,
     input_path: path::PathBuf,
+    precompute: bool,
 ) -> Result<Loaded, String> {
     let (mut set, warning) =
         ProgramSet::from_source(source, input_path).map_err(|errors| match errors.first() {
@@ -130,7 +160,7 @@ pub fn load(
         if set.programs()[index].is_empty() {
             continue;
         }
-        let outcome = process(environment, &set.evaluation_input(index));
+        let outcome = process(environment, &set.evaluation_input(index), precompute);
         if set.record(index, outcome).is_err() {
             failed.push(index);
         }
@@ -176,6 +206,7 @@ mod tests {
             90,
             PathBuf::new(),
             CheckMode::Errors,
+            false,
             ModuleTable::default(),
             move || {
                 counted.fetch_add(1, Ordering::SeqCst);
@@ -197,7 +228,7 @@ mod tests {
         let Ok(Reply::Program(first)) = replies.recv_timeout(timeout) else {
             panic!("expected the first program's reply");
         };
-        assert!(matches!(first, Ok((Some(Evaluated::Waveform { .. }), _))));
+        assert!(matches!(first, Ok((Some(Evaluated::Waveform(_)), _))));
         let Ok(Reply::Program(second)) = replies.recv_timeout(timeout) else {
             panic!("expected the second program's reply");
         };
@@ -227,14 +258,14 @@ mod tests {
     fn processing_an_empty_program_succeeds_with_no_result() {
         let mut set = set_from("#{level_db=0}\nkick = 1 | fin(time - 1);\n");
         let environment = Environment::new(8000, 90, PathBuf::new());
-        let outcome = process(&environment, &set.evaluation_input(0));
+        let outcome = process(&environment, &set.evaluation_input(0), false);
         assert!(set.record(0, outcome).is_ok());
         assert!(set.programs()[0].evaluated().is_some());
 
         // Clearing the text must not surface a parse error — an empty
         // program is a deletion in progress — and the old result goes.
         set.program_mut(0).unwrap().set_text("  ".to_string());
-        let outcome = process(&environment, &set.evaluation_input(0));
+        let outcome = process(&environment, &set.evaluation_input(0), false);
         assert!(matches!(outcome, Ok((None, ref warnings)) if warnings.is_empty()));
         assert!(set.record(0, outcome).is_ok());
         assert!(set.programs()[0].evaluated().is_none());
@@ -248,7 +279,7 @@ mod tests {
         // Default mode: findings are errors, positioned in the program's
         // own text (`"a"` starts at column 12), and they gate — evaluation
         // is never attempted, so the checker's finding stands alone.
-        let diagnostics = process(&environment, &set.evaluation_input(0))
+        let diagnostics = process(&environment, &set.evaluation_input(0), false)
             .expect_err("error findings gate evaluation");
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].severity, Severity::Error);
@@ -261,7 +292,7 @@ mod tests {
         // Warnings mode: the same finding reports as a warning, first, and
         // evaluation proceeds to its own error — side by side.
         environment.set_check_mode(CheckMode::Warnings);
-        let diagnostics = process(&environment, &set.evaluation_input(0))
+        let diagnostics = process(&environment, &set.evaluation_input(0), false)
             .expect_err("fin(\"a\") fails at evaluation");
         assert_eq!(diagnostics.len(), 2);
         assert_eq!(diagnostics[0].severity, Severity::Warning);
@@ -276,8 +307,8 @@ mod tests {
         environment.set_check_mode(CheckMode::Errors);
         for text in ["time", "fin(nth(1 + 2, [1, 2, 4, 8]))(time)"] {
             set.program_mut(0).unwrap().set_text(text.to_string());
-            match process(&environment, &set.evaluation_input(0)) {
-                Ok((Some(Evaluated::Waveform { .. }), warnings)) => assert!(warnings.is_empty()),
+            match process(&environment, &set.evaluation_input(0), false) {
+                Ok((Some(Evaluated::Waveform(_)), warnings)) => assert!(warnings.is_empty()),
                 outcome => panic!("{} should evaluate cleanly, got {:?}", text, outcome),
             }
         }
@@ -287,7 +318,7 @@ mod tests {
         set.program_mut(0)
             .unwrap()
             .set_text("fin(nth(2.5, [1, 2, 4, 8]))(time)".to_string());
-        let diagnostics = process(&environment, &set.evaluation_input(0))
+        let diagnostics = process(&environment, &set.evaluation_input(0), false)
             .expect_err("the fractional index gates");
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].severity, Severity::Error);
@@ -299,7 +330,7 @@ mod tests {
         set.program_mut(0)
             .unwrap()
             .set_text("let f = fn(x) => nth(2.5, [1, 2]) in time".to_string());
-        let diagnostics = process(&environment, &set.evaluation_input(0))
+        let diagnostics = process(&environment, &set.evaluation_input(0), false)
             .expect_err("the unused function's finding gates");
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
@@ -307,12 +338,55 @@ mod tests {
             "1:22: expected int, found float"
         );
         environment.set_check_mode(CheckMode::Warnings);
-        let Ok((Some(_), warnings)) = process(&environment, &set.evaluation_input(0)) else {
+        let Ok((Some(_), warnings)) = process(&environment, &set.evaluation_input(0), false) else {
             panic!("the unused function body never evaluates");
         };
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].severity, Severity::Warning);
         assert_eq!(warnings[0].to_string(), "1:22: expected int, found float");
+    }
+
+    /// Precompute replaces the finite waveform a program plays with its
+    /// samples and leaves an infinite one as it is.
+    #[test]
+    fn precompute_fixes_the_finite_waveform_a_program_plays() {
+        use crate::waveform::Waveform;
+
+        let environment = Environment::new(8000, 90, PathBuf::new());
+        let evaluated = |source: &str, precompute: bool| {
+            let set = set_from(source);
+            match process(&environment, &set.evaluation_input(0), precompute) {
+                Ok((Some(evaluated), _)) => evaluated,
+                outcome => panic!("{} should evaluate, got {:?}", source, outcome),
+            }
+        };
+
+        let source = "#{level_db=0}\n_ = 1 | fin(time - 1);\n";
+        let Evaluated::Waveform(Waveform::Fixed(samples, ())) = evaluated(source, true) else {
+            panic!("expected samples for {}", source);
+        };
+        assert_eq!(samples, vec![1.0; 8000]);
+
+        let source = "#{level_db=0}\n_ = time;\n";
+        let (Evaluated::Waveform(precomputed), Evaluated::Waveform(not_precomputed)) =
+            (evaluated(source, true), evaluated(source, false))
+        else {
+            panic!("expected waveforms for {}", source);
+        };
+        assert_eq!(precomputed, not_precomputed);
+
+        let source = "on_beats = fn(w) => fn(bs) => w;\n\
+                      #{level_db=0}\n\
+                      _ = [1, 2.5] | on_beats(1 | fin(time - 1));\n";
+        let Evaluated::Sequence(sequence) = evaluated(source, true) else {
+            panic!("expected a sequence for {}", source);
+        };
+        assert_eq!(sequence.steps, vec![1.0, 2.5]);
+        assert!(
+            matches!(sequence.step_waveform, Waveform::Fixed(..)),
+            "got {}",
+            sequence.step_waveform
+        );
     }
 
     /// A program that uses a broken module definition gets its own
@@ -341,13 +415,13 @@ mod tests {
         let environment = Environment::new(44100, 90, root.clone());
 
         // A program using only the module's healthy exports is untouched.
-        let Ok((Some(_), warnings)) = process(&environment, &set.evaluation_input(0)) else {
+        let Ok((Some(_), warnings)) = process(&environment, &set.evaluation_input(0), false) else {
             panic!("healthy exports evaluate");
         };
         assert!(warnings.is_empty(), "got {:?}", warnings);
 
         // The use site carries the diagnostic and the gate fires.
-        let diagnostics = process(&environment, &set.evaluation_input(1))
+        let diagnostics = process(&environment, &set.evaluation_input(1), false)
             .expect_err("a use of a broken definition gates evaluation");
         assert_eq!(diagnostics.len(), 1, "got {:?}", diagnostics);
         assert_eq!(
@@ -370,6 +444,7 @@ mod tests {
              #{skip_slots=1}\nbad = time | fin(\"a\");\n"
                 .to_string(),
             PathBuf::from("song.tuun"),
+            false,
         )
         .expect("the source parses");
         assert_eq!(loaded.warning, "");
@@ -392,6 +467,7 @@ mod tests {
             &environment,
             "#{level_db=0}\ntone = ((;\n".to_string(),
             PathBuf::new(),
+            false,
         )
         .expect("recoverable garble loads");
         assert!(
@@ -401,7 +477,7 @@ mod tests {
         );
 
         // A source that doesn't parse at all is an error.
-        let Err(error) = load(&environment, "#{".to_string(), PathBuf::new()) else {
+        let Err(error) = load(&environment, "#{".to_string(), PathBuf::new(), false) else {
             panic!("an unparseable source should fail");
         };
         assert!(error.starts_with("Parse error"), "got: {}", error);

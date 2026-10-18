@@ -299,7 +299,7 @@ fn update_pads_clip_launcher(
         } else if is_installed_keys {
             // If it's the installed keys program, don't color the top pad (unless it's playing).
             launchkey.set_daw_top_pad_color(i as u8, 0, 0, 0);
-        } else if program.waveform().is_some()
+        } else if program.is_playable()
             && !pad_refused(
                 state,
                 status,
@@ -334,7 +334,7 @@ fn update_pads_clip_launcher(
                 current_beat_duration,
             );
             launchkey.set_daw_bottom_pad_color(i as u8, r, g, b);
-        } else if program.waveform().is_some()
+        } else if program.is_playable()
             && !pad_refused(
                 state,
                 status,

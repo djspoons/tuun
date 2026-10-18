@@ -14,7 +14,6 @@ use tuun::actions;
 use tuun::diagnostics;
 use tuun::effects;
 use tuun::environment;
-use tuun::generator;
 use tuun::launchkey;
 use tuun::metric;
 use tuun::midi_input;
@@ -23,7 +22,6 @@ use tuun::processing;
 use tuun::renderer;
 use tuun::sdl2_input;
 use tuun::tracker;
-use tuun::waveform;
 
 use metric::Metric;
 use renderer::Renderer;
@@ -46,6 +44,8 @@ struct Args {
     // each other's captures, so include something like a process id when launching in a loop.
     #[arg(long, default_value = "tuun_%Y-%m-%d_%H-%M-%S")]
     date_format: String,
+    /// Whether the finite parts of each evaluated waveform (and of the Beats
+    /// waveforms) are replaced by their samples before they are played.
     #[arg(long,
         num_args(0..=1), // Allows --flag or --flag=value
         action = clap::ArgAction::Set,
@@ -119,18 +119,12 @@ pub fn main() {
         // Call the callback to get at least one status update
         tracker.callback(&mut out);
         let status = status_receiver.recv().unwrap();
-        // Parse and send commands to play all of the waveforms. There is
-        // no precompute thread in batch mode, so both Player routes go
-        // straight to the tracker.
+        // Parse and send commands to play all of the waveforms, without
+        // precomputing them.
         let mut environment =
             environment::Environment::new(args.sample_rate, args.tempo, args.library_root.clone());
         environment.set_check_mode(args.check);
-        let player = player::Player::new(
-            args.tempo,
-            args.beats_per_measure,
-            command_sender.clone(),
-            command_sender,
-        );
+        let player = player::Player::new(args.tempo, args.beats_per_measure, command_sender);
         for program_index in 0..state.programs.programs().len() {
             if state.programs.programs()[program_index].is_empty() {
                 continue;
@@ -144,16 +138,14 @@ pub fn main() {
             let outcome = processing::process(
                 &environment,
                 &state.programs.evaluation_input(program_index),
+                false,
             );
             match state.programs.record(program_index, outcome) {
                 Ok(warnings) => {
                     for warning in &warnings {
                         println!("Warning: {}", warning);
                     }
-                    if state.programs.programs()[program_index]
-                        .waveform()
-                        .is_some()
-                    {
+                    if state.programs.programs()[program_index].is_playable() {
                         player.play_program(
                             &state.programs,
                             program_index,
@@ -176,14 +168,17 @@ pub fn main() {
                 }
             }
         }
-        // Call the tracker's callback until all of the waveforms have finished playing
+        // Call the tracker's callback until all of the waveforms have finished
+        // playing. Every played waveform carries a terminator mark, while a
+        // sequence's top-level mark is on its anchor alone, which can end
+        // before its last step does.
         loop {
             tracker.callback(&mut out);
             let status = status_receiver.recv().unwrap();
             let mark_count = status
                 .marks
                 .iter()
-                .filter(|mark| mark.mark_id == MarkId::TopLevel)
+                .filter(|mark| mark.mark_id == MarkId::Terminator)
                 .count();
             if mark_count == 0 {
                 println!("All waveforms finished");
@@ -217,66 +212,15 @@ pub fn main() {
         .unwrap();
     device.resume();
 
-    // Spin up the precompute thread that sits in front of the tracker as the
-    // Player's `precompute_sender` route. The thread pre-computes
-    // `Command::Play` and passes everything else through unchanged.
-    let precomputing_command_sender = {
-        let play_command_sender = command_sender.clone();
-        let (tx, play_receiver) = mpsc::channel();
-        let precompute = args.precompute;
-        let sample_rate = args.sample_rate;
-        thread::spawn(move || {
-            loop {
-                match play_receiver.recv() {
-                    Ok(Command::Play {
-                        id,
-                        mut waveform,
-                        start,
-                        repeat_every,
-                    }) => {
-                        if precompute {
-                            // TODO probably precompute should happen on another thread
-                            let mut generator = generator::Generator::new(sample_rate);
-                            waveform = waveform::remove_state(generator.precompute(waveform));
-                            println!("precompute returned: {}", waveform);
-                        }
-
-                        play_command_sender
-                            .send(Command::Play {
-                                id,
-                                waveform,
-                                start,
-                                repeat_every,
-                            })
-                            .unwrap();
-                    }
-                    Ok(cmd) => {
-                        play_command_sender.send(cmd).unwrap();
-                    }
-                    Err(e) => {
-                        println!("Play thread got error receiving: {}", e);
-                        return;
-                    }
-                }
-            }
-        });
-        tx
-    };
-
     // One environment and one tracker-facing player for the whole UI
     // session; both end up owned by the effect runner.
     let mut environment =
         environment::Environment::new(args.sample_rate, args.tempo, args.library_root.clone());
     environment.set_check_mode(args.check);
-    let player = player::Player::new(
-        args.tempo,
-        args.beats_per_measure,
-        precomputing_command_sender,
-        command_sender.clone(),
-    );
+    let player = player::Player::new(args.tempo, args.beats_per_measure, command_sender.clone());
 
     // Start the beats!
-    player.start_beats(&environment, &status_receiver);
+    player.start_beats(&environment, &status_receiver, args.precompute);
 
     // Seed each slider's ramp baseline where the slider currently sits, so its
     // first move ramps instead of stepping to the target.
@@ -378,6 +322,7 @@ pub fn main() {
         args.tempo,
         args.library_root.clone(),
         args.check,
+        args.precompute,
         environment.module_table(),
         main_loop_waker(&event_subsystem, wake_event_type),
     );

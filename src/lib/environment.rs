@@ -149,6 +149,8 @@ impl std::fmt::Display for CheckMode {
 }
 
 pub struct Environment {
+    /// Samples per second of the waveforms this environment evaluates.
+    sample_rate: u32,
     /// What checker findings become
     check_mode: CheckMode,
     /// Built-ins plus the definitions [`Environment::new`] adds (`tempo`,
@@ -235,6 +237,7 @@ impl Environment {
         ));
 
         Environment {
+            sample_rate,
             check_mode: CheckMode::Errors,
             prelude,
             library_root,
@@ -245,6 +248,11 @@ impl Environment {
             checked_generation: Cell::new(0),
             reported_modules: RefCell::new(HashSet::new()),
         }
+    }
+
+    /// Returns the sample rate the prelude's `sample_rate` defines.
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
     }
 
     /// Resolves a module path to its (parsed) bindings.
@@ -605,14 +613,14 @@ impl Environment {
         Some(optimizer::optimize(waveform))
     }
 
-    /// Evaluates the program `input` describes against its declared kind: an unmarked
-    /// program must evaluate to a playable waveform, and one marked `#{keys}`
-    /// must evaluate to a keys-instrument note function. Returns the
+    /// Evaluates the program `input` describes against its declared kind: an
+    /// unmarked program must evaluate to a playable waveform, and one marked
+    /// `#{keys}` must evaluate to a keys-instrument note function. Returns the
     /// user-visible diagnostics as the error otherwise.
     ///
     /// Keys instruments are sanity-checked by actually invoking them with dummy
-    /// note/velocity arguments. Waveform results additionally carry their
-    /// decomposed sequence when the text has the sequenceable `on_beats` shape.
+    /// note/velocity arguments. A waveform program whose text has the
+    /// sequenceable `on_beats` shape evaluates to its decomposed sequence.
     pub fn evaluate_program(&self, input: &EvaluationInput) -> Result<Evaluated, Vec<Diagnostic>> {
         // Programs and their file's sibling bindings see the prelude through an
         // implicit leading `open __prelude`, the same way modules do (see
@@ -676,9 +684,10 @@ impl Environment {
         }
     }
 
-    /// Builds the `Evaluated::Waveform` result for the program `input`
-    /// describes, attaching the decomposed sequence when the program's text
-    /// has the sequenceable `on_beats` shape.
+    /// Builds the result for the program `input` describes, which evaluated
+    /// to `waveform`: the decomposed sequence when the program's text has the
+    /// sequenceable `on_beats` shape and its waveform argument evaluates to a
+    /// waveform, and `waveform` otherwise.
     fn evaluated_waveform(
         &self,
         input: &EvaluationInput,
@@ -691,9 +700,9 @@ impl Environment {
                 step_waveform,
             })
         });
-        Evaluated::Waveform {
-            waveform: optimizer::optimize(waveform),
-            sequence,
+        match sequence {
+            Some(sequence) => Evaluated::Sequence(sequence),
+            None => Evaluated::Waveform(optimizer::optimize(waveform)),
         }
     }
 
@@ -955,7 +964,9 @@ mod tests {
         let function = match environment.evaluate_program(&set.evaluation_input(0)) {
             Ok(Evaluated::KeysInstrument(function)) => function,
             Err(diagnostics) => panic!("invalid: {:?}", diagnostics),
-            Ok(Evaluated::Waveform { .. }) => panic!("classified as waveform"),
+            Ok(Evaluated::Waveform(_) | Evaluated::Sequence(_)) => {
+                panic!("classified as waveform")
+            }
         };
         set.program_mut(0)
             .unwrap()
@@ -1138,12 +1149,10 @@ mod tests {
         )
         .expect("test source should parse");
         let environment = Environment::new(8000, 90, PathBuf::new());
-        let Ok(Evaluated::Waveform {
-            sequence: Some(sequence),
-            ..
-        }) = environment.evaluate_program(&set.evaluation_input(0))
+        let Ok(Evaluated::Sequence(sequence)) =
+            environment.evaluate_program(&set.evaluation_input(0))
         else {
-            panic!("expected a waveform with an attached sequence");
+            panic!("expected a sequence");
         };
         assert_eq!(sequence.steps, vec![1.0, 2.5]);
     }
@@ -1157,7 +1166,7 @@ mod tests {
         .expect("test source should parse");
         let environment = Environment::new(44100, 90, PathBuf::new());
         match environment.evaluate_program(&set.evaluation_input(0)) {
-            Ok(Evaluated::Waveform { .. }) => {}
+            Ok(Evaluated::Waveform(_)) => {}
             Err(diagnostics) => {
                 panic!("prelude names should resolve, got: {}", diagnostics[0])
             }

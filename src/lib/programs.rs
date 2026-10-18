@@ -165,14 +165,13 @@ pub enum ProgramKind {
 /// The result of successfully evaluating a program's text.
 #[derive(Debug, Clone)]
 pub enum Evaluated {
-    /// The program evaluated to a playable waveform.
-    Waveform {
-        /// The evaluated waveform, optimized; slider values and the level
-        /// wrap are applied per play.
-        waveform: waveform::Waveform<MarkId>,
-        /// Present when the text also has the sequenceable `on_beats` shape.
-        sequence: Option<sequencer::Sequence>,
-    },
+    /// The program evaluated to a playable waveform that isn't sequenceable.
+    /// The waveform is optimized; slider values and the level wrap are applied
+    /// per play.
+    Waveform(waveform::Waveform<MarkId>),
+    /// The program evaluated to a playable waveform and its text has the
+    /// sequenceable `on_beats` shape, so it plays as the decomposed sequence.
+    Sequence(sequencer::Sequence),
     /// The program evaluated to a function usable as a keys instrument.
     KeysInstrument(expr::SourceExpr<MarkId, Source>),
 }
@@ -388,12 +387,22 @@ impl Program {
         self.evaluated.as_ref()
     }
 
-    /// Returns the waveform if the last recorded evaluation produced one.
+    /// Returns the waveform if the last recorded evaluation produced one that
+    /// isn't sequenceable.
     pub fn waveform(&self) -> Option<&waveform::Waveform<MarkId>> {
         match &self.evaluated {
-            Some(Evaluated::Waveform { waveform, .. }) => Some(waveform),
+            Some(Evaluated::Waveform(waveform)) => Some(waveform),
             _ => None,
         }
+    }
+
+    /// Returns whether the last recorded evaluation produced something to
+    /// play: a waveform or a sequence.
+    pub fn is_playable(&self) -> bool {
+        matches!(
+            self.evaluated,
+            Some(Evaluated::Waveform(_) | Evaluated::Sequence(_))
+        )
     }
 
     /// Returns the keys-instrument function if the last recorded evaluation
@@ -409,7 +418,7 @@ impl Program {
     /// a sequenceable waveform.
     pub fn sequence(&self) -> Option<&sequencer::Sequence> {
         match &self.evaluated {
-            Some(Evaluated::Waveform { sequence, .. }) => sequence.as_ref(),
+            Some(Evaluated::Sequence(sequence)) => Some(sequence),
             _ => None,
         }
     }
@@ -1692,16 +1701,24 @@ mod tests {
     #[test]
     fn evaluated_accessors_follow_the_cached_variant() {
         let mut program = Program::from_string("x", 0);
-        program.evaluated = Some(Evaluated::Waveform {
-            waveform: waveform::Waveform::Const(1.0),
-            sequence: None,
-        });
+        program.evaluated = Some(Evaluated::Waveform(waveform::Waveform::Const(1.0)));
         assert!(program.waveform().is_some());
+        assert!(program.is_playable());
         assert!(program.keys_instrument().is_none());
         assert!(program.sequence().is_none());
 
+        program.evaluated = Some(Evaluated::Sequence(sequencer::Sequence {
+            steps: vec![1.0],
+            step_waveform: waveform::Waveform::Const(1.0),
+        }));
+        assert!(program.waveform().is_none());
+        assert!(program.is_playable());
+        assert!(program.keys_instrument().is_none());
+        assert!(program.sequence().is_some());
+
         program.evaluated = Some(Evaluated::KeysInstrument(expr::SourceExpr::float(1.0)));
         assert!(program.waveform().is_none());
+        assert!(!program.is_playable());
         assert!(program.keys_instrument().is_some());
         assert!(program.sequence().is_none());
 

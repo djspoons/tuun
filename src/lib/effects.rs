@@ -305,30 +305,13 @@ impl EffectRunner {
                 start,
                 repeat_after_measures,
             } => {
-                // A sequenceable program always plays decomposed — one
-                // tracker entry per step — so the sequencer can edit its
-                // steps live.
-                let sequenced = state
-                    .programs
-                    .program(program_index)
-                    .is_some_and(|p| p.sequence().is_some());
-                let message = if sequenced {
-                    self.player.play_program_steps(
-                        &state.programs,
-                        program_index,
-                        world.status,
-                        start,
-                        repeat_after_measures,
-                    )
-                } else {
-                    self.player.play_program(
-                        &state.programs,
-                        program_index,
-                        world.status,
-                        start,
-                        repeat_after_measures,
-                    )
-                };
+                let message = self.player.play_program(
+                    &state.programs,
+                    program_index,
+                    world.status,
+                    start,
+                    repeat_after_measures,
+                );
                 if let Some(message) = message
                     && !matches!(start, player::Start::At(_))
                 {
@@ -714,10 +697,10 @@ mod tests {
     fn reply_to(environment: &environment::Environment, job: processing::Job) -> processing::Reply {
         match job {
             processing::Job::Program(input) => {
-                processing::Reply::Program(processing::process(environment, &input))
+                processing::Reply::Program(processing::process(environment, &input, false))
             }
             processing::Job::Load { source, input_path } => {
-                processing::Reply::Loaded(processing::load(environment, source, input_path))
+                processing::Reply::Loaded(processing::load(environment, source, input_path, false))
             }
         }
     }
@@ -774,10 +757,9 @@ mod tests {
         // the note-off waveform spliced in at release — not the values baked in
         // when the instrument was evaluated.
         // TODO all of the sender set-up is repeated in many tests
-        let (precompute_sender, _precompute_receiver) = mpsc::channel();
-        let (fast_sender, fast_receiver) = mpsc::channel();
+        let (command_sender, command_receiver) = mpsc::channel();
         let (slider_sender, _slider_receiver) = mpsc::channel();
-        let player = player::Player::new(90, 4, precompute_sender, fast_sender);
+        let player = player::Player::new(90, 4, command_sender);
         let environment = environment::Environment::new(44100, 90, std::path::PathBuf::new());
         let (job_sender, job_receiver) = mpsc::channel();
         let mut runner = EffectRunner::new(player, environment, slider_sender, job_sender);
@@ -831,7 +813,7 @@ mod tests {
         // The release splice is the Modify command on the note's terminator
         // mark.
         let mut note_off = None;
-        while let Ok(command) = fast_receiver.try_recv() {
+        while let Ok(command) = command_receiver.try_recv() {
             if let tracker::Command::Modify {
                 selector: WaveformSelector::Only(WaveformId::Key(60)),
                 mark_id: MarkId::Terminator,
@@ -847,21 +829,20 @@ mod tests {
         assert_eq!(marks, vec![(slider_mark(0, "vol"), 1.0)]);
     }
 
-    /// Returns a runner whose channels the test holds: the tracker's fast
-    /// route and the processing thread's jobs.
+    /// Returns a runner whose channels the test holds: the tracker's commands
+    /// and the processing thread's jobs.
     fn runner_with_jobs() -> (
         EffectRunner,
         mpsc::Receiver<tracker::Command<WaveformId, MarkId>>,
         mpsc::Receiver<processing::Job>,
     ) {
-        let (precompute_sender, _precompute_receiver) = mpsc::channel();
-        let (fast_sender, fast_receiver) = mpsc::channel();
+        let (command_sender, command_receiver) = mpsc::channel();
         let (slider_sender, _slider_receiver) = mpsc::channel();
         let (job_sender, job_receiver) = mpsc::channel();
-        let player = player::Player::new(90, 4, precompute_sender, fast_sender);
+        let player = player::Player::new(90, 4, command_sender);
         let environment = environment::Environment::new(44100, 90, std::path::PathBuf::new());
         let runner = EffectRunner::new(player, environment, slider_sender, job_sender);
-        (runner, fast_receiver, job_receiver)
+        (runner, command_receiver, job_receiver)
     }
 
     /// Returns a state with one waveform program, `tone`, in slot A:1.
@@ -877,7 +858,7 @@ mod tests {
     /// as an immediate evaluation would have.
     #[test]
     fn leaving_edit_mode_applies_when_the_reply_arrives() {
-        let (mut runner, _fast_receiver, job_receiver) = runner_with_jobs();
+        let (mut runner, _command_receiver, job_receiver) = runner_with_jobs();
         let mut state = tone_state();
         state.mode = actions::Mode::Edit {
             cursor_position: 0,
@@ -914,7 +895,7 @@ mod tests {
     /// returns to.
     #[test]
     fn a_failed_evaluation_reports_into_edit_mode() {
-        let (mut runner, _fast_receiver, job_receiver) = runner_with_jobs();
+        let (mut runner, _command_receiver, job_receiver) = runner_with_jobs();
         let mut state = tone_state();
         state
             .programs
@@ -957,7 +938,7 @@ mod tests {
     /// The effects that read a result run only once it is recorded.
     #[test]
     fn success_effects_wait_for_the_result() {
-        let (mut runner, fast_receiver, job_receiver) = runner_with_jobs();
+        let (mut runner, command_receiver, job_receiver) = runner_with_jobs();
         let mut state = tone_state();
         let status = empty_status();
         let mut world = World {
@@ -977,11 +958,11 @@ mod tests {
                 on_failure: vec![],
             },
         );
-        assert!(fast_receiver.try_recv().is_err());
+        assert!(command_receiver.try_recv().is_err());
 
         process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
         assert!(matches!(
-            fast_receiver.try_recv(),
+            command_receiver.try_recv(),
             Ok(tracker::Command::Play {
                 id: WaveformId::Program(0),
                 ..
@@ -993,7 +974,7 @@ mod tests {
     /// error stays on the status line.
     #[test]
     fn a_failure_runs_only_its_failure_effects() {
-        let (mut runner, _fast_receiver, job_receiver) = runner_with_jobs();
+        let (mut runner, _command_receiver, job_receiver) = runner_with_jobs();
         let mut state = AppState::from_source(
             "#{level_db=0}\nw = time | fin(\"a\");\n".to_string(),
             std::path::PathBuf::new(),
@@ -1026,7 +1007,7 @@ mod tests {
     /// status line rather than the toggle's message.
     #[test]
     fn a_failed_sequencer_toggle_shows_its_error() {
-        let (mut runner, _fast_receiver, job_receiver) = runner_with_jobs();
+        let (mut runner, _command_receiver, job_receiver) = runner_with_jobs();
         let mut state = AppState::from_source(
             "on_beats = fn(w) => fn(bs) => w;\n\
              #{level_db=0}\n\
@@ -1058,7 +1039,7 @@ mod tests {
     /// effects and all.
     #[test]
     fn a_result_for_replaced_text_is_dropped() {
-        let (mut runner, _fast_receiver, job_receiver) = runner_with_jobs();
+        let (mut runner, _command_receiver, job_receiver) = runner_with_jobs();
         let mut state = tone_state();
         state.message = "before".to_string();
         let status = empty_status();
@@ -1091,7 +1072,7 @@ mod tests {
     /// own result is recorded.
     #[test]
     fn the_last_result_plays_until_the_next_is_recorded() {
-        let (mut runner, fast_receiver, job_receiver) = runner_with_jobs();
+        let (mut runner, command_receiver, job_receiver) = runner_with_jobs();
         let mut state = tone_state();
         let status = empty_status();
         let mut world = World {
@@ -1120,7 +1101,7 @@ mod tests {
         runner.run_one(&mut state, &mut world, evaluate());
         process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
         runner.run_one(&mut state, &mut world, play());
-        let first = played(&fast_receiver);
+        let first = played(&command_receiver);
 
         state
             .programs
@@ -1129,18 +1110,18 @@ mod tests {
             .set_text("2 | fin(time - 1)".to_string());
         runner.run_one(&mut state, &mut world, evaluate());
         runner.run_one(&mut state, &mut world, play());
-        assert_eq!(played(&fast_receiver), first);
+        assert_eq!(played(&command_receiver), first);
 
         process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
         runner.run_one(&mut state, &mut world, play());
-        assert_ne!(played(&fast_receiver), first);
+        assert_ne!(played(&command_receiver), first);
     }
 
     /// While a newer job for the current text is on its way, an older job's
     /// result still applies, so each of two quick edits runs its effects.
     #[test]
     fn an_older_result_applies_while_a_newer_job_is_pending() {
-        let (mut runner, _fast_receiver, job_receiver) = runner_with_jobs();
+        let (mut runner, _command_receiver, job_receiver) = runner_with_jobs();
         let mut state = tone_state();
         let status = empty_status();
         let mut world = World {
@@ -1172,7 +1153,7 @@ mod tests {
             let Ok(processing::Job::Program(input)) = job_receiver.try_recv() else {
                 panic!("expected a job");
             };
-            let outcome = processing::process(&environment, &input);
+            let outcome = processing::process(&environment, &input, false);
             runner.finish(&mut state, &mut world, processing::Reply::Program(outcome));
             assert_eq!(state.message, message);
             assert!(state.programs.programs()[0].waveform().is_some());
@@ -1182,10 +1163,9 @@ mod tests {
 
     #[test]
     fn reload_source_stops_all_and_swaps_programs() {
-        let (precompute_sender, _precompute_receiver) = mpsc::channel();
-        let (fast_sender, fast_receiver) = mpsc::channel();
+        let (command_sender, command_receiver) = mpsc::channel();
         let (slider_sender, slider_receiver) = mpsc::channel();
-        let player = player::Player::new(90, 4, precompute_sender, fast_sender);
+        let player = player::Player::new(90, 4, command_sender);
         let environment = environment::Environment::new(44100, 90, std::path::PathBuf::new());
         let (job_sender, job_receiver) = mpsc::channel();
         let mut runner = EffectRunner::new(player, environment, slider_sender, job_sender);
@@ -1218,7 +1198,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
 
         // Nothing changes until the set is built.
-        assert!(fast_receiver.try_recv().is_err());
+        assert!(command_receiver.try_recv().is_err());
         assert!(state.keys.is_some());
         assert_eq!(state.programs.display_name(0), "A:1 (tone)");
         assert_eq!(state.message, actions::PROCESSING_MESSAGE);
@@ -1226,7 +1206,7 @@ mod tests {
 
         process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
         assert!(!state.is_loading());
-        let commands: Vec<_> = fast_receiver.try_iter().collect();
+        let commands: Vec<_> = command_receiver.try_iter().collect();
         assert!(
             matches!(
                 commands[0],
@@ -1268,10 +1248,9 @@ mod tests {
 
     #[test]
     fn print_evaluated_program_applies_a_keys_instrument() {
-        let (precompute_sender, _precompute_receiver) = mpsc::channel();
-        let (fast_sender, _fast_receiver) = mpsc::channel();
+        let (command_sender, _command_receiver) = mpsc::channel();
         let (slider_sender, _slider_receiver) = mpsc::channel();
-        let player = player::Player::new(90, 4, precompute_sender, fast_sender);
+        let player = player::Player::new(90, 4, command_sender);
         let environment = environment::Environment::new(44100, 90, std::path::PathBuf::new());
         let (job_sender, job_receiver) = mpsc::channel();
         let mut runner = EffectRunner::new(player, environment, slider_sender, job_sender);
@@ -1312,10 +1291,9 @@ mod tests {
 
     #[test]
     fn reload_source_read_failure_leaves_everything_untouched() {
-        let (precompute_sender, _precompute_receiver) = mpsc::channel();
-        let (fast_sender, fast_receiver) = mpsc::channel();
+        let (command_sender, command_receiver) = mpsc::channel();
         let (slider_sender, _slider_receiver) = mpsc::channel();
-        let player = player::Player::new(90, 4, precompute_sender, fast_sender);
+        let player = player::Player::new(90, 4, command_sender);
         let environment = environment::Environment::new(44100, 90, std::path::PathBuf::new());
         let (job_sender, job_receiver) = mpsc::channel();
         let mut runner = EffectRunner::new(player, environment, slider_sender, job_sender);
@@ -1334,7 +1312,7 @@ mod tests {
         };
         runner.run_one(&mut state, &mut world, Effect::ReloadSource);
 
-        assert!(fast_receiver.try_iter().next().is_none());
+        assert!(command_receiver.try_iter().next().is_none());
         assert!(job_receiver.try_recv().is_err());
         assert!(!state.is_loading());
         assert_eq!(state.programs.display_name(0), "A:1 (tone)");
@@ -1355,7 +1333,7 @@ mod tests {
     /// were, and reports the error.
     #[test]
     fn a_failed_load_leaves_state_untouched() {
-        let (mut runner, fast_receiver, job_receiver) = runner_with_jobs();
+        let (mut runner, command_receiver, job_receiver) = runner_with_jobs();
         let (mut state, path) =
             file_backed_state("failed_load", "#{level_db=0}\ntone = 1 | fin(time - 1);\n");
         state.keys = Some(Keys {
@@ -1373,7 +1351,7 @@ mod tests {
         process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
         std::fs::remove_file(&path).ok();
 
-        assert!(fast_receiver.try_recv().is_err());
+        assert!(command_receiver.try_recv().is_err());
         assert!(!state.is_loading());
         assert!(state.keys.is_some());
         assert_eq!(state.programs.display_name(0), "A:1 (tone)");
@@ -1388,7 +1366,7 @@ mod tests {
     /// from, and the load installs after it.
     #[test]
     fn a_program_job_before_a_reload_applies_to_the_old_set() {
-        let (mut runner, fast_receiver, job_receiver) = runner_with_jobs();
+        let (mut runner, command_receiver, job_receiver) = runner_with_jobs();
         let (mut state, path) = file_backed_state(
             "job_before_reload",
             "#{level_db=0}\ntone = 1 | fin(time - 1);\n",
@@ -1419,7 +1397,7 @@ mod tests {
         runner.finish(&mut state, &mut world, reply_to(&environment, job));
         assert_eq!(state.programs.display_name(0), "A:1 (tone)");
         assert!(state.programs.programs()[0].waveform().is_some());
-        assert!(fast_receiver.try_recv().is_err(), "nothing stops yet");
+        assert!(command_receiver.try_recv().is_err(), "nothing stops yet");
         // The load still owns the status line.
         assert_eq!(state.message, actions::PROCESSING_MESSAGE);
         assert!(state.is_loading());
@@ -1440,7 +1418,7 @@ mod tests {
     /// the loaded set replaces the source it would write.
     #[test]
     fn update_source_is_skipped_while_a_set_loads() {
-        let (mut runner, _fast_receiver, _job_receiver) = runner_with_jobs();
+        let (mut runner, _command_receiver, _job_receiver) = runner_with_jobs();
         let source = "#{level_db=0}\ntone = 1 | fin(time - 1);\n";
         let (mut state, path) = file_backed_state("skip_update", source);
         let status = empty_status();
@@ -1463,7 +1441,7 @@ mod tests {
     /// The load at startup reports only the programs that failed.
     #[test]
     fn the_startup_load_names_the_failed_programs() {
-        let (mut runner, _fast_receiver, job_receiver) = runner_with_jobs();
+        let (mut runner, _command_receiver, job_receiver) = runner_with_jobs();
         let source = "#{level_db=0}\ngood = 1 | fin(time - 1);\n\
                       #{level_db=0}\nbad = time | fin(\"a\");\n";
         let mut state = AppState::from_source(source.to_string(), std::path::PathBuf::new())
@@ -1488,10 +1466,9 @@ mod tests {
 
     #[test]
     fn remove_pending_program_cancels_from_the_next_cycle() {
-        let (precompute_sender, _precompute_receiver) = mpsc::channel();
-        let (fast_sender, fast_receiver) = mpsc::channel();
+        let (command_sender, command_receiver) = mpsc::channel();
         let (slider_sender, _slider_receiver) = mpsc::channel();
-        let player = player::Player::new(90, 4, precompute_sender, fast_sender);
+        let player = player::Player::new(90, 4, command_sender);
         let environment = environment::Environment::new(44100, 90, std::path::PathBuf::new());
         let (job_sender, _job_receiver) = mpsc::channel();
         let mut runner = EffectRunner::new(player, environment, slider_sender, job_sender);
@@ -1521,7 +1498,7 @@ mod tests {
             status: &status,
         };
         runner.run_one(&mut state, &mut world, Effect::RemovePendingProgram(0));
-        let command = fast_receiver.try_recv().expect("expected a command");
+        let command = command_receiver.try_recv().expect("expected a command");
         assert!(
             matches!(
                 command,
@@ -1540,7 +1517,7 @@ mod tests {
             status: &status,
         };
         runner.run_one(&mut state, &mut world, Effect::RemovePendingProgram(0));
-        assert!(fast_receiver.try_recv().is_err());
+        assert!(command_receiver.try_recv().is_err());
     }
 
     #[test]
@@ -1637,11 +1614,10 @@ mod tests {
     /// A play from an instant goes straight to the tracker with that start,
     /// repeating per the given measures, and leaves the message alone.
     #[test]
-    fn a_play_at_an_instant_takes_the_fast_route_silently() {
-        let (precompute_sender, precompute_receiver) = mpsc::channel();
-        let (fast_sender, fast_receiver) = mpsc::channel();
+    fn a_play_at_an_instant_goes_to_the_tracker_silently() {
+        let (command_sender, command_receiver) = mpsc::channel();
         let (slider_sender, _slider_receiver) = mpsc::channel();
-        let player = player::Player::new(60, 4, precompute_sender, fast_sender);
+        let player = player::Player::new(60, 4, command_sender);
         let environment = environment::Environment::new(44100, 60, std::path::PathBuf::new());
         let (job_sender, job_receiver) = mpsc::channel();
         let mut runner = EffectRunner::new(player, environment, slider_sender, job_sender);
@@ -1672,15 +1648,14 @@ mod tests {
         );
         process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
 
-        assert!(precompute_receiver.try_recv().is_err());
         let Ok(tracker::Command::Play {
             id: WaveformId::Program(0),
             start,
             repeat_every,
             ..
-        }) = fast_receiver.try_recv()
+        }) = command_receiver.try_recv()
         else {
-            panic!("expected a Play on the fast route");
+            panic!("expected a Play");
         };
         assert_eq!(start, Some(at));
         assert_eq!(repeat_every, Some(std::time::Duration::from_secs(4)));
@@ -1692,10 +1667,9 @@ mod tests {
     /// move addresses exactly that mark on every voice.
     #[test]
     fn a_slider_move_reaches_a_voice_of_another_program() {
-        let (precompute_sender, _precompute_receiver) = mpsc::channel();
-        let (fast_sender, fast_receiver) = mpsc::channel();
+        let (command_sender, command_receiver) = mpsc::channel();
         let (slider_sender, slider_receiver) = mpsc::channel();
-        let player = player::Player::new(90, 4, precompute_sender, fast_sender);
+        let player = player::Player::new(90, 4, command_sender);
         let environment = environment::Environment::new(44100, 90, std::path::PathBuf::new());
         let (job_sender, job_receiver) = mpsc::channel();
         let mut runner = EffectRunner::new(player, environment, slider_sender, job_sender);
@@ -1733,7 +1707,7 @@ mod tests {
         );
 
         // A:2's sounding voice carries A:1's mark.
-        let played = fast_receiver
+        let played = command_receiver
             .try_iter()
             .find_map(|command| match command {
                 tracker::Command::Play {
