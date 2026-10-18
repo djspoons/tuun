@@ -373,39 +373,6 @@ pub fn main() {
 
     let mut launchkey = launchkey.ok();
 
-    // Evaluate each program from its initial source so that playback and
-    // InstallKeys work without needing to enter and exit Edit mode first.
-    // TODO evaluate through the processing thread (with the program set
-    // installed on its reply) so the window comes up at once.
-    let input_path = state.programs.input_path().to_path_buf();
-    let failed_programs = match processing::load(&environment, input, input_path) {
-        Ok(loaded) => {
-            state.programs = loaded.set;
-            loaded.failed
-        }
-        // Not expected: the same source parsed above.
-        Err(message) => {
-            println!("Couldn't evaluate the programs at startup: {}", message);
-            Vec::new()
-        }
-    };
-    // Errors from the initial parse and this sweep would sit in the status
-    // line with nothing saying which program they came from — replace them
-    // with a pointer to the failing programs; each error resurfaces when
-    // its program is evaluated interactively.
-    state.message = if failed_programs.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "Errors in {}",
-            failed_programs
-                .iter()
-                .map(|&i| state.programs.display_name(i))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    };
-
     let (job_sender, replies) = processing::spawn(
         args.sample_rate,
         args.tempo,
@@ -416,6 +383,10 @@ pub fn main() {
     );
     let mut effect_runner =
         effects::EffectRunner::new(player, environment, slider_sender.clone(), job_sender);
+    // Evaluate each program from its initial source so that playback and
+    // InstallKeys work without needing to enter and exit Edit mode first. The
+    // window shows the unevaluated programs until the set is installed.
+    effect_runner.load(&mut state, input, true);
 
     let mut status = tracker::Status {
         buffer_start: Instant::now(),

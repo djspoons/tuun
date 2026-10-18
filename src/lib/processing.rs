@@ -15,13 +15,20 @@ use crate::programs::{EvaluationInput, Outcome, ProgramSet};
 pub enum Job {
     /// Check and evaluate one program (see [`process`]).
     Program(EvaluationInput),
+    /// Build the program set for `source`, the contents of the file at
+    /// `input_path`, and process each of its programs (see [`load`]).
+    Load {
+        source: String,
+        input_path: path::PathBuf,
+    },
 }
 
 /// The processing thread's answer to one [`Job`].
-#[derive(Debug)]
 pub enum Reply {
     /// The outcome of a [`Job::Program`].
     Program(Outcome),
+    /// The outcome of a [`Job::Load`].
+    Loaded(Result<Loaded, String>),
 }
 
 /// Starts the processing thread and returns the sender its jobs go to and the
@@ -51,6 +58,9 @@ pub fn spawn(
             for job in jobs {
                 let reply = match job {
                     Job::Program(input) => Reply::Program(process(&environment, &input)),
+                    Job::Load { source, input_path } => {
+                        Reply::Loaded(load(&environment, source, input_path))
+                    }
                 };
                 if reply_sender.send(reply).is_err() {
                     return;
@@ -177,18 +187,31 @@ mod tests {
             .unwrap()
             .set_text("time | fin(\"a\")".to_string());
         jobs.send(Job::Program(set.evaluation_input(0))).unwrap();
+        jobs.send(Job::Load {
+            source: "#{level_db=0}\nother = 1 | fin(time - 1);\n".to_string(),
+            input_path: PathBuf::from("song.tuun"),
+        })
+        .unwrap();
 
         let timeout = Duration::from_secs(30);
-        let Reply::Program(first) = replies.recv_timeout(timeout).expect("first reply");
+        let Ok(Reply::Program(first)) = replies.recv_timeout(timeout) else {
+            panic!("expected the first program's reply");
+        };
         assert!(matches!(first, Ok((Some(Evaluated::Waveform { .. }), _))));
-        let Reply::Program(second) = replies.recv_timeout(timeout).expect("second reply");
+        let Ok(Reply::Program(second)) = replies.recv_timeout(timeout) else {
+            panic!("expected the second program's reply");
+        };
         assert!(second.is_err(), "got {:?}", second);
+        let Ok(Reply::Loaded(Ok(loaded))) = replies.recv_timeout(timeout) else {
+            panic!("expected the load's reply");
+        };
+        assert!(loaded.set.programs()[0].waveform().is_some());
         // The wake follows the send, so it may land just after the reply.
         let deadline = std::time::Instant::now() + timeout;
-        while wakes.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
+        while wakes.load(Ordering::SeqCst) < 3 && std::time::Instant::now() < deadline {
             thread::yield_now();
         }
-        assert_eq!(wakes.load(Ordering::SeqCst), 2);
+        assert_eq!(wakes.load(Ordering::SeqCst), 3);
     }
 
     /// Returns the set for `source`, which must parse cleanly.
