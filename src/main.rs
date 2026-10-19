@@ -70,6 +70,10 @@ struct Args {
     output_dir: String, // Captures waveforms to the specified directory
 }
 
+/// The number of sample headers the tracker's header ring holds: far more
+/// callbacks than the sample ring, which holds one second of samples, has room for.
+const SAMPLE_HEADER_CAPACITY: usize = 1024;
+
 pub fn main() {
     let args = Args::parse();
     let captured_file_prefix = chrono::Local::now().format(&args.date_format).to_string();
@@ -102,6 +106,10 @@ pub fn main() {
             println!("{}", state.message);
         }
 
+        // Nothing drains the samples in batch mode; once the rings fill, the
+        // tracker just counts its pushes as dropped.
+        let (sample_producer, _sample_consumer) =
+            tracker::sample_rings(args.sample_rate as usize, SAMPLE_HEADER_CAPACITY);
         // TODO the tracker clock resync doesn't really make sense for batch
         // mode... maybe we shouldn't try to resync in this case?
         let mut tracker = tracker::Tracker::<WaveformId, MarkId>::new(
@@ -110,6 +118,7 @@ pub fn main() {
             captured_file_prefix.clone(),
             command_receiver,
             status_sender,
+            sample_producer,
             // No audio device plays these samples, so just use one buffer.
             Duration::from_secs_f32(args.buffer_size as f32 / args.sample_rate as f32),
         );
@@ -196,6 +205,8 @@ pub fn main() {
         channels: Some(1), // mono
         samples: Some(args.buffer_size),
     };
+    let (sample_producer, _sample_consumer) =
+        tracker::sample_rings(args.sample_rate as usize, SAMPLE_HEADER_CAPACITY);
     let device = audio_subsystem
         .open_playback(None, &desired_spec, |spec| {
             let output_latency = tracker::sdl_output_latency(spec.freq as u32, spec.samples as u32);
@@ -206,6 +217,7 @@ pub fn main() {
                 captured_file_prefix.clone(),
                 command_receiver,
                 status_sender,
+                sample_producer,
                 output_latency,
             )
         })

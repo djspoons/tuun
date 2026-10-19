@@ -915,6 +915,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caf4aa5b0f434c91fe5c7f1ecb6a5ece2130b02ad2a590589dda5146df959001"
 
 [[package]]
+name = "rtrb"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9278fb35b3e730abe136e9b395b5b81b96d06b9f5478a50f0c8430a2237b22de"
+
+[[package]]
 name = "rustfft"
 version = "6.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1132,6 +1138,7 @@ dependencies = [
  "nom",
  "nom_locate",
  "realfft",
+ "rtrb",
  "sdl2",
  "thiserror 2.0.18",
  "wasm-bindgen",

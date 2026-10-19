@@ -125,6 +125,79 @@ where
     }
 }
 
+/// The placement on the clock of one callback's output samples.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SampleHeader {
+    /// When the first of these samples plays.
+    pub buffer_start: Instant,
+    /// How many samples follow this header in the sample ring.
+    pub written: usize,
+    /// How many samples were dropped, because a ring was full, since the previous header.
+    pub dropped: usize,
+}
+
+/// The audio thread's end of the sample and header rings.
+pub struct SampleProducer {
+    samples: rtrb::Producer<f32>,
+    headers: rtrb::Producer<SampleHeader>,
+    // Samples dropped since the last header pushed.
+    dropped: usize,
+}
+
+/// The UI's end of the sample and header rings.
+pub struct SampleConsumer {
+    pub samples: rtrb::Consumer<f32>,
+    pub headers: rtrb::Consumer<SampleHeader>,
+}
+
+/// Returns both ends of a new pair of rings holding `sample_capacity` samples
+/// and `header_capacity` headers.
+pub fn sample_rings(
+    sample_capacity: usize,
+    header_capacity: usize,
+) -> (SampleProducer, SampleConsumer) {
+    let (sample_producer, sample_consumer) = rtrb::RingBuffer::new(sample_capacity);
+    let (header_producer, header_consumer) = rtrb::RingBuffer::new(header_capacity);
+    (
+        SampleProducer {
+            samples: sample_producer,
+            headers: header_producer,
+            dropped: 0,
+        },
+        SampleConsumer {
+            samples: sample_consumer,
+            headers: header_consumer,
+        },
+    )
+}
+
+impl SampleProducer {
+    /// Pushes `samples` and then a header placing them at `buffer_start`, or,
+    /// when either ring lacks room, pushes nothing and counts them as dropped.
+    ///
+    /// Never blocks or allocates.
+    pub fn push(&mut self, buffer_start: Instant, samples: &[f32]) {
+        if self.headers.slots() >= 1 && self.samples.slots() >= samples.len() {
+            // The samples go first: once the consumer pops a header, every
+            // sample it describes has already been published to the sample
+            // ring.
+            self.samples
+                .push_entire_slice(samples)
+                .expect("the sample ring was checked for room");
+            self.headers
+                .push(SampleHeader {
+                    buffer_start,
+                    written: samples.len(),
+                    dropped: self.dropped,
+                })
+                .expect("the header ring was checked for room");
+            self.dropped = 0;
+        } else {
+            self.dropped = self.dropped.saturating_add(samples.len());
+        }
+    }
+}
+
 struct ActiveWaveform<I, M>
 where
     I: Clone,
@@ -163,6 +236,7 @@ where
     captured_file_prefix: String,
     command_receiver: mpsc::Receiver<Command<I, M>>,
     status_sender: mpsc::Sender<Status<I, M>>,
+    sample_producer: SampleProducer,
     output_latency: Duration,
 
     // The time at which the first sample counted by `samples_elapsed` plays;
@@ -188,15 +262,17 @@ where
     /// Returns a new tracker that implements `audio::AudioCallback` and
     /// processes commands from `command_receiver`.
     ///
-    /// Each captured file is named from `captured_file_prefix`, the capture's
-    /// own file stem, and a serial number. `output_latency` is the time from
-    /// the start of a callback until the first sample it generates plays.
+    /// Every callback's output samples go to `sample_producer`. Each captured
+    /// file is named from `captured_file_prefix`, the capture's own file stem,
+    /// and a serial number. `output_latency` is the time from the start of a
+    /// callback until the first sample it generates plays.
     pub fn new(
         sample_rate: u32,
         captured_output_dir: path::PathBuf,
         captured_file_prefix: String,
         command_receiver: mpsc::Receiver<Command<I, M>>,
         status_sender: mpsc::Sender<Status<I, M>>,
+        sample_producer: SampleProducer,
         output_latency: Duration,
     ) -> Tracker<'a, I, M> {
         Tracker {
@@ -206,6 +282,7 @@ where
             captured_file_prefix,
             command_receiver,
             status_sender,
+            sample_producer,
             output_latency,
 
             clock_origin: None,
@@ -451,6 +528,7 @@ where
         // Now generate!
         let generate_start = Instant::now();
         let (finished, allocations) = self.generate(buffer_start, out);
+        self.sample_producer.push(buffer_start, out);
         status_to_send.tracker_load = Some(
             self.sample_rate as f32 / (out.len() as f32 / generate_start.elapsed().as_secs_f32()),
         );
@@ -817,25 +895,47 @@ mod tests {
 
     use super::*;
 
-    /// A tracker under test with its command sender and status receiver.
+    /// A tracker under test with its command sender, status receiver and sample
+    /// consumer.
     type TestTracker = (
         Tracker<'static, WaveformId, MarkId>,
         mpsc::Sender<Command<WaveformId, MarkId>>,
         mpsc::Receiver<Status<WaveformId, MarkId>>,
+        SampleConsumer,
     );
 
-    fn test_tracker() -> TestTracker {
+    /// Returns a tracker whose sample rings hold `sample_capacity` samples and
+    /// `header_capacity` headers.
+    fn test_tracker_with_rings(sample_capacity: usize, header_capacity: usize) -> TestTracker {
         let (command_sender, command_receiver) = mpsc::channel();
         let (status_sender, status_receiver) = mpsc::channel();
+        let (sample_producer, sample_consumer) = sample_rings(sample_capacity, header_capacity);
         let tracker = Tracker::new(
             8000,
             path::PathBuf::new(),
             String::new(),
             command_receiver,
             status_sender,
+            sample_producer,
             Duration::ZERO,
         );
-        (tracker, command_sender, status_receiver)
+        (tracker, command_sender, status_receiver, sample_consumer)
+    }
+
+    fn test_tracker() -> TestTracker {
+        test_tracker_with_rings(256, 4)
+    }
+
+    /// Pops a header and then the samples it describes.
+    fn pop_callback(consumer: &mut SampleConsumer) -> (SampleHeader, Vec<f32>) {
+        let header = consumer.headers.pop().expect("expected a header");
+        let samples = consumer
+            .samples
+            .read_chunk(header.written)
+            .expect("expected the header's samples")
+            .into_iter()
+            .collect();
+        (header, samples)
     }
 
     fn marked(mark: MarkId, value: f32) -> waveform::Waveform<MarkId> {
@@ -906,8 +1006,73 @@ mod tests {
     }
 
     #[test]
+    fn callback_pushes_its_samples_and_then_a_header() {
+        let (mut tracker, sender, status_receiver, mut consumer) = test_tracker();
+        sender
+            .send(play(WaveformId::Program(0), marked(MarkId::TopLevel, 0.5)))
+            .unwrap();
+        let mut out = vec![0.0f32; 64];
+        tracker.callback(&mut out);
+
+        let status = status_receiver.try_recv().unwrap();
+        let (header, samples) = pop_callback(&mut consumer);
+        assert_eq!(
+            header,
+            SampleHeader {
+                buffer_start: status.buffer_start,
+                written: out.len(),
+                dropped: 0,
+            }
+        );
+        assert_eq!(samples, out);
+        assert!(consumer.headers.is_empty());
+        assert!(consumer.samples.is_empty());
+    }
+
+    #[test]
+    fn callback_without_room_for_its_samples_counts_them_as_dropped() {
+        // Room for the first buffer but not the second.
+        let (mut tracker, _sender, _status_receiver, mut consumer) = test_tracker_with_rings(96, 4);
+        let mut out = vec![0.0f32; 64];
+        tracker.callback(&mut out);
+        tracker.callback(&mut out);
+        assert_eq!(
+            consumer.headers.slots(),
+            1,
+            "only the first buffer is pushed"
+        );
+
+        let (first, _) = pop_callback(&mut consumer);
+        assert_eq!(first.dropped, 0);
+        tracker.callback(&mut out);
+        let (next, samples) = pop_callback(&mut consumer);
+        assert_eq!(next.dropped, out.len());
+        assert_eq!(samples.len(), out.len());
+    }
+
+    #[test]
+    fn callback_without_room_for_its_header_pushes_nothing() {
+        let (mut tracker, _sender, _status_receiver, mut consumer) =
+            test_tracker_with_rings(256, 1);
+        let mut out = vec![0.0f32; 64];
+        tracker.callback(&mut out);
+        let samples_held = consumer.samples.slots();
+        tracker.callback(&mut out);
+        assert_eq!(
+            consumer.samples.slots(),
+            samples_held,
+            "no samples are pushed without room for their header"
+        );
+
+        pop_callback(&mut consumer);
+        tracker.callback(&mut out);
+        let (next, _) = pop_callback(&mut consumer);
+        assert_eq!(next.dropped, out.len());
+    }
+
+    #[test]
     fn modify_all_keys_rewrites_every_key_waveform() {
-        let (mut tracker, sender, _status_receiver) = test_tracker();
+        let (mut tracker, sender, _status_receiver, _samples) = test_tracker();
         let mut out = vec![0.0f32; 64];
 
         sender
@@ -935,7 +1100,7 @@ mod tests {
 
     #[test]
     fn modify_only_selector_targets_one_waveform() {
-        let (mut tracker, sender, _status_receiver) = test_tracker();
+        let (mut tracker, sender, _status_receiver, _samples) = test_tracker();
         let mut out = vec![0.0f32; 64];
 
         sender
@@ -960,7 +1125,7 @@ mod tests {
 
     #[test]
     fn remove_pending_program_voices_removes_program_and_step_waveforms() {
-        let (mut tracker, sender, status_receiver) = test_tracker();
+        let (mut tracker, sender, status_receiver, _samples) = test_tracker();
         let mut out = vec![0.0f32; 64];
 
         let start = Some(Instant::now() + Duration::from_secs(60));
@@ -996,7 +1161,7 @@ mod tests {
 
     #[test]
     fn remove_pending_after_keeps_current_cycle_and_clears_repeat() {
-        let (mut tracker, sender, status_receiver) = test_tracker();
+        let (mut tracker, sender, status_receiver, _samples) = test_tracker();
         let mut out = vec![0.0f32; 64];
 
         let now = Instant::now();
@@ -1091,12 +1256,14 @@ mod tests {
 
         let (command_sender, command_receiver) = mpsc::channel();
         let (status_sender, _status_receiver) = mpsc::channel();
+        let (sample_producer, _sample_consumer) = sample_rings(64, 1);
         let mut tracker = Tracker::new(
             8000,
             dir.clone(),
             "tuun_run".to_string(),
             command_receiver,
             status_sender,
+            sample_producer,
             Duration::ZERO,
         );
 
@@ -1188,7 +1355,7 @@ mod tests {
 
     #[test]
     fn alternating_repeats_cover_buffer_start_when_the_audio_clock_runs_fast() {
-        let (mut tracker, sender, status_receiver) = test_tracker();
+        let (mut tracker, sender, status_receiver, _samples) = test_tracker();
         play_alternating_beats(&sender, Duration::from_millis(100));
 
         // Calling back without waiting generates samples far faster than
@@ -1204,7 +1371,7 @@ mod tests {
 
     #[test]
     fn alternating_repeats_cover_buffer_start_when_the_audio_clock_runs_slow() {
-        let (mut tracker, sender, status_receiver) = test_tracker();
+        let (mut tracker, sender, status_receiver, _samples) = test_tracker();
         play_alternating_beats(&sender, Duration::from_millis(50));
 
         // Waiting longer than each 8ms buffer between callbacks generates
