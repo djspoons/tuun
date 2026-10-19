@@ -32,6 +32,6 @@ How should the new sample path and scope views be tested? In particular:
 - **Acceptance on the dev's machine:**
   - the tracker's `allocations` metric is unchanged from before;
   - render time and `renderer_load` stay within the 60 Hz frame budget with Scan showing;
-  - by eye: an envelope sweeps across two measures; clipping ticks show in yellow and red; a source reload shows as a gap; Ctrl+S switches views and shows the status message; `--scope-view scan` starts in Scan; `--snapshot-refresh-ms` changes how often Snapshot and the spectrum redraw.
+  - by eye: an envelope sweeps across two measures; clipping ticks show in yellow and red; Ctrl+S switches views and shows the status message; `--scope-view scan` starts in Scan; `--snapshot-refresh-ms` changes how often Snapshot and the spectrum redraw.
 - **`--show-loop-timing` is temporary.** Its level of detail doesn't need to outlive the main-thread work. The acceptance check relies on the metrics already on `main` (`allocations`, `renderer_load`). If the loop timing is needed, it is brought in as one self-contained commit (from `claude/main-thread`) and reverted afterwards; nothing in this work depends on it.
-
+- **Gaps are checked by unit tests only.** A source reload no longer stalls the main thread (it runs on the processing thread on `main`), so there is no easy way to make a gap by hand; the `scope.rs` tests cover turning dropped counts into gap columns.

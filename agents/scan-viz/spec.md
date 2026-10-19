@@ -195,10 +195,10 @@ Run the checks in `CLAUDE.md` § Build & Test Verification (`cargo build`, `carg
 - By eye:
   - an envelope sweeps across two measures, with the previous pass dimmed ahead of the head and lines at both measure starts;
   - clipping ticks show in yellow and red;
-  - a source reload (Cmd+R) shows as a hatched gap;
   - Ctrl+S switches views in each editor mode and shows the status message, without typing an "s" in Edit mode or playing a note in Keys mode;
   - `--scope-view scan` starts in Scan;
   - `--snapshot-refresh-ms` changes how often Snapshot and the spectrum redraw, in both views.
+- Gaps (the hatch for dropped samples) have no by-eye check: a source reload runs on the processing thread, so nothing easily stalls the main thread long enough to drop samples. The `scope.rs` tests (§6) cover them.
 
 `--show-loop-timing` is not needed. If it is, bring it in from `claude/main-thread` as one commit and revert it afterwards; nothing here depends on it.
 
