@@ -40,6 +40,8 @@ pub mod recorder;
 #[cfg(feature = "native")]
 pub mod renderer;
 #[cfg(feature = "native")]
+pub mod scope;
+#[cfg(feature = "native")]
 pub mod sdl2_input;
 #[cfg(feature = "native")]
 pub mod sequencer;

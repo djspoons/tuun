@@ -15,6 +15,7 @@ use crate::launchkey;
 use crate::metric::Metric;
 use crate::programs::{PROGRAMS_PER_BANK, SliderDisplay};
 use crate::recorder::{Finish, Phase};
+use crate::scope;
 use crate::tracker;
 
 fn make_texture<'t>(
@@ -59,8 +60,11 @@ pub struct Renderer<'ttf> {
     nav_width: u32,
 
     last_message: String,
+    // Snapshot's samples and their spectrum, refreshed every `snapshot_refresh`.
     samples: Vec<f32>,
     spectrum: Vec<Complex<f32>>,
+    snapshot_refresh: Duration,
+    next_snapshot_refresh: Instant,
 }
 
 pub struct Metrics {
@@ -86,6 +90,7 @@ impl<'ttf> Renderer<'ttf> {
         tempo: u32,
         beats_per_measure: u32,
         sample_rate: u32,
+        snapshot_refresh: Duration,
     ) -> Renderer<'ttf> {
         let video_subsystem = sdl_context.video().unwrap();
         let display_mode = video_subsystem
@@ -141,14 +146,20 @@ impl<'ttf> Renderer<'ttf> {
             last_message: String::new(),
             samples: Vec::new(),
             spectrum: Vec::new(),
+            snapshot_refresh,
+            next_snapshot_refresh: Instant::now(),
         }
     }
 
     /// Draws and presents one frame that was due at `due`.
+    ///
+    /// Snapshot and the spectrum show `scope`'s latest samples as of their last
+    /// refresh, at most one `snapshot_refresh` before `due`.
     pub fn render(
         &mut self,
         state: &AppState,
         status: &tracker::Status<WaveformId, MarkId>,
+        scope: &scope::Scope,
         metrics: &mut Metrics,
         encoder_mode: Option<launchkey::EncoderMode>,
         due: Instant,
@@ -172,18 +183,21 @@ impl<'ttf> Renderer<'ttf> {
         self.canvas.set_draw_color(Color::RGB(0x00, 0x00, 0x00));
         self.canvas.clear();
 
-        // Save the new buffer if present
-        if let Some(buffer) = &status.buffer {
-            self.samples = buffer.clone();
-            let mut planner = RealFftPlanner::<f32>::new();
-            let fft = planner.plan_fft_forward(self.samples.len());
-            let mut input = fft.make_input_vec();
-            for (i, f) in self.samples.iter().enumerate() {
-                input[i] = *f;
-            }
-            self.spectrum = fft.make_output_vec();
-            if let Err(e) = fft.process(&mut input, &mut self.spectrum) {
-                println!("Error processing FFT: {}", e);
+        if due >= self.next_snapshot_refresh {
+            self.next_snapshot_refresh = due + self.snapshot_refresh;
+            self.samples.clear();
+            self.samples.extend(scope.snapshot());
+            if !self.samples.is_empty() {
+                let mut planner = RealFftPlanner::<f32>::new();
+                let fft = planner.plan_fft_forward(self.samples.len());
+                let mut input = fft.make_input_vec();
+                for (i, f) in self.samples.iter().enumerate() {
+                    input[i] = *f;
+                }
+                self.spectrum = fft.make_output_vec();
+                if let Err(e) = fft.process(&mut input, &mut self.spectrum) {
+                    println!("Error processing FFT: {}", e);
+                }
             }
         }
         // Draw the most recent sample buffer

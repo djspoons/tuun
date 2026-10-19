@@ -26,7 +26,6 @@ fn played(
     let status = tracker::Status {
         buffer_start: Instant::now(),
         marks: Vec::new(),
-        buffer: None,
         tracker_load: None,
         allocations: None,
     };

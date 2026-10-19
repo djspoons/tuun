@@ -61,7 +61,6 @@ pub enum Command<I: Id, M> {
         selector: I::Selector,
         after: Option<Instant>,
     },
-    SendCurrentBuffer,
 }
 
 #[derive(Debug, Clone)]
@@ -84,8 +83,6 @@ where
     // Marks for each active waveform as well as any pending waveforms; a mark may appear more
     // than once if a given waveform is both active and pending
     pub marks: Vec<Mark<I, M>>,
-    // Some status updates will include the current buffer
-    pub buffer: Option<Vec<f32>>,
     // The current tracker load, the ratio of sample frequency to samples generated per second
     pub tracker_load: Option<f32>,
     // The number of buffers allocated while generating this status's buffer
@@ -250,8 +247,6 @@ where
     // Distinguishes the files captured during one run, which share a prefix, and which share a
     // file stem too whenever concurrent voices of one program capture at once.
     next_capture_serial: u64,
-    // Command state
-    send_current_buffer: bool,
 }
 
 impl<'a, I, M> Tracker<'a, I, M>
@@ -291,8 +286,6 @@ where
             active_waveforms: Vec::new(),
             pending_waveforms: Vec::new(),
             next_capture_serial: 0,
-
-            send_current_buffer: false,
         }
     }
 
@@ -522,7 +515,6 @@ where
             marks: Vec::new(),
             tracker_load: None,
             allocations: None,
-            buffer: None,
         };
 
         // Now generate!
@@ -544,13 +536,6 @@ where
         }
         for pending in &self.pending_waveforms {
             status_to_send.marks.extend_from_slice(&pending.marks);
-        }
-
-        if self.send_current_buffer {
-            let mut copy: Vec<f32> = Vec::with_capacity(out.len());
-            out.clone_into(&mut copy);
-            status_to_send.buffer = Some(copy);
-            self.send_current_buffer = false;
         }
 
         self.status_sender.send(status_to_send).unwrap();
@@ -705,9 +690,6 @@ where
                         }
                     }
                 }
-            }
-            Command::SendCurrentBuffer => {
-                self.send_current_buffer = true;
             }
         }
     }
@@ -1229,7 +1211,6 @@ mod tests {
                 ),
                 mark(WaveformId::Key(60), now - Duration::from_secs(1)),
             ],
-            buffer: None,
             tracker_load: None,
             allocations: None,
         };

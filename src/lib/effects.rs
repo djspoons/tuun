@@ -709,7 +709,6 @@ mod tests {
         tracker::Status {
             buffer_start: Instant::now(),
             marks: vec![],
-            buffer: None,
             tracker_load: None,
             allocations: None,
         }

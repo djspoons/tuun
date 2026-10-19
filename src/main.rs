@@ -20,12 +20,12 @@ use tuun::midi_input;
 use tuun::player;
 use tuun::processing;
 use tuun::renderer;
+use tuun::scope;
 use tuun::sdl2_input;
 use tuun::tracker;
 
 use metric::Metric;
 use renderer::Renderer;
-use tracker::Command;
 use tuun::ids::{MarkId, WaveformId};
 
 #[derive(ClapParser, Debug)]
@@ -68,6 +68,10 @@ struct Args {
     input_file: String,
     #[arg(short = 'O', long, default_value = ".")]
     output_dir: String, // Captures waveforms to the specified directory
+    /// How often, in milliseconds, the Snapshot scope view and the spectrum
+    /// redraw.
+    #[arg(long, default_value_t = 200)]
+    snapshot_refresh_ms: u64,
 }
 
 /// The number of sample headers the tracker's header ring holds: far more
@@ -205,7 +209,7 @@ pub fn main() {
         channels: Some(1), // mono
         samples: Some(args.buffer_size),
     };
-    let (sample_producer, _sample_consumer) =
+    let (sample_producer, sample_consumer) =
         tracker::sample_rings(args.sample_rate as usize, SAMPLE_HEADER_CAPACITY);
     let device = audio_subsystem
         .open_playback(None, &desired_spec, |spec| {
@@ -320,8 +324,18 @@ pub fn main() {
         args.tempo,
         args.beats_per_measure,
         args.sample_rate,
+        Duration::from_millis(args.snapshot_refresh_ms),
     );
     renderer.video_subsystem.text_input().start();
+    // Scan shows two measures across the window, one column per pixel.
+    let scan_window =
+        Duration::from_secs_f64(2.0 * args.beats_per_measure as f64 * 60.0 / args.tempo as f64);
+    let mut scope = scope::Scope::new(
+        sample_consumer,
+        args.sample_rate,
+        scan_window,
+        renderer.width as usize,
+    );
     let mut event_pump = sdl_context.event_pump().unwrap();
 
     let sdl2_handler =
@@ -348,7 +362,6 @@ pub fn main() {
     let mut status = tracker::Status {
         buffer_start: Instant::now(),
         marks: Vec::new(),
-        buffer: None,
         tracker_load: None,
         allocations: None,
     };
@@ -358,9 +371,6 @@ pub fn main() {
         renderer_load: Metric::new(Duration::from_secs(10), 100),
     };
 
-    const BUFFER_REFRESH_INTERVAL: Duration = Duration::from_millis(200);
-    let mut next_buffer_refresh = Instant::now();
-    command_sender.send(Command::SendCurrentBuffer).unwrap();
     // Push the initial encoder + DAW-mode display state to the controller
     // if present.
     {
@@ -384,7 +394,7 @@ pub fn main() {
 
         // Sleep until an input or a wake event arrives, or until the next
         // deadline.
-        let mut deadline = next_render.min(next_buffer_refresh);
+        let mut deadline = next_render;
         if let Some(tick) = state.next_take_tick() {
             deadline = deadline.min(tick);
         }
@@ -400,6 +410,8 @@ pub fn main() {
         while let Ok(tracker_status) = status_receiver.try_recv() {
             apply_status(tracker_status, &mut metrics, &mut status);
         }
+        // Like statuses, samples don't wake the loop.
+        scope.drain(scope::measure_origin(&status));
 
         // Before input, so that an input in this pass sees the results.
         loop {
@@ -468,11 +480,6 @@ pub fn main() {
             }
         }
 
-        if next_buffer_refresh <= Instant::now() {
-            command_sender.send(Command::SendCurrentBuffer).unwrap();
-            next_buffer_refresh = Instant::now() + BUFFER_REFRESH_INTERVAL;
-        }
-
         if state.take_tick_due(Instant::now()) {
             dispatch_actions(
                 &mut effect_runner,
@@ -492,6 +499,7 @@ pub fn main() {
             renderer.render(
                 &state,
                 &status,
+                &scope,
                 &mut metrics,
                 launchkey.as_ref().map(|l| l.encoder_mode),
                 due,
