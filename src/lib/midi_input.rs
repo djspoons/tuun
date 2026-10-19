@@ -162,7 +162,7 @@ pub fn update_launchkey_state(
     });
 
     let now = Instant::now();
-    let (_current_beat, current_beat_start, current_beat_duration) =
+    let (_current_beat, current_beat_start, current_beat_duration, _even_measure) =
         renderer::current_beat_info(now, status);
 
     launchkey.set_record_brightness(match &state.mode {

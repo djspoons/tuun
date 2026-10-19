@@ -196,7 +196,7 @@ impl<'ttf> Renderer<'ttf> {
 
         // TODO so much clean-up
         let now = Instant::now();
-        let (current_beat, current_beat_start, current_beat_duration) =
+        let (current_beat, current_beat_start, current_beat_duration, even_measure) =
             current_beat_info(now, status);
         // Alpha for things that fade over the beat: opaque at its start.
         let beat_fade = u8::MAX
@@ -714,6 +714,32 @@ impl<'ttf> Renderer<'ttf> {
             )
             .unwrap();
 
+        // Mark odd and even measures with two bars under the "N / M" part of
+        // the beat, the current measure's bar lit.
+        let beat_x = self.width as i32 - beat_width as i32 - 20;
+        let baseline = self.height as i32 - beat_height as i32 - 20 + self.beat_font.ascent();
+        let bars_width = self
+            .beat_font
+            .size_of(&format!("{} / {}", current_beat, self.beats_per_measure))
+            .unwrap()
+            .0;
+        let bar_width = bars_width / 2 - 1;
+        for (i, lit) in [!even_measure, even_measure].into_iter().enumerate() {
+            self.canvas.set_draw_color(if lit {
+                ACTIVE_COLOR
+            } else {
+                SCAN_PREVIOUS_COLORS[0]
+            });
+            self.canvas
+                .fill_rect(Rect::new(
+                    beat_x + i as i32 * (bars_width / 2 + 1) as i32,
+                    baseline + 10,
+                    bar_width,
+                    6,
+                ))
+                .unwrap();
+        }
+
         // Draw some internal metrics
         let metrics_height = self.height / 2 - beat_height - 40;
         let metrics_width = 200;
@@ -1030,15 +1056,18 @@ pub fn beat_phase(now: Instant, beat_start: Instant, beat_duration: Duration) ->
         .min(1.0)
 }
 
+/// Returns the beat playing at `status.buffer_start`: its number within the
+/// measure, its start, its duration, and whether its measure is even.
 pub fn current_beat_info(
     now: Instant,
     status: &tracker::Status<WaveformId, MarkId>,
-) -> (u32, Instant, Duration) {
+) -> (u32, Instant, Duration, bool) {
     let mut current_beat = 0;
     let mut current_beat_start = now;
     let mut current_beat_duration = Duration::from_secs(1);
+    let mut even_measure = false;
     for mark in status.marks.iter() {
-        if let WaveformId::Beats(_) = mark.waveform_id {
+        if let WaveformId::Beats(even) = mark.waveform_id {
             // XXX sometimes this doesn't match anything?
             if let Some(duration) = mark.duration
                 && mark.start <= status.buffer_start
@@ -1048,6 +1077,7 @@ pub fn current_beat_info(
                 current_beat = beat;
                 current_beat_start = mark.start;
                 current_beat_duration = duration;
+                even_measure = even;
             }
         }
     }
@@ -1057,5 +1087,10 @@ pub fn current_beat_info(
             status.buffer_start, status.marks
         );
     }
-    (current_beat, current_beat_start, current_beat_duration)
+    (
+        current_beat,
+        current_beat_start,
+        current_beat_duration,
+        even_measure,
+    )
 }
