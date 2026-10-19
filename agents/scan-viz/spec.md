@@ -135,7 +135,7 @@ From [Switching scope views](tickets/05-switching-scope-views.md).
 - Right after the status drain, call `scope.drain(scope::measure_origin(&status))`. Like statuses, samples don't wake the loop; it already wakes at least once a frame to render.
 - Pass `&scope` to `renderer.render`.
 
-The main-thread work map (`agents/main-thread/` on `claude/main-thread`) owns the loop's design. If that branch has changed the loop by the time this lands, keep these changes as small as above and fit them to its shape.
+The loop's design comes from the main-thread work map (`agents/main-thread/` on `claude/main-thread`), now on `main`: it sleeps in `wait_event_timeout`, collects processing-thread replies, and renders at most once per `renderer::FRAME_BUDGET`. Keep these changes as small as above.
 
 ## 5. Drawing (`src/lib/renderer.rs`)
 
