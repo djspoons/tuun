@@ -17,6 +17,7 @@ use crate::launchkey;
 use crate::player;
 use crate::programs::{self, BoundTo, PROGRAMS_PER_BANK, Program};
 use crate::recorder::{self, Closed, Finish, Phase, Response, Take, Tick};
+use crate::scope;
 use crate::sequencer;
 use crate::tracker;
 use crate::waveform;
@@ -172,6 +173,8 @@ pub struct AppState {
     pub sequencer_page: u8,
     /// Whether the metronome clicks on every beat.
     pub metronome: bool,
+    /// Which scope view the screen draws.
+    pub scope_view: scope::ScopeView,
     /// Set by `Effect::Exit`; `main` checks at top of loop and breaks.
     pub should_exit: bool,
     /// Last user-visible status message. Set by `Effect::ShowMessage` (and
@@ -206,6 +209,7 @@ impl AppState {
             daw_pad_mode: DawPadMode::ClipLauncher,
             sequencer_page: 0,
             metronome: false,
+            scope_view: scope::ScopeView::Snapshot,
             should_exit: false,
             message,
             processing: VecDeque::new(),
@@ -454,6 +458,9 @@ pub enum Action {
     ToggleLaunchMode,
     /// Turn the metronome click on or off.
     ToggleMetronome,
+    /// Switch the screen between `scope::ScopeView::Snapshot` and
+    /// `scope::ScopeView::Scan`.
+    ToggleScopeView,
 
     // --- program-related I/O and other effects ---
     ShowMessage(String),
@@ -950,6 +957,14 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             vec![Effect::ShowMessage(format!(
                 "Launch mode: {}",
                 state.launch_mode.display_name()
+            ))]
+        }
+
+        Action::ToggleScopeView => {
+            state.scope_view = state.scope_view.toggled();
+            vec![Effect::ShowMessage(format!(
+                "Scope view: {}",
+                state.scope_view.display_name()
             ))]
         }
 
@@ -3393,6 +3408,26 @@ _ = saw(220);";
     }
 
     #[test]
+    fn toggle_scope_view_flips_the_view_and_says_so() {
+        let mut state = test_state();
+        assert_eq!(state.scope_view, scope::ScopeView::Snapshot);
+        let effects = apply_with_empty_status(&mut state, Action::ToggleScopeView);
+        assert_eq!(state.scope_view, scope::ScopeView::Scan);
+        assert!(
+            matches!(&effects[..], [Effect::ShowMessage(m)] if m == "Scope view: Scan"),
+            "expected the Scan message, got {:?}",
+            effects
+        );
+        let effects = apply_with_empty_status(&mut state, Action::ToggleScopeView);
+        assert_eq!(state.scope_view, scope::ScopeView::Snapshot);
+        assert!(
+            matches!(&effects[..], [Effect::ShowMessage(m)] if m == "Scope view: Snapshot"),
+            "expected the Snapshot message, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
     fn toggle_metronome_flips_the_click_on_and_off() {
         let mut state = test_state();
         assert!(!state.metronome);
@@ -4349,6 +4384,31 @@ _ = saw(220);";
 
     fn record() -> Action {
         Action::Transport(Transport::Record)
+    }
+
+    #[test]
+    fn scope_view_toggles_while_editing_or_recording() {
+        let mut state = editing_state();
+        assert!(matches!(state.mode, Mode::Edit { .. }));
+        let effects = apply_with_empty_status(&mut state, Action::ToggleScopeView);
+        assert_eq!(state.scope_view, scope::ScopeView::Scan);
+        assert!(
+            matches!(&effects[..], [Effect::ShowMessage(_)]),
+            "expected a message in Edit mode, got {:?}",
+            effects
+        );
+
+        let t0 = Instant::now();
+        let mut state = record_state(RECORD_SOURCE, 1);
+        apply_at(&mut state, t0, 1.0, record());
+        assert!(matches!(state.mode, Mode::Record { .. }));
+        let effects = apply_at(&mut state, t0, 1.5, Action::ToggleScopeView);
+        assert_eq!(state.scope_view, scope::ScopeView::Scan);
+        assert!(
+            matches!(&effects[..], [Effect::ShowMessage(_)]),
+            "expected a message in Record mode, got {:?}",
+            effects
+        );
     }
 
     #[test]

@@ -10,6 +10,58 @@ use crate::tracker;
 /// The number of output samples Snapshot shows.
 pub const SNAPSHOT_LEN: usize = 2048;
 
+/// Which scope view the screen draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScopeView {
+    /// The latest output samples.
+    #[default]
+    Snapshot,
+    /// The output's range over two measures, swept left to right.
+    Scan,
+}
+
+impl ScopeView {
+    /// Returns the other scope view.
+    pub fn toggled(self) -> ScopeView {
+        match self {
+            ScopeView::Snapshot => ScopeView::Scan,
+            ScopeView::Scan => ScopeView::Snapshot,
+        }
+    }
+
+    /// Returns the name shown to the user.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            ScopeView::Snapshot => "Snapshot",
+            ScopeView::Scan => "Scan",
+        }
+    }
+}
+
+impl std::str::FromStr for ScopeView {
+    type Err = String;
+
+    fn from_str(view: &str) -> Result<ScopeView, String> {
+        match view {
+            "snapshot" => Ok(ScopeView::Snapshot),
+            "scan" => Ok(ScopeView::Scan),
+            other => Err(format!(
+                "expected \"snapshot\" or \"scan\", got \"{}\"",
+                other
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for ScopeView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ScopeView::Snapshot => "snapshot",
+            ScopeView::Scan => "scan",
+        })
+    }
+}
+
 /// How close an output range comes to clipping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClipLevel {
@@ -549,5 +601,20 @@ mod tests {
             ])),
             Some(now + Duration::from_secs(4))
         );
+    }
+
+    #[test]
+    fn scope_view_parses_and_toggles() {
+        assert_eq!("snapshot".parse(), Ok(ScopeView::Snapshot));
+        assert_eq!("scan".parse(), Ok(ScopeView::Scan));
+        assert!("Scan".parse::<ScopeView>().is_err());
+        assert!("".parse::<ScopeView>().is_err());
+        for view in [ScopeView::Snapshot, ScopeView::Scan] {
+            assert_eq!(view.to_string().parse(), Ok(view));
+        }
+
+        assert_eq!(ScopeView::default(), ScopeView::Snapshot);
+        assert_eq!(ScopeView::Snapshot.toggled(), ScopeView::Scan);
+        assert_eq!(ScopeView::Scan.toggled(), ScopeView::Snapshot);
     }
 }

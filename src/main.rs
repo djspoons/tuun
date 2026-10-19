@@ -68,6 +68,10 @@ struct Args {
     input_file: String,
     #[arg(short = 'O', long, default_value = ".")]
     output_dir: String, // Captures waveforms to the specified directory
+    /// Which scope view the screen starts in: snapshot or scan. Ctrl+S
+    /// switches between them.
+    #[arg(long, default_value_t = scope::ScopeView::Snapshot)]
+    scope_view: scope::ScopeView,
     /// How often, in milliseconds, the Snapshot scope view and the spectrum
     /// redraw.
     #[arg(long, default_value_t = 200)]
@@ -101,6 +105,7 @@ pub fn main() {
             process::exit(1);
         }
     };
+    state.scope_view = args.scope_view;
 
     if !args.ui {
         println!("Starting in non-UI mode");

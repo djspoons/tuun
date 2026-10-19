@@ -40,6 +40,8 @@ const ACTIVE_COLOR: Color = Color::RGB(0x00, 0xFF, 0x00);
 const EDIT_COLOR: Color = Color::RGB(0xFF, 0xFF, 0xFF);
 const ERROR_COLOR: Color = Color::RGB(0xFF, 0xDE, 0x21);
 const RECORD_COLOR: Color = Color::RGB(0xFF, 0x00, 0x00);
+/// Scan's measure lines: `INACTIVE_COLOR` at about 30% brightness.
+const SCAN_MEASURE_COLOR: Color = Color::RGB(0x00, 0x4C, 0x4C);
 
 pub struct Renderer<'ttf> {
     pub video_subsystem: sdl2::VideoSubsystem,
@@ -200,57 +202,12 @@ impl<'ttf> Renderer<'ttf> {
                 }
             }
         }
-        // Draw the most recent sample buffer
-        if !self.samples.is_empty() {
-            // Draw the waveform
-            let x_scale = self.width as f32 / (self.samples.len() + 1) as f32;
-            let waveform_height = self.height * 3 / 5;
-            if !self.samples.is_empty() {
-                self.canvas.set_draw_color(Color::RGB(0x00, 0xFF, 0x00));
-                let mut last_y = (waveform_height as f32
-                    - ((self.samples[0] + 1.0) * (waveform_height as f32 / 2.4)))
-                    as i32;
-                for (i, f) in self.samples.iter().enumerate() {
-                    let x = (i as f32 * x_scale) as i32;
-                    let y = (waveform_height as f32 - ((f + 1.0) * (waveform_height as f32 / 2.4)))
-                        as i32;
-                    if f.abs() <= 0.95 {
-                        self.canvas.set_draw_color(Color::RGB(0x00, 0xFF, 0x00));
-                    } else if f.abs() <= 1.0 {
-                        self.canvas.set_draw_color(Color::RGB(0xFF, 0xDE, 0x21));
-                    } else {
-                        self.canvas.set_draw_color(Color::RGB(0xFF, 0x00, 0x00));
-                    }
-                    self.canvas
-                        .draw_line((x, last_y), (x + x_scale as i32, y))
-                        .unwrap();
-                    last_y = y;
-                }
-            }
-
-            // Draw the spectrum
-            if !self.spectrum.is_empty() {
-                let spectrum_height = self.height - waveform_height;
-                fn as_scalar(c: &Complex<f32>) -> f32 {
-                    c.abs().log10()
-                }
-                let y_scale_max = -self
-                    .spectrum
-                    .iter()
-                    .map(as_scalar)
-                    .reduce(f32::max)
-                    .unwrap();
-                self.canvas.set_draw_color(Color::RGB(0xFF, 0x00, 0x00));
-                let mut last_y = (waveform_height + 300) as i32; // i.e., 0
-                for (i, c) in self.spectrum.iter().enumerate() {
-                    let x = ((i * 10) as f32 * x_scale) as i32;
-                    let y = (as_scalar(c) / y_scale_max * spectrum_height as f32
-                        + (waveform_height + 300) as f32) as i32;
-                    self.canvas.draw_line((x, last_y), (x + 9, y)).unwrap();
-                    last_y = y;
-                }
-            }
+        let scope_height = self.height * 3 / 5;
+        match state.scope_view {
+            scope::ScopeView::Snapshot => self.draw_snapshot(scope_height),
+            scope::ScopeView::Scan => self.draw_scan(scope, scope_height),
         }
+        self.draw_spectrum(scope_height);
 
         let mut y = 10;
         let bank_start = active_program_index - (active_program_index % PROGRAMS_PER_BANK);
@@ -779,6 +736,82 @@ impl<'ttf> Renderer<'ttf> {
         metrics
             .renderer_load
             .set_max(due.elapsed().div_duration_f32(FRAME_BUDGET));
+    }
+
+    /// Draws Snapshot's samples as a waveform in the top `waveform_height`
+    /// pixels.
+    fn draw_snapshot(&mut self, waveform_height: u32) {
+        if self.samples.is_empty() {
+            return;
+        }
+        let x_scale = self.width as f32 / (self.samples.len() + 1) as f32;
+        self.canvas.set_draw_color(Color::RGB(0x00, 0xFF, 0x00));
+        let mut last_y = (waveform_height as f32
+            - ((self.samples[0] + 1.0) * (waveform_height as f32 / 2.4)))
+            as i32;
+        for (i, f) in self.samples.iter().enumerate() {
+            let x = (i as f32 * x_scale) as i32;
+            let y = (waveform_height as f32 - ((f + 1.0) * (waveform_height as f32 / 2.4))) as i32;
+            if f.abs() <= 0.95 {
+                self.canvas.set_draw_color(Color::RGB(0x00, 0xFF, 0x00));
+            } else if f.abs() <= 1.0 {
+                self.canvas.set_draw_color(Color::RGB(0xFF, 0xDE, 0x21));
+            } else {
+                self.canvas.set_draw_color(Color::RGB(0xFF, 0x00, 0x00));
+            }
+            self.canvas
+                .draw_line((x, last_y), (x + x_scale as i32, y))
+                .unwrap();
+            last_y = y;
+        }
+    }
+
+    /// Draws Scan's columns in the top `scope_height` pixels, one pixel column
+    /// per column of `scope`.
+    fn draw_scan(&mut self, scope: &scope::Scope, scope_height: u32) {
+        // TODO draw each column's range, clipping and gaps; for now, only the
+        // measure lines and the write head.
+        let columns: Vec<scope::ScanColumn> = scope.scan_columns().collect();
+        self.canvas.set_draw_color(SCAN_MEASURE_COLOR);
+        for x in [0, columns.len() as i32 / 2] {
+            self.canvas
+                .draw_line((x, 0), (x, scope_height as i32))
+                .unwrap();
+        }
+        if let Some(head) = columns.iter().position(|c| *c == scope::ScanColumn::Head) {
+            self.canvas.set_draw_color(INACTIVE_COLOR);
+            self.canvas
+                .fill_rect(sdl2::rect::Rect::new(head as i32, 0, 2, scope_height))
+                .unwrap();
+        }
+    }
+
+    /// Draws the spectrum of Snapshot's samples below the top `waveform_height`
+    /// pixels.
+    fn draw_spectrum(&mut self, waveform_height: u32) {
+        if self.samples.is_empty() || self.spectrum.is_empty() {
+            return;
+        }
+        let x_scale = self.width as f32 / (self.samples.len() + 1) as f32;
+        let spectrum_height = self.height - waveform_height;
+        fn as_scalar(c: &Complex<f32>) -> f32 {
+            c.abs().log10()
+        }
+        let y_scale_max = -self
+            .spectrum
+            .iter()
+            .map(as_scalar)
+            .reduce(f32::max)
+            .unwrap();
+        self.canvas.set_draw_color(Color::RGB(0xFF, 0x00, 0x00));
+        let mut last_y = (waveform_height + 300) as i32; // i.e., 0
+        for (i, c) in self.spectrum.iter().enumerate() {
+            let x = ((i * 10) as f32 * x_scale) as i32;
+            let y = (as_scalar(c) / y_scale_max * spectrum_height as f32
+                + (waveform_height + 300) as f32) as i32;
+            self.canvas.draw_line((x, last_y), (x + 9, y)).unwrap();
+            last_y = y;
+        }
     }
 
     /// Draws the large circle around the slot number on the row at `y`.

@@ -115,6 +115,17 @@ impl InputHandler {
         // gui_mod is "command" on a Mac
         let gui_mod = keymod.contains(Mod::LGUIMOD) || keymod.contains(Mod::RGUIMOD);
         let shift = keymod.contains(Mod::LSHIFTMOD) || keymod.contains(Mod::RSHIFTMOD);
+        // Ctrl+S switches the scope view in every mode, once per press: a held
+        // chord's auto-repeat would flip it back and forth.
+        if let Some(Scancode::S) = scancode
+            && ctrl
+        {
+            return Some(if repeat {
+                vec![]
+            } else {
+                vec![Action::ToggleScopeView]
+            });
+        }
         // Keys mode: piano keystrokes → NoteOn (suppress on auto-repeat so a
         // held key doesn't retrigger), Escape leaves keys mode, Ctrl+C still
         // exits.
@@ -349,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn record_mode_accepts_only_ctrl_c() {
+    fn record_mode_accepts_only_ctrl_c_and_ctrl_s() {
         let handler = InputHandler::new(true, 800, 600);
         let now = Instant::now();
         let state = test_state(Mode::Record {
@@ -358,6 +369,8 @@ mod tests {
         });
         let exit = handler.classify_keydown(Some(Scancode::C), Mod::LCTRLMOD, false, &state);
         assert!(matches!(exit.as_deref(), Some([Action::Exit])));
+        let toggle = handler.classify_keydown(Some(Scancode::S), Mod::LCTRLMOD, false, &state);
+        assert!(matches!(toggle.as_deref(), Some([Action::ToggleScopeView])));
         for (scancode, keymod) in [
             (Scancode::Return, Mod::NOMOD),
             (Scancode::Escape, Mod::NOMOD),
@@ -441,6 +454,60 @@ mod tests {
             matches!(actions[0], Action::Exit),
             "expected Exit, got {:?}",
             actions[0]
+        );
+    }
+
+    #[test]
+    fn ctrl_s_toggles_the_scope_view_in_every_mode() {
+        let handler = InputHandler::new(true, 800, 600);
+        let now = Instant::now();
+        for mode in [
+            Mode::Select,
+            Mode::Edit {
+                cursor_position: 0,
+                errors: vec![],
+                completion: None,
+            },
+            Mode::MoveSliders,
+            Mode::Keys,
+            Mode::Record {
+                take: recorder::Take::arm("kb".to_string(), 60, now, now),
+                keys_program: 0,
+            },
+        ] {
+            let state = test_state(mode);
+            for keymod in [Mod::LCTRLMOD, Mod::RCTRLMOD] {
+                let actions = handler.classify_keydown(Some(Scancode::S), keymod, false, &state);
+                assert!(
+                    matches!(actions.as_deref(), Some([Action::ToggleScopeView])),
+                    "{:?} with {:?} gave {:?}",
+                    state.mode,
+                    keymod,
+                    actions
+                );
+            }
+            // A held chord's auto-repeat doesn't toggle again.
+            let actions = handler.classify_keydown(Some(Scancode::S), Mod::LCTRLMOD, true, &state);
+            assert!(
+                matches!(actions.as_deref(), Some([])),
+                "{:?} on repeat gave {:?}",
+                state.mode,
+                actions
+            );
+        }
+    }
+
+    #[test]
+    fn keys_mode_bare_s_still_emits_note_on() {
+        let handler = InputHandler::new(false, 800, 600);
+        let state = test_state(Mode::Keys);
+        let actions = handler
+            .classify_keydown(Some(Scancode::S), Mod::NOMOD, false, &state)
+            .expect("S in Keys mode should produce actions");
+        assert!(
+            matches!(actions[..], [Action::NoteOn { key: 61, .. }]),
+            "expected NoteOn(C#4=61), got {:?}",
+            actions
         );
     }
 
