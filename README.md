@@ -92,7 +92,7 @@ In "keys" mode:
 * Bottom two rows of keys (Z to /, S to ;) behave as the keys on MIDI keyboard
 * Escape - return to "select" mode
 
-The scope at the top of the window has two views. "Snapshot" view draws the latest output samples, and "scan" view sweeps the output's range across two measures, turning yellow or red where it nears or passes clipping. Start in Scan with `--scope-view scan`. Snapshot and the spectrum below it redraw every 200 ms; change that with `--snapshot-refresh-ms`.
+The scope at the top of the window has two views. "Snapshot" view draws the latest output samples, and "scan" view sweeps the output's range across two measures, turning yellow or red where it nears or passes clipping. Start in Scan with `--scope-view scan`. Snapshot and the spectrum below it redraw according to `--snapshot-refresh-ms`.
 
 ### MIDI Integration
 
