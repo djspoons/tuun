@@ -18,7 +18,7 @@ Decided by reacting to the [prototype](../prototypes/scan-look.html):
 - **Layout: sweep.** A write head moves left to right across the window and wraps; the previous pass stays dimmed ahead of it.
 - **Window: two measures.** No minimum length in seconds.
 - **Amplitude: linear.**
-- **Clipping:** ticks along the top edge, yellow where a slice's peak is above 0.95 and at most 1.0, red above 1.0. These are Snapshot's existing thresholds and colours.
+- **Clipping:** the column itself is coloured yellow where a slice's peak is above 0.95 and at most 1.0, and red above 1.0 (the prototype's "Yellow + red"). These are Snapshot's existing thresholds and colours. Ticks along the top edge were tried first, but on real waveforms they were too hard to see.
 - **Gridlines:** measure lines only.
 - **Snapshot:** the latest N = 2048 samples.
 - **Dropped samples:** drawn as a hatched gap, as in the prototype (not separately discussed).

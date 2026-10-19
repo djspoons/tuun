@@ -5,8 +5,8 @@ Adds the **Scan** scope view next to **Snapshot** in the native SDL2 UI, and rep
 ## Outcome
 
 - The tracker pushes every callback's output samples to the UI through two lock-free `rtrb` rings. `Command::SendCurrentBuffer`, `Status.buffer` and the main loop's `next_buffer_refresh` are gone.
-- **Snapshot** draws the latest 2048 output samples. It looks as it does today and redraws, with the spectrum, every `--snapshot-refresh-ms` (default 200).
-- **Scan** draws the output's per-column min/max over two measures, aligned to measure boundaries, as a left-to-right sweep. Clipping shows as ticks on its top edge, and dropped samples as a hatched gap.
+- **Snapshot** draws the latest 2048 output samples. It looks as it does today and redraws, with the spectrum, every `--snapshot-refresh-ms` (default 100).
+- **Scan** draws the output's per-column min/max over two measures, aligned to measure boundaries, as a left-to-right sweep. Clipping colours a column yellow or red, and dropped samples show as a hatched gap.
 - **Ctrl+S** toggles the scope view in every editor mode and shows "Scope view: Scan" or "Scope view: Snapshot". `--scope-view scan` starts in Scan; the default is Snapshot.
 - The spectrum stays below the scope in both views.
 
@@ -114,6 +114,8 @@ From [Scan's time axis](tickets/03-scan-time-axis.md) and [Scan look](tickets/04
 
 `pub fn measure_origin(status: &tracker::Status<WaveformId, MarkId>) -> Option<Instant>` returns the `start` of any `WaveformId::Beats(false)` mark with `MarkId::TopLevel` (active or pending). Those starts differ by whole multiples of two measures (`Player::start_beats` repeats the odd Beats waveform every two measures), so any one gives the same windows. Call it on every drain, not once: a tracker clock resync shifts every mark (`Tracker::next_buffer_start`), and the origin should follow it.
 
+The pass *numbers*, though, depend on which start is reported, and the reported start moves a window ahead mid-pass: status lists active marks before pending ones, and a repeating waveform's pending copy takes its next `start` when it activates. So the origin is this pass's start during the first measure and the next pass's start during the second. Measured against those, every sample is in pass 0 or −1, so columns are never replaced (only widened), and the first measure shows as `Empty` while the second is drawn. To prevent this, Scan numbers passes from the first origin it gets. Each later origin is moved by the whole number of windows that brings it nearest that origin, so pass numbers stay fixed and a resync shift of less than half a window is still followed.
+
 ## 3. Switching scope views (`src/lib/actions.rs`, `src/lib/sdl2_input.rs`, `src/main.rs`)
 
 From [Switching scope views](tickets/05-switching-scope-views.md).
@@ -126,7 +128,7 @@ From [Switching scope views](tickets/05-switching-scope-views.md).
 - No Launchkey binding.
 - `Args` gains:
   - `#[arg(long, default_value_t = scope::ScopeView::Snapshot)] scope_view: scope::ScopeView`
-  - `#[arg(long, default_value_t = 200)] snapshot_refresh_ms: u64`, with doc comments saying what each does.
+  - `#[arg(long, default_value_t = 100)] snapshot_refresh_ms: u64`, with doc comments saying what each does.
 - README: add "Ctrl + S - switch the scope view between Snapshot and Scan" to the key lists (Select mode, with a note that it works in every mode), and mention both flags where flags are described, or under "Keyboard Navigation" if there is no better place.
 
 ## 4. Main loop (`src/main.rs`)
@@ -145,9 +147,8 @@ The loop's design comes from the main-thread work map (`agents/main-thread/` on 
 - **Snapshot timer** (from [The spectrum in Scan](tickets/06-spectrum-in-scan.md)): at the start of `render`, if `due >= next_snapshot_refresh`, copy `scope.snapshot()` into `self.samples`, recompute `self.spectrum` from it (the FFT code that runs on `status.buffer` today), and set `next_snapshot_refresh = due + snapshot_refresh`. It runs in both views, so the spectrum keeps updating under Scan. It adds no deadline to the loop and may fire up to a frame late.
 - **Scope area:** the top 3/5 of the window, as today. Split the existing body into `draw_snapshot` (today's waveform code, unchanged) and `draw_scan`, chosen by `state.scope_view`; then draw the spectrum (today's code, unchanged) in either view.
 - **`draw_scan`**, one pixel column per `ScanColumn`:
-  - Amplitude: linear, using Snapshot's mapping `y(v) = h − (v + 1) · h / 2.4` for scope height `h`, so a level looks the same in both views. A column is a vertical bar from `y(max)` to `y(min)`, at least 1 px tall.
-  - Body colour: Snapshot's green `RGB(0x00, 0xFF, 0x00)` for current columns. Previous columns use the same colours at about 30% brightness (precomputed, so no blend mode is needed).
-  - Clipping: a tick about 6 px tall on the top edge of the scope area, in `ERROR_COLOR` for `Warn` and `RECORD_COLOR` for `Clip`, dimmed for previous columns.
+  - Amplitude: linear, using Snapshot's mapping `y(v) = h − (v + 1) · h / 2.4` for scope height `h`, so a level looks the same in both views. A column is a vertical bar from `y(max)` to `y(min)`, at least 1 px tall. As in Snapshot, `y` isn't clamped, so a level below −1 extends below the scope area.
+  - Colour, by the column's `ClipLevel`: Snapshot's per-sample colours, green `RGB(0x00, 0xFF, 0x00)` for `None`, `ERROR_COLOR` for `Warn` and `RECORD_COLOR` for `Clip`. Previous columns use the same colours at about 30% brightness (precomputed, so no blend mode is needed).
   - Gaps: a hatch, a vertical line every third column across 90% of the scope height, in dim red (dimmer still for previous gaps), as in the [prototype](prototypes/scan-look.html).
   - Measure lines only: dim cyan at column 0 and at the window's midpoint.
   - Write head: a 2 px line in `INACTIVE_COLOR` (cyan) at the head column.
@@ -194,7 +195,7 @@ Run the checks in `CLAUDE.md` § Build & Test Verification (`cargo build`, `carg
 - Render time and `renderer_load` stay within the 60 Hz frame budget with Scan showing.
 - By eye:
   - an envelope sweeps across two measures, with the previous pass dimmed ahead of the head and lines at both measure starts;
-  - clipping ticks show in yellow and red;
+  - clipping columns show in yellow and red;
   - Ctrl+S switches views in each editor mode and shows the status message, without typing an "s" in Edit mode or playing a note in Keys mode;
   - `--scope-view scan` starts in Scan;
   - `--snapshot-refresh-ms` changes how often Snapshot and the spectrum redraw, in both views.

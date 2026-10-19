@@ -23,9 +23,9 @@ Reached: [spec.md](spec.md).
 - [Lock-free handoff from audio thread to UI in Rust](tickets/02-lock-free-handoff.md): mpsc sometimes allocates and can lock. `rtrb`/`ringbuf` are lock-free with a fixed capacity and drop the newest data when full; `triple_buffer` keeps only the latest; `ArrayQueue::force_push` drops the oldest.
 - [How the audio thread reports samples](tickets/01-sample-reporting.md): raw samples pushed every callback through an `rtrb` sample ring plus a header ring (timestamp, written, dropped), all-or-nothing per callback; newest dropped when full; replaces `SendCurrentBuffer`; Snapshot becomes the latest N samples.
 - [Scan's time axis: measures or seconds](tickets/03-scan-time-axis.md): musical time; the window is a whole number of measures aligned to measure boundaries.
-- [Scan look](tickets/04-scan-look.md): a sweep over two measures, linear amplitude, clipping ticks on the top edge in Snapshot's yellow and red, measure lines only; Snapshot shows the latest 2048 samples.
+- [Scan look](tickets/04-scan-look.md): a sweep over two measures, linear amplitude, clipping colours the column in Snapshot's yellow and red, measure lines only; Snapshot shows the latest 2048 samples.
 - [Switching scope views](tickets/05-switching-scope-views.md): Ctrl+S toggles in every editor mode where possible; Snapshot by default; `--scope-view` CLI flag sets the startup view; a status message on each switch; no Launchkey button.
-- [The spectrum in Scan](tickets/06-spectrum-in-scan.md): kept below the scope in both views; Snapshot and the spectrum redraw on a UI timer set by a CLI flag (default 200 ms).
+- [The spectrum in Scan](tickets/06-spectrum-in-scan.md): kept below the scope in both views; Snapshot and the spectrum redraw on a UI timer set by a CLI flag (default 100 ms).
 - [Testing the sample path and scope views](tickets/07-testing.md): tracker push tested by calling `callback` on tiny injected rings; scope logic in a drawing-free module with unit tests; drawing checked by eye; acceptance on `allocations`, `renderer_load` and a by-eye checklist; `--show-loop-timing` stays temporary.
 
 ## Not yet specified
