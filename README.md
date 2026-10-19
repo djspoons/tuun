@@ -74,6 +74,7 @@ In "select" mode (when a solid triangle appears at the left-hand side):
 * Right - select the next program bank
 * Left - select the previous program bank
 * Cmd + R - stop playback and **reload** all source files
+* Ctrl + S - switch the **scope** view between "snapshot" and "scan"
 
 In "edit" mode (when the current program is rendered in white):
 * Enter - play the current program's waveform at the beginning of the next measure
@@ -90,6 +91,8 @@ In "slider" mode (slider marks at top and left turn green):
 In "keys" mode:
 * Bottom two rows of keys (Z to /, S to ;) behave as the keys on MIDI keyboard
 * Escape - return to "select" mode
+
+The scope at the top of the window has two views. "Snapshot" view draws the latest output samples, and "scan" view sweeps the output's range across two measures, turning yellow or red where it nears or passes clipping. Start in Scan with `--scope-view scan`. Snapshot and the spectrum below it redraw every 200 ms; change that with `--snapshot-refresh-ms`.
 
 ### MIDI Integration
 

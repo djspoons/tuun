@@ -74,7 +74,7 @@ struct Args {
     scope_view: scope::ScopeView,
     /// How often, in milliseconds, the Snapshot scope view and the spectrum
     /// redraw.
-    #[arg(long, default_value_t = 200)]
+    #[arg(long, default_value_t = 100)]
     snapshot_refresh_ms: u64,
 }
 

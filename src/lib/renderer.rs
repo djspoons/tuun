@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 use sdl2::Sdl;
 use sdl2::pixels::Color;
+use sdl2::rect::Rect;
 use sdl2::render::{TextureCreator, TextureQuery};
 use sdl2::ttf::{Font, Sdl2TtfContext};
 use sdl2::video::WindowContext;
@@ -42,6 +43,25 @@ const ERROR_COLOR: Color = Color::RGB(0xFF, 0xDE, 0x21);
 const RECORD_COLOR: Color = Color::RGB(0xFF, 0x00, 0x00);
 /// Scan's measure lines: `INACTIVE_COLOR` at about 30% brightness.
 const SCAN_MEASURE_COLOR: Color = Color::RGB(0x00, 0x4C, 0x4C);
+/// Scan's current columns, by clip level (none, warn, clip): Snapshot's
+/// per-sample colors.
+const SCAN_COLORS: [Color; 3] = [
+    // Slightly lighter than text
+    Color::RGB(0x00, 0xCC, 0x00),
+    Color::RGB(0xFF, 0xDE, 0x21),
+    Color::RGB(0xFF, 0x00, 0x00),
+];
+/// Scan's previous columns, by clip level: the current colors at about 30%
+/// brightness.
+const SCAN_PREVIOUS_COLORS: [Color; 3] = [
+    Color::RGB(0x00, 0x4C, 0x00),
+    Color::RGB(0x4C, 0x42, 0x0A),
+    Color::RGB(0x4C, 0x00, 0x00),
+];
+/// Scan's hatch for dropped samples: dim red, and dimmer still in the previous
+/// pass.
+const SCAN_GAP_COLOR: Color = Color::RGB(0x59, 0x00, 0x00);
+const SCAN_PREVIOUS_GAP_COLOR: Color = Color::RGB(0x1B, 0x00, 0x00);
 
 pub struct Renderer<'ttf> {
     pub video_subsystem: sdl2::VideoSubsystem,
@@ -769,20 +789,63 @@ impl<'ttf> Renderer<'ttf> {
     /// Draws Scan's columns in the top `scope_height` pixels, one pixel column
     /// per column of `scope`.
     fn draw_scan(&mut self, scope: &scope::Scope, scope_height: u32) {
-        // TODO draw each column's range, clipping and gaps; for now, only the
-        // measure lines and the write head.
-        let columns: Vec<scope::ScanColumn> = scope.scan_columns().collect();
-        self.canvas.set_draw_color(SCAN_MEASURE_COLOR);
-        for x in [0, columns.len() as i32 / 2] {
-            self.canvas
-                .draw_line((x, 0), (x, scope_height as i32))
-                .unwrap();
+        let h = scope_height as f32;
+        // Snapshot's amplitude mapping. Like Snapshot, levels below -1 extend
+        // below the scope area.
+        let y = |v: f32| (h - (v + 1.0) * h / 2.4) as i32;
+        let gap_top = (scope_height / 20) as i32;
+        let gap_height = scope_height * 9 / 10;
+
+        // Rectangles are collected per color so that each color takes one
+        // `fill_rects` call. Bars are indexed by clip level, as the colors are.
+        let mut bars: [Vec<Rect>; 3] = Default::default();
+        let mut previous_bars: [Vec<Rect>; 3] = Default::default();
+        let mut gaps = Vec::new();
+        let mut previous_gaps = Vec::new();
+        let mut heads = Vec::new();
+        let level = |clip| match clip {
+            scope::ClipLevel::None => 0,
+            scope::ClipLevel::Warn => 1,
+            scope::ClipLevel::Clip => 2,
+        };
+        let mut columns = 0;
+        for (column, scan_column) in scope.scan_columns().enumerate() {
+            columns = column + 1;
+            let x = column as i32;
+            let bar = |min: f32, max: f32| {
+                let top = y(max);
+                Rect::new(x, top, 1, y(min).saturating_sub(top).max(1) as u32)
+            };
+            // The hatch is a line in every third column.
+            let gap = (x % 3 == 0).then(|| Rect::new(x, gap_top, 1, gap_height));
+            match scan_column {
+                scope::ScanColumn::Empty => {}
+                scope::ScanColumn::Current { min, max, clip } => {
+                    bars[level(clip)].push(bar(min, max))
+                }
+                scope::ScanColumn::Previous { min, max, clip } => {
+                    previous_bars[level(clip)].push(bar(min, max))
+                }
+                scope::ScanColumn::CurrentGap => gaps.extend(gap),
+                scope::ScanColumn::PreviousGap => previous_gaps.extend(gap),
+                scope::ScanColumn::Head => heads.push(Rect::new(x, 0, 2, scope_height)),
+            }
         }
-        if let Some(head) = columns.iter().position(|c| *c == scope::ScanColumn::Head) {
-            self.canvas.set_draw_color(INACTIVE_COLOR);
-            self.canvas
-                .fill_rect(sdl2::rect::Rect::new(head as i32, 0, 2, scope_height))
-                .unwrap();
+        let measure_lines = [0, columns as i32 / 2].map(|x| Rect::new(x, 0, 1, scope_height));
+
+        let colored_bars = SCAN_PREVIOUS_COLORS
+            .iter()
+            .zip(&previous_bars)
+            .chain(SCAN_COLORS.iter().zip(&bars))
+            .map(|(color, rects)| (*color, rects.as_slice()));
+        for (color, rects) in colored_bars.chain([
+            (SCAN_PREVIOUS_GAP_COLOR, previous_gaps.as_slice()),
+            (SCAN_GAP_COLOR, &gaps),
+            (SCAN_MEASURE_COLOR, &measure_lines),
+            (INACTIVE_COLOR, &heads),
+        ]) {
+            self.canvas.set_draw_color(color);
+            self.canvas.fill_rects(rects).unwrap();
         }
     }
 

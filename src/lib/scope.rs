@@ -144,6 +144,8 @@ impl Slot {
 struct Scan {
     window: Duration,
     slots: Vec<Slot>,
+    // The origin that passes are numbered from.
+    origin: Option<Instant>,
     // The position of the end of the newest sample, rounded down.
     head: Option<i64>,
 }
@@ -196,14 +198,38 @@ impl Scan {
         }
     }
 
-    /// Records the samples of one callback placed by `header` against `origin`.
+    /// Returns the origin to number passes from, given a measure origin
+    /// `reported` for this chunk.
+    ///
+    /// Reported origins that differ by whole windows give the same passes, and
+    /// one shifted by less than half a window is followed.
+    fn align(&mut self, reported: Instant) -> Instant {
+        let aligned = match self.origin {
+            None => reported,
+            Some(origin) => {
+                // Move `reported` by whole windows to the start nearest `origin`.
+                let windows = (self.position(reported, origin) / self.slots.len() as f64).round();
+                if windows >= 0.0 {
+                    reported - self.window.mul_f64(windows)
+                } else {
+                    reported + self.window.mul_f64(-windows)
+                }
+            }
+        };
+        self.origin = Some(aligned);
+        aligned
+    }
+
+    /// Records the samples of one callback placed by `header` against the
+    /// measure origin `reported` for it.
     fn add_chunk(
         &mut self,
-        origin: Instant,
+        reported: Instant,
         sample_rate: u32,
         header: &tracker::SampleHeader,
         samples: impl Iterator<Item = f32>,
     ) {
+        let origin = self.align(reported);
         let columns_per_sample =
             self.slots.len() as f64 / (self.window.as_secs_f64() * sample_rate as f64);
         let start = self.position(header.buffer_start, origin);
@@ -282,6 +308,7 @@ impl Scope {
             scan: Scan {
                 window: scan_window,
                 slots: vec![Slot::Empty; scan_columns],
+                origin: None,
                 head: None,
             },
         }
@@ -547,6 +574,76 @@ mod tests {
                 gap,
                 Slot::Empty,
             ]
+        );
+    }
+
+    #[test]
+    fn an_origin_a_window_later_keeps_the_current_pass() {
+        let (mut producer, mut scope) = test_scope();
+        let origin = Instant::now();
+
+        // Column 1 is drained against `origin`, then column 5 against the
+        // next window's start.
+        producer.push(origin + COLUMN, &[0.5]);
+        scope.drain(Some(origin));
+        producer.push(origin + 5 * COLUMN, &[0.25]);
+        scope.drain(Some(origin + WINDOW));
+
+        let columns = scope.scan_columns().collect::<Vec<_>>();
+        assert_eq!(
+            columns[1],
+            ScanColumn::Current {
+                min: 0.5,
+                max: 0.5,
+                clip: ClipLevel::None
+            }
+        );
+        assert_eq!(columns[5], ScanColumn::Head);
+    }
+
+    #[test]
+    fn a_later_pass_replaces_columns_after_the_origin_advances() {
+        let (mut producer, mut scope) = test_scope();
+        let origin = Instant::now();
+
+        // Each window is drained against its own start for its first half,
+        // and against the next window's start for its second half.
+        producer.push(origin + COLUMN, &[0.9]);
+        scope.drain(Some(origin));
+        producer.push(origin + 5 * COLUMN, &[0.9]);
+        scope.drain(Some(origin + WINDOW));
+        producer.push(origin + WINDOW + COLUMN, &[0.0]);
+        scope.drain(Some(origin + WINDOW));
+
+        assert_eq!(
+            slots(&scope)[1],
+            Slot::Range {
+                pass: 1,
+                min: 0.0,
+                max: 0.0
+            }
+        );
+    }
+
+    #[test]
+    fn an_origin_shifted_by_a_resync_is_followed() {
+        let (mut producer, mut scope) = test_scope();
+        let origin = Instant::now();
+        let shift = COLUMN * 2;
+
+        producer.push(origin + COLUMN, &[0.5]);
+        scope.drain(Some(origin));
+        // The clock resyncs, shifting the next window's start by two columns.
+        producer.push(origin + WINDOW + 3 * COLUMN, &[0.25]);
+        scope.drain(Some(origin + WINDOW + shift));
+
+        assert_eq!(
+            slots(&scope)[1],
+            Slot::Range {
+                pass: 1,
+                min: 0.25,
+                max: 0.25
+            }
         );
     }
 
