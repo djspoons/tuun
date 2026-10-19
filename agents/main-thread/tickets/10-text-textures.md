@@ -18,3 +18,6 @@ The cost is not a missing cache: in Edit mode the active program is drawn one te
 - **Acceptance check:** re-measure Edit mode on the same long program with `--show-loop-timing`. A render should take under 16.7 ms, with text textures in the low teens to twenties.
 - Hypothesis (unverified): drawing runs may also fix letter spacing, since characters drawn one by one lose the font's kerning.
 
+## Measured after the change
+
+Release build on the dev's machine, Edit mode on a long program, `current second / 10 s max` in ms: `render` 5.9 / 6.1, `render text` 3.9 / 4.1, `render other` 2.0 / 2.1, `text textures` 32 / 32. Without the timing display's 18 lines that's about 14 textures, against 112 before, and the render is well under 16.7 ms (22.8 ms before). The acceptance check passes. `text edit` read 0.0 in this capture, so no keystroke was timed in that window. The render is what this check needed.

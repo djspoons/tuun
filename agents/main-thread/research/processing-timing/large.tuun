@@ -92,9 +92,9 @@ kirnberger_c_p_upper2 = [C5, B, B, C5, D5, A, B, B, C5] | brass_notes(Q);
 
 // Subtractive synthesis from synth.sub
 #{level_db=-9}
-harm_line = [1, 2, 3, 4] | on_beats(sub.harmonica(Q, 220) | unseq());
+harm_line = [1, 2, 3, 4] | on_beats(sub.harmonica(Q, 220) | unseq() | mark(1));
 #{level_db=-9}
-flute_line = [1, 1.5, 2, 3] | on_beats(sub.flute(E, 440));
+flute_line = [1, 1.5, 2, 3] | on_beats(sub.flute(Q/2, 440) | mark(1));
 #{level_db=-9}
 _ = sub.harmonica(H, 330);
 #{level_db=-9}

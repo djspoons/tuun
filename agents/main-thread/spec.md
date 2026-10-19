@@ -4,7 +4,7 @@ The work on the native UI's main thread, ranked by how long it can keep an input
 
 **Input latency** is the time from an input event (computer keyboard in Keys mode, Launchkey pad, Launchkey piano key) to its command reaching the tracker. Every input passes through the main loop in `src/main.rs`, so any work on the main thread delays the inputs that arrive while it runs. **Long-running** means slower than one 60 Hz frame, about 16.7 ms.
 
-Out of scope: the audio thread, the precompute thread, the web/wasm UI, and making the changes themselves.
+Out of scope: the audio thread, the web/wasm UI, and making the changes themselves. The precompute thread was in scope only where it overlapped program processing, and it is now folded into the processing thread (decisions 1–3).
 
 ## Ranking
 
@@ -14,7 +14,7 @@ Ranked by the worst time measured on the dev's machine with `--show-loop-timing`
 |---|---|---|---|
 | 1 | Program processing on source reload and startup | 2585 ms release | **Move** to the processing thread |
 | 2 | Completion and parameter hints (Cmd-/) | 317 ms release, 920 ms debug | **Move** the evaluation to the processing thread; **cache** its result for the Edit session |
-| 3 | Program processing on leaving Edit mode, recording, sequencer toggles, undo/redo | 233 ms release | **Move** to the processing thread |
+| 3 | Program processing on leaving Edit mode, recording, sequencer toggles, undo/redo | 343 ms release | **Move** to the processing thread |
 | 4 | Rendering text in Edit mode | 22.8 ms render, 20.9 ms of it text | **Keep**; draw the active line in runs |
 | 5 | The status wait (`recv_timeout`) | 10 ms per pass | **Remove**; the loop waits on SDL events |
 | 6 | Note-on (the keys instrument's note function) | about 1 ms; 8–10 ms for a four-note chord in debug *(container)* | **Keep** |
@@ -37,10 +37,12 @@ From [Where program processing runs](tickets/06-evaluation.md):
 - While a job is pending the user sees "Processing…" and input keeps working:
   - Leaving Edit mode keeps the program in Edit mode until its result arrives, and drops keystrokes for that program meanwhile.
   - During a reload, playback, pads and sliders keep working against the old programs, and actions that change source are refused.
-  - Startup goes through the reload path.
-- Each program has a generation number, and a result whose generation is out of date is dropped.
+  - Startup parses on the main thread, so a bad file still exits with its errors, and then evaluates through the reload path.
+- Results are applied in the order their jobs were sent, so the newest lands last, as the synchronous code behaves. Each program has a generation number that increases when its text changes; a result is dropped only when the program's text has changed since the newest job for it was sent. Entering Edit mode is refused for a program with a pending job, so that drop is a guard, not a path users hit.
+- Effects that read a result (playing the program, scheduling a sequencer step) wait for it; the write-back doesn't.
 - The write-back stays on the main thread (item 7).
-- Batch mode (`--ui=false`) stays synchronous.
+- Batch mode (`--ui=false`) stays synchronous and doesn't precompute.
+- **Precompute moves onto the processing thread** ([the processing-thread plan](processing-thread-plan.md)): the waveform each program plays (a sequence's step waveform) is precomputed once when the program is evaluated, and every play sends the cached result. The separate precompute thread is gone, and the Player has one route to the tracker. Precompute took 0.01–75 ms per program against 90–350 ms to evaluate one (release, medium.tuun).
 - Making processing itself faster is out of scope: it shortens the "Processing…" wait, not input latency ([Caching evaluated modules and bindings](tickets/07-evaluation-caching.md)).
 
 ### 2. Completion and parameter hints use a prefetched context
@@ -86,15 +88,16 @@ Each step can land on its own:
 
 Making built-ins `Send`, the prerequisite for items 1–3, is already on `main`.
 
+Steps 1 and 4 are done on `main` and measured with `--show-loop-timing` (release): an Edit-mode render on a long program takes about 6 ms over about 14 textures, SDL events dispatch in at most 0.5 ms, and keyboard input reads at most 1.0 ms ([Caching text textures](tickets/10-text-textures.md), [The 10 ms status wait](tickets/04-status-wait.md)).
+
 1. Load fonts once (item 8) and draw the Edit-mode line in runs (item 4). Neither depends on anything else.
-2. Add the processing thread and move program processing onto it (items 1 and 3).
+2. Add the processing thread and move program processing onto it (items 1 and 3), then precompute on it. Phases are in [the processing-thread plan](processing-thread-plan.md). All five are done. Measured with `--show-loop-timing` (release) on medium.tuun and large.tuun, a reload or leaving Edit mode now takes at most 2.0 ms of `keyboard input` and 1.4 ms of `SDL events`, against 2585 ms and 233 ms in [Measure on the dev's machine](tickets/02-measure.md). Applying a result on the main thread, installing a reloaded set included, takes at most 1.2 ms. A pad press's tracker load fell from about 4% of each buffer (at most 12%) to under 0.1% ([Where program processing runs](tickets/06-evaluation.md)).
 3. Prefetch the Edit-mode context on it (item 2).
 4. Remove the status wait (item 5). It can come before step 2; processing-thread results join its wake sources when the thread exists.
 
 ## Acceptance
 
 Re-measure with `--show-loop-timing` on the dev's machine:
-- **`--show-loop-timing` is temporary.** Its detail doesn't need to outlive this work: keep it in one self-contained commit (`src/lib/loop_timing.rs` and its call sites) so it can be reverted cleanly once these checks pass.
 - **Keyboard latency** has a maximum of about 6 ms in the "Several programs playing" and "Keys instrument" scenarios of [Measure on the dev's machine](tickets/02-measure.md).
 - **Source reload, leaving Edit mode and Cmd-/** no longer show in `SDL events` or `keyboard input` beyond a few ms.
 - **An Edit-mode render** of a long program takes under 16.7 ms.
@@ -102,6 +105,10 @@ Re-measure with `--show-loop-timing` on the dev's machine:
 
 ## Gaps and open questions
 
-- **Launchkey not measured.** Pad and piano-key latency have no numbers yet; the hardware wasn't at hand.
+- **Launchkey not measured.** Pad and piano-key latency have no numbers yet; the hardware wasn't at hand. For the same reason, sequencer toggles and undo/redo outside Edit mode weren't measured on the processing thread.
+- **A one-off idle stall at startup.** Measured after step 2, the loop's `idle` step peaked once at about 312 ms on startup, on both stand-in files. It doesn't depend on the file, so processing doesn't cause it; the cause hasn't been investigated.
+- **Switching to the Tuun window** shows as a render of about 35–45 ms (in `render other`) and up to about 13 ms of `SDL events` ([Measure on the dev's machine](tickets/02-measure.md), [Where program processing runs](tickets/06-evaluation.md)). Not investigated, since it happens only when the window is activated.
+- **Keyboard latency is a lower bound.** SDL stamps a key when the main thread pumps it, so `keyboard input` can't show a key waiting behind a render. The 6 ms acceptance target is met only by reasoning so far (one render, at most 6.8 ms measured, plus dispatch).
 - **Note-on under heavier instruments.** It's open whether note-on stays within its budget as keys instruments get heavier, and for chords in debug builds.
 - **A cross-frame text cache** comes back only if later measurements show ordinary frames over budget.
+- **The first ShowType pays a cold type check.** Only the processing thread type-checks programs now, so nothing warms the main environment's module-type cache; ShowType (Ctrl-H) fills it on first use, and again after a library edit. Not measured for ShowType: a cold check of one program costs 80–100 ms in release and 350–700 ms in debug *(container)* ([Where program processing runs](tickets/06-evaluation.md)). The gap closes if ShowType moves to the processing thread.

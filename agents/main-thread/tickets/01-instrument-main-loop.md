@@ -17,7 +17,7 @@ Run the native UI with `--show-loop-timing`. Nine lines appear in the top-right 
 
 - **Steps of each main-loop pass:** `SDL events`, `Launchkey events`, `status wait` (includes the up-to-10 ms `recv_timeout`), `tick`, `render` (includes `present()`), `Launchkey update`. Each is the time the step took, including the handling of every event it dispatched.
 - **Input latency,** from arrival to the end of the event's handling (after `dispatch_actions` returns):
-  - `keyboard input`: every SDL key-down and text input (typed characters such as the digits that select a program arrive as text input). Measured from SDL's event timestamp with SDL's millisecond clock. Hypothesis (unverified): SDL stamps an event when it pumps it from the OS, at the start of the `SDL events` step, so this excludes the time the key waited for the loop to come round. Treat it as a lower bound.
+  - `keyboard input`: every SDL key-down and text input (typed characters such as the digits that select a program arrive as text input). Measured from SDL's event timestamp with SDL's millisecond clock. SDL stamps an event when the main thread pumps it from the OS, so this excludes the time the key waited for the loop to come round. Treat it as a lower bound. Checked in SDL 2.32.2's source: `SDL_PushEvent` sets `timestamp = SDL_GetTicks()`, and on macOS `Cocoa_PumpEventsUntilDate` dequeues each `NSEvent` on the pumping thread and posts it from there.
   - `pad input`: Launchkey top and bottom pad presses in DAW mode.
   - `piano key input`: Launchkey note-ons.
   - Pad and piano-key events are stamped on the MIDI input thread when their message arrives, so these include the wait for the loop.
@@ -25,3 +25,9 @@ Run the native UI with `--show-loop-timing`. Nine lines appear in the top-right 
 
 Code: `src/lib/loop_timing.rs` (new), `Metric::set_max` in `src/lib/metric.rs`, `Launchkey::events` now pairs each event with its arrival `Instant` (`src/lib/launchkey.rs`), and the wiring in `src/main.rs` and `src/lib/renderer.rs`. The `CLAUDE.md` checks pass (build, benches, tests, fmt, clippy, wasm tests).
 
+## Ported to `main`
+
+The instrumentation was first written on `claude/main-thread`, and the merge into `main` left it out. It was re-applied to `main` after [The 10 ms status wait](04-status-wait.md) and [Font loading per frame](05-font-loading.md) landed, with these differences:
+- `status wait` is replaced by `idle`, the time blocked in `wait_event_timeout`, and `statuses`, the `try_recv` drain after waking.
+- `render` and `Launchkey update` are recorded only on passes that render (at most 60 Hz).
+- `render fonts` is gone, since fonts are no longer loaded per frame. The display draws 18 lines (the driver line plus 17), so `text textures` counts 18 more than a frame without the flag.

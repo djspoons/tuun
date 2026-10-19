@@ -35,3 +35,7 @@ Headless on a 4-core Linux container (SDL 2.30.0, SDL_ttf 2.22.0), not the dev's
 - Debug builds measure about the same: the time is spent in the C libraries.
 - Against the dev's 5–7 ms render step ([Measure on the dev's machine](02-measure.md)), keeping fonts is estimated to save 1–4 ms per frame.
 - With fonts kept, creating text textures is the largest remaining text cost here (about 0.7 ms on a software renderer). Caching textures would borrow from the `TextureCreator`; sdl2's `unsafe_textures` feature avoids that.
+
+## Measured after the change
+
+Release build on the dev's machine, idle: `render` 5.6 / 8.4 ms (`current second / 10 s max`) against 6.1 / 17.1 before ([Measure render cost](08-measure-render.md)). `render text` is 3.7 / 5.4 against 4.0 / 14.8 before, for the same 13 textures without the timing display. The saving is about the 0.8 ms that `render fonts` used to show, the low end of the 1–4 ms estimate. The hypothesis that a kept font's glyph cache would also cut `render text` noticeably isn't borne out at idle: 4.0 to 3.7 ms.
