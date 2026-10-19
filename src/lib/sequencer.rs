@@ -28,6 +28,8 @@ pub const MAX_PAGE: u8 = 8;
 
 /// The decomposed form of a sequenceable program: what the sequencer plays
 /// one tracker entry per step from.
+// TODO Maybe consider a different name since this might be confused with a seq
+// waveform.
 #[derive(Debug, Clone)]
 pub struct Sequence {
     /// The listed steps, each the beat it plays on, in source order.

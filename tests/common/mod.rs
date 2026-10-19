@@ -36,9 +36,9 @@ pub struct Scope {
     /// The bindings a program is checked under: it opens the prelude, then
     /// std.
     ///
-    /// Opening std adds about 14 ms to every `eval::evaluate` (measured on
-    /// `1 + 2`), since evaluation has no counterpart to the checker's
-    /// `ModuleCache`.
+    /// Opening std adds about 1 ms to every `eval::evaluate` in a debug
+    /// build (measured on `1 + 2`), since evaluation has no counterpart to
+    /// the checker's `ModuleCache`.
     pub program: Vec<SourceBinding<u32, u32>>,
 }
 

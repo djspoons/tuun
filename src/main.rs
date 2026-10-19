@@ -14,15 +14,14 @@ use tuun::actions;
 use tuun::diagnostics;
 use tuun::effects;
 use tuun::environment;
-use tuun::generator;
 use tuun::launchkey;
 use tuun::metric;
 use tuun::midi_input;
 use tuun::player;
+use tuun::processing;
 use tuun::renderer;
 use tuun::sdl2_input;
 use tuun::tracker;
-use tuun::waveform;
 
 use metric::Metric;
 use renderer::Renderer;
@@ -45,6 +44,8 @@ struct Args {
     // each other's captures, so include something like a process id when launching in a loop.
     #[arg(long, default_value = "tuun_%Y-%m-%d_%H-%M-%S")]
     date_format: String,
+    /// Whether the finite parts of each evaluated waveform (and of the Beats
+    /// waveforms) are replaced by their samples before they are played.
     #[arg(long,
         num_args(0..=1), // Allows --flag or --flag=value
         action = clap::ArgAction::Set,
@@ -118,18 +119,12 @@ pub fn main() {
         // Call the callback to get at least one status update
         tracker.callback(&mut out);
         let status = status_receiver.recv().unwrap();
-        // Parse and send commands to play all of the waveforms. There is
-        // no precompute thread in batch mode, so both Player routes go
-        // straight to the tracker.
+        // Parse and send commands to play all of the waveforms, without
+        // precomputing them.
         let mut environment =
             environment::Environment::new(args.sample_rate, args.tempo, args.library_root.clone());
         environment.set_check_mode(args.check);
-        let player = player::Player::new(
-            args.tempo,
-            args.beats_per_measure,
-            command_sender.clone(),
-            command_sender,
-        );
+        let player = player::Player::new(args.tempo, args.beats_per_measure, command_sender);
         for program_index in 0..state.programs.programs().len() {
             if state.programs.programs()[program_index].is_empty() {
                 continue;
@@ -140,18 +135,17 @@ pub fn main() {
                 display_name,
                 state.programs.programs()[program_index].text()
             );
-            match state
-                .programs
-                .evaluate_and_record(&environment, program_index)
-            {
+            let outcome = processing::process(
+                &environment,
+                &state.programs.evaluation_input(program_index),
+                false,
+            );
+            match state.programs.record(program_index, outcome) {
                 Ok(warnings) => {
                     for warning in &warnings {
                         println!("Warning: {}", warning);
                     }
-                    if state.programs.programs()[program_index]
-                        .waveform()
-                        .is_some()
-                    {
+                    if state.programs.programs()[program_index].is_playable() {
                         player.play_program(
                             &state.programs,
                             program_index,
@@ -174,14 +168,17 @@ pub fn main() {
                 }
             }
         }
-        // Call the tracker's callback until all of the waveforms have finished playing
+        // Call the tracker's callback until all of the waveforms have finished
+        // playing. Every played waveform carries a terminator mark, while a
+        // sequence's top-level mark is on its anchor alone, which can end
+        // before its last step does.
         loop {
             tracker.callback(&mut out);
             let status = status_receiver.recv().unwrap();
             let mark_count = status
                 .marks
                 .iter()
-                .filter(|mark| mark.mark_id == MarkId::TopLevel)
+                .filter(|mark| mark.mark_id == MarkId::Terminator)
                 .count();
             if mark_count == 0 {
                 println!("All waveforms finished");
@@ -215,66 +212,15 @@ pub fn main() {
         .unwrap();
     device.resume();
 
-    // Spin up the precompute thread that sits in front of the tracker as the
-    // Player's `precompute_sender` route. The thread pre-computes
-    // `Command::Play` and passes everything else through unchanged.
-    let precomputing_command_sender = {
-        let play_command_sender = command_sender.clone();
-        let (tx, play_receiver) = mpsc::channel();
-        let precompute = args.precompute;
-        let sample_rate = args.sample_rate;
-        thread::spawn(move || {
-            loop {
-                match play_receiver.recv() {
-                    Ok(Command::Play {
-                        id,
-                        mut waveform,
-                        start,
-                        repeat_every,
-                    }) => {
-                        if precompute {
-                            // TODO probably precompute should happen on another thread
-                            let mut generator = generator::Generator::new(sample_rate);
-                            waveform = waveform::remove_state(generator.precompute(waveform));
-                            println!("precompute returned: {}", waveform);
-                        }
-
-                        play_command_sender
-                            .send(Command::Play {
-                                id,
-                                waveform,
-                                start,
-                                repeat_every,
-                            })
-                            .unwrap();
-                    }
-                    Ok(cmd) => {
-                        play_command_sender.send(cmd).unwrap();
-                    }
-                    Err(e) => {
-                        println!("Play thread got error receiving: {}", e);
-                        return;
-                    }
-                }
-            }
-        });
-        tx
-    };
-
     // One environment and one tracker-facing player for the whole UI
     // session; both end up owned by the effect runner.
     let mut environment =
         environment::Environment::new(args.sample_rate, args.tempo, args.library_root.clone());
     environment.set_check_mode(args.check);
-    let player = player::Player::new(
-        args.tempo,
-        args.beats_per_measure,
-        precomputing_command_sender,
-        command_sender.clone(),
-    );
+    let player = player::Player::new(args.tempo, args.beats_per_measure, command_sender.clone());
 
     // Start the beats!
-    player.start_beats(&environment, &status_receiver);
+    player.start_beats(&environment, &status_receiver, args.precompute);
 
     // Seed each slider's ramp baseline where the slider currently sits, so its
     // first move ramps instead of stepping to the target.
@@ -370,7 +316,22 @@ pub fn main() {
         sdl2_input::InputHandler::new(launchkey.is_err(), renderer.width, renderer.height);
 
     let mut launchkey = launchkey.ok();
-    let mut effect_runner = effects::EffectRunner::new(player, environment, slider_sender.clone());
+
+    let (job_sender, replies) = processing::spawn(
+        args.sample_rate,
+        args.tempo,
+        args.library_root.clone(),
+        args.check,
+        args.precompute,
+        environment.module_table(),
+        main_loop_waker(&event_subsystem, wake_event_type),
+    );
+    let mut effect_runner =
+        effects::EffectRunner::new(player, environment, slider_sender.clone(), job_sender);
+    // Evaluate each program from its initial source so that playback and
+    // InstallKeys work without needing to enter and exit Edit mode first. The
+    // window shows the unevaluated programs until the set is installed.
+    effect_runner.load(&mut state, input, true);
 
     let mut status = tracker::Status {
         buffer_start: Instant::now(),
@@ -383,48 +344,6 @@ pub fn main() {
         tracker_load: Metric::new(Duration::from_secs(10), 100),
         allocations: Metric::new(Duration::from_secs(10), 100),
         renderer_load: Metric::new(Duration::from_secs(10), 100),
-    };
-
-    // Populate each program's cached_waveform / cached_keys_instrument from
-    // its initial source so that playback and InstallKeys work without
-    // needing to enter and exit Edit mode first.
-    let mut failed_programs: Vec<usize> = Vec::new();
-    for i in 0..state.programs.programs().len() {
-        if state.programs.programs()[i].is_empty() {
-            continue;
-        }
-        run_effects(
-            &mut effect_runner,
-            &mut state,
-            launchkey.as_mut(),
-            &status,
-            vec![actions::Effect::EvaluateProgram {
-                program_index: i,
-                mode_on_success: Some(actions::Mode::Select),
-                mode_on_failure: Some(actions::Mode::Select),
-            }],
-        );
-        // A failed evaluation leaves both caches empty.
-        let program = &state.programs.programs()[i];
-        if program.waveform().is_none() && program.keys_instrument().is_none() {
-            failed_programs.push(i);
-        }
-    }
-    // Errors from the initial parse and this sweep would sit in the status
-    // line with nothing saying which program they came from — replace them
-    // with a pointer to the failing programs; each error resurfaces when
-    // its program is evaluated interactively.
-    state.message = if failed_programs.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "Errors in {}",
-            failed_programs
-                .iter()
-                .map(|&i| state.programs.display_name(i))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
     };
 
     const BUFFER_REFRESH_INTERVAL: Duration = Duration::from_millis(200);
@@ -468,6 +387,23 @@ pub fn main() {
         // Statuses don't wake the loop; use the latest that has arrived.
         while let Ok(tracker_status) = status_receiver.try_recv() {
             apply_status(tracker_status, &mut metrics, &mut status);
+        }
+
+        // Before input, so that an input in this pass sees the results.
+        loop {
+            match replies.try_recv() {
+                Ok(reply) => finish_job(
+                    &mut effect_runner,
+                    &mut state,
+                    launchkey.as_mut(),
+                    &status,
+                    reply,
+                ),
+                Err(mpsc::TryRecvError::Empty) => break,
+                // Only a panic stops the thread while the loop holds its
+                // job sender.
+                Err(mpsc::TryRecvError::Disconnected) => panic!("The processing thread stopped"),
+            }
         }
 
         for event in first_event.into_iter().chain(event_pump.poll_iter()) {
@@ -566,6 +502,19 @@ fn run_effects(
 ) {
     let mut world = effects::World { launchkey, status };
     runner.run_all(state, &mut world, effects);
+}
+
+/// Applies the processing thread's `reply` against a `World` built from the
+/// given arguments.
+fn finish_job(
+    runner: &mut effects::EffectRunner,
+    state: &mut actions::AppState,
+    launchkey: Option<&mut launchkey::Launchkey>,
+    status: &tracker::Status<WaveformId, MarkId>,
+    reply: processing::Reply,
+) {
+    let mut world = effects::World { launchkey, status };
+    runner.finish(state, &mut world, reply);
 }
 
 /// Dispatches `actions` through the reducer against a `World` built from the

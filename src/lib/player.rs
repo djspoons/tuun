@@ -1,10 +1,7 @@
 //! Sends waveforms to the tracker — all tracker I/O lives here.
 //!
-//! `Player` owns the two command routes: `precompute_sender` goes through
-//! the precompute thread (used for playback scheduled at the next measure,
-//! where latency is hidden), and `fast_sender` goes straight to the
-//! tracker (used for immediate playback, playback at a chosen instant, and
-//! note-on/off, where latency matters). All methods take `&self`.
+//! `Player` owns the sender that goes straight to the tracker. All methods take
+//! `&self`.
 
 use std::sync::mpsc;
 use std::time;
@@ -12,9 +9,10 @@ use std::time;
 use crate::diagnostics::Source;
 use crate::environment::Environment;
 use crate::expr;
+use crate::generator;
 use crate::ids::{MarkId, WaveformId, WaveformSelector};
 use crate::optimizer;
-use crate::programs::ProgramSet;
+use crate::programs::{Evaluated, ProgramSet};
 use crate::sequencer;
 use crate::slider;
 use crate::tracker;
@@ -57,13 +55,12 @@ pub fn substitute_current_slider_values(
 /// When a played program starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Start {
-    /// Immediately, through the fast route.
+    /// Immediately.
     Now,
-    /// At the next measure boundary, through the precompute thread.
+    /// At the next measure boundary.
     NextMeasure,
-    /// At the given instant, through the fast route. An instant already
-    /// past plays from where the waveform would be by now, dropping what was
-    /// missed.
+    /// At the given instant. An instant already past plays from where the
+    /// waveform would be by now, dropping what was missed.
     At(time::Instant),
 }
 
@@ -96,22 +93,19 @@ pub fn play_waveform_message(
 pub struct Player {
     tempo: u32,
     beats_per_measure: u32,
-    precompute_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
-    fast_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
+    sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
 }
 
 impl Player {
     pub fn new(
         tempo: u32,
         beats_per_measure: u32,
-        precompute_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
-        fast_sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
+        sender: mpsc::Sender<tracker::Command<WaveformId, MarkId>>,
     ) -> Player {
         Player {
             tempo,
             beats_per_measure,
-            precompute_sender,
-            fast_sender,
+            sender,
         }
     }
 
@@ -120,26 +114,42 @@ impl Player {
         self.tempo
     }
 
-    /// Returns the route for a play that starts where `start` says.
-    fn sender(&self, start: Start) -> &mpsc::Sender<tracker::Command<WaveformId, MarkId>> {
-        match start {
-            Start::NextMeasure => &self.precompute_sender,
-            Start::Now | Start::At(_) => &self.fast_sender,
-        }
-    }
-
     /// Returns the number of beats in a measure.
     pub fn beats_per_measure(&self) -> u32 {
         self.beats_per_measure
     }
 
-    /// Plays the program at `program_index` as a waveform, substituting its
-    /// current slider values. Returns the user-visible message, or `None`
-    /// when the program's text didn't evaluate to a waveform (or the index
-    /// is out of range) and nothing was played.
+    /// Plays the program at `program_index`, substituting its current slider
+    /// values. Returns the user-visible message, or `None` when the program's
+    /// text didn't evaluate to a waveform or a sequence (or the index is out of
+    /// range) and nothing was played.
     ///
-    /// The waveform starts where `start` says.
+    /// A waveform plays as one tracker entry under
+    /// `WaveformId::Program(program_index)`. A sequence plays decomposed: one
+    /// scheduled, independently repeating `WaveformId::Step` per listed step,
+    /// plus a silent anchor step carrying the `TopLevel` mark. Either starts
+    /// where `start` says, repeating every `repeat_after_measures` measures if
+    /// given.
     pub fn play_program(
+        &self,
+        set: &ProgramSet,
+        program_index: usize,
+        status: &tracker::Status<WaveformId, MarkId>,
+        start: Start,
+        repeat_after_measures: Option<u32>,
+    ) -> Option<String> {
+        // A sequence always plays decomposed, so the sequencer can edit its
+        // steps live.
+        if set.program(program_index)?.sequence().is_some() {
+            self.play_sequence(set, program_index, status, start, repeat_after_measures)
+        } else {
+            self.play_waveform(set, program_index, status, start, repeat_after_measures)
+        }
+    }
+
+    /// Plays the waveform of the program at `program_index` as described by
+    /// [`Player::play_program`].
+    fn play_waveform(
         &self,
         set: &ProgramSet,
         program_index: usize,
@@ -168,7 +178,7 @@ impl Player {
         // Substitute the program's current slider positions before handing
         // the waveform to the tracker (since the cached ones may be old).
         substitute_current_slider_values(&mut waveform, set);
-        self.sender(start)
+        self.sender
             .send(tracker::Command::Play {
                 // TODO maybe extend the top-level mark to the full measure?
                 id: WaveformId::Program(program_index),
@@ -186,25 +196,23 @@ impl Player {
     /// `None` when the program's text didn't evaluate to a waveform (or the
     /// index is out of range) and nothing was played.
     ///
-    /// For a sequenceable program the voice is the waveform its pattern is
-    /// built from — one hit, not the pattern; every other program's voice is
-    /// its whole waveform.
+    /// A sequence's voice is its step waveform — one hit, not the pattern;
+    /// a waveform program's voice is its whole waveform.
     ///
     /// # Example
     ///
     /// A program reading `[1, 2, 3, 4] | on_beats(kick)` plays `kick` once,
-    /// where [`Player::play_program_steps`] would play all four steps.
+    /// where [`Player::play_program`] would play all four steps.
     pub fn play_program_voice(&self, set: &ProgramSet, program_index: usize) -> Option<String> {
         let program = set.program(program_index)?;
         let display_name = set.display_name(program_index);
-        // A sequenceable program's own waveform is the whole pattern, so the
-        // single voice has to come from the decomposed sequence instead.
-        let mut waveform = match program.sequence() {
-            Some(sequence) => sequence.step_waveform.clone(),
-            None => program.waveform().cloned()?,
+        let mut waveform = match program.evaluated()? {
+            Evaluated::Waveform(waveform) => waveform.clone(),
+            Evaluated::Sequence(sequence) => sequence.step_waveform.clone(),
+            Evaluated::KeysInstrument(_) => return None,
         };
         substitute_current_slider_values(&mut waveform, set);
-        self.fast_sender
+        self.sender
             .send(tracker::Command::Play {
                 id: WaveformId::Program(program_index),
                 waveform: build_top_level_waveform(waveform, program.level_db()),
@@ -215,14 +223,9 @@ impl Player {
         Some(format!("Playing voice of {}", display_name))
     }
 
-    /// Plays the sequenceable program at `program_index` decomposed: one
-    /// scheduled, independently repeating `WaveformId::Step` per listed
-    /// step, plus a silent anchor step carrying the `TopLevel` mark.
-    /// Returns the user-visible message, or `None` when the program's text
-    /// didn't evaluate to a sequenceable waveform and nothing was played.
-    ///
-    /// The cycle is anchored where `start` says.
-    pub fn play_program_steps(
+    /// Plays the sequence of the program at `program_index` as described by
+    /// [`Player::play_program`].
+    fn play_sequence(
         &self,
         set: &ProgramSet,
         program_index: usize,
@@ -253,9 +256,8 @@ impl Player {
         };
         let mut step = sequence.step_waveform.clone();
         substitute_current_slider_values(&mut step, set);
-        let sender = self.sender(start);
         for &step_beat in &sequence.steps {
-            sender
+            self.sender
                 .send(tracker::Command::Play {
                     id: WaveformId::Step {
                         program: program_index,
@@ -277,7 +279,7 @@ impl Player {
                     let measures = ((step_beat - 0.75) / self.beats_per_measure as f32).ceil();
                     acc.max(measures * self.beats_per_measure as f32)
                 });
-        sender
+        self.sender
             .send(tracker::Command::Play {
                 id: WaveformId::Step {
                     program: program_index,
@@ -355,7 +357,7 @@ impl Player {
         };
         let mut step = sequence.step_waveform.clone();
         substitute_current_slider_values(&mut step, set);
-        let _ = self.fast_sender.send(tracker::Command::Play {
+        let _ = self.sender.send(tracker::Command::Play {
             id: WaveformId::Step {
                 program: program_index,
                 sixteenth,
@@ -367,11 +369,11 @@ impl Player {
         None
     }
 
-    /// Plays a note waveform under `WaveformId::Key(key)` immediately via
-    /// the fast route, wrapped with the top-level amplitude/terminator
+    /// Plays a note waveform under `WaveformId::Key(key)` immediately,
+    /// wrapped with the top-level amplitude/terminator
     /// marks at `level_db`.
     pub fn play_note(&self, key: u8, waveform: waveform::Waveform<MarkId>, level_db: f32) {
-        let _ = self.fast_sender.send(tracker::Command::Play {
+        let _ = self.sender.send(tracker::Command::Play {
             id: WaveformId::Key(key),
             waveform: build_top_level_waveform(waveform, level_db),
             start: None,
@@ -382,7 +384,7 @@ impl Player {
     /// Fades out the waveforms matched by the selector over a short ramp. A
     /// no-op if no matching waveform is playing.
     pub fn stop_waveform(&self, selector: WaveformSelector) {
-        self.fast_sender
+        self.sender
             .send(tracker::Command::Modify {
                 selector,
                 mark_id: MarkId::Terminator,
@@ -397,7 +399,7 @@ impl Player {
     /// repeating.
     pub fn remove_pending(&self, selector: WaveformSelector, after: Option<time::Instant>) {
         let _ = self
-            .fast_sender
+            .sender
             .send(tracker::Command::RemovePending { selector, after });
     }
 
@@ -409,7 +411,7 @@ impl Player {
         mark_id: MarkId,
         waveform: waveform::Waveform<MarkId>,
     ) {
-        let _ = self.fast_sender.send(tracker::Command::Modify {
+        let _ = self.sender.send(tracker::Command::Modify {
             selector,
             mark_id,
             waveform,
@@ -417,18 +419,25 @@ impl Player {
     }
 
     /// Starts the two alternating Beats waveforms that keep time for the
-    /// rest of the runtime. Blocks on `status_receiver` until the first
-    /// Beats waveform is scheduled so the second can start a measure later.
+    /// rest of the runtime, with their finite parts replaced by their samples
+    /// when `precompute` is set (see [`generator::Generator::precompute`]).
+    /// Blocks on `status_receiver` until the first Beats waveform is
+    /// scheduled so the second can start a measure later.
     pub fn start_beats(
         &self,
         environment: &Environment,
         status_receiver: &mpsc::Receiver<tracker::Status<WaveformId, MarkId>>,
+        precompute: bool,
     ) {
+        let mut beats = self.beats_waveform(environment);
+        if precompute {
+            beats = generator::Generator::new(environment.sample_rate()).precompute(beats);
+        }
         // Play the odd Beats waveform starting immediately and repeating every two measures
-        self.precompute_sender
+        self.sender
             .send(tracker::Command::Play {
                 id: WaveformId::Beats(false),
-                waveform: self.beats_waveform(environment),
+                waveform: beats.clone(),
                 start: None,
                 repeat_every: Some(
                     duration_from_beats(self.tempo, self.beats_per_measure as u64) * 2,
@@ -443,10 +452,10 @@ impl Player {
                         && mark.mark_id == MarkId::TopLevel
                         && let Some(duration) = mark.duration
                     {
-                        self.precompute_sender
+                        self.sender
                             .send(tracker::Command::Play {
                                 id: WaveformId::Beats(true),
-                                waveform: self.beats_waveform(environment),
+                                waveform: beats,
                                 start: Some(mark.start + duration),
                                 repeat_every: Some(
                                     duration_from_beats(self.tempo, self.beats_per_measure as u64)
@@ -675,8 +684,6 @@ fn duration_from_beats_f32(tempo: u32, beats: f32) -> time::Duration {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use crate::generator;
-
     use super::*;
 
     fn empty_status() -> tracker::Status<WaveformId, MarkId> {
@@ -745,7 +752,7 @@ mod tests {
     #[test]
     fn beats_have_known_lengths() {
         let environment = Environment::new(8000, 90, std::path::PathBuf::new());
-        let (player, _precompute_receiver, _fast_receiver) = test_player();
+        let (player, _receiver) = test_player();
         let mut generator = generator::Generator::new(8000);
         let beats = player.beats_waveform(&environment);
         let precomputed = generator.precompute(beats.clone());
@@ -781,8 +788,8 @@ mod tests {
         }
     }
 
-    /// Builds a program set whose program 0 is sequenceable with steps on
-    /// beats [1, 2.5], evaluated so its sequence is available.
+    /// Builds a program set whose program 0 is a sequence with steps on beats
+    /// [1, 2.5], evaluated so its sequence is available.
     fn sequenced_set() -> ProgramSet {
         let source = "on_beats = fn(w) => fn(bs) => w;\n\
                       #{level_db=0}\n\
@@ -792,8 +799,11 @@ mod tests {
                 .expect("test source should parse");
         assert!(message.is_empty(), "{}", message);
         let environment = Environment::new(8000, 90, std::path::PathBuf::new());
-        set.evaluate_and_record(&environment, 0)
+        let evaluated = environment
+            .evaluate_program(&set.evaluation_input(0))
             .expect("test program should evaluate");
+        set.record(0, Ok((Some(evaluated), Vec::new())))
+            .expect("a success records");
         assert!(set.program(0).unwrap().sequence().is_some());
         set
     }
@@ -801,11 +811,10 @@ mod tests {
     /// A receiver for the commands a test player sends to the tracker.
     type CommandReceiver = mpsc::Receiver<tracker::Command<WaveformId, MarkId>>;
 
-    fn test_player() -> (Player, CommandReceiver, CommandReceiver) {
-        let (precompute_sender, precompute_receiver) = mpsc::channel();
-        let (fast_sender, fast_receiver) = mpsc::channel();
-        let player = Player::new(90, 4, precompute_sender, fast_sender);
-        (player, precompute_receiver, fast_receiver)
+    fn test_player() -> (Player, CommandReceiver) {
+        let (sender, receiver) = mpsc::channel();
+        let player = Player::new(90, 4, sender);
+        (player, receiver)
     }
 
     fn anchor_mark(program: usize, start: Instant) -> tracker::Mark<WaveformId, MarkId> {
@@ -821,14 +830,14 @@ mod tests {
     }
 
     #[test]
-    fn play_program_steps_sends_one_play_per_step_plus_anchor() {
+    fn play_program_sends_one_play_per_step_of_a_sequence_plus_anchor() {
         let set = sequenced_set();
-        let (player, _precompute_receiver, fast_receiver) = test_player();
+        let (player, receiver) = test_player();
 
-        let message = player.play_program_steps(&set, 0, &empty_status(), Start::Now, Some(1));
+        let message = player.play_program(&set, 0, &empty_status(), Start::Now, Some(1));
         assert!(message.is_some());
 
-        let commands: Vec<_> = fast_receiver.try_iter().collect();
+        let commands: Vec<_> = receiver.try_iter().collect();
         let plays: Vec<_> = commands
             .iter()
             .map(|c| match c {
@@ -880,17 +889,17 @@ mod tests {
         assert!(format!("{}", anchor.1).contains("top-level"));
     }
 
-    /// A sequenceable program's voice is one hit, not the pattern — where
-    /// `play_program_steps` sends one entry per listed step plus an anchor.
+    /// A sequence's voice is one hit, not the pattern — where `play_program`
+    /// sends one entry per listed step plus an anchor.
     #[test]
     fn play_program_voice_plays_one_hit_of_a_sequenceable_program() {
         let set = sequenced_set();
-        let (player, _precompute_receiver, fast_receiver) = test_player();
+        let (player, receiver) = test_player();
 
         let message = player.play_program_voice(&set, 0);
         assert!(message.is_some());
 
-        let commands: Vec<_> = fast_receiver.try_iter().collect();
+        let commands: Vec<_> = receiver.try_iter().collect();
         assert_eq!(commands.len(), 1, "a voice is one entry, not a pattern");
         let tracker::Command::Play {
             id,
@@ -917,14 +926,17 @@ mod tests {
                 .expect("test source should parse");
         assert!(message.is_empty(), "{}", message);
         let environment = Environment::new(8000, 90, std::path::PathBuf::new());
-        set.evaluate_and_record(&environment, 0)
+        let evaluated = environment
+            .evaluate_program(&set.evaluation_input(0))
             .expect("test program should evaluate");
+        set.record(0, Ok((Some(evaluated), Vec::new())))
+            .expect("a success records");
         assert!(set.program(0).unwrap().sequence().is_none());
 
-        let (player, _precompute_receiver, fast_receiver) = test_player();
+        let (player, receiver) = test_player();
         assert!(player.play_program_voice(&set, 0).is_some());
 
-        let commands: Vec<_> = fast_receiver.try_iter().collect();
+        let commands: Vec<_> = receiver.try_iter().collect();
         assert_eq!(commands.len(), 1);
         let tracker::Command::Play {
             id, repeat_every, ..
@@ -939,7 +951,7 @@ mod tests {
     #[test]
     fn play_step_schedules_this_cycle_when_sixteenth_is_ahead() {
         let set = sequenced_set();
-        let (player, _precompute_receiver, fast_receiver) = test_player();
+        let (player, receiver) = test_player();
 
         let now = Instant::now();
         let cycle = now - Duration::from_millis(100);
@@ -951,7 +963,7 @@ mod tests {
         let message = player.play_step(&set, 0, 8, &status, None);
         assert!(message.is_none());
 
-        let commands: Vec<_> = fast_receiver.try_iter().collect();
+        let commands: Vec<_> = receiver.try_iter().collect();
         assert_eq!(commands.len(), 1);
         let tracker::Command::Play {
             id,
@@ -976,7 +988,7 @@ mod tests {
     #[test]
     fn play_step_rolls_to_next_cycle_when_sixteenth_passed() {
         let set = sequenced_set();
-        let (player, _precompute_receiver, fast_receiver) = test_player();
+        let (player, receiver) = test_player();
 
         let now = Instant::now();
         let cycle = now - Duration::from_secs(1);
@@ -988,7 +1000,7 @@ mod tests {
         let message = player.play_step(&set, 0, 0, &status, None);
         assert!(message.is_none());
 
-        let commands: Vec<_> = fast_receiver.try_iter().collect();
+        let commands: Vec<_> = receiver.try_iter().collect();
         assert_eq!(commands.len(), 1);
         let tracker::Command::Play { start, .. } = &commands[0] else {
             panic!("expected a Play command");
@@ -999,7 +1011,7 @@ mod tests {
     #[test]
     fn play_step_warns_when_passed_and_not_repeating() {
         let set = sequenced_set();
-        let (player, _precompute_receiver, fast_receiver) = test_player();
+        let (player, receiver) = test_player();
 
         let now = Instant::now();
         let mut status = empty_status();
@@ -1007,7 +1019,7 @@ mod tests {
 
         let message = player.play_step(&set, 0, 0, &status, None);
         assert!(message.unwrap().contains("passed"));
-        assert!(fast_receiver.try_iter().next().is_none());
+        assert!(receiver.try_iter().next().is_none());
     }
 
     /// An anchor that is running with nothing queued behind it is a one-shot
@@ -1016,7 +1028,7 @@ mod tests {
     #[test]
     fn play_step_does_not_repeat_into_a_one_shot_family() {
         let set = sequenced_set();
-        let (player, _precompute_receiver, fast_receiver) = test_player();
+        let (player, receiver) = test_player();
 
         let now = Instant::now();
         let cycle = now - Duration::from_millis(100);
@@ -1028,7 +1040,7 @@ mod tests {
         let message = player.play_step(&set, 0, 8, &status, Some(1));
         assert!(message.is_none());
 
-        let commands: Vec<_> = fast_receiver.try_iter().collect();
+        let commands: Vec<_> = receiver.try_iter().collect();
         assert_eq!(commands.len(), 1);
         let tracker::Command::Play {
             start,

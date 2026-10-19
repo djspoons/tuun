@@ -38,9 +38,10 @@ fn adsr_segments_meet_without_gaps_or_overlaps() {
             ProgramSet::from_source(source, PathBuf::new()).expect("test source should parse");
         assert_eq!(warning, "");
         let environment = Environment::new(sample_rate, 90, library_root.clone());
-        let waveform = match environment.evaluate_program(&set, 0) {
-            Ok(Evaluated::Waveform { waveform, .. }) => waveform,
+        let waveform = match environment.evaluate_program(&set.evaluation_input(0)) {
+            Ok(Evaluated::Waveform(waveform)) => waveform,
             Err(diagnostics) => panic!("invalid: {:?}", diagnostics),
+            Ok(Evaluated::Sequence(_)) => panic!("classified as a sequence"),
             Ok(Evaluated::KeysInstrument(_)) => panic!("classified as keys"),
         };
         let mut out = vec![0.0; 10000];

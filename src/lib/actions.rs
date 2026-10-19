@@ -4,7 +4,7 @@
 //! `Action`s. `apply` then mutates `AppState` and returns `Effect`s, which
 //! the runner in `effects.rs` executes against the outside world.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::ops::Range;
 use std::time::Instant;
 
@@ -124,6 +124,35 @@ impl LaunchMode {
     }
 }
 
+/// The status message shown while a program's result is on its way back from
+/// the processing thread.
+pub const PROCESSING_MESSAGE: &str = "Processing…";
+
+/// A job sent to the processing thread whose reply hasn't been applied yet.
+#[derive(Debug)]
+pub enum PendingJob {
+    /// The evaluation of one program (`Effect::EvaluateProgram`).
+    Program {
+        /// The program's index.
+        index: usize,
+        /// The program's generation when the job was sent.
+        generation: u64,
+        /// The effects to run once a successful result is recorded.
+        on_success: Vec<Effect>,
+        /// The effects to run once a failed result is recorded.
+        on_failure: Vec<Effect>,
+        /// The status message replaced by [`PROCESSING_MESSAGE`] when the job
+        /// was sent.
+        message: String,
+    },
+    /// The load of a whole program set (`Effect::ReloadSource`, or startup).
+    Load {
+        /// Whether this is the load at startup, which reports differently from
+        /// a reload.
+        startup: bool,
+    },
+}
+
 /// Internal state of the application. The reducer takes `&mut AppState` and mutates it in
 /// place; `main` keeps a single instance for the lifetime of the program.
 pub struct AppState {
@@ -153,6 +182,9 @@ pub struct AppState {
     /// the first line is the status-line summary, and single-line display
     /// sites should show only that line.
     pub message: String,
+    /// The jobs sent to the processing thread whose replies haven't been
+    /// applied, in the order they were sent (the order replies arrive in).
+    pub processing: VecDeque<PendingJob>,
 }
 
 impl AppState {
@@ -176,6 +208,7 @@ impl AppState {
             metronome: false,
             should_exit: false,
             message,
+            processing: VecDeque::new(),
         })
     }
 
@@ -198,6 +231,22 @@ impl AppState {
     /// Returns whether a take is waiting on a tick that is due at `now`.
     pub fn take_tick_due(&self, now: Instant) -> bool {
         self.next_take_tick().is_some_and(|due| due <= now)
+    }
+
+    /// Returns whether an evaluation of the program at `index` is waiting on
+    /// the processing thread.
+    pub fn is_processing(&self, index: usize) -> bool {
+        self.processing
+            .iter()
+            .any(|job| matches!(job, PendingJob::Program { index: i, .. } if *i == index))
+    }
+
+    /// Returns whether a load of a whole program set is waiting on the
+    /// processing thread.
+    pub fn is_loading(&self) -> bool {
+        self.processing
+            .iter()
+            .any(|job| matches!(job, PendingJob::Load { .. }))
     }
 }
 
@@ -451,13 +500,14 @@ pub enum Effect {
         waveform: waveform::Waveform<MarkId>,
     },
 
-    /// Parse and evaluate the given program, updating its state. On success,
-    /// switch to `mode_on_success`; on failure, switch to `mode_on_failure`
-    /// (`None` keeps the current mode either way).
+    /// Send the given program to the processing thread to be parsed and
+    /// evaluated. Once the result is recorded, run `on_success`, or
+    /// `on_failure` when the evaluation failed. A failure's diagnostics go to
+    /// Edit mode when that is the mode `on_failure` leaves.
     EvaluateProgram {
         program_index: usize,
-        mode_on_success: Option<Mode>,
-        mode_on_failure: Option<Mode>,
+        on_success: Vec<Effect>,
+        on_failure: Vec<Effect>,
     },
 
     /// Update the source file with the current text of the given program, then
@@ -503,10 +553,15 @@ pub enum Effect {
     SetDawModeDisplay(String),
 
     // --- I/O ---
-    /// Stop every voice on the tracker, then re-read the backing file and
-    /// rebuild the program set from it. A file that can't be read or parsed
-    /// leaves playback and state untouched.
+    /// Re-read the backing file and send it to the processing thread to be
+    /// rebuilt into a program set. Once the set is built, stop every voice on
+    /// the tracker and install it. A file that can't be read or parsed leaves
+    /// playback and state untouched.
     ReloadSource,
+    /// Switch to the given mode. Only for a switch that waits on another
+    /// effect's outcome (see `EvaluateProgram`); otherwise the reducer sets
+    /// `state.mode` itself.
+    SetMode(Mode),
     /// User-visible status message.
     ShowMessage(String),
     /// Print the evaluated waveform of the program at the given index to
@@ -531,6 +586,9 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
     }
     if refused_by_ownership(state, ctx.status, ctx.now, &action) {
         return vec![];
+    }
+    if let Some(effects) = refused_by_processing(state, &action) {
+        return effects;
     }
     match action {
         Action::PlayProgram {
@@ -681,22 +739,24 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             repeat_after_measures,
         } => {
             let i = state.active_program_index;
-            let mut effects = vec![
+            // The play reads the result, so it waits for it; the save does not,
+            // so it runs now.
+            let mut on_success = vec![Effect::SetMode(Mode::Select)];
+            if play {
+                on_success.push(Effect::PlayProgram {
+                    program_index: i,
+                    start: player::Start::NextMeasure,
+                    repeat_after_measures,
+                });
+            }
+            vec![
                 Effect::EvaluateProgram {
                     program_index: i,
-                    mode_on_success: Some(Mode::Select),
-                    mode_on_failure: Some(mode_on_failure),
+                    on_success,
+                    on_failure: vec![Effect::SetMode(mode_on_failure)],
                 },
                 Effect::UpdateSource(i),
-            ];
-            if play {
-                effects.extend(play_program_effects(
-                    i,
-                    player::Start::NextMeasure,
-                    repeat_after_measures,
-                ));
-            }
-            effects
+            ]
         }
         Action::EnterSelectMode => {
             state.mode = Mode::Select;
@@ -966,6 +1026,61 @@ pub fn refused_by_ownership(
     }
 }
 
+/// Returns the effects of refusing `action` because a job is waiting on the
+/// processing thread, or `None` when it isn't refused.
+///
+/// While a program set is loading, the actions that would change the source
+/// (entering Edit mode, toggling a sequencer step, arming a take, undo and
+/// redo, and another reload) are refused with a message, since the loaded set
+/// replaces the source they would change.
+///
+/// While an evaluation of the active program is waiting, entering Edit mode is
+/// refused with a message. In Edit mode, the keyboard actions that would change
+/// the text, move the cursor, or evaluate again are dropped silently, so the
+/// text the result answers is the text on screen. Showing a type only reads, so
+/// it stays allowed.
+fn refused_by_processing(state: &AppState, action: &Action) -> Option<Vec<Effect>> {
+    if state.is_loading()
+        && matches!(
+            action,
+            Action::EnterEditMode
+                | Action::ToggleSequencerStep { .. }
+                | Action::Transport(Transport::Record)
+                | Action::Undo
+                | Action::Redo
+                | Action::ReloadSource
+        )
+    {
+        return Some(vec![Effect::ShowMessage(PROCESSING_MESSAGE.to_string())]);
+    }
+    if !state.is_processing(state.active_program_index) {
+        return None;
+    }
+    match action {
+        Action::EnterEditMode => Some(vec![Effect::ShowMessage(PROCESSING_MESSAGE.to_string())]),
+        Action::InsertText(_)
+        | Action::DeleteCharBeforeCursor
+        | Action::DeleteCharAfterCursor
+        | Action::DeleteWordBeforeCursor
+        | Action::DeleteWordAfterCursor
+        | Action::DeleteToEndOfLine
+        | Action::MoveCursorBy(_)
+        | Action::MoveCursorToStart
+        | Action::MoveCursorToEnd
+        | Action::MoveCursorToPreviousWord
+        | Action::MoveCursorToNextWord
+        | Action::Complete
+        | Action::Undo
+        | Action::Redo
+        | Action::EvaluateAndLeaveEditMode { .. }
+            if matches!(state.mode, Mode::Edit { .. }) =>
+        {
+            Some(vec![])
+        }
+        _ => None,
+    }
+}
+
 /// Returns the effects of the Play transport press outside Record mode: queue
 /// the active program at the next measure, unless its playback is already
 /// pending or it is the installed keys program.
@@ -1160,7 +1275,15 @@ fn write_take(
     let cursor = program.text().len();
     program.record_edit(cursor);
     program.set_text(closed.text);
-    let mut effects = vec![
+    let mut on_success = Vec::new();
+    if closed.finish == Finish::Play {
+        on_success.push(Effect::PlayProgram {
+            program_index: i,
+            start: player::Start::At(closed.end),
+            repeat_after_measures: state.repeat_after_measures,
+        });
+    }
+    vec![
         // Posted first so that an evaluation error or a refused save, which
         // set their own message, stay on screen. A play from an instant
         // posts nothing, so this is still the last message on success.
@@ -1171,20 +1294,11 @@ fn write_take(
         )),
         Effect::EvaluateProgram {
             program_index: i,
-            mode_on_success: None,
-            mode_on_failure: None,
+            on_success,
+            on_failure: vec![],
         },
         Effect::UpdateSource(i),
-    ];
-    if closed.finish == Finish::Play {
-        // A failed evaluation leaves no waveform, so this plays nothing.
-        effects.push(Effect::PlayProgram {
-            program_index: i,
-            start: player::Start::At(closed.end),
-            repeat_after_measures: state.repeat_after_measures,
-        });
-    }
-    effects
+    ]
 }
 
 /// Returns `n` notes as text, e.g. "1 note" or "7 notes".
@@ -1310,34 +1424,39 @@ fn apply_toggle_sequencer_step(state: &mut AppState, ctx: &Context, sixteenth: u
 
     let live = sequence_is_live(ctx, i);
 
-    let mut effects = vec![
-        Effect::EvaluateProgram {
-            program_index: i,
-            mode_on_success: None,
-            mode_on_failure: None,
-        },
-        Effect::UpdateSource(i),
-        Effect::ShowMessage(format!(
-            "{} beat {} {}",
-            display_name,
-            edit.beat,
-            if edit.turned_on { "on" } else { "off" }
-        )),
-    ];
+    // The message waits for success so that a failure's error stays on screen,
+    // and the play because it reads the result. A removal reads nothing, so it
+    // runs either way.
+    let mut on_success = vec![Effect::ShowMessage(format!(
+        "{} beat {} {}",
+        display_name,
+        edit.beat,
+        if edit.turned_on { "on" } else { "off" }
+    ))];
+    let mut on_failure = Vec::new();
     if live {
         if edit.turned_on {
-            effects.push(Effect::PlaySequencerStep {
+            on_success.push(Effect::PlaySequencerStep {
                 program_index: i,
                 sixteenth,
             });
         } else {
-            effects.push(Effect::RemovePendingSequencerStep {
-                program_index: i,
-                sixteenth,
-            });
+            for effects in [&mut on_success, &mut on_failure] {
+                effects.push(Effect::RemovePendingSequencerStep {
+                    program_index: i,
+                    sixteenth,
+                });
+            }
         }
     }
-    effects
+    vec![
+        Effect::EvaluateProgram {
+            program_index: i,
+            on_success,
+            on_failure,
+        },
+        Effect::UpdateSource(i),
+    ]
 }
 
 /// Returns whether the program at `program_index` is playing as a sequence:
@@ -1763,36 +1882,40 @@ fn apply_committed_history_restore(
     if restore(program, cursor).is_none() {
         return vec![Effect::ShowMessage(empty_message.to_string())];
     }
-    let mut effects = vec![
-        // Posted first so that an evaluation error or a refused save, which
-        // set their own message, stay on screen.
-        Effect::ShowMessage(format!("{} change to {}", verb, display_name)),
-        Effect::EvaluateProgram {
-            program_index: i,
-            mode_on_success: None,
-            mode_on_failure: None,
-        },
-        Effect::UpdateSource(i),
-    ];
     // Playing steps repeat independently of the text, so bring them in line
-    // with the restored step list.
+    // with the restored step list. A play reads the result, so it waits for
+    // success; a removal reads nothing, so it runs either way.
+    let mut on_success = Vec::new();
+    let mut on_failure = Vec::new();
     if sequence_is_live(ctx, i) {
         let old_steps = step_sixteenths(&old_text);
         let new_steps = step_sixteenths(state.active_program().text());
-        effects.extend(new_steps.difference(&old_steps).map(|&sixteenth| {
+        on_success.extend(new_steps.difference(&old_steps).map(|&sixteenth| {
             Effect::PlaySequencerStep {
                 program_index: i,
                 sixteenth,
             }
         }));
-        effects.extend(old_steps.difference(&new_steps).map(|&sixteenth| {
-            Effect::RemovePendingSequencerStep {
-                program_index: i,
-                sixteenth,
-            }
-        }));
+        for effects in [&mut on_success, &mut on_failure] {
+            effects.extend(old_steps.difference(&new_steps).map(|&sixteenth| {
+                Effect::RemovePendingSequencerStep {
+                    program_index: i,
+                    sixteenth,
+                }
+            }));
+        }
     }
-    effects
+    vec![
+        // Posted first so that an evaluation error or a refused save, which
+        // set their own message, stay on screen.
+        Effect::ShowMessage(format!("{} change to {}", verb, display_name)),
+        Effect::EvaluateProgram {
+            program_index: i,
+            on_success,
+            on_failure,
+        },
+        Effect::UpdateSource(i),
+    ]
 }
 
 /// Refreshes `Mode::Edit.errors` from the active program's text. Called
@@ -3443,22 +3566,25 @@ _ = saw(220);";
             state.active_program().text(),
             "[1, 2.5, 3] | on_beats(1 | fin(time - 1))"
         );
-        assert!(matches!(
-            effects[0],
-            Effect::EvaluateProgram {
-                program_index: 0,
-                mode_on_success: None,
-                mode_on_failure: None,
-            }
-        ));
-        assert!(matches!(effects[1], Effect::UpdateSource(0)));
+        // The message waits for a successful result, so that a failure's error
+        // stays on screen; the save does not wait.
         assert!(
-            matches!(&effects[2], Effect::ShowMessage(m) if m.contains("beat 3 on")),
-            "expected a beat-on message, got {:?}",
+            matches!(
+                &effects[..],
+                [
+                    Effect::EvaluateProgram {
+                        program_index: 0,
+                        on_success,
+                        on_failure,
+                    },
+                    Effect::UpdateSource(0),
+                    // Not playing: the toggle is text-only, no tracker effect.
+                ] if matches!(&on_success[..], [Effect::ShowMessage(m)] if m.contains("beat 3 on"))
+                    && on_failure.is_empty()
+            ),
+            "expected an evaluation followed by a beat-on message, got {:?}",
             effects
         );
-        // Not playing: the toggle is text-only, no tracker effect.
-        assert_eq!(effects.len(), 3);
     }
 
     #[test]
@@ -3482,12 +3608,12 @@ _ = saw(220);";
                 effects
             );
             assert!(matches!(
-                effects[1],
+                &effects[1],
                 Effect::EvaluateProgram {
                     program_index: 0,
-                    mode_on_success: None,
-                    mode_on_failure: None,
-                }
+                    on_success,
+                    on_failure,
+                } if on_success.is_empty() && on_failure.is_empty()
             ));
             assert!(matches!(effects[2], Effect::UpdateSource(0)));
             assert_eq!(effects.len(), 3);
@@ -3517,8 +3643,10 @@ _ = saw(220);";
             std::path::PathBuf::new(),
         )
         .expect("test source should parse");
-        let effects =
-            apply_with_empty_status(&mut state, Action::ToggleSequencerStep { sixteenth: 4 });
+        let effects = in_run_order(apply_with_empty_status(
+            &mut state,
+            Action::ToggleSequencerStep { sixteenth: 4 },
+        ));
         assert_eq!(
             state.active_program().text(),
             "[1, 3] | on_beats(1 | fin(time - 1))"
@@ -3544,7 +3672,7 @@ _ = saw(220);";
             Action::ToggleSequencerStep { sixteenth: 4 },
         );
 
-        let effects = apply_with_status(&mut state, &status, now, Action::Undo);
+        let effects = in_run_order(apply_with_status(&mut state, &status, now, Action::Undo));
         assert!(
             matches!(
                 effects.last(),
@@ -3558,7 +3686,7 @@ _ = saw(220);";
         );
         assert_eq!(effects.len(), 4);
 
-        let effects = apply_with_status(&mut state, &status, now, Action::Redo);
+        let effects = in_run_order(apply_with_status(&mut state, &status, now, Action::Redo));
         assert!(
             matches!(
                 effects.last(),
@@ -3578,12 +3706,12 @@ _ = saw(220);";
         let mut state = sequencer_state();
         let now = Instant::now();
         let status = status_with_anchor(now - Duration::from_secs(1));
-        let effects = apply_with_status(
+        let effects = in_run_order(apply_with_status(
             &mut state,
             &status,
             now,
             Action::ToggleSequencerStep { sixteenth: 4 },
-        );
+        ));
         assert!(
             matches!(
                 effects.last(),
@@ -3602,15 +3730,30 @@ _ = saw(220);";
         let mut state = sequencer_state();
         let now = Instant::now();
         let status = status_with_anchor(now - Duration::from_secs(1));
-        let effects = apply_with_status(
+        let effects = in_run_order(apply_with_status(
             &mut state,
             &status,
             now,
             Action::ToggleSequencerStep { sixteenth: 0 },
-        );
+        ));
         assert_eq!(
             state.active_program().text(),
             "[2.5] | on_beats(1 | fin(time - 1))"
+        );
+        // The removal reads no result, so it runs on a failure too.
+        assert!(
+            matches!(
+                &effects[0],
+                Effect::EvaluateProgram { on_failure, .. } if matches!(
+                    &on_failure[..],
+                    [Effect::RemovePendingSequencerStep {
+                        program_index: 0,
+                        sixteenth: 0,
+                    }]
+                )
+            ),
+            "got {:?}",
+            effects
         );
         assert!(
             matches!(
@@ -3630,12 +3773,12 @@ _ = saw(220);";
         let mut state = sequencer_state();
         let now = Instant::now();
         let status = status_with_anchor(now + Duration::from_secs(1));
-        let effects = apply_with_status(
+        let effects = in_run_order(apply_with_status(
             &mut state,
             &status,
             now,
             Action::ToggleSequencerStep { sixteenth: 4 },
-        );
+        ));
         assert!(
             matches!(effects.last(), Some(Effect::PlaySequencerStep { .. })),
             "expected PlaySequencerStep for a queued family, got {:?}",
@@ -3947,28 +4090,165 @@ _ = saw(220);";
                 repeat_after_measures: Some(2),
             },
         );
-        let evaluate = effects.iter().position(|e| {
-            matches!(
-                e,
-                Effect::EvaluateProgram {
-                    program_index: 0,
-                    ..
-                }
-            )
-        });
-        let play = effects.iter().position(|e| {
-            matches!(
-                e,
-                Effect::PlayProgram {
-                    program_index: 0,
-                    start: player::Start::NextMeasure,
-                    repeat_after_measures: Some(2),
-                }
-            )
-        });
+        // The mode stays Edit until the result arrives, and the play waits
+        // for it; the save does not.
+        assert!(matches!(state.mode, Mode::Edit { .. }));
         assert!(
-            matches!((evaluate, play), (Some(e), Some(p)) if e < p),
+            matches!(
+                &effects[..],
+                [
+                    Effect::EvaluateProgram {
+                        program_index: 0,
+                        on_success,
+                        on_failure,
+                    },
+                    Effect::UpdateSource(0),
+                ] if matches!(
+                    &on_success[..],
+                    [
+                        Effect::SetMode(Mode::Select),
+                        Effect::PlayProgram {
+                            program_index: 0,
+                            start: player::Start::NextMeasure,
+                            repeat_after_measures: Some(2),
+                        },
+                    ]
+                ) && matches!(&on_failure[..], [Effect::SetMode(Mode::Select)])
+            ),
             "expected EvaluateProgram then PlayProgram, got {:?}",
+            effects
+        );
+    }
+
+    /// Marks an evaluation of the program at `index` as waiting on the
+    /// processing thread.
+    fn pend_evaluation(state: &mut AppState, index: usize) {
+        let generation = state.programs.programs()[index].generation();
+        state.processing.push_back(PendingJob::Program {
+            index,
+            generation,
+            on_success: vec![Effect::SetMode(Mode::Select)],
+            on_failure: vec![],
+            message: String::new(),
+        });
+    }
+
+    #[test]
+    fn edit_keys_are_dropped_while_the_result_is_pending() {
+        let mut state = editing_state();
+        apply_with_empty_status(&mut state, Action::InsertText(" ".to_string()));
+        pend_evaluation(&mut state, 0);
+        let text_before = state.active_program().text().to_string();
+        for action in [
+            Action::InsertText("x".to_string()),
+            Action::DeleteCharBeforeCursor,
+            Action::DeleteCharAfterCursor,
+            Action::DeleteWordBeforeCursor,
+            Action::DeleteWordAfterCursor,
+            Action::DeleteToEndOfLine,
+            Action::MoveCursorBy(-1),
+            Action::MoveCursorToStart,
+            Action::MoveCursorToEnd,
+            Action::MoveCursorToPreviousWord,
+            Action::MoveCursorToNextWord,
+            Action::Complete,
+            Action::Undo,
+            Action::Redo,
+            Action::EvaluateAndLeaveEditMode {
+                mode_on_failure: Mode::Select,
+                play: true,
+                repeat_after_measures: None,
+            },
+        ] {
+            let effects = apply_with_empty_status(&mut state, action);
+            assert!(effects.is_empty(), "expected no effects, got {:?}", effects);
+        }
+        assert_eq!(state.active_program().text(), text_before);
+        assert!(matches!(
+            state.mode,
+            Mode::Edit { cursor_position, .. } if cursor_position == text_before.len()
+        ));
+
+        // Reading a type, and pads for other programs, still work.
+        let effects = apply_with_empty_status(&mut state, Action::ShowType);
+        assert!(
+            matches!(&effects[..], [Effect::ShowMessage(_)]),
+            "got {:?}",
+            effects
+        );
+        let effects = apply_with_empty_status(&mut state, Action::ToggleInstalledKeys(1));
+        assert!(
+            matches!(&effects[..], [Effect::InstallKeys(1)]),
+            "got {:?}",
+            effects
+        );
+
+        // Once the result is in, editing resumes.
+        state.processing.clear();
+        apply_with_empty_status(&mut state, Action::InsertText("x".to_string()));
+        assert_eq!(state.active_program().text(), format!("{}x", text_before));
+    }
+
+    #[test]
+    fn entering_edit_mode_is_refused_while_the_result_is_pending() {
+        let mut state = editing_state();
+        state.mode = Mode::Select;
+        pend_evaluation(&mut state, 0);
+        let effects = apply_with_empty_status(&mut state, Action::EnterEditMode);
+        assert!(
+            matches!(&effects[..], [Effect::ShowMessage(m)] if m == PROCESSING_MESSAGE),
+            "got {:?}",
+            effects
+        );
+        assert!(matches!(state.mode, Mode::Select));
+
+        // A result pending for another program doesn't hold this one.
+        state.processing.clear();
+        pend_evaluation(&mut state, 1);
+        apply_with_empty_status(&mut state, Action::EnterEditMode);
+        assert!(matches!(state.mode, Mode::Edit { .. }));
+    }
+
+    /// The actions that change the source are refused while a program set
+    /// loads, and playback is not.
+    #[test]
+    fn source_changes_are_refused_while_a_set_loads() {
+        let mut state = test_state();
+        state
+            .processing
+            .push_back(PendingJob::Load { startup: false });
+        for action in [
+            Action::EnterEditMode,
+            Action::ToggleSequencerStep { sixteenth: 0 },
+            Action::Transport(Transport::Record),
+            Action::Undo,
+            Action::Redo,
+            Action::ReloadSource,
+        ] {
+            let description = format!("{:?}", action);
+            let effects = apply_with_empty_status(&mut state, action);
+            assert!(
+                matches!(&effects[..], [Effect::ShowMessage(m)] if m == PROCESSING_MESSAGE),
+                "{} got {:?}",
+                description,
+                effects
+            );
+        }
+        assert!(matches!(state.mode, Mode::Select));
+
+        let effects = apply_with_empty_status(&mut state, Action::StartProgramVoice(0));
+        assert!(
+            matches!(&effects[..], [Effect::PlayProgramVoice(0), ..]),
+            "got {:?}",
+            effects
+        );
+
+        // Once the set is in, the same actions go through.
+        state.processing.clear();
+        let effects = apply_with_empty_status(&mut state, Action::ReloadSource);
+        assert!(
+            matches!(&effects[..], [Effect::ReloadSource]),
+            "got {:?}",
             effects
         );
     }
@@ -4020,6 +4300,33 @@ _ = saw(220);";
     fn apply_at(state: &mut AppState, t0: Instant, seconds: f64, action: Action) -> Vec<Effect> {
         let now = t0 + Duration::from_secs_f64(seconds);
         apply_with_status(state, &measures(t0), now, action)
+    }
+
+    /// Returns `effects` in the order they run when every evaluation among
+    /// them succeeds and answers after the rest: each `EvaluateProgram`'s
+    /// `on_success` effects move to the end, leaving its `on_success` empty.
+    fn in_run_order(effects: Vec<Effect>) -> Vec<Effect> {
+        let mut now = Vec::new();
+        let mut later = Vec::new();
+        for effect in effects {
+            match effect {
+                Effect::EvaluateProgram {
+                    program_index,
+                    on_success,
+                    on_failure,
+                } => {
+                    later.extend(on_success);
+                    now.push(Effect::EvaluateProgram {
+                        program_index,
+                        on_success: vec![],
+                        on_failure,
+                    });
+                }
+                effect => now.push(effect),
+            }
+        }
+        now.extend(later);
+        now
     }
 
     /// Returns the messages among `effects`, in order.
@@ -4206,15 +4513,15 @@ _ = saw(220);";
         );
         assert_eq!(messages(&effects), vec!["Recorded 1 note into A:2"]);
         assert!(matches!(
-            effects[1..],
+            &effects[1..],
             [
                 Effect::EvaluateProgram {
                     program_index: 1,
-                    mode_on_success: None,
-                    mode_on_failure: None,
+                    on_success,
+                    on_failure,
                 },
                 Effect::UpdateSource(1),
-            ]
+            ] if on_success.is_empty() && on_failure.is_empty()
         ));
         // The write is one undo unit.
         let program = state.programs.program_mut(1).unwrap();
@@ -4239,13 +4546,15 @@ _ = saw(220);";
         );
     }
 
-    /// Returns the start of the `PlayProgram` effects among `effects`, in order.
+    /// Returns the start of the `PlayProgram` effects among `effects`,
+    /// including those waiting on an evaluation's success, in order.
     fn play_starts(effects: &[Effect]) -> Vec<player::Start> {
         effects
             .iter()
-            .filter_map(|e| match e {
-                Effect::PlayProgram { start, .. } => Some(*start),
-                _ => None,
+            .flat_map(|e| match e {
+                Effect::PlayProgram { start, .. } => vec![*start],
+                Effect::EvaluateProgram { on_success, .. } => play_starts(on_success),
+                _ => vec![],
             })
             .collect()
     }
@@ -4268,22 +4577,25 @@ _ = saw(220);";
         let effects = apply_at(&mut state, t0, 7.9, Action::TakeTick);
         assert!(matches!(state.mode, Mode::Select));
         assert_eq!(messages(&effects), vec!["Recorded 1 note into A:2"]);
-        // The play follows the evaluation and the save.
+        // The play waits for the evaluation; the save does not.
         assert!(
             matches!(
-                effects[1..],
+                &effects[1..],
                 [
                     Effect::EvaluateProgram {
                         program_index: 1,
-                        ..
+                        on_success,
+                        on_failure,
                     },
                     Effect::UpdateSource(1),
-                    Effect::PlayProgram {
+                ] if on_failure.is_empty() && matches!(
+                    &on_success[..],
+                    [Effect::PlayProgram {
                         program_index: 1,
                         repeat_after_measures: Some(1),
                         ..
-                    },
-                ]
+                    }]
+                )
             ),
             "got {:?}",
             effects

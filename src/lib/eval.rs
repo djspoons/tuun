@@ -40,7 +40,7 @@ fn extend_with_trivial_context<M, S>(
 /// Rebuilt nodes keep their spans as provenance (a substituted variable keeps
 /// the span of the value's defining expression).
 fn substitute<M, S>(
-    context: &[(String, SourceExpr<M, S>)],
+    context: &mut Vec<(String, SourceExpr<M, S>)>,
     expr: SourceExpr<M, S>,
 ) -> Result<SourceExpr<M, S>, Error<S>>
 where
@@ -73,14 +73,16 @@ where
                 .into_iter()
                 .map(|(name, value)| Ok((name, substitute(context, value)?)))
                 .collect::<Result<_, self::Error<S>>>()?;
-            let mut context = Vec::from(context);
+            let len = context.len();
             for param in &positional {
-                extend_with_trivial_context(&mut context, param);
+                extend_with_trivial_context(context, param);
             }
             for (name, _) in &named {
                 context.push((name.clone(), SourceExpr::variable(name.clone())));
             }
-            let body = substitute(&context, *body)?;
+            let body = substitute(context, *body);
+            context.truncate(len);
+            let body = body?;
             SourceExpr {
                 expr: Expr::Function {
                     positional,
@@ -370,7 +372,7 @@ where
                             .unwrap_or_else(|| default.clone());
                         context.push((name.clone(), value));
                     }
-                    let body = substitute(&context, *body)?;
+                    let body = substitute(&mut context, *body)?;
                     evaluate_closed(body)
                 }
                 (BuiltIn { name, function }, arguments) => {
@@ -465,8 +467,8 @@ where
     M: Clone + Display + Debug,
     S: Clone + Debug,
 {
-    let context = evaluate_bindings(resolve, bindings)?;
-    evaluate_with_context(&context, expr)
+    let mut context = evaluate_bindings(resolve, bindings)?;
+    evaluate_with_context(&mut context, expr)
 }
 
 /// Evaluates `bindings` and returns the resulting context: one entry per
@@ -490,7 +492,7 @@ where
 
 /// Substitutes `context` into `expr` and reduces the result to a value.
 fn evaluate_with_context<M, S>(
-    context: &[(String, SourceExpr<M, S>)],
+    context: &mut Vec<(String, SourceExpr<M, S>)>,
     expr: SourceExpr<M, S>,
 ) -> Result<SourceExpr<M, S>, Error<S>>
 where
@@ -528,17 +530,26 @@ where
     }
     open.push(key);
     let mut module_context = Vec::new();
-    let exports = build_context(resolve, module, &mut module_context, open);
+    let own = build_context(resolve, module, &mut module_context, open);
     open.pop();
-    exports
+    let mut own = own?.into_iter().peekable();
+    Ok(module_context
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| own.next_if_eq(i).is_some())
+        .map(|(_, entry)| entry)
+        .collect())
 }
 
+/// Evaluates `bindings`, appending an entry to `context` for each bound name.
+/// Returns the indices into `context` of the entries `bindings` defines itself
+/// (as opposed to those brought in by `open`).
 fn build_context<'a, M, S, F>(
     resolve: &F,
     bindings: &'a [SourceBinding<M, S>],
     context: &mut Vec<ContextEntry<M, S>>,
     open: &mut Vec<(usize, usize)>,
-) -> Result<Vec<ContextEntry<M, S>>, Error<S>>
+) -> Result<Vec<usize>, Error<S>>
 where
     F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
     M: Clone + Display + Debug,
@@ -571,7 +582,7 @@ where
                 let value = evaluate_closed(substituted)?;
                 let before = context.len();
                 extend_context(context, pattern, &value)?;
-                own.extend_from_slice(&context[before..]);
+                own.extend(before..context.len());
             }
             // Empty bindings have no semantic content — they exist only to
             // anchor annotation/comment spans for source preservation.

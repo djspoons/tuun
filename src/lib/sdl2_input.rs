@@ -173,7 +173,7 @@ impl InputHandler {
                 if gui_mod {
                     // Cmd+Return: play with repeat (Shift=2, otherwise 1).
                     let measures = if shift { 2 } else { 1 };
-                    if programs[active_program_index].waveform().is_some() {
+                    if programs[active_program_index].is_playable() {
                         Some(vec![Action::PlayProgram {
                             program_index: active_program_index,
                             start_at_next_measure: true,

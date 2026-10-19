@@ -95,7 +95,7 @@ fn bench_marks(c: &mut Criterion) {
             let (tx, _rx) = mpsc::channel();
             let environment =
                 environment::Environment::new(SAMPLE_RATE, 120, std::path::PathBuf::from("./lib"));
-            let player = player::Player::new(120, 4, tx.clone(), tx);
+            let player = player::Player::new(120, 4, tx);
             let mut generator = generator::Generator::new(SAMPLE_RATE);
             let mut ws = Vec::new();
             for _ in 0..40 {

@@ -299,7 +299,7 @@ fn update_pads_clip_launcher(
         } else if is_installed_keys {
             // If it's the installed keys program, don't color the top pad (unless it's playing).
             launchkey.set_daw_top_pad_color(i as u8, 0, 0, 0);
-        } else if program.waveform().is_some()
+        } else if program.is_playable()
             && !pad_refused(
                 state,
                 status,
@@ -334,7 +334,7 @@ fn update_pads_clip_launcher(
                 current_beat_duration,
             );
             launchkey.set_daw_bottom_pad_color(i as u8, r, g, b);
-        } else if program.waveform().is_some()
+        } else if program.is_playable()
             && !pad_refused(
                 state,
                 status,
@@ -425,15 +425,10 @@ fn update_pads_sequencer(
     current_beat_duration: std::time::Duration,
 ) {
     let program = state.active_program();
-    let steps: Option<Vec<f32>> = program
-        .sequence()
-        .map(|sequence| sequence.steps.clone())
-        .or_else(|| {
-            // A program that was edited (but not yet re-evaluated) or that
-            // isn't playable can still show its pattern from the text.
-            sequencer::analyze(program.text())
-                .map(|shape| shape.steps.iter().map(|(beat, _)| *beat).collect())
-        });
+    // From the text, which the evaluated sequence can lag behind while an
+    // edit is being evaluated.
+    let steps: Option<Vec<f32>> = sequencer::analyze(program.text())
+        .map(|shape| shape.steps.iter().map(|(beat, _)| *beat).collect());
 
     // The playhead only shows while the step family is sounding: its
     // absolute sixteenth is measured from the current cycle's anchor start,

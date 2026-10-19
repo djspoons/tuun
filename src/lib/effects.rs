@@ -4,12 +4,13 @@
 //! controller). Keeping it separate from `actions.rs` means the reducer
 //! stays pure and easy to test.
 
+use std::mem;
 use std::sync::mpsc;
 use std::time::Instant;
 
 use std::collections::HashMap;
 
-use crate::actions::{self, AppState, Effect};
+use crate::actions::{self, AppState, Effect, PendingJob};
 use crate::diagnostics;
 use crate::environment;
 use crate::expr;
@@ -17,6 +18,7 @@ use crate::ids::{MarkId, WaveformId, WaveformSelector};
 use crate::keys::Keys;
 use crate::launchkey;
 use crate::player;
+use crate::processing;
 use crate::programs::{self, PROGRAMS_PER_BANK};
 use crate::slider;
 use crate::tracker;
@@ -82,6 +84,9 @@ pub struct EffectRunner {
     player: player::Player,
     environment: environment::Environment,
     slider_sender: mpsc::Sender<SliderEvent>,
+    /// Where `Effect::EvaluateProgram` sends its jobs; their replies come back
+    /// through [`EffectRunner::finish`].
+    jobs: mpsc::Sender<processing::Job>,
 }
 
 impl EffectRunner {
@@ -89,11 +94,13 @@ impl EffectRunner {
         player: player::Player,
         environment: environment::Environment,
         slider_sender: mpsc::Sender<SliderEvent>,
+        jobs: mpsc::Sender<processing::Job>,
     ) -> Self {
         Self {
             player,
             environment,
             slider_sender,
+            jobs,
         }
     }
 
@@ -130,6 +137,167 @@ impl EffectRunner {
         self.run_all(state, world, all_effects);
     }
 
+    /// Applies `reply`, the processing thread's answer to the oldest job in
+    /// `state.processing`, and runs the effects that waited on it.
+    ///
+    /// A program's result is recorded, its message shown, and its `on_success`
+    /// or `on_failure` effects run, unless the program's text has changed since
+    /// the newest job for it was sent; then the result answers text that is
+    /// gone and the whole reply is dropped.
+    ///
+    /// A loaded program set is installed (see [`EffectRunner::load`]).
+    pub fn finish(&mut self, state: &mut AppState, world: &mut World, reply: processing::Reply) {
+        let outcome = match reply {
+            processing::Reply::Program(outcome) => outcome,
+            processing::Reply::Loaded(loaded) => {
+                match state.processing.pop_front() {
+                    Some(PendingJob::Load { startup }) => self.install(state, loaded, startup),
+                    _ => println!("Got a load reply with no load waiting for it"),
+                }
+                return;
+            }
+        };
+        let Some(PendingJob::Program {
+            index,
+            generation,
+            on_success,
+            on_failure,
+            message,
+        }) = state.processing.pop_front()
+        else {
+            println!("Got a program reply with no program waiting for it");
+            return;
+        };
+        // A pending load still owns the status line.
+        if state.message == actions::PROCESSING_MESSAGE && !state.is_loading() {
+            state.message = message;
+        }
+        // An older job's result still applies while a newer job for the same
+        // text is on its way, so that each sequencer toggle schedules its
+        // step.
+        let newest = state
+            .processing
+            .iter()
+            .rev()
+            .find_map(|job| match job {
+                PendingJob::Program {
+                    index: i,
+                    generation,
+                    ..
+                } if *i == index => Some(*generation),
+                _ => None,
+            })
+            .unwrap_or(generation);
+        if state
+            .programs
+            .program(index)
+            .map(programs::Program::generation)
+            != Some(newest)
+        {
+            return;
+        }
+        match state.programs.record(index, outcome) {
+            Ok(warnings) => {
+                // Warnings are informational: the program plays regardless, and
+                // only the status line reports them.
+                if !warnings.is_empty() {
+                    state.message = diagnostics::error_message(&warnings);
+                }
+                self.run_all(state, world, on_success);
+            }
+            Err(diagnostics) => {
+                state.message = diagnostics::error_message(&diagnostics);
+                self.run_all(state, world, on_failure);
+                // Hand the diagnostics to the editor, in whichever mode
+                // `on_failure` left, so evaluation errors highlight.
+                if let actions::Mode::Edit { errors, .. } = &mut state.mode {
+                    *errors = diagnostics;
+                }
+            }
+        }
+    }
+
+    /// Sends `source`, the contents of the program set's backing file, to the
+    /// processing thread to be built into a new program set, which
+    /// [`EffectRunner::finish`] installs.
+    ///
+    /// Playback and the current set are untouched until the reply. Installing
+    /// stops every voice; a `source` that doesn't parse leaves everything as it
+    /// is and shows the error. `startup` marks the load at startup, whose
+    /// status message names only the failed programs.
+    pub fn load(&mut self, state: &mut AppState, source: String, startup: bool) {
+        let job = processing::Job::Load {
+            source,
+            input_path: state.programs.input_path().to_path_buf(),
+        };
+        if self.jobs.send(job).is_err() {
+            state.message = "The processing thread has stopped".to_string();
+            return;
+        }
+        state.message = actions::PROCESSING_MESSAGE.to_string();
+        state.processing.push_back(PendingJob::Load { startup });
+    }
+
+    /// Installs `loaded`, the set a load built, in place of the current set, or
+    /// shows its error.
+    fn install(
+        &mut self,
+        state: &mut AppState,
+        loaded: Result<processing::Loaded, String>,
+        startup: bool,
+    ) {
+        let processing::Loaded {
+            set,
+            warning,
+            failed,
+        } = match loaded {
+            Ok(loaded) => loaded,
+            Err(message) => {
+                state.message = message;
+                return;
+            }
+        };
+        // TODO this can cause audible artifacts if a waveform is already in
+        // the middle of being stopped. For example, if a note-off has a very
+        // long ramp in progress, this stop can momentarily increase the
+        // amplitude.
+        self.player.stop_waveform(WaveformSelector::AllVoices);
+        self.player
+            .remove_pending(WaveformSelector::AllVoices, None);
+        // The installed instrument was a snapshot of the old set.
+        state.keys = None;
+        state.programs = set;
+        // Baselines are re-seeded from the new set rather than kept since a
+        // slider mark names a program slot, which the new set may fill with an
+        // entirely different binding.
+        let _ = self
+            .slider_sender
+            .send(SliderEvent::SetBaselines(slider_values(&state.programs)));
+        let failed: Vec<String> = failed
+            .into_iter()
+            .map(|i| state.programs.display_name(i))
+            .collect();
+        state.message = if startup {
+            // The parse warning would sit in the status line with nothing
+            // saying which program it came from; each error resurfaces when
+            // its program is evaluated interactively.
+            if failed.is_empty() {
+                String::new()
+            } else {
+                format!("Errors in {}", failed.join(", "))
+            }
+        } else {
+            let mut message = format!("Reloaded {}", state.programs.display_path());
+            if !warning.is_empty() {
+                message = format!("{} — {}", message, warning);
+            }
+            if !failed.is_empty() {
+                message = format!("{} — failed: {}", message, failed.join(", "));
+            }
+            message
+        };
+    }
+
     fn run_one(&mut self, state: &mut AppState, world: &mut World, effect: Effect) {
         match effect {
             Effect::PlayProgram {
@@ -137,30 +305,13 @@ impl EffectRunner {
                 start,
                 repeat_after_measures,
             } => {
-                // A sequenceable program always plays decomposed — one
-                // tracker entry per step — so the sequencer can edit its
-                // steps live.
-                let sequenced = state
-                    .programs
-                    .program(program_index)
-                    .is_some_and(|p| p.sequence().is_some());
-                let message = if sequenced {
-                    self.player.play_program_steps(
-                        &state.programs,
-                        program_index,
-                        world.status,
-                        start,
-                        repeat_after_measures,
-                    )
-                } else {
-                    self.player.play_program(
-                        &state.programs,
-                        program_index,
-                        world.status,
-                        start,
-                        repeat_after_measures,
-                    )
-                };
+                let message = self.player.play_program(
+                    &state.programs,
+                    program_index,
+                    world.status,
+                    start,
+                    repeat_after_measures,
+                );
                 if let Some(message) = message
                     && !matches!(start, player::Start::At(_))
                 {
@@ -246,100 +397,43 @@ impl EffectRunner {
 
             Effect::EvaluateProgram {
                 program_index,
-                mode_on_success,
-                mode_on_failure,
+                on_success,
+                on_failure,
             } => {
-                match state
-                    .programs
-                    .evaluate_and_record(&self.environment, program_index)
-                {
-                    Ok(warnings) => {
-                        if let Some(mode) = mode_on_success {
-                            state.mode = mode;
-                        }
-                        // Type warnings are informational: the program plays
-                        // regardless, and only the status line reports them.
-                        if !warnings.is_empty() {
-                            state.message = diagnostics::error_message(&warnings);
-                        }
-                    }
-                    Err(diagnostics) => {
-                        state.message = diagnostics::error_message(&diagnostics);
-                        // Hand the diagnostics to the editor so evaluation
-                        // errors highlight like parse errors do — whether the
-                        // Edit mode comes from `mode_on_failure` or is the
-                        // mode being kept.
-                        match mode_on_failure {
-                            Some(mut mode) => {
-                                if let actions::Mode::Edit { errors, .. } = &mut mode {
-                                    *errors = diagnostics;
-                                }
-                                state.mode = mode;
-                            }
-                            None => {
-                                if let actions::Mode::Edit { errors, .. } = &mut state.mode {
-                                    *errors = diagnostics;
-                                }
-                            }
-                        }
-                    }
+                let Some(program) = state.programs.program(program_index) else {
+                    return;
+                };
+                let generation = program.generation();
+                let input = state.programs.evaluation_input(program_index);
+                if self.jobs.send(processing::Job::Program(input)).is_err() {
+                    state.message = "The processing thread has stopped".to_string();
+                    return;
                 }
+                let message =
+                    mem::replace(&mut state.message, actions::PROCESSING_MESSAGE.to_string());
+                state.processing.push_back(PendingJob::Program {
+                    index: program_index,
+                    generation,
+                    on_success,
+                    on_failure,
+                    message,
+                });
             }
 
             Effect::UpdateSource(program_index) => {
+                // The loaded set replaces the source this would write.
+                if state.is_loading() {
+                    return;
+                }
                 if let Err(message) = state.programs.splice(program_index) {
                     state.message = message;
                 }
             }
 
-            Effect::ReloadSource => {
-                // Validate before silencing: a file that doesn't read or
-                // parse leaves playback and state untouched.
-                let (new_set, warning) = match state.programs.reload_from_disk() {
-                    Err(message) => {
-                        state.message = message;
-                        return;
-                    }
-                    Ok(reloaded) => reloaded,
-                };
-                // TODO this can cause audible artifacts if a waveform is
-                // already in the middle of being stopped. For example, if a
-                // note-off has a very long ramp in progress, this stop can
-                // momentarily increase the amplitude.
-                self.player.stop_waveform(WaveformSelector::AllVoices);
-                self.player
-                    .remove_pending(WaveformSelector::AllVoices, None);
-                // The installed instrument was a snapshot of the old set.
-                state.keys = None;
-                state.programs = new_set;
-                // Baselines are re-seeded from the new set rather than kept
-                // since a slider mark names a program slot, which the new set
-                // may fill with an entirely different binding.
-                let _ = self
-                    .slider_sender
-                    .send(SliderEvent::SetBaselines(slider_values(&state.programs)));
-                let mut failed: Vec<String> = Vec::new();
-                for i in 0..state.programs.programs().len() {
-                    if state.programs.programs()[i].is_empty() {
-                        continue;
-                    }
-                    if state
-                        .programs
-                        .evaluate_and_record(&self.environment, i)
-                        .is_err()
-                    {
-                        failed.push(state.programs.display_name(i));
-                    }
-                }
-                let mut message = format!("Reloaded {}", state.programs.display_path());
-                if !warning.is_empty() {
-                    message = format!("{} — {}", message, warning);
-                }
-                if !failed.is_empty() {
-                    message = format!("{} — failed: {}", message, failed.join(", "));
-                }
-                state.message = message;
-            }
+            Effect::ReloadSource => match state.programs.read_backing_file() {
+                Ok(source) => self.load(state, source, false),
+                Err(message) => state.message = message,
+            },
 
             Effect::InstallKeys(program_index) => {
                 let program = &state.programs.programs()[program_index];
@@ -391,8 +485,11 @@ impl EffectRunner {
                         self.player.play_note(key, note_on, program.level_db());
                     }
                     Err(error) => {
-                        let diagnostic =
-                            self.environment.diagnose(&error, &state.programs, keys.id);
+                        let diagnostic = self.environment.diagnose(
+                            &error,
+                            program.text(),
+                            state.programs.source(),
+                        );
                         state.message = diagnostics::error_message(&[diagnostic]);
                     }
                 }
@@ -429,6 +526,7 @@ impl EffectRunner {
                     .send(SliderEvent::UpdateSlider { mark, value });
             }
 
+            Effect::SetMode(mode) => state.mode = mode,
             Effect::ShowMessage(msg) => {
                 state.message = msg;
             }
@@ -503,8 +601,8 @@ impl EffectRunner {
                                 println!("{}", function);
                                 let diagnostic = self.environment.diagnose(
                                     &error,
-                                    &state.programs,
-                                    program_index,
+                                    state.programs.programs()[program_index].text(),
+                                    state.programs.source(),
                                 );
                                 let message = diagnostics::error_message(&[diagnostic]);
                                 println!("Applying it at a sample note failed: {}", message);
@@ -579,6 +677,34 @@ mod tests {
 
     use super::*;
 
+    /// Stands in for the processing thread: evaluates each job sent to
+    /// `jobs`, including those the replies' effects send, and hands its reply
+    /// to `runner`.
+    fn process_jobs(
+        runner: &mut EffectRunner,
+        state: &mut AppState,
+        world: &mut World,
+        jobs: &mpsc::Receiver<processing::Job>,
+    ) {
+        let environment = environment::Environment::new(44100, 90, std::path::PathBuf::new());
+        while let Ok(job) = jobs.try_recv() {
+            runner.finish(state, world, reply_to(&environment, job));
+        }
+    }
+
+    /// Returns the processing thread's reply to `job`, worked out in
+    /// `environment`.
+    fn reply_to(environment: &environment::Environment, job: processing::Job) -> processing::Reply {
+        match job {
+            processing::Job::Program(input) => {
+                processing::Reply::Program(processing::process(environment, &input, false))
+            }
+            processing::Job::Load { source, input_path } => {
+                processing::Reply::Loaded(processing::load(environment, source, input_path, false))
+            }
+        }
+    }
+
     fn empty_status() -> tracker::Status<WaveformId, MarkId> {
         tracker::Status {
             buffer_start: Instant::now(),
@@ -631,12 +757,12 @@ mod tests {
         // the note-off waveform spliced in at release — not the values baked in
         // when the instrument was evaluated.
         // TODO all of the sender set-up is repeated in many tests
-        let (precompute_sender, _precompute_receiver) = mpsc::channel();
-        let (fast_sender, fast_receiver) = mpsc::channel();
+        let (command_sender, command_receiver) = mpsc::channel();
         let (slider_sender, _slider_receiver) = mpsc::channel();
-        let player = player::Player::new(90, 4, precompute_sender, fast_sender);
+        let player = player::Player::new(90, 4, command_sender);
         let environment = environment::Environment::new(44100, 90, std::path::PathBuf::new());
-        let mut runner = EffectRunner::new(player, environment, slider_sender);
+        let (job_sender, job_receiver) = mpsc::channel();
+        let mut runner = EffectRunner::new(player, environment, slider_sender, job_sender);
 
         let mut state = AppState::from_source(
             "#{sliders=[\"vol:0.5:0:1\"], keys}\nk = fn(note, vel) => (vol, vol);".to_string(),
@@ -653,10 +779,11 @@ mod tests {
             &mut world,
             Effect::EvaluateProgram {
                 program_index: 0,
-                mode_on_success: None,
-                mode_on_failure: None,
+                on_success: vec![],
+                on_failure: vec![],
             },
         );
+        process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
         runner.run_one(&mut state, &mut world, Effect::InstallKeys(0));
         assert!(
             state.keys.is_some(),
@@ -686,7 +813,7 @@ mod tests {
         // The release splice is the Modify command on the note's terminator
         // mark.
         let mut note_off = None;
-        while let Ok(command) = fast_receiver.try_recv() {
+        while let Ok(command) = command_receiver.try_recv() {
             if let tracker::Command::Modify {
                 selector: WaveformSelector::Only(WaveformId::Key(60)),
                 mark_id: MarkId::Terminator,
@@ -702,14 +829,346 @@ mod tests {
         assert_eq!(marks, vec![(slider_mark(0, "vol"), 1.0)]);
     }
 
+    /// Returns a runner whose channels the test holds: the tracker's commands
+    /// and the processing thread's jobs.
+    fn runner_with_jobs() -> (
+        EffectRunner,
+        mpsc::Receiver<tracker::Command<WaveformId, MarkId>>,
+        mpsc::Receiver<processing::Job>,
+    ) {
+        let (command_sender, command_receiver) = mpsc::channel();
+        let (slider_sender, _slider_receiver) = mpsc::channel();
+        let (job_sender, job_receiver) = mpsc::channel();
+        let player = player::Player::new(90, 4, command_sender);
+        let environment = environment::Environment::new(44100, 90, std::path::PathBuf::new());
+        let runner = EffectRunner::new(player, environment, slider_sender, job_sender);
+        (runner, command_receiver, job_receiver)
+    }
+
+    /// Returns a state with one waveform program, `tone`, in slot A:1.
+    fn tone_state() -> AppState {
+        AppState::from_source(
+            "#{level_db=0}\ntone = 1 | fin(time - 1);\n".to_string(),
+            std::path::PathBuf::new(),
+        )
+        .expect("test source should parse")
+    }
+
+    /// Leaving Edit mode waits in Edit mode for the result, then applies it
+    /// as an immediate evaluation would have.
+    #[test]
+    fn leaving_edit_mode_applies_when_the_reply_arrives() {
+        let (mut runner, _command_receiver, job_receiver) = runner_with_jobs();
+        let mut state = tone_state();
+        state.mode = actions::Mode::Edit {
+            cursor_position: 0,
+            errors: vec![],
+            completion: None,
+        };
+        state.message = "before".to_string();
+        let status = empty_status();
+        let mut world = World {
+            launchkey: None,
+            status: &status,
+        };
+        runner.dispatch(
+            &mut state,
+            &mut world,
+            vec![actions::Action::EvaluateAndLeaveEditMode {
+                mode_on_failure: actions::Mode::Select,
+                play: false,
+                repeat_after_measures: None,
+            }],
+        );
+        assert!(matches!(state.mode, actions::Mode::Edit { .. }));
+        assert_eq!(state.message, actions::PROCESSING_MESSAGE);
+        assert!(state.is_processing(0));
+
+        process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
+        assert!(matches!(state.mode, actions::Mode::Select));
+        assert_eq!(state.message, "before");
+        assert!(state.processing.is_empty());
+        assert!(state.programs.programs()[0].waveform().is_some());
+    }
+
+    /// A failed evaluation hands its diagnostics to the Edit mode it
+    /// returns to.
+    #[test]
+    fn a_failed_evaluation_reports_into_edit_mode() {
+        let (mut runner, _command_receiver, job_receiver) = runner_with_jobs();
+        let mut state = tone_state();
+        state
+            .programs
+            .program_mut(0)
+            .unwrap()
+            .set_text("time | fin(\"a\")".to_string());
+        let editing = actions::Mode::Edit {
+            cursor_position: 0,
+            errors: vec![],
+            completion: None,
+        };
+        state.mode = editing.clone();
+        let status = empty_status();
+        let mut world = World {
+            launchkey: None,
+            status: &status,
+        };
+        runner.run_one(
+            &mut state,
+            &mut world,
+            Effect::EvaluateProgram {
+                program_index: 0,
+                on_success: vec![Effect::SetMode(actions::Mode::Select)],
+                on_failure: vec![Effect::SetMode(editing)],
+            },
+        );
+        process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
+        assert!(
+            matches!(&state.mode, actions::Mode::Edit { errors, .. } if !errors.is_empty()),
+            "got {:?}",
+            state.mode
+        );
+        assert!(
+            state.message.contains("expected waveform"),
+            "got: {}",
+            state.message
+        );
+    }
+
+    /// The effects that read a result run only once it is recorded.
+    #[test]
+    fn success_effects_wait_for_the_result() {
+        let (mut runner, command_receiver, job_receiver) = runner_with_jobs();
+        let mut state = tone_state();
+        let status = empty_status();
+        let mut world = World {
+            launchkey: None,
+            status: &status,
+        };
+        runner.run_one(
+            &mut state,
+            &mut world,
+            Effect::EvaluateProgram {
+                program_index: 0,
+                on_success: vec![Effect::PlayProgram {
+                    program_index: 0,
+                    start: player::Start::Now,
+                    repeat_after_measures: None,
+                }],
+                on_failure: vec![],
+            },
+        );
+        assert!(command_receiver.try_recv().is_err());
+
+        process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
+        assert!(matches!(
+            command_receiver.try_recv(),
+            Ok(tracker::Command::Play {
+                id: WaveformId::Program(0),
+                ..
+            })
+        ));
+    }
+
+    /// A failed evaluation runs `on_failure` and not `on_success`, and its
+    /// error stays on the status line.
+    #[test]
+    fn a_failure_runs_only_its_failure_effects() {
+        let (mut runner, _command_receiver, job_receiver) = runner_with_jobs();
+        let mut state = AppState::from_source(
+            "#{level_db=0}\nw = time | fin(\"a\");\n".to_string(),
+            std::path::PathBuf::new(),
+        )
+        .expect("test source should parse");
+        let status = empty_status();
+        let mut world = World {
+            launchkey: None,
+            status: &status,
+        };
+        runner.run_one(
+            &mut state,
+            &mut world,
+            Effect::EvaluateProgram {
+                program_index: 0,
+                on_success: vec![Effect::ShowMessage("on_success ran".to_string())],
+                on_failure: vec![Effect::SetMode(actions::Mode::MoveSliders)],
+            },
+        );
+        process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
+        assert!(matches!(state.mode, actions::Mode::MoveSliders));
+        assert!(
+            state.message.contains("expected waveform"),
+            "got: {}",
+            state.message
+        );
+    }
+
+    /// A sequencer toggle whose evaluation fails leaves the error on the
+    /// status line rather than the toggle's message.
+    #[test]
+    fn a_failed_sequencer_toggle_shows_its_error() {
+        let (mut runner, _command_receiver, job_receiver) = runner_with_jobs();
+        let mut state = AppState::from_source(
+            "on_beats = fn(w) => fn(bs) => w;\n\
+             #{level_db=0}\n\
+             _ = [1, 2.5] | on_beats(time | fin(\"a\"));\n"
+                .to_string(),
+            std::path::PathBuf::new(),
+        )
+        .expect("test source should parse");
+        let status = empty_status();
+        let mut world = World {
+            launchkey: None,
+            status: &status,
+        };
+        runner.dispatch(
+            &mut state,
+            &mut world,
+            vec![actions::Action::ToggleSequencerStep { sixteenth: 8 }],
+        );
+        assert!(state.is_processing(0), "got: {}", state.message);
+        process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
+        assert!(
+            state.message.contains("expected waveform"),
+            "got: {}",
+            state.message
+        );
+    }
+
+    /// A result whose text was replaced after its job was sent is dropped,
+    /// effects and all.
+    #[test]
+    fn a_result_for_replaced_text_is_dropped() {
+        let (mut runner, _command_receiver, job_receiver) = runner_with_jobs();
+        let mut state = tone_state();
+        state.message = "before".to_string();
+        let status = empty_status();
+        let mut world = World {
+            launchkey: None,
+            status: &status,
+        };
+        runner.run_one(
+            &mut state,
+            &mut world,
+            Effect::EvaluateProgram {
+                program_index: 0,
+                on_success: vec![Effect::ShowMessage("on_success ran".to_string())],
+                on_failure: vec![],
+            },
+        );
+        state
+            .programs
+            .program_mut(0)
+            .unwrap()
+            .set_text("2 | fin(time - 1)".to_string());
+
+        process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
+        assert!(state.processing.is_empty());
+        assert!(state.programs.programs()[0].evaluated().is_none());
+        assert_eq!(state.message, "before");
+    }
+
+    /// An edit keeps the program playing its last result until the edit's
+    /// own result is recorded.
+    #[test]
+    fn the_last_result_plays_until_the_next_is_recorded() {
+        let (mut runner, command_receiver, job_receiver) = runner_with_jobs();
+        let mut state = tone_state();
+        let status = empty_status();
+        let mut world = World {
+            launchkey: None,
+            status: &status,
+        };
+        let evaluate = || Effect::EvaluateProgram {
+            program_index: 0,
+            on_success: vec![],
+            on_failure: vec![],
+        };
+        let play = || Effect::PlayProgram {
+            program_index: 0,
+            start: player::Start::Now,
+            repeat_after_measures: None,
+        };
+        let played = |receiver: &mpsc::Receiver<tracker::Command<WaveformId, MarkId>>| {
+            receiver
+                .try_iter()
+                .find_map(|command| match command {
+                    tracker::Command::Play { waveform, .. } => Some(format!("{}", waveform)),
+                    _ => None,
+                })
+                .expect("expected a Play")
+        };
+        runner.run_one(&mut state, &mut world, evaluate());
+        process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
+        runner.run_one(&mut state, &mut world, play());
+        let first = played(&command_receiver);
+
+        state
+            .programs
+            .program_mut(0)
+            .unwrap()
+            .set_text("2 | fin(time - 1)".to_string());
+        runner.run_one(&mut state, &mut world, evaluate());
+        runner.run_one(&mut state, &mut world, play());
+        assert_eq!(played(&command_receiver), first);
+
+        process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
+        runner.run_one(&mut state, &mut world, play());
+        assert_ne!(played(&command_receiver), first);
+    }
+
+    /// While a newer job for the current text is on its way, an older job's
+    /// result still applies, so each of two quick edits runs its effects.
+    #[test]
+    fn an_older_result_applies_while_a_newer_job_is_pending() {
+        let (mut runner, _command_receiver, job_receiver) = runner_with_jobs();
+        let mut state = tone_state();
+        let status = empty_status();
+        let mut world = World {
+            launchkey: None,
+            status: &status,
+        };
+        for (text, message) in [
+            ("2 | fin(time - 1)", "first"),
+            ("3 | fin(time - 1)", "second"),
+        ] {
+            state
+                .programs
+                .program_mut(0)
+                .unwrap()
+                .set_text(text.to_string());
+            runner.run_one(
+                &mut state,
+                &mut world,
+                Effect::EvaluateProgram {
+                    program_index: 0,
+                    on_success: vec![Effect::ShowMessage(message.to_string())],
+                    on_failure: vec![],
+                },
+            );
+        }
+
+        let environment = environment::Environment::new(44100, 90, std::path::PathBuf::new());
+        for message in ["first", "second"] {
+            let Ok(processing::Job::Program(input)) = job_receiver.try_recv() else {
+                panic!("expected a job");
+            };
+            let outcome = processing::process(&environment, &input, false);
+            runner.finish(&mut state, &mut world, processing::Reply::Program(outcome));
+            assert_eq!(state.message, message);
+            assert!(state.programs.programs()[0].waveform().is_some());
+        }
+        assert!(state.processing.is_empty());
+    }
+
     #[test]
     fn reload_source_stops_all_and_swaps_programs() {
-        let (precompute_sender, _precompute_receiver) = mpsc::channel();
-        let (fast_sender, fast_receiver) = mpsc::channel();
+        let (command_sender, command_receiver) = mpsc::channel();
         let (slider_sender, slider_receiver) = mpsc::channel();
-        let player = player::Player::new(90, 4, precompute_sender, fast_sender);
+        let player = player::Player::new(90, 4, command_sender);
         let environment = environment::Environment::new(44100, 90, std::path::PathBuf::new());
-        let mut runner = EffectRunner::new(player, environment, slider_sender);
+        let (job_sender, job_receiver) = mpsc::channel();
+        let mut runner = EffectRunner::new(player, environment, slider_sender, job_sender);
 
         let path =
             std::env::temp_dir().join(format!("tuun_reload_runner_{}.tuun", std::process::id()));
@@ -738,7 +1197,16 @@ mod tests {
         runner.run_one(&mut state, &mut world, Effect::ReloadSource);
         std::fs::remove_file(&path).ok();
 
-        let commands: Vec<_> = fast_receiver.try_iter().collect();
+        // Nothing changes until the set is built.
+        assert!(command_receiver.try_recv().is_err());
+        assert!(state.keys.is_some());
+        assert_eq!(state.programs.display_name(0), "A:1 (tone)");
+        assert_eq!(state.message, actions::PROCESSING_MESSAGE);
+        assert!(state.is_loading());
+
+        process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
+        assert!(!state.is_loading());
+        let commands: Vec<_> = command_receiver.try_iter().collect();
         assert!(
             matches!(
                 commands[0],
@@ -780,12 +1248,12 @@ mod tests {
 
     #[test]
     fn print_evaluated_program_applies_a_keys_instrument() {
-        let (precompute_sender, _precompute_receiver) = mpsc::channel();
-        let (fast_sender, _fast_receiver) = mpsc::channel();
+        let (command_sender, _command_receiver) = mpsc::channel();
         let (slider_sender, _slider_receiver) = mpsc::channel();
-        let player = player::Player::new(90, 4, precompute_sender, fast_sender);
+        let player = player::Player::new(90, 4, command_sender);
         let environment = environment::Environment::new(44100, 90, std::path::PathBuf::new());
-        let mut runner = EffectRunner::new(player, environment, slider_sender);
+        let (job_sender, job_receiver) = mpsc::channel();
+        let mut runner = EffectRunner::new(player, environment, slider_sender, job_sender);
 
         let mut state = AppState::from_source(
             "#{keys}\nk = fn(note, vel) => (note, vel);".to_string(),
@@ -802,10 +1270,11 @@ mod tests {
             &mut world,
             Effect::EvaluateProgram {
                 program_index: 0,
-                mode_on_success: None,
-                mode_on_failure: None,
+                on_success: vec![],
+                on_failure: vec![],
             },
         );
+        process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
         assert!(
             state.programs.programs()[0].keys_instrument().is_some(),
             "program should evaluate to a keys instrument: {}",
@@ -822,12 +1291,12 @@ mod tests {
 
     #[test]
     fn reload_source_read_failure_leaves_everything_untouched() {
-        let (precompute_sender, _precompute_receiver) = mpsc::channel();
-        let (fast_sender, fast_receiver) = mpsc::channel();
+        let (command_sender, command_receiver) = mpsc::channel();
         let (slider_sender, _slider_receiver) = mpsc::channel();
-        let player = player::Player::new(90, 4, precompute_sender, fast_sender);
+        let player = player::Player::new(90, 4, command_sender);
         let environment = environment::Environment::new(44100, 90, std::path::PathBuf::new());
-        let mut runner = EffectRunner::new(player, environment, slider_sender);
+        let (job_sender, job_receiver) = mpsc::channel();
+        let mut runner = EffectRunner::new(player, environment, slider_sender, job_sender);
 
         // An empty input path can't be re-read: the reload must not touch
         // playback or programs.
@@ -843,19 +1312,166 @@ mod tests {
         };
         runner.run_one(&mut state, &mut world, Effect::ReloadSource);
 
-        assert!(fast_receiver.try_iter().next().is_none());
+        assert!(command_receiver.try_iter().next().is_none());
+        assert!(job_receiver.try_recv().is_err());
+        assert!(!state.is_loading());
         assert_eq!(state.programs.display_name(0), "A:1 (tone)");
         assert!(!state.message.is_empty());
     }
 
+    /// Returns a state over `source`, backed by a fresh temporary file named
+    /// for `test` that holds it, and that file's path.
+    fn file_backed_state(test: &str, source: &str) -> (AppState, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!("tuun_{}_{}.tuun", test, std::process::id()));
+        std::fs::write(&path, source).unwrap();
+        let state = AppState::from_source(source.to_string(), path.clone())
+            .expect("test source should parse");
+        (state, path)
+    }
+
+    /// A source that doesn't parse leaves playback, programs and keys as they
+    /// were, and reports the error.
+    #[test]
+    fn a_failed_load_leaves_state_untouched() {
+        let (mut runner, command_receiver, job_receiver) = runner_with_jobs();
+        let (mut state, path) =
+            file_backed_state("failed_load", "#{level_db=0}\ntone = 1 | fin(time - 1);\n");
+        state.keys = Some(Keys {
+            id: 0,
+            function: expr::SourceExpr::float(0.0),
+            note_off_waveforms: HashMap::new(),
+        });
+        std::fs::write(&path, "#{").unwrap();
+        let status = empty_status();
+        let mut world = World {
+            launchkey: None,
+            status: &status,
+        };
+        runner.run_one(&mut state, &mut world, Effect::ReloadSource);
+        process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
+        std::fs::remove_file(&path).ok();
+
+        assert!(command_receiver.try_recv().is_err());
+        assert!(!state.is_loading());
+        assert!(state.keys.is_some());
+        assert_eq!(state.programs.display_name(0), "A:1 (tone)");
+        assert!(
+            state.message.starts_with("Parse error"),
+            "got: {}",
+            state.message
+        );
+    }
+
+    /// A program job sent before a reload is applied to the set it was sent
+    /// from, and the load installs after it.
+    #[test]
+    fn a_program_job_before_a_reload_applies_to_the_old_set() {
+        let (mut runner, command_receiver, job_receiver) = runner_with_jobs();
+        let (mut state, path) = file_backed_state(
+            "job_before_reload",
+            "#{level_db=0}\ntone = 1 | fin(time - 1);\n",
+        );
+        std::fs::write(&path, "#{level_db=0}\nrenamed = 1 | fin(time - 1);\n").unwrap();
+        let status = empty_status();
+        let mut world = World {
+            launchkey: None,
+            status: &status,
+        };
+        runner.run_all(
+            &mut state,
+            &mut world,
+            vec![
+                Effect::EvaluateProgram {
+                    program_index: 0,
+                    on_success: vec![],
+                    on_failure: vec![],
+                },
+                Effect::ReloadSource,
+            ],
+        );
+        std::fs::remove_file(&path).ok();
+
+        let environment = environment::Environment::new(44100, 90, std::path::PathBuf::new());
+        let job = job_receiver.try_recv().expect("the program's job");
+        assert!(matches!(job, processing::Job::Program(_)));
+        runner.finish(&mut state, &mut world, reply_to(&environment, job));
+        assert_eq!(state.programs.display_name(0), "A:1 (tone)");
+        assert!(state.programs.programs()[0].waveform().is_some());
+        assert!(command_receiver.try_recv().is_err(), "nothing stops yet");
+        // The load still owns the status line.
+        assert_eq!(state.message, actions::PROCESSING_MESSAGE);
+        assert!(state.is_loading());
+
+        let job = job_receiver.try_recv().expect("the load's job");
+        assert!(matches!(job, processing::Job::Load { .. }));
+        runner.finish(&mut state, &mut world, reply_to(&environment, job));
+        assert!(state.processing.is_empty());
+        assert_eq!(state.programs.display_name(0), "A:1 (renamed)");
+        assert!(
+            state.message.starts_with("Reloaded"),
+            "got: {}",
+            state.message
+        );
+    }
+
+    /// While a load is pending, writing a program back to the file is skipped:
+    /// the loaded set replaces the source it would write.
+    #[test]
+    fn update_source_is_skipped_while_a_set_loads() {
+        let (mut runner, _command_receiver, _job_receiver) = runner_with_jobs();
+        let source = "#{level_db=0}\ntone = 1 | fin(time - 1);\n";
+        let (mut state, path) = file_backed_state("skip_update", source);
+        let status = empty_status();
+        let mut world = World {
+            launchkey: None,
+            status: &status,
+        };
+        runner.run_one(&mut state, &mut world, Effect::ReloadSource);
+        state
+            .programs
+            .program_mut(0)
+            .unwrap()
+            .set_text("2 | fin(time - 1)".to_string());
+        runner.run_one(&mut state, &mut world, Effect::UpdateSource(0));
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(on_disk, source);
+    }
+
+    /// The load at startup reports only the programs that failed.
+    #[test]
+    fn the_startup_load_names_the_failed_programs() {
+        let (mut runner, _command_receiver, job_receiver) = runner_with_jobs();
+        let source = "#{level_db=0}\ngood = 1 | fin(time - 1);\n\
+                      #{level_db=0}\nbad = time | fin(\"a\");\n";
+        let mut state = AppState::from_source(source.to_string(), std::path::PathBuf::new())
+            .expect("test source should parse");
+        let status = empty_status();
+        let mut world = World {
+            launchkey: None,
+            status: &status,
+        };
+        runner.load(&mut state, source.to_string(), true);
+        assert_eq!(state.message, actions::PROCESSING_MESSAGE);
+        process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
+        assert_eq!(state.message, "Errors in A:2 (bad)");
+        assert!(state.programs.programs()[0].waveform().is_some());
+
+        // A clean set clears the status line.
+        let clean = "#{level_db=0}\ngood = 1 | fin(time - 1);\n";
+        runner.load(&mut state, clean.to_string(), true);
+        process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
+        assert_eq!(state.message, "");
+    }
+
     #[test]
     fn remove_pending_program_cancels_from_the_next_cycle() {
-        let (precompute_sender, _precompute_receiver) = mpsc::channel();
-        let (fast_sender, fast_receiver) = mpsc::channel();
+        let (command_sender, command_receiver) = mpsc::channel();
         let (slider_sender, _slider_receiver) = mpsc::channel();
-        let player = player::Player::new(90, 4, precompute_sender, fast_sender);
+        let player = player::Player::new(90, 4, command_sender);
         let environment = environment::Environment::new(44100, 90, std::path::PathBuf::new());
-        let mut runner = EffectRunner::new(player, environment, slider_sender);
+        let (job_sender, _job_receiver) = mpsc::channel();
+        let mut runner = EffectRunner::new(player, environment, slider_sender, job_sender);
 
         let mut state = AppState::from_source(
             "#{level_db=0}\n_ = 1 | fin(time - 1);\n".to_string(),
@@ -882,7 +1498,7 @@ mod tests {
             status: &status,
         };
         runner.run_one(&mut state, &mut world, Effect::RemovePendingProgram(0));
-        let command = fast_receiver.try_recv().expect("expected a command");
+        let command = command_receiver.try_recv().expect("expected a command");
         assert!(
             matches!(
                 command,
@@ -901,7 +1517,7 @@ mod tests {
             status: &status,
         };
         runner.run_one(&mut state, &mut world, Effect::RemovePendingProgram(0));
-        assert!(fast_receiver.try_recv().is_err());
+        assert!(command_receiver.try_recv().is_err());
     }
 
     #[test]
@@ -998,13 +1614,13 @@ mod tests {
     /// A play from an instant goes straight to the tracker with that start,
     /// repeating per the given measures, and leaves the message alone.
     #[test]
-    fn a_play_at_an_instant_takes_the_fast_route_silently() {
-        let (precompute_sender, precompute_receiver) = mpsc::channel();
-        let (fast_sender, fast_receiver) = mpsc::channel();
+    fn a_play_at_an_instant_goes_to_the_tracker_silently() {
+        let (command_sender, command_receiver) = mpsc::channel();
         let (slider_sender, _slider_receiver) = mpsc::channel();
-        let player = player::Player::new(60, 4, precompute_sender, fast_sender);
+        let player = player::Player::new(60, 4, command_sender);
         let environment = environment::Environment::new(44100, 60, std::path::PathBuf::new());
-        let mut runner = EffectRunner::new(player, environment, slider_sender);
+        let (job_sender, job_receiver) = mpsc::channel();
+        let mut runner = EffectRunner::new(player, environment, slider_sender, job_sender);
         let mut state = AppState::from_source(
             "#{level_db=0}\n_ = 1 | fin(time - 1);\n".to_string(),
             std::path::PathBuf::new(),
@@ -1017,32 +1633,29 @@ mod tests {
             status: &status,
         };
         let at = Instant::now() - std::time::Duration::from_millis(50);
-        runner.run_all(
+        runner.run_one(
             &mut state,
             &mut world,
-            vec![
-                Effect::EvaluateProgram {
-                    program_index: 0,
-                    mode_on_success: None,
-                    mode_on_failure: None,
-                },
-                Effect::PlayProgram {
+            Effect::EvaluateProgram {
+                program_index: 0,
+                on_success: vec![Effect::PlayProgram {
                     program_index: 0,
                     start: player::Start::At(at),
                     repeat_after_measures: Some(1),
-                },
-            ],
+                }],
+                on_failure: vec![],
+            },
         );
+        process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
 
-        assert!(precompute_receiver.try_recv().is_err());
         let Ok(tracker::Command::Play {
             id: WaveformId::Program(0),
             start,
             repeat_every,
             ..
-        }) = fast_receiver.try_recv()
+        }) = command_receiver.try_recv()
         else {
-            panic!("expected a Play on the fast route");
+            panic!("expected a Play");
         };
         assert_eq!(start, Some(at));
         assert_eq!(repeat_every, Some(std::time::Duration::from_secs(4)));
@@ -1054,12 +1667,12 @@ mod tests {
     /// move addresses exactly that mark on every voice.
     #[test]
     fn a_slider_move_reaches_a_voice_of_another_program() {
-        let (precompute_sender, _precompute_receiver) = mpsc::channel();
-        let (fast_sender, fast_receiver) = mpsc::channel();
+        let (command_sender, command_receiver) = mpsc::channel();
         let (slider_sender, slider_receiver) = mpsc::channel();
-        let player = player::Player::new(90, 4, precompute_sender, fast_sender);
+        let player = player::Player::new(90, 4, command_sender);
         let environment = environment::Environment::new(44100, 90, std::path::PathBuf::new());
-        let mut runner = EffectRunner::new(player, environment, slider_sender);
+        let (job_sender, job_receiver) = mpsc::channel();
+        let mut runner = EffectRunner::new(player, environment, slider_sender, job_sender);
 
         // A:1 owns the slider; A:2 opts in by referencing A:1's binding.
         let mut state = AppState::from_source(
@@ -1078,10 +1691,11 @@ mod tests {
             &mut world,
             Effect::EvaluateProgram {
                 program_index: 1,
-                mode_on_success: None,
-                mode_on_failure: None,
+                on_success: vec![],
+                on_failure: vec![],
             },
         );
+        process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
         runner.run_one(
             &mut state,
             &mut world,
@@ -1093,7 +1707,7 @@ mod tests {
         );
 
         // A:2's sounding voice carries A:1's mark.
-        let played = fast_receiver
+        let played = command_receiver
             .try_iter()
             .find_map(|command| match command {
                 tracker::Command::Play {
