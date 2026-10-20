@@ -567,10 +567,11 @@ impl EffectRunner {
 
             Effect::PrintEvaluatedProgram(program_index) => {
                 let display_name = state.programs.display_name(program_index);
-                let evaluated = state
-                    .programs
-                    .program(program_index)
-                    .and_then(|program| program.evaluated());
+                let evaluated = state.programs.program(program_index).and(
+                    self.environment
+                        .evaluate_program(&state.programs.evaluation_input(program_index))
+                        .ok(),
+                );
                 match evaluated {
                     Some(programs::Evaluated::KeysInstrument(function)) => {
                         // The lambda itself is noisy to print, so show what it
@@ -585,7 +586,7 @@ impl EffectRunner {
                             expr::SourceExpr::float(SAMPLE_KEY),
                             expr::SourceExpr::float(SAMPLE_VELOCITY),
                         ];
-                        match self.environment.apply_note_function(function, args) {
+                        match self.environment.apply_note_function(&function, args) {
                             Ok((note_on, note_off)) => {
                                 println!(
                                     "Keys instrument of program {} applied at key {}, velocity {}:",
