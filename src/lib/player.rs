@@ -207,7 +207,7 @@ impl Player {
         let program = set.program(program_index)?;
         let display_name = set.display_name(program_index);
         let mut waveform = match program.evaluated()? {
-            Evaluated::Waveform(waveform) => waveform.clone(),
+            Evaluated::Waveform(waveform, _) => waveform.clone(),
             Evaluated::Sequence(sequence) => sequence.step_waveform.clone(),
             Evaluated::KeysInstrument(_) => return None,
         };
@@ -256,7 +256,7 @@ impl Player {
         };
         let mut step = sequence.step_waveform.clone();
         substitute_current_slider_values(&mut step, set);
-        for &step_beat in &sequence.steps {
+        for step_beat in sequence.step_beats() {
             self.sender
                 .send(tracker::Command::Play {
                     id: WaveformId::Step {
@@ -273,9 +273,8 @@ impl Player {
         // for as long as its steps do.
         let pattern_beats =
             sequence
-                .steps
-                .iter()
-                .fold(self.beats_per_measure as f32, |acc, &step_beat| {
+                .step_beats()
+                .fold(self.beats_per_measure as f32, |acc, step_beat| {
                     let measures = ((step_beat - 0.75) / self.beats_per_measure as f32).ceil();
                     acc.max(measures * self.beats_per_measure as f32)
                 });

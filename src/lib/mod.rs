@@ -10,6 +10,7 @@ pub mod parser;
 pub mod signatures;
 pub mod slider;
 pub mod trace;
+pub mod trace_walk;
 pub mod types;
 pub mod waveform;
 

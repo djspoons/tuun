@@ -5,6 +5,7 @@ use std::fmt;
 use std::fs;
 use std::ops::Range;
 use std::path;
+use std::sync::Arc;
 use std::time;
 
 use crate::diagnostics::{Diagnostic, Source};
@@ -14,6 +15,7 @@ use crate::ids::MarkId;
 use crate::parser;
 use crate::sequencer;
 use crate::slider;
+use crate::trace_walk::WaveformMarks;
 use crate::waveform;
 
 pub const PROGRAMS_PER_BANK: usize = 8;
@@ -165,10 +167,10 @@ pub enum ProgramKind {
 /// The result of successfully evaluating a program's text.
 #[derive(Debug, Clone)]
 pub enum Evaluated {
-    /// The program evaluated to a playable waveform that isn't sequenceable.
-    /// The waveform is optimized; slider values and the level wrap are applied
-    /// per play.
-    Waveform(waveform::Waveform<MarkId>),
+    /// The program evaluated to a playable waveform that isn't sequenceable,
+    /// with its marks. The waveform is optimized; slider values and the
+    /// level wrap are applied per play.
+    Waveform(waveform::Waveform<MarkId>, Arc<WaveformMarks>),
     /// The program evaluated to a playable waveform and its text has the
     /// sequenceable `on_beats` shape, so it plays as the decomposed sequence.
     Sequence(sequencer::Sequence),
@@ -391,7 +393,7 @@ impl Program {
     /// isn't sequenceable.
     pub fn waveform(&self) -> Option<&waveform::Waveform<MarkId>> {
         match &self.evaluated {
-            Some(Evaluated::Waveform(waveform)) => Some(waveform),
+            Some(Evaluated::Waveform(waveform, _)) => Some(waveform),
             _ => None,
         }
     }
@@ -401,7 +403,7 @@ impl Program {
     pub fn is_playable(&self) -> bool {
         matches!(
             self.evaluated,
-            Some(Evaluated::Waveform(_) | Evaluated::Sequence(_))
+            Some(Evaluated::Waveform(..) | Evaluated::Sequence(_))
         )
     }
 
@@ -1701,15 +1703,19 @@ mod tests {
     #[test]
     fn evaluated_accessors_follow_the_cached_variant() {
         let mut program = Program::from_string("x", 0);
-        program.evaluated = Some(Evaluated::Waveform(waveform::Waveform::Const(1.0)));
+        program.evaluated = Some(Evaluated::Waveform(
+            waveform::Waveform::Const(1.0),
+            Arc::default(),
+        ));
         assert!(program.waveform().is_some());
         assert!(program.is_playable());
         assert!(program.keys_instrument().is_none());
         assert!(program.sequence().is_none());
 
         program.evaluated = Some(Evaluated::Sequence(sequencer::Sequence {
-            steps: vec![1.0],
+            steps: vec![(1.0, 0..1)],
             step_waveform: waveform::Waveform::Const(1.0),
+            step_marks: Arc::default(),
         }));
         assert!(program.waveform().is_none());
         assert!(program.is_playable());

@@ -39,7 +39,7 @@ fn adsr_segments_meet_without_gaps_or_overlaps() {
         assert_eq!(warning, "");
         let environment = Environment::new(sample_rate, 90, library_root.clone());
         let waveform = match environment.evaluate_program(&set.evaluation_input(0)) {
-            Ok(Evaluated::Waveform(waveform)) => waveform,
+            Ok(Evaluated::Waveform(waveform, _)) => waveform,
             Err(diagnostics) => panic!("invalid: {:?}", diagnostics),
             Ok(Evaluated::Sequence(_)) => panic!("classified as a sequence"),
             Ok(Evaluated::KeysInstrument(_)) => panic!("classified as keys"),

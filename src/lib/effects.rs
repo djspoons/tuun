@@ -476,7 +476,7 @@ impl EffectRunner {
                     expr::SourceExpr::float(velocity as f32 / 127.0),
                 ];
                 match self.environment.apply_note_function(&keys.function, args) {
-                    Ok((mut note_on, note_off)) => {
+                    Ok((mut note_on, note_off, _marks)) => {
                         keys.note_off_waveforms.insert(key, note_off);
                         // `note_on`'s `Marked(Slider { .. })` nodes still hold
                         // the values from when the instrument was originally
@@ -587,7 +587,7 @@ impl EffectRunner {
                             expr::SourceExpr::float(SAMPLE_VELOCITY),
                         ];
                         match self.environment.apply_note_function(&function, args) {
-                            Ok((note_on, note_off)) => {
+                            Ok((note_on, note_off, _marks)) => {
                                 println!(
                                     "Keys instrument of program {} applied at key {}, velocity {}:",
                                     display_name, SAMPLE_KEY, SAMPLE_VELOCITY

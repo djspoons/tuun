@@ -26,7 +26,8 @@ use crate::parser;
 use crate::programs::{Evaluated, EvaluationInput, ProgramKind, ProgramSet};
 use crate::sequencer;
 use crate::signatures;
-use crate::trace;
+use crate::trace::{self, Trace};
+use crate::trace_walk::{self, WaveformMarks};
 use crate::waveform;
 
 /// The `mark(N)` built-in: wraps a waveform in a `MarkId::UserDefined`
@@ -598,17 +599,19 @@ impl Environment {
     /// Evaluates a sub-expression of the program `input` describes in that
     /// program's evaluation context, expecting a waveform result.
     ///
-    /// The waveform is returned without trace marks, optimized. Returns `None`
-    /// when evaluation fails or the result is neither a bare nor a
-    /// `seq`-wrapped waveform (the `seq` wrapper is stripped).
+    /// The waveform is returned as [`Environment::prepare_waveform`] returns
+    /// it, with its marks. Returns `None` when evaluation fails or the result is
+    /// neither a bare nor a `seq`-wrapped waveform (the `seq` wrapper is
+    /// stripped).
     pub fn evaluate_program_waveform_expr(
         &self,
         input: &EvaluationInput,
         expr: &expr::SourceExpr<MarkId, Source>,
-    ) -> Option<waveform::Waveform<MarkId>> {
+    ) -> Option<(waveform::Waveform<MarkId>, Arc<WaveformMarks>)> {
         let mut bindings = input.bindings.clone();
         bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
         let expr = eval::evaluate(|path| self.resolve(path), &bindings, expr.clone()).ok()?;
+        let trace = trace_walk::result_trace(&expr);
         let waveform = match expr.expr {
             expr::Expr::Waveform(w) => w,
             expr::Expr::Seq { waveform, .. } => match waveform.expr {
@@ -617,7 +620,21 @@ impl Environment {
             },
             _ => return None,
         };
-        Some(optimizer::optimize(trace::strip_trace_marks(waveform)))
+        Some(self.prepare_waveform(waveform, &trace, None))
+    }
+
+    /// Returns `waveform`, an evaluation result whose trace is `trace`, ready
+    /// to play: without trace marks and optimized. Also returns its marks,
+    /// lighting `instrument` where nothing else lights (see
+    /// [`trace_walk::walk`]).
+    fn prepare_waveform(
+        &self,
+        waveform: waveform::Waveform<MarkId>,
+        trace: &Arc<Trace<Source>>,
+        instrument: Option<&Trace<Source>>,
+    ) -> (waveform::Waveform<MarkId>, Arc<WaveformMarks>) {
+        let (waveform, marks) = trace_walk::walk(waveform, trace, instrument, self.sample_rate);
+        (optimizer::optimize(waveform), Arc::new(marks))
     }
 
     /// Evaluates the program `input` describes against its declared kind: an
@@ -651,16 +668,17 @@ impl Environment {
             Ok(expr) => expr,
         };
         let message_only = |message: &str| vec![Diagnostic::message_only(message.to_string())];
+        let trace = trace_walk::result_trace(&expr);
         match expr.expr {
             expr::Expr::Waveform(w) => match kind {
-                ProgramKind::Waveform => Ok(self.evaluated_waveform(input, w)),
+                ProgramKind::Waveform => Ok(self.evaluated_waveform(input, w, &trace)),
                 ProgramKind::Keys => Err(message_only(
                     "Program is marked #{keys} but evaluates to a waveform",
                 )),
             },
             expr::Expr::Seq { waveform, .. } => match (kind, waveform.expr) {
                 (ProgramKind::Waveform, expr::Expr::Waveform(w)) => {
-                    Ok(self.evaluated_waveform(input, w))
+                    Ok(self.evaluated_waveform(input, w, &trace))
                 }
                 (ProgramKind::Keys, expr::Expr::Waveform(_)) => Err(message_only(
                     "Program is marked #{keys} but evaluates to a waveform",
@@ -692,24 +710,30 @@ impl Environment {
     }
 
     /// Builds the result for the program `input` describes, which evaluated
-    /// to `waveform`: the decomposed sequence when the program's text has the
-    /// sequenceable `on_beats` shape and its waveform argument evaluates to a
-    /// waveform, and `waveform` otherwise.
+    /// to `waveform` with the trace `trace`: the decomposed sequence when the
+    /// program's text has the sequenceable `on_beats` shape and its waveform
+    /// argument evaluates to a waveform, and `waveform` otherwise.
     fn evaluated_waveform(
         &self,
         input: &EvaluationInput,
         waveform: waveform::Waveform<MarkId>,
+        trace: &Arc<Trace<Source>>,
     ) -> Evaluated {
         let sequence = sequencer::analyze(&input.text).and_then(|shape| {
-            let step_waveform = self.evaluate_program_waveform_expr(input, &shape.waveform_expr)?;
+            let (step_waveform, step_marks) =
+                self.evaluate_program_waveform_expr(input, &shape.waveform_expr)?;
             Some(sequencer::Sequence {
-                steps: shape.steps.iter().map(|(beat, _)| *beat).collect(),
+                steps: shape.steps,
                 step_waveform,
+                step_marks,
             })
         });
         match sequence {
             Some(sequence) => Evaluated::Sequence(sequence),
-            None => Evaluated::Waveform(optimizer::optimize(trace::strip_trace_marks(waveform))),
+            None => {
+                let (waveform, marks) = self.prepare_waveform(waveform, trace, None);
+                Evaluated::Waveform(waveform, marks)
+            }
         }
     }
 
@@ -739,16 +763,26 @@ impl Environment {
     }
 
     /// Applies a note function `expr` to the given `arguments`, expecting a
-    /// pair of (note-on, note-off) waveforms as a result. Both returned
-    /// waveforms are without trace marks, optimized.
+    /// pair of (note-on, note-off) waveforms as a result. Returns both
+    /// waveforms without trace marks, optimized, and the note-on's marks,
+    /// which light `expr`'s place wherever nothing else does.
     ///
     /// Both `expr` and `arguments` must be closed.
+    #[allow(clippy::type_complexity)]
     pub fn apply_note_function(
         &self,
         expr: &expr::SourceExpr<MarkId, Source>,
         arguments: Vec<expr::SourceExpr<MarkId, Source>>,
-    ) -> Result<(waveform::Waveform<MarkId>, waveform::Waveform<MarkId>), expr::Error<Source>> {
+    ) -> Result<
+        (
+            waveform::Waveform<MarkId>,
+            waveform::Waveform<MarkId>,
+            Arc<WaveformMarks>,
+        ),
+        expr::Error<Source>,
+    > {
         use expr::Expr::{Tuple, Waveform};
+        let instrument = Trace::of(expr);
         let expr = expr::SourceExpr::application(expr.clone(), arguments);
         let bindings = vec![];
         let resolve = |_: &[String]| {
@@ -765,11 +799,17 @@ impl Environment {
                         exprs.len()
                     )));
                 }
-                match (exprs.remove(0).expr, exprs.remove(0).expr) {
-                    (Waveform(note_on), Waveform(note_off)) => Ok((
-                        optimizer::optimize(trace::strip_trace_marks(note_on)),
-                        optimizer::optimize(trace::strip_trace_marks(note_off)),
-                    )),
+                let note_on = exprs.remove(0);
+                let trace = trace_walk::result_trace(&note_on);
+                match (note_on.expr, exprs.remove(0).expr) {
+                    (Waveform(note_on), Waveform(note_off)) => {
+                        let (note_on, marks) =
+                            self.prepare_waveform(note_on, &trace, Some(&instrument));
+                        // The note-off is written into the held voice, and
+                        // its envelope has no source waveform to light.
+                        let note_off = optimizer::optimize(trace::strip_trace_marks(note_off));
+                        Ok((note_on, note_off, marks))
+                    }
                     (expr, Waveform(_)) => Err(expr::Error::eval_here(format!(
                         "Expected waveform for note-on, got: {}",
                         expr
@@ -934,7 +974,7 @@ mod tests {
 
         // A note played at the initial slider position carries vol = 0.5.
         let args = vec![expr::SourceExpr::float(60.0), expr::SourceExpr::float(0.5)];
-        let (mut note_on, _note_off) = environment
+        let (mut note_on, _note_off, _marks) = environment
             .apply_note_function(&function, args.clone())
             .expect("note function should apply");
         substitute_current_slider_values(&mut note_on, &set);
@@ -947,7 +987,7 @@ mod tests {
             .unwrap()
             .set_slider_normalized(0, 1.0)
             .expect("program has a vol slider");
-        let (mut note_on, _note_off) = environment
+        let (mut note_on, _note_off, _marks) = environment
             .apply_note_function(&function, args)
             .expect("note function should apply");
         substitute_current_slider_values(&mut note_on, &set);
@@ -972,7 +1012,7 @@ mod tests {
         let function = match environment.evaluate_program(&set.evaluation_input(0)) {
             Ok(Evaluated::KeysInstrument(function)) => function,
             Err(diagnostics) => panic!("invalid: {:?}", diagnostics),
-            Ok(Evaluated::Waveform(_) | Evaluated::Sequence(_)) => {
+            Ok(Evaluated::Waveform(..) | Evaluated::Sequence(_)) => {
                 panic!("classified as waveform")
             }
         };
@@ -982,7 +1022,7 @@ mod tests {
             .expect("program has a vol slider");
 
         let args = vec![expr::SourceExpr::float(60.0), expr::SourceExpr::float(0.5)];
-        let (mut note_on, _note_off) = environment
+        let (mut note_on, _note_off, _marks) = environment
             .apply_note_function(&function, args)
             .expect("note function should apply");
         substitute_current_slider_values(&mut note_on, &set);
@@ -1162,7 +1202,7 @@ mod tests {
         else {
             panic!("expected a sequence");
         };
-        assert_eq!(sequence.steps, vec![1.0, 2.5]);
+        assert_eq!(sequence.step_beats().collect::<Vec<_>>(), vec![1.0, 2.5]);
     }
 
     #[test]
@@ -1174,7 +1214,7 @@ mod tests {
         .expect("test source should parse");
         let environment = Environment::new(44100, 90, PathBuf::new());
         match environment.evaluate_program(&set.evaluation_input(0)) {
-            Ok(Evaluated::Waveform(_)) => {}
+            Ok(Evaluated::Waveform(..)) => {}
             Err(diagnostics) => {
                 panic!("prelude names should resolve, got: {}", diagnostics[0])
             }

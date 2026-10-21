@@ -130,7 +130,9 @@ pub fn process(environment: &Environment, input: &EvaluationInput, precompute: b
 fn precomputed(evaluated: Evaluated, sample_rate: u32) -> Evaluated {
     let mut generator = Generator::new(sample_rate);
     match evaluated {
-        Evaluated::Waveform(waveform) => Evaluated::Waveform(generator.precompute(waveform)),
+        Evaluated::Waveform(waveform, marks) => {
+            Evaluated::Waveform(generator.precompute(waveform), marks)
+        }
         Evaluated::Sequence(sequence) => Evaluated::Sequence(sequencer::Sequence {
             step_waveform: generator.precompute(sequence.step_waveform),
             ..sequence
@@ -228,7 +230,7 @@ mod tests {
         let Ok(Reply::Program(first)) = replies.recv_timeout(timeout) else {
             panic!("expected the first program's reply");
         };
-        assert!(matches!(first, Ok((Some(Evaluated::Waveform(_)), _))));
+        assert!(matches!(first, Ok((Some(Evaluated::Waveform(..)), _))));
         let Ok(Reply::Program(second)) = replies.recv_timeout(timeout) else {
             panic!("expected the second program's reply");
         };
@@ -308,7 +310,7 @@ mod tests {
         for text in ["time", "fin(nth(1 + 2, [1, 2, 4, 8]))(time)"] {
             set.program_mut(0).unwrap().set_text(text.to_string());
             match process(&environment, &set.evaluation_input(0), false) {
-                Ok((Some(Evaluated::Waveform(_)), warnings)) => assert!(warnings.is_empty()),
+                Ok((Some(Evaluated::Waveform(..)), warnings)) => assert!(warnings.is_empty()),
                 outcome => panic!("{} should evaluate cleanly, got {:?}", text, outcome),
             }
         }
@@ -362,13 +364,13 @@ mod tests {
         };
 
         let source = "#{level_db=0}\n_ = 1 | fin(time - 1);\n";
-        let Evaluated::Waveform(Waveform::Fixed(samples, ())) = evaluated(source, true) else {
+        let Evaluated::Waveform(Waveform::Fixed(samples, ()), _) = evaluated(source, true) else {
             panic!("expected samples for {}", source);
         };
         assert_eq!(samples, vec![1.0; 8000]);
 
         let source = "#{level_db=0}\n_ = time;\n";
-        let (Evaluated::Waveform(precomputed), Evaluated::Waveform(not_precomputed)) =
+        let (Evaluated::Waveform(precomputed, _), Evaluated::Waveform(not_precomputed, _)) =
             (evaluated(source, true), evaluated(source, false))
         else {
             panic!("expected waveforms for {}", source);
@@ -381,7 +383,7 @@ mod tests {
         let Evaluated::Sequence(sequence) = evaluated(source, true) else {
             panic!("expected a sequence for {}", source);
         };
-        assert_eq!(sequence.steps, vec![1.0, 2.5]);
+        assert_eq!(sequence.step_beats().collect::<Vec<_>>(), vec![1.0, 2.5]);
         assert!(
             matches!(sequence.step_waveform, Waveform::Fixed(..)),
             "got {}",

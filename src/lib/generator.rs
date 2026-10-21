@@ -656,7 +656,7 @@ impl<'a> Generator<'a> {
 
     /// Returns the number of samples before `length` is first non-negative, when `length` is
     /// `time` offset by a constant.
-    fn fin_cutoff<M, S>(&self, length: &waveform::Waveform<M, S>) -> Option<usize> {
+    pub(crate) fn fin_cutoff<M, S>(&self, length: &waveform::Waveform<M, S>) -> Option<usize> {
         use waveform::Waveform::{BinaryOp, Const, Time};
         let offset = match length {
             BinaryOp(op @ (BinaryOperator::Add | BinaryOperator::Subtract), a, b) => {

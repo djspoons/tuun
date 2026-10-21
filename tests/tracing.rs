@@ -8,7 +8,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use tuun::environment::Environment;
-use tuun::expr::SourceExpr;
+use tuun::expr::{Binding, Expr, SourceExpr};
+use tuun::optimizer;
 use tuun::programs::{Evaluated, EvaluationInput, ProgramSet};
 use tuun::trace;
 
@@ -33,7 +34,7 @@ fn tuun_files(dir: &Path, found: &mut Vec<PathBuf>) {
 /// to get waveforms, with trace marks made or not as `trace_marking` says.
 fn played(environment: &Environment, evaluated: Evaluated, trace_marking: bool) -> String {
     match evaluated {
-        Evaluated::Waveform(w) => format!("{:?}", w),
+        Evaluated::Waveform(w, _) => format!("Waveform:{:?}", w),
         Evaluated::Sequence(sequence) => {
             format!("{:?} {:?}", sequence.steps, sequence.step_waveform)
         }
@@ -44,7 +45,11 @@ fn played(environment: &Environment, evaluated: Evaluated, trace_marking: bool) 
                 vec![SourceExpr::float(60.0), SourceExpr::float(0.7)],
             );
             trace::set_trace_marking(true);
-            format!("{:?}", note)
+            // The marks differ by design; what plays must not.
+            format!(
+                "{:?}",
+                note.map(|(note_on, note_off, _)| (note_on, note_off))
+            )
         }
     }
 }
@@ -61,8 +66,26 @@ fn evaluate(environment: &Environment, input: &EvaluationInput, trace_marking: b
     }
 }
 
+/// Returns the waveform program `input` describes with its trace marks
+/// stripped rather than walked, optimized, or `None` if it isn't one.
+fn stripped(environment: &Environment, input: &EvaluationInput) -> Option<String> {
+    let mut bindings = input.bindings.clone();
+    bindings.insert(0, Binding::Open(vec!["__prelude".to_string()]).into());
+    let value = environment.evaluate_source(&input.text, &bindings).ok()?;
+    let waveform = match value.expr {
+        Expr::Waveform(w) => w,
+        Expr::Seq { waveform, .. } => match waveform.expr {
+            Expr::Waveform(w) => w,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some(format!("{:?}", optimizer::optimize(waveform)))
+}
+
 /// Trace marking on, then stripped, plays the same optimized tree as trace
-/// marking off, for every waveform, step, and keys program.
+/// marking off, for every waveform, step, and keys program. Reading marks off
+/// a waveform program plays the same tree as stripping them.
 #[test]
 fn trace_marked_programs_play_the_same_tree_as_unmarked() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -96,7 +119,12 @@ fn trace_marked_programs_play_the_same_tree_as_unmarked() {
                 continue;
             }
             compared += 1;
-            if traced != untraced {
+            // `stripped` also evaluates steps' and instruments' programs, which
+            // `traced` doesn't print as one waveform.
+            let walked_differs = traced.starts_with("Waveform:")
+                && stripped(&environment, &input)
+                    .is_none_or(|s| format!("Waveform:{}", s) != traced);
+            if traced != untraced || walked_differs {
                 mismatches.push(format!(
                     "{} {}: {}",
                     path.display(),

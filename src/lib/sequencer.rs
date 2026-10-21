@@ -7,11 +7,13 @@
 //! `1 + k/4`, and covers the window `[b, b + 0.25)`.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use crate::diagnostics::Source;
 use crate::expr::{Expr, SourceExpr};
 use crate::ids::MarkId;
 use crate::parser;
+use crate::trace_walk::{self, WaveformMarks};
 use crate::waveform;
 
 /// Beat-comparison tolerance for classifying a step as on-grid.
@@ -32,11 +34,35 @@ pub const MAX_PAGE: u8 = 8;
 // waveform.
 #[derive(Debug, Clone)]
 pub struct Sequence {
-    /// The listed steps, each the beat it plays on, in source order.
-    pub steps: Vec<f32>,
+    /// The listed steps, each the beat it plays on with the byte range of
+    /// its literal, in source order.
+    pub steps: Vec<(f32, Range<usize>)>,
     /// The waveform argument `w`, evaluated in the program's context and
     /// optimized; slider values and the level wrap are applied per play.
     pub step_waveform: waveform::Waveform<MarkId>,
+    /// The step waveform's marks, shared by every step.
+    pub step_marks: Arc<WaveformMarks>,
+}
+
+impl Sequence {
+    /// Returns the beat each listed step plays on, in source order.
+    pub fn step_beats(&self) -> impl Iterator<Item = f32> + '_ {
+        self.steps.iter().map(|(beat, _)| *beat)
+    }
+
+    /// Returns the marks the step voice at `sixteenth` adds to
+    /// [`Sequence::step_marks`]: the literal of each listed step in that
+    /// sixteenth, current during every segment of the step waveform.
+    pub fn step_literal_marks(&self, sixteenth: u8) -> Vec<trace_walk::Mark> {
+        self.steps
+            .iter()
+            .filter(|(beat, _)| sixteenth_for_beat(*beat) == sixteenth)
+            .map(|(_, range)| trace_walk::Mark {
+                text_range: range.clone(),
+                segments: 0..self.step_marks.segments.len(),
+            })
+            .collect()
+    }
 }
 
 /// The syntactic shape of a sequenceable program.
@@ -45,7 +71,7 @@ pub struct SequenceShape {
     pub waveform_expr: SourceExpr<MarkId, Source>,
     /// The byte range of the step-list literal, brackets included.
     pub list_range: Range<usize>,
-    /// Each step's beat literal with its byte range, in source order.
+    /// Each step's beat with the byte range of its literal, in source order.
     pub steps: Vec<(f32, Range<usize>)>,
 }
 
@@ -235,6 +261,31 @@ mod tests {
 
     fn steps(text: &str) -> Vec<f32> {
         shape(text).steps.iter().map(|(b, _)| *b).collect()
+    }
+
+    #[test]
+    fn step_literal_marks_cover_the_steps_in_a_sixteenth() {
+        let sequence = Sequence {
+            steps: vec![(1.0, 1..2), (2.0, 4..5), (2.1, 7..10)],
+            step_waveform: waveform::Waveform::Const(1.0),
+            step_marks: Arc::new(WaveformMarks {
+                segments: vec![
+                    trace_walk::Segment {
+                        offset: 0,
+                        duration: Some(1),
+                    };
+                    2
+                ],
+                marks: vec![],
+            }),
+        };
+        let mark = |text_range| trace_walk::Mark {
+            text_range,
+            segments: 0..2,
+        };
+        assert_eq!(sequence.step_literal_marks(0), [mark(1..2)]);
+        assert_eq!(sequence.step_literal_marks(4), [mark(4..5), mark(7..10)]);
+        assert!(sequence.step_literal_marks(1).is_empty());
     }
 
     #[test]
