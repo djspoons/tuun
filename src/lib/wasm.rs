@@ -12,7 +12,7 @@ use wasm_bindgen::prelude::*;
 use web_sys::console;
 
 use crate::{
-    builtins, eval, expr, generator, infer, modules, optimizer, parser, signatures, slider,
+    builtins, eval, expr, generator, infer, modules, optimizer, parser, signatures, slider, trace,
     waveform,
 };
 
@@ -29,6 +29,10 @@ impl fmt::Display for MarkId {
         }
     }
 }
+
+// The browser doesn't light program text, so its marks carry no trace and
+// nothing it evaluates has trace marks to strip.
+impl<S> trace::CarriesTrace<S> for MarkId {}
 
 /// Identifies which text a span's byte range indexes in the wasm runtime.
 #[derive(Copy, Clone, Debug, PartialEq)]

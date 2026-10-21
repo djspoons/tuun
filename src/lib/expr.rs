@@ -7,6 +7,7 @@ use std::fmt::{Debug, Display};
 use std::ops::Range;
 use std::sync::Arc;
 
+use crate::trace::{self, CarriesTrace, Via};
 use crate::waveform;
 
 /// A byte range plus the identity of the text it indexes.
@@ -215,7 +216,26 @@ pub type BuiltInImpl<M, S> =
     Arc<dyn Fn(Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>> + Send + Sync>;
 
 #[derive(Clone)]
-pub struct BuiltInFn<M, S = ()>(pub BuiltInImpl<M, S>);
+pub struct BuiltInFn<M, S = ()>(pub BuiltInImpl<M, S>, pub BuiltInKind);
+
+/// How a built-in's result relates to its arguments.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuiltInKind {
+    /// It computes new samples from its arguments' values.
+    Computes,
+    /// It builds no new samples: it chooses among its arguments, moves or times
+    /// them, or makes a value that isn't a waveform.
+    Arranges,
+}
+
+impl<M, S> BuiltInFn<M, S> {
+    pub fn new(
+        kind: BuiltInKind,
+        f: impl Fn(Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>> + Send + Sync + 'static,
+    ) -> BuiltInFn<M, S> {
+        BuiltInFn(Arc::new(f), kind)
+    }
+}
 
 impl<M, S> Debug for BuiltInFn<M, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -342,11 +362,18 @@ pub enum Expr<M, S = ()> {
 pub struct SourceExpr<M, S = ()> {
     pub expr: Expr<M, S>,
     pub span: Option<Span<S>>, // Some(_) for parser output; None for synthesized
+    /// Where the value went after it was written at `span`, newest step
+    /// first; `None` for parser output.
+    pub via: Option<Arc<Via<S>>>,
 }
 
 impl<M, S> From<Expr<M, S>> for SourceExpr<M, S> {
     fn from(expr: Expr<M, S>) -> Self {
-        SourceExpr { expr, span: None }
+        SourceExpr {
+            expr,
+            span: None,
+            via: None,
+        }
     }
 }
 
@@ -376,11 +403,17 @@ impl<M, S> Expr<M, S> {
         Expr::Waveform(waveform::Waveform::Const(value))
     }
 
-    /// Returns the scalar value of a constant waveform, or `None` for any other
-    /// expression.
-    pub fn as_const_float(&self) -> Option<f32> {
+    /// Returns the scalar value of a constant waveform, looking through trace
+    /// marks at its root, or `None` for any other expression.
+    pub fn as_const_float(&self) -> Option<f32>
+    where
+        M: CarriesTrace<S>,
+    {
         match self {
-            Expr::Waveform(waveform::Waveform::Const(value)) => Some(*value),
+            Expr::Waveform(w) => match trace::peel(w) {
+                waveform::Waveform::Const(value) => Some(*value),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -393,6 +426,7 @@ impl<M> SourceExpr<M> {
         SourceExpr {
             expr,
             span: Some(Span::unstamped(range)),
+            via: None,
         }
     }
 }
@@ -573,7 +607,7 @@ fn stamp_binding<M, S: Copy>(binding: SourceBinding<M>, source: S) -> SourceBind
 
 /// Stamps `source` as the source identity of every span in `expr`'s tree.
 pub(crate) fn stamp_expr<M, S: Copy>(expr: SourceExpr<M>, source: S) -> SourceExpr<M, S> {
-    let SourceExpr { expr, span } = expr;
+    let SourceExpr { expr, span, .. } = expr;
     let expr = match expr {
         Expr::Bool(v) => Expr::Bool(v),
         Expr::String(v) => Expr::String(v),
@@ -632,6 +666,7 @@ pub(crate) fn stamp_expr<M, S: Copy>(expr: SourceExpr<M>, source: S) -> SourceEx
     SourceExpr {
         expr,
         span: stamp_span(span, source),
+        via: None,
     }
 }
 

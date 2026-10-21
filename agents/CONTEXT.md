@@ -19,7 +19,7 @@ A named definition at the top level of a file. Later bindings in the same file m
 _Avoid_: variable, assignment, declaration
 
 **Program**:
-An expression that evaluates to a waveform, occupying one numbered slot. The unit a performer selects, edits, and plays.
+An expression that evaluates to a waveform or a keys instrument, occupying one numbered slot. The unit a performer selects, edits, and plays.
 _Avoid_: patch, clip, track, preset, sound
 
 **Keys instrument**:
@@ -55,8 +55,8 @@ The eighth of a beat on either side of a measure boundary within which the recor
 _Avoid_: early-hit window, pre-roll, anticipation window, grace period, tolerance
 
 **Mark**:
-A labelled point inside a waveform that can later be substituted — how a sound is stopped, and how a live slider value reaches it.
-_Avoid_: tag, label, handle
+A labelled point inside a waveform: a marked node, whose label is its **mark id**. The mark id says what the mark means, and its kind (terminator, slider, trace, …) is the kind of the mark. A trace mark is one whose mark id carries a trace. Some marks are places that can be substituted while the waveform plays: how a sound is stopped, and how a live slider value reaches it. The rest record which program text built each part of the sound. Before the waveform plays, they are read off as the voice's marks, each with the times in the voice when the part of the sound it built is playing. A mark is current while one of those times covers now.
+_Avoid_: tag, label, handle, schedule
 
 **Terminator**:
 The mark on every voice through which it is released or stopped. What is written there only ever scales the voice, so it can end or quiet a voice but never make it louder.
@@ -109,6 +109,24 @@ _Avoid_: loop, looping, cycle
 **Installed keys instrument**:
 The one keys instrument that sounds when MIDI note-on and note-off events arrive, one voice per held key. Taken from a keys program; at most one is installed at a time.
 _Avoid_: the keys, current keys, active instrument
+
+### The screen
+
+**Mark highlight**:
+The block drawn in a program's color behind the program text a current mark records.
+_Avoid_: light, glow, highlight (unqualified)
+
+**Scope view**:
+How the screen draws the output mix's samples: Snapshot or Scan.
+_Avoid_: waveform view, waveform mode, display mode
+
+**Snapshot**:
+The scope view that draws one short, recent stretch of output samples edge to edge. Suited to periodic sound.
+_Avoid_: oscilloscope, buffer view
+
+**Scan**:
+The scope view that draws a rolling history of the output over a whole number of measures, aligned to measure boundaries, showing each slice's range of sample values, so envelopes and other slow changes are visible.
+_Avoid_: scroll, history, strip chart, envelope view
 
 ### Modes
 

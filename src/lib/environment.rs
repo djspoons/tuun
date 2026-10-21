@@ -26,13 +26,14 @@ use crate::parser;
 use crate::programs::{Evaluated, EvaluationInput, ProgramKind, ProgramSet};
 use crate::sequencer;
 use crate::signatures;
+use crate::trace;
 use crate::waveform;
 
 /// The `mark(N)` built-in: wraps a waveform in a `MarkId::UserDefined`
 /// mark.
-fn mark<S: 'static>(
-    arguments: Vec<expr::Expr<MarkId, S>>,
-) -> Result<expr::Expr<MarkId, S>, expr::Error<S>> {
+fn mark(
+    arguments: Vec<expr::Expr<MarkId, Source>>,
+) -> Result<expr::Expr<MarkId, Source>, expr::Error<Source>> {
     Ok(match &arguments[..] {
         [argument]
             if argument
@@ -45,12 +46,13 @@ fn mark<S: 'static>(
                 .round() as u32;
             expr::Expr::BuiltIn {
                 name: format!("mark({})", id),
-                function: builtins::curry(move |waveform: Box<waveform::Waveform<MarkId>>| {
-                    waveform::Waveform::Marked {
+                function: builtins::curry(
+                    expr::BuiltInKind::Arranges,
+                    move |waveform: Box<waveform::Waveform<MarkId>>| waveform::Waveform::Marked {
                         id: MarkId::UserDefined(id),
                         waveform,
-                    }
-                }),
+                    },
+                ),
             }
         }
         // TODO could be Error::Eval if this is a negative integer... but we
@@ -228,7 +230,7 @@ impl Environment {
             "mark",
             SourceExpr::from(expr::Expr::BuiltIn {
                 name: "mark".to_string(),
-                function: expr::BuiltInFn(Arc::new(mark)),
+                function: expr::BuiltInFn::new(expr::BuiltInKind::Arranges, mark),
             }),
         ));
         prelude.push(def(
@@ -573,8 +575,8 @@ impl Environment {
     }
 
     /// Parses and evaluates `text` under `bindings`, resolving `open`
-    /// directives through the module cache. Returns the evaluated expression
-    /// or a user-visible message.
+    /// directives through the module cache. Returns the evaluated expression,
+    /// without trace marks, or a user-visible message.
     pub fn evaluate_source(
         &self,
         text: &str,
@@ -585,15 +587,20 @@ impl Environment {
             Ok(expr) => expr,
         };
 
-        eval::evaluate(|path| self.resolve(path), bindings, expr).map_err(|error| error.to_string())
+        let expr = eval::evaluate(|path| self.resolve(path), bindings, expr)
+            .map_err(|error| error.to_string())?;
+        Ok(expr::SourceExpr {
+            expr: trace::strip_expr_trace_marks(expr.expr),
+            ..expr
+        })
     }
 
     /// Evaluates a sub-expression of the program `input` describes in that
     /// program's evaluation context, expecting a waveform result.
     ///
-    /// The waveform is returned optimized. Returns `None` when evaluation fails
-    /// or the result is neither a bare nor a `seq`-wrapped waveform (the `seq`
-    /// wrapper is stripped).
+    /// The waveform is returned without trace marks, optimized. Returns `None`
+    /// when evaluation fails or the result is neither a bare nor a
+    /// `seq`-wrapped waveform (the `seq` wrapper is stripped).
     pub fn evaluate_program_waveform_expr(
         &self,
         input: &EvaluationInput,
@@ -610,7 +617,7 @@ impl Environment {
             },
             _ => return None,
         };
-        Some(optimizer::optimize(waveform))
+        Some(optimizer::optimize(trace::strip_trace_marks(waveform)))
     }
 
     /// Evaluates the program `input` describes against its declared kind: an
@@ -702,7 +709,7 @@ impl Environment {
         });
         match sequence {
             Some(sequence) => Evaluated::Sequence(sequence),
-            None => Evaluated::Waveform(optimizer::optimize(waveform)),
+            None => Evaluated::Waveform(optimizer::optimize(trace::strip_trace_marks(waveform))),
         }
     }
 
@@ -733,7 +740,7 @@ impl Environment {
 
     /// Applies a note function `expr` to the given `arguments`, expecting a
     /// pair of (note-on, note-off) waveforms as a result. Both returned
-    /// waveforms are optimized.
+    /// waveforms are without trace marks, optimized.
     ///
     /// Both `expr` and `arguments` must be closed.
     pub fn apply_note_function(
@@ -759,9 +766,10 @@ impl Environment {
                     )));
                 }
                 match (exprs.remove(0).expr, exprs.remove(0).expr) {
-                    (Waveform(note_on), Waveform(note_off)) => {
-                        Ok((optimizer::optimize(note_on), optimizer::optimize(note_off)))
-                    }
+                    (Waveform(note_on), Waveform(note_off)) => Ok((
+                        optimizer::optimize(trace::strip_trace_marks(note_on)),
+                        optimizer::optimize(trace::strip_trace_marks(note_off)),
+                    )),
                     (expr, Waveform(_)) => Err(expr::Error::eval_here(format!(
                         "Expected waveform for note-on, got: {}",
                         expr

@@ -146,8 +146,8 @@ pub enum Waveform<MarkId, State = ()> {
     /// Implements a point-wise transformation of a waveform by computing the
     /// given operation one sample at a time.
     UnaryOp(UnaryOperator, Box<Waveform<MarkId, State>>),
-    /// Generates a repeating waveform that restarts the given waveform whenever the trigger waveform
-    /// flips from negative values to positive values. Its length is determined by the trigger waveform.
+    /// Generates the given waveform, reinitializing its state whenever the trigger waveform flips
+    /// from negative values to positive values. Its length is determined by the trigger waveform.
     Reset {
         trigger: Box<Waveform<MarkId, State>>,
         waveform: Box<Waveform<MarkId, State>>,

@@ -4,8 +4,13 @@
 //! module holds the app's concrete instantiation.
 
 use std::fmt;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
+use crate::diagnostics::Source;
+use crate::expr::Span;
 use crate::programs;
+use crate::trace::{CarriesTrace, Trace};
 use crate::tracker;
 
 // TODO: rename Program as Clip? Or make Clip a type of program?
@@ -83,9 +88,8 @@ pub enum MarkId {
     Terminator,         // used to stop programs
     MetronomeAmplitude, // used to set the level of the metronome click
     UserDefined(u32),
-    // TODO consider replacing "UserDefined" with cases that better describe the cases
-    //VisualizeTiming, // How mark(1) is currently used
-    //ShowSample(String), // For debugging filter params, etc.
+    /// Records which program text built the waveform it marks.
+    Trace(TraceRef),
 }
 
 impl fmt::Display for MarkId {
@@ -104,7 +108,55 @@ impl fmt::Display for MarkId {
             MarkId::Terminator => write!(f, "terminator"),
             MarkId::MetronomeAmplitude => write!(f, "metronome"),
             MarkId::UserDefined(id) => write!(f, "{:?}", id),
+            MarkId::Trace(_) => write!(f, "trace"),
         }
+    }
+}
+
+/// A trace as a mark id carries it: equal and hashed by pointer, so two mark
+/// ids are the same only if they share one trace.
+#[derive(Clone)]
+pub struct TraceRef(pub Arc<Trace<Source>>);
+
+impl PartialEq for TraceRef {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for TraceRef {}
+
+impl Hash for TraceRef {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Arc::as_ptr(&self.0).hash(state)
+    }
+}
+
+impl fmt::Debug for TraceRef {
+    // The whole trace is a graph of the value's history; its written place
+    // is enough to tell mark ids apart when debugging.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0.span {
+            Some(span) => write!(f, "Trace({:?} {:?})", span.source, span.range),
+            None => write!(f, "Trace"),
+        }
+    }
+}
+
+impl CarriesTrace<Source> for MarkId {
+    fn from_trace(trace: &Arc<Trace<Source>>) -> Option<Self> {
+        Some(MarkId::Trace(TraceRef(trace.clone())))
+    }
+
+    fn as_trace(&self) -> Option<&Arc<Trace<Source>>> {
+        match self {
+            MarkId::Trace(trace) => Some(&trace.0),
+            _ => None,
+        }
+    }
+
+    fn in_program(span: &Span<Source>) -> bool {
+        span.source == Source::Program
     }
 }
 

@@ -3991,10 +3991,9 @@ fn dedup_last_wins<T>(entries: Vec<(String, T)>) -> Vec<(String, T)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     use crate::builtins;
-    use crate::expr::BuiltInFn;
+    use crate::expr::{BuiltInFn, BuiltInKind};
     use crate::parser::{parse_module, parse_program};
     use crate::signatures;
 
@@ -4034,7 +4033,9 @@ mod tests {
             Pattern::Identifier("mark".to_string()),
             SourceExpr::from(Expr::BuiltIn {
                 name: "mark".to_string(),
-                function: BuiltInFn(Arc::new(|_| Err(Error::internal_here("stub")))),
+                function: BuiltInFn::new(BuiltInKind::Arranges, |_| {
+                    Err(Error::internal_here("stub"))
+                }),
             }),
         ));
         prelude.push(SourceBinding::definition(
@@ -4048,12 +4049,12 @@ mod tests {
             Pattern::Identifier("w2".to_string()),
             SourceExpr::from(Expr::BuiltIn {
                 name: "w2".to_string(),
-                function: BuiltInFn(Arc::new(|arguments: Vec<Expr<u32, S>>| {
+                function: BuiltInFn::new(BuiltInKind::Arranges, |arguments: Vec<Expr<u32, S>>| {
                     arguments
                         .into_iter()
                         .next()
                         .ok_or_else(|| Error::internal_here("w2 takes two arguments"))
-                })),
+                }),
             }),
         ));
         // `f1`: a built-in of type `float -> float` (see `test_signature`).
@@ -4062,12 +4063,12 @@ mod tests {
             Pattern::Identifier("f1".to_string()),
             SourceExpr::from(Expr::BuiltIn {
                 name: "f1".to_string(),
-                function: BuiltInFn(Arc::new(|arguments: Vec<Expr<u32, S>>| {
+                function: BuiltInFn::new(BuiltInKind::Arranges, |arguments: Vec<Expr<u32, S>>| {
                     arguments
                         .into_iter()
                         .next()
                         .ok_or_else(|| Error::internal_here("f1 takes one argument"))
-                })),
+                }),
             }),
         ));
         // `f2`: a built-in of type `(float, float) -> float` (see
@@ -4077,12 +4078,12 @@ mod tests {
             Pattern::Identifier("f2".to_string()),
             SourceExpr::from(Expr::BuiltIn {
                 name: "f2".to_string(),
-                function: BuiltInFn(Arc::new(|arguments: Vec<Expr<u32, S>>| {
+                function: BuiltInFn::new(BuiltInKind::Arranges, |arguments: Vec<Expr<u32, S>>| {
                     arguments
                         .into_iter()
                         .next()
                         .ok_or_else(|| Error::internal_here("f2 takes two arguments"))
-                })),
+                }),
             }),
         ));
         // `src_w1`: a one-argument waveform function defined in source rather

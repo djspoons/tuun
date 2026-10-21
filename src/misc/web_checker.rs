@@ -22,6 +22,9 @@ enum Source {
     Module(usize),
 }
 
+// The checker evaluates as the browser does, which doesn't trace.
+impl tuun::trace::CarriesTrace<Source> for ids::MarkId {}
+
 type Bindings = Vec<expr::SourceBinding<ids::MarkId, Source>>;
 
 /// Renders `error` with its `line:col` position and a caret snippet

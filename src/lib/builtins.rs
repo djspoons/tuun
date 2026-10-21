@@ -1,14 +1,23 @@
 use std::fmt::{Debug, Display};
-use std::sync::Arc;
 
 use crate::eval;
 use crate::expr;
-use crate::expr::{BuiltInFn, Error, Expr, SourceExpr, boxed};
+use crate::expr::{BuiltInFn, BuiltInKind, Error, Expr, SourceExpr, boxed};
 use crate::optimizer;
+use crate::trace::{self, CarriesTrace};
 use crate::waveform::{BinaryOperator, UnaryOperator, Waveform};
 use Expr::{Bool, BuiltIn, List, Seq};
 
 type BuiltinFn<M, S> = fn(Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>;
+
+/// Returns `argument` as a bare constant when it is a constant under trace
+/// marks, and unchanged otherwise, for a built-in that consumes it.
+fn peel_const<M: CarriesTrace<S>, S>(argument: Expr<M, S>) -> Expr<M, S> {
+    match argument.as_const_float() {
+        Some(value) => Expr::float(value),
+        None => argument,
+    }
+}
 
 // TODO maybe use Display instead of Debug for errors?
 fn binary_op<M, S>(
@@ -17,7 +26,7 @@ fn binary_op<M, S>(
     op: BinaryOperator,
 ) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Debug,
+    M: Debug + CarriesTrace<S>,
     S: Debug,
 {
     Ok({
@@ -85,7 +94,7 @@ where
 
 pub fn plus<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Debug,
+    M: Debug + CarriesTrace<S>,
     S: Debug,
 {
     binary_op(arguments, "+".to_string(), BinaryOperator::Add)
@@ -93,7 +102,7 @@ where
 
 pub fn minus<M, S>(mut arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Debug,
+    M: Debug + CarriesTrace<S>,
     S: Debug,
 {
     // Unary minus is multiplication by -1, so it folds and threads seqs the
@@ -107,7 +116,7 @@ where
 
 pub fn times<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Debug,
+    M: Debug + CarriesTrace<S>,
     S: Debug,
 {
     binary_op(arguments, "*".to_string(), BinaryOperator::Multiply)
@@ -115,7 +124,7 @@ where
 
 pub fn divide<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Debug,
+    M: Debug + CarriesTrace<S>,
     S: Debug,
 {
     binary_op(arguments, "/".to_string(), BinaryOperator::Divide)
@@ -123,7 +132,7 @@ where
 
 pub fn merge<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Debug,
+    M: Debug + CarriesTrace<S>,
     S: Debug,
 {
     binary_op(arguments, "&".to_string(), BinaryOperator::Merge)
@@ -133,10 +142,19 @@ where
 // `Time ~+ w` or `Const(x)`) return a new waveform which represents the sum of those offsets.
 fn add_offsets<M, S>(a: Waveform<M>, b: Waveform<M>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Clone + Debug + PartialEq,
+    M: Clone + Debug + PartialEq + CarriesTrace<S>,
     S: Clone + Debug,
 {
-    match (optimizer::first_root(&a), optimizer::first_root(&b)) {
+    // The roots are read through bare copies; `a` and `b` themselves keep
+    // their trace marks, which the caller embeds.
+    let (a_bare, b_bare) = (
+        trace::strip_trace_marks(a.clone()),
+        trace::strip_trace_marks(b.clone()),
+    );
+    match (
+        optimizer::first_root(&a_bare),
+        optimizer::first_root(&b_bare),
+    ) {
         // The sum's root is the sum of the roots: `Time - (a + b)`.
         (Some(a_root), Some(b_root)) => Ok(Expr::Waveform(Waveform::BinaryOp(
             BinaryOperator::Subtract,
@@ -158,7 +176,7 @@ where
 /// after the offset of the first (which therefore must be a seq).
 pub fn followed_by<M, S>(mut arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Debug + Display + Clone + PartialEq,
+    M: Debug + Display + Clone + PartialEq + CarriesTrace<S>,
     S: Clone + Debug,
 {
     Ok({
@@ -245,7 +263,7 @@ where
 
 pub fn power<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Debug,
+    M: Debug + CarriesTrace<S>,
     S: Debug,
 {
     binary_op(arguments, "pow".to_string(), BinaryOperator::Power)
@@ -270,9 +288,10 @@ where
 
 pub fn sqrt<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Debug,
+    M: Debug + CarriesTrace<S>,
     S: Debug,
 {
+    let arguments: Vec<_> = arguments.into_iter().map(peel_const).collect();
     Ok({
         match arguments[..] {
             [Expr::Waveform(Waveform::Const(value))] if value >= 0.0 => Expr::float(value.sqrt()),
@@ -366,9 +385,10 @@ where
 
 pub fn round<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Debug,
+    M: Debug + CarriesTrace<S>,
     S: Debug,
 {
+    let arguments: Vec<_> = arguments.into_iter().map(peel_const).collect();
     Ok({
         match arguments[..] {
             [Expr::Waveform(Waveform::Const(value))] => Expr::float(value.round()),
@@ -379,9 +399,10 @@ where
 
 pub fn equals<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Debug,
+    M: Debug + CarriesTrace<S>,
     S: Debug,
 {
+    let arguments: Vec<_> = arguments.into_iter().map(peel_const).collect();
     Ok({
         match &arguments[..] {
             [Bool(a), Bool(b)] => Expr::Bool(a == b),
@@ -399,9 +420,10 @@ where
 
 pub fn not_equals<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Debug,
+    M: Debug + CarriesTrace<S>,
     S: Debug,
 {
+    let arguments: Vec<_> = arguments.into_iter().map(peel_const).collect();
     Ok({
         match &arguments[..] {
             [Bool(a), Bool(b)] => Expr::Bool(a != b),
@@ -418,9 +440,10 @@ where
 
 pub fn less_than<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Debug,
+    M: Debug + CarriesTrace<S>,
     S: Debug,
 {
+    let arguments: Vec<_> = arguments.into_iter().map(peel_const).collect();
     Ok({
         match arguments[..] {
             [
@@ -434,9 +457,10 @@ where
 
 pub fn less_than_equals<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Debug,
+    M: Debug + CarriesTrace<S>,
     S: Debug,
 {
+    let arguments: Vec<_> = arguments.into_iter().map(peel_const).collect();
     Ok({
         match arguments[..] {
             [
@@ -450,9 +474,10 @@ where
 
 pub fn greater_than<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Debug,
+    M: Debug + CarriesTrace<S>,
     S: Debug,
 {
+    let arguments: Vec<_> = arguments.into_iter().map(peel_const).collect();
     Ok({
         match arguments[..] {
             [
@@ -466,9 +491,10 @@ where
 
 pub fn greater_than_equals<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Debug,
+    M: Debug + CarriesTrace<S>,
     S: Debug,
 {
+    let arguments: Vec<_> = arguments.into_iter().map(peel_const).collect();
     Ok({
         match arguments[..] {
             [
@@ -482,7 +508,7 @@ where
 
 pub fn map<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Clone + Debug + Display,
+    M: Clone + Debug + Display + CarriesTrace<S>,
     S: Clone + Debug,
 {
     Ok({
@@ -504,7 +530,7 @@ where
 
 pub fn reduce<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Debug + Clone + Display,
+    M: Debug + Clone + Display + CarriesTrace<S>,
     S: Clone + Debug,
 {
     Ok({
@@ -524,11 +550,14 @@ where
     })
 }
 
-pub fn unfold<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
+pub fn unfold<M, S>(mut arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Debug + Clone + Display,
+    M: Debug + Clone + Display + CarriesTrace<S>,
     S: Clone + Debug,
 {
+    if let Some(count) = arguments.pop() {
+        arguments.push(peel_const(count));
+    }
     Ok({
         match &arguments[..] {
             [function, seed, Expr::Waveform(Waveform::Const(n))]
@@ -601,11 +630,15 @@ where
     })
 }
 
-pub fn nth<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
+pub fn nth<M, S>(mut arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Clone,
+    M: Clone + CarriesTrace<S>,
     S: Clone,
 {
+    if !arguments.is_empty() {
+        let index = peel_const(arguments.remove(0));
+        arguments.insert(0, index);
+    }
     Ok({
         match &arguments[..] {
             [Expr::Waveform(Waveform::Const(a)), List(b)] if *a >= 0.0 && a.fract() == 0.0 => {
@@ -627,7 +660,7 @@ where
 
 pub fn fixed<M, S>(arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Debug,
+    M: Debug + CarriesTrace<S>,
     S: Debug,
 {
     Ok({
@@ -635,9 +668,11 @@ where
             [List(samples)] => {
                 let mut fixed_samples = Vec::new();
                 for sample in samples {
-                    match &sample.expr {
-                        Expr::Waveform(Waveform::Const(value)) => fixed_samples.push(*value),
-                        _ => return Err(Error::internal_here("Invalid sample in fixed waveform")),
+                    match sample.expr.as_const_float() {
+                        Some(value) => fixed_samples.push(value),
+                        None => {
+                            return Err(Error::internal_here("Invalid sample in fixed waveform"));
+                        }
                     }
                 }
                 Expr::Waveform(Waveform::Fixed(fixed_samples, ()))
@@ -647,13 +682,17 @@ where
     })
 }
 
+/// Returns a built-in of kind `kind` that applies `f` to a waveform argument or
+/// to a seq argument's waveform.
 pub fn curry<M, S>(
+    kind: BuiltInKind,
     f: impl Fn(Box<Waveform<M>>) -> Waveform<M> + Send + Sync + 'static,
 ) -> BuiltInFn<M, S>
 where
     M: Display,
 {
-    BuiltInFn(Arc::new(
+    BuiltInFn::new(
+        kind,
         move |mut arguments: Vec<Expr<M, S>>| -> Result<Expr<M, S>, Error<S>> {
             if arguments.len() != 1 {
                 return Err(Error::internal_here("Expected waveform"));
@@ -681,7 +720,7 @@ where
                 }
             })
         },
-    ))
+    )
 }
 
 pub fn fin<M, S>(mut arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
@@ -701,10 +740,12 @@ where
                 let length = length;
                 BuiltIn {
                     name: format!("fin({})", length),
-                    function: curry(move |waveform: Box<Waveform<M>>| Waveform::Fin {
-                        length: Box::new(length.clone()),
-                        waveform,
-                        state: (),
+                    function: curry(BuiltInKind::Arranges, move |waveform: Box<Waveform<M>>| {
+                        Waveform::Fin {
+                            length: Box::new(length.clone()),
+                            waveform,
+                            state: (),
+                        }
                     }),
                 }
             }
@@ -736,7 +777,8 @@ where
         let name = format!("seq({})", offset);
         BuiltIn {
             name,
-            function: BuiltInFn(Arc::new(
+            function: BuiltInFn::new(
+                BuiltInKind::Arranges,
                 move |mut arguments: Vec<Expr<M, S>>| -> Result<Expr<M, S>, Error<S>> {
                     let offset = offset.clone();
                     if arguments.len() != 1 {
@@ -759,7 +801,7 @@ where
                         }
                     })
                 },
-            )),
+            ),
         }
     })
 }
@@ -777,7 +819,8 @@ where
         }
         Expr::BuiltIn {
             name: "unseq()".to_string(),
-            function: BuiltInFn(Arc::new(
+            function: BuiltInFn::new(
+                BuiltInKind::Arranges,
                 |mut arguments: Vec<Expr<M, S>>| -> Result<Expr<M, S>, Error<S>> {
                     if arguments.len() != 1 {
                         return Err(Error::internal_here(format!(
@@ -790,7 +833,7 @@ where
                         _ => return Err(Error::internal_here("Expected seq as argument to unseq")),
                     })
                 },
-            )),
+            ),
         }
     })
 }
@@ -893,11 +936,13 @@ where
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            function: curry(move |waveform: Box<Waveform<M>>| Waveform::Filter {
-                waveform,
-                feed_forward: feed_forward.clone(),
-                feedback: feedback.clone(),
-                state: (),
+            function: curry(BuiltInKind::Computes, move |waveform: Box<Waveform<M>>| {
+                Waveform::Filter {
+                    waveform,
+                    feed_forward: feed_forward.clone(),
+                    feedback: feedback.clone(),
+                    state: (),
+                }
             }),
         }
     })
@@ -931,7 +976,7 @@ where
 
 pub fn alt<M, S>(mut arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Debug,
+    M: Debug + CarriesTrace<S>,
     S: Debug,
 {
     Ok({
@@ -939,7 +984,7 @@ where
         if arguments.len() != 3 {
             return Err(Error::internal_here("Expected three waveforms"));
         }
-        let trigger = match arguments.remove(0) {
+        let trigger = match peel_const(arguments.remove(0)) {
             Expr::Waveform(a) => a,
             _ => return Err(Error::internal_here("First argument must be a waveform")),
         };
@@ -982,9 +1027,11 @@ where
         };
         BuiltIn {
             name: format!("capture({})", file_stem),
-            function: curry(move |waveform: Box<Waveform<M>>| Waveform::Captured {
-                file_stem: file_stem.clone(),
-                waveform,
+            function: curry(BuiltInKind::Arranges, move |waveform: Box<Waveform<M>>| {
+                Waveform::Captured {
+                    file_stem: file_stem.clone(),
+                    waveform,
+                }
             }),
         }
     })
@@ -1020,7 +1067,7 @@ where
 
 pub fn sequence<M, S>(mut arguments: Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>>
 where
-    M: Debug + Clone + Display + PartialEq + 'static,
+    M: Debug + Clone + Display + PartialEq + 'static + CarriesTrace<S>,
     S: Clone + Debug + 'static,
 {
     Ok({
@@ -1066,40 +1113,49 @@ where
 /// ```
 pub fn debug<M, S>(print: impl Fn(&str) + Clone + Send + Sync + 'static) -> SourceExpr<M, S>
 where
-    M: Display + 'static,
-    S: 'static,
+    M: Clone + Display + 'static + CarriesTrace<S>,
+    S: Clone + 'static,
 {
     SourceExpr::from(Expr::BuiltIn {
         name: "debug".to_string(),
-        function: BuiltInFn(Arc::new(move |mut arguments: Vec<Expr<M, S>>| {
-            if arguments.len() != 1 {
-                return Err(Error::internal_here("Expected one argument for debug"));
-            }
-            let label = match arguments.remove(0) {
-                Expr::String(label) => label,
-                _ => {
-                    return Err(Error::internal_here("Expected a string argument to debug"));
+        function: BuiltInFn::new(
+            BuiltInKind::Arranges,
+            move |mut arguments: Vec<Expr<M, S>>| {
+                if arguments.len() != 1 {
+                    return Err(Error::internal_here("Expected one argument for debug"));
                 }
-            };
-            let print = print.clone();
-            Ok(BuiltIn {
-                name: format!("debug({})", label),
-                function: BuiltInFn(Arc::new(move |mut arguments: Vec<Expr<M, S>>| {
-                    if arguments.len() != 1 {
-                        return Err(Error::internal_here("Expected one argument"));
+                let label = match arguments.remove(0) {
+                    Expr::String(label) => label,
+                    _ => {
+                        return Err(Error::internal_here("Expected a string argument to debug"));
                     }
-                    print(&format!("[DEBUG] {}: {}", label, arguments[0]));
-                    Ok(arguments.pop().unwrap())
-                })),
-            })
-        })),
+                };
+                let print = print.clone();
+                Ok(BuiltIn {
+                    name: format!("debug({})", label),
+                    function: BuiltInFn::new(
+                        BuiltInKind::Arranges,
+                        move |mut arguments: Vec<Expr<M, S>>| {
+                            if arguments.len() != 1 {
+                                return Err(Error::internal_here("Expected one argument"));
+                            }
+                            // The value prints as it would play, without the
+                            // trace marks it carries.
+                            let shown = trace::strip_expr_trace_marks(arguments[0].clone());
+                            print(&format!("[DEBUG] {}: {}", label, shown));
+                            Ok(arguments.pop().unwrap())
+                        },
+                    ),
+                })
+            },
+        ),
     })
 }
 
 /// Adds all of the built-ins to `bindings`.
 pub fn add_bindings<M, S>(bindings: &mut Vec<expr::SourceBinding<M, S>>)
 where
-    M: Debug + Clone + Display + PartialEq + Send + Sync + 'static,
+    M: Debug + Clone + Display + PartialEq + Send + Sync + 'static + CarriesTrace<S>,
     S: Clone + Debug + 'static,
 {
     fn def<M, S>(id: &str, expr: expr::SourceExpr<M, S>) -> expr::SourceBinding<M, S> {
@@ -1118,50 +1174,51 @@ where
         SourceExpr::from(Expr::Waveform(Waveform::Noise)),
     ));
 
-    let builtins: Vec<(&str, BuiltinFn<M, S>)> = vec![
-        ("+", plus),
-        ("-", minus),
-        ("*", times),
-        ("/", divide),
-        ("&", merge),
-        ("\\", followed_by),
-        ("==", equals),
-        ("!=", not_equals),
-        ("<", less_than),
-        ("<=", less_than_equals),
-        (">", greater_than),
-        (">=", greater_than_equals),
-        ("pow", power),
-        ("log", log),
-        ("sqrt", sqrt),
-        ("exp", exp),
-        ("sin", sin),
-        ("phase", phase),
-        ("round", round),
-        ("map", map),
-        ("reduce", reduce),
-        ("unfold", unfold),
-        ("append", append),
-        ("concat", concat),
-        ("nth", nth),
-        ("fixed", fixed),
-        ("fin", fin),
-        ("seq", seq),
-        ("unseq", unseq),
-        ("filter", waveform_filter),
+    use BuiltInKind::{Arranges, Computes};
+    let builtins: Vec<(&str, BuiltInKind, BuiltinFn<M, S>)> = vec![
+        ("+", Computes, plus),
+        ("-", Computes, minus),
+        ("*", Computes, times),
+        ("/", Computes, divide),
+        ("&", Computes, merge),
+        ("\\", Arranges, followed_by),
+        ("==", Arranges, equals),
+        ("!=", Arranges, not_equals),
+        ("<", Arranges, less_than),
+        ("<=", Arranges, less_than_equals),
+        (">", Arranges, greater_than),
+        (">=", Arranges, greater_than_equals),
+        ("pow", Computes, power),
+        ("log", Computes, log),
+        ("sqrt", Computes, sqrt),
+        ("exp", Computes, exp),
+        ("sin", Computes, sin),
+        ("phase", Computes, phase),
+        ("round", Computes, round),
+        ("map", Arranges, map),
+        ("reduce", Arranges, reduce),
+        ("unfold", Arranges, unfold),
+        ("append", Arranges, append),
+        ("concat", Arranges, concat),
+        ("nth", Arranges, nth),
+        ("fixed", Computes, fixed),
+        ("fin", Arranges, fin),
+        ("seq", Arranges, seq),
+        ("unseq", Arranges, unseq),
+        ("filter", Computes, waveform_filter),
         //("~*", waveform_convolution),
-        ("reset", reset),
-        ("alt", alt),
-        ("capture", capture),
-        ("__chord", chord),
-        ("__sequence", sequence),
+        ("reset", Computes, reset),
+        ("alt", Computes, alt),
+        ("capture", Arranges, capture),
+        ("__chord", Arranges, chord),
+        ("__sequence", Arranges, sequence),
     ];
-    for (name, function) in builtins {
+    for (name, kind, function) in builtins {
         bindings.push(def(
             name,
             SourceExpr::from(Expr::BuiltIn {
                 name: name.to_string(),
-                function: BuiltInFn(Arc::new(function)),
+                function: BuiltInFn::new(kind, function),
             }),
         ));
     }
@@ -1169,6 +1226,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::expr::ErrorKind;
     use Expr::BuiltIn;
@@ -1221,7 +1280,7 @@ mod tests {
         let result = map(vec![
             BuiltIn {
                 name: "minus".to_string(),
-                function: BuiltInFn(Arc::new(minus)),
+                function: BuiltInFn::new(BuiltInKind::Computes, minus),
             },
             List(exprs),
         ]);
@@ -1238,7 +1297,7 @@ mod tests {
         let result = reduce(vec![
             BuiltIn {
                 name: "plus".to_string(),
-                function: BuiltInFn(Arc::new(plus)),
+                function: BuiltInFn::new(BuiltInKind::Computes, plus),
             },
             Expr::float(1.0),
             List(exprs),
@@ -1318,5 +1377,129 @@ mod tests {
     fn test_chord_of_nothing_is_the_empty_waveform() {
         let result = chord::<u32, ()>(vec![List(vec![])]).unwrap();
         assert!(matches!(result, Expr::Waveform(Waveform::Fixed(v, ())) if v.is_empty()));
+    }
+
+    /// A mark id that carries a trace and nothing else.
+    #[derive(Clone, Debug)]
+    struct Traced(Arc<trace::Trace<()>>);
+
+    impl Display for Traced {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "traced")
+        }
+    }
+
+    // Two mark ids are equal when they share one trace.
+    impl PartialEq for Traced {
+        fn eq(&self, other: &Self) -> bool {
+            Arc::ptr_eq(&self.0, &other.0)
+        }
+    }
+
+    impl CarriesTrace<()> for Traced {
+        fn from_trace(trace: &Arc<trace::Trace<()>>) -> Option<Self> {
+            Some(Traced(trace.clone()))
+        }
+        fn as_trace(&self) -> Option<&Arc<trace::Trace<()>>> {
+            Some(&self.0)
+        }
+    }
+
+    /// Returns `w` under a trace mark.
+    fn traced(w: Waveform<Traced>) -> Waveform<Traced> {
+        Waveform::Marked {
+            id: Traced(Arc::new(trace::Trace::new::<Traced>(None, None, None))),
+            waveform: Box::new(w),
+        }
+    }
+
+    fn traced_float(value: f32) -> Expr<Traced, ()> {
+        Expr::Waveform(traced(Waveform::Const(value)))
+    }
+
+    #[test]
+    fn consumed_constants_are_read_through_trace_marks() {
+        let float = |result: Result<Expr<Traced, ()>, Error<()>>| result.unwrap().as_const_float();
+        assert_eq!(float(sqrt(vec![traced_float(4.0)])), Some(2.0));
+        assert_eq!(float(round(vec![traced_float(1.6)])), Some(2.0));
+        assert_eq!(
+            float(times(vec![traced_float(2.0), traced_float(3.0)])),
+            Some(6.0)
+        );
+        let list = || List(vec![SourceExpr::float(1.0), SourceExpr::float(2.0)]);
+        assert_eq!(float(nth(vec![traced_float(1.0), list()])), Some(2.0));
+        let fixed = fixed(vec![List(vec![SourceExpr::from(traced_float(0.5))])]).unwrap();
+        assert!(matches!(fixed, Expr::Waveform(Waveform::Fixed(v, ())) if v == [0.5]));
+        for (compare, expected) in [
+            (equals as BuiltinFn<Traced, ()>, false),
+            (not_equals, true),
+            (less_than, true),
+            (less_than_equals, true),
+            (greater_than, false),
+            (greater_than_equals, false),
+        ] {
+            let result = compare(vec![traced_float(1.0), traced_float(2.0)]).unwrap();
+            assert!(matches!(result, Bool(b) if b == expected));
+        }
+    }
+
+    #[test]
+    fn debug_prints_values_without_trace_marks() {
+        use std::sync::Mutex;
+        let printed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&printed);
+        let debug = debug::<Traced, ()>(move |line| sink.lock().unwrap().push(line.to_string()));
+        let Expr::BuiltIn { function, .. } = debug.expr else {
+            panic!("debug should build a BuiltIn");
+        };
+        let Ok(BuiltIn { function, .. }) = function.0(vec![Expr::String("freq".to_string())])
+        else {
+            panic!("debug applied to label should be a BuiltIn");
+        };
+        // The value is handed back as it was, marks and all.
+        let result = function.0(vec![traced_float(440.0)]).unwrap();
+        assert!(matches!(result, Expr::Waveform(Waveform::Marked { .. })));
+        assert_eq!(printed.lock().unwrap().as_slice(), ["[DEBUG] freq: 440"]);
+    }
+
+    #[test]
+    fn a_traced_constant_count_unfolds() {
+        let function = BuiltIn {
+            name: "minus".to_string(),
+            function: BuiltInFn::new(BuiltInKind::Computes, minus),
+        };
+        let result = unfold(vec![function, Expr::float(1.0), traced_float(2.0)]).unwrap();
+        assert_eq!(format!("{}", result), "[1, -1]");
+    }
+
+    #[test]
+    fn a_traced_constant_trigger_chooses_its_branch() {
+        let result = alt::<Traced, ()>(vec![
+            traced_float(1.0),
+            Expr::float(2.0),
+            Expr::Waveform(Waveform::Time(())),
+        ])
+        .unwrap();
+        assert_eq!(result.as_const_float(), Some(2.0));
+    }
+
+    #[test]
+    fn traced_offsets_still_add() {
+        let seq = |seconds: f32| Seq {
+            offset: boxed(Expr::Waveform(Waveform::BinaryOp(
+                BinaryOperator::Subtract,
+                Box::new(traced(Waveform::Time(()))),
+                Box::new(traced(Waveform::Const(seconds))),
+            ))),
+            waveform: boxed(Expr::float(1.0)),
+        };
+        let Seq { offset, .. } = followed_by(vec![seq(1.0), seq(2.0)]).unwrap() else {
+            panic!("seq \\ seq should be a seq");
+        };
+        let Expr::Waveform(offset) = offset.expr else {
+            panic!("offset should be a waveform");
+        };
+        let root = optimizer::first_root(&trace::strip_trace_marks(offset));
+        assert!(matches!(root, Some(Waveform::Const(v)) if v == 3.0));
     }
 }

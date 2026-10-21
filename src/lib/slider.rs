@@ -1,16 +1,18 @@
 use std::fmt::Display;
 
 use crate::waveform;
-use crate::{builtins, eval, expr, parser};
+use crate::{builtins, eval, expr, parser, trace};
 
 use waveform::BinaryOperator;
 use waveform::Waveform::{Append, BinaryOp, Const, Fin, Marked, Time};
 
 // This file defines types and functions related to sliders that are platform-independent.
 
-/// Dummy mark type used for evaluating slider function expressions (which don't use marks).
+/// Dummy mark id type used for evaluating slider function expressions (which don't use marks).
 #[derive(Clone, Debug, PartialEq)]
 struct NoMark;
+
+impl<S> trace::CarriesTrace<S> for NoMark {}
 
 impl Display for NoMark {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -9,6 +9,7 @@ pub mod optimizer;
 pub mod parser;
 pub mod signatures;
 pub mod slider;
+pub mod trace;
 pub mod types;
 pub mod waveform;
 
