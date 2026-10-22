@@ -203,7 +203,6 @@ where
             ))),
         )),
         BinaryOp(BinaryOperator::Merge, a, b) => {
-            use Waveform::Marked;
             match (optimize(*a), optimize(*b)) {
                 // Merge yields the longer of the two inputs.
                 (Fixed(a, _), b) if a.is_empty() => b,
@@ -249,41 +248,6 @@ where
                             state: (),
                         }),
                         Box::new(Append(b, c, ())),
-                    ),
-                },
-                // Same as above, but when w is Marked(n, w'). There's a lot of overlap
-                // with the previous case!
-                (Marked { id, waveform: a }, Append(b, c, ())) => match (*a, *b) {
-                    (
-                        Fin {
-                            length: a_length,
-                            waveform: a,
-                            ..
-                        },
-                        Fin {
-                            length: b_length,
-                            waveform: b,
-                            ..
-                        },
-                    ) if first_root(&a_length) == first_root(&b_length) => optimize(Append(
-                        Box::new(Marked {
-                            id,
-                            waveform: Box::new(Fin {
-                                length: a_length,
-                                waveform: Box::new(BinaryOp(BinaryOperator::Merge, a, b)),
-                                state: (),
-                            }),
-                        }),
-                        c,
-                        (),
-                    )),
-                    (a, b) => BinaryOp(
-                        BinaryOperator::Merge,
-                        Box::new(Marked {
-                            id,
-                            waveform: Box::new(a),
-                        }),
-                        Box::new(Append(Box::new(b), c, ())),
                     ),
                 },
                 (a, b) => BinaryOp(BinaryOperator::Merge, Box::new(a), Box::new(b)),

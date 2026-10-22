@@ -77,7 +77,7 @@ pub fn flush_slider_updates(
 /// External handles the runner needs but doesn't own.
 pub struct World<'a> {
     pub launchkey: Option<&'a mut launchkey::Launchkey>,
-    pub status: &'a tracker::Status<WaveformId, MarkId>,
+    pub status: &'a tracker::Status<WaveformId>,
 }
 
 pub struct EffectRunner {
@@ -729,10 +729,9 @@ mod tests {
         }
     }
 
-    fn empty_status() -> tracker::Status<WaveformId, MarkId> {
+    fn empty_status() -> tracker::Status<WaveformId> {
         tracker::Status {
             buffer_start: Instant::now(),
-            marks: vec![],
             start_times: Vec::new(),
             tracker_load: None,
             allocations: None,

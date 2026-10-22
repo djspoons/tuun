@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use crate::actions;
-use crate::ids::{ANCHOR_SIXTEENTH, MarkId, WaveformId, WaveformSelector};
+use crate::ids::{ANCHOR_SIXTEENTH, WaveformId, WaveformSelector};
 use crate::launchkey;
 use crate::programs::{PROGRAMS_PER_BANK, Program, ProgramKind};
 use crate::recorder;
@@ -135,7 +135,7 @@ pub fn classify(
 /// Pushes the current app state out to the Launchkey hardware.
 pub fn update_launchkey_state(
     state: &actions::AppState,
-    status: &tracker::Status<WaveformId, MarkId>,
+    status: &tracker::Status<WaveformId>,
     tempo: u32,
     beats_per_measure: u32,
     launchkey: &mut launchkey::Launchkey,
@@ -236,7 +236,7 @@ fn pulsed(
 /// the editor mode owns the active program.
 fn pad_refused(
     state: &actions::AppState,
-    status: &tracker::Status<WaveformId, MarkId>,
+    status: &tracker::Status<WaveformId>,
     now: Instant,
     event: &launchkey::Event,
 ) -> bool {
@@ -250,7 +250,7 @@ fn pad_refused(
 
 fn update_pads_clip_launcher(
     state: &actions::AppState,
-    status: &tracker::Status<WaveformId, MarkId>,
+    status: &tracker::Status<WaveformId>,
     launchkey: &mut launchkey::Launchkey,
     now: Instant,
     current_beat_start: Instant,
@@ -346,7 +346,7 @@ fn update_pads_clip_launcher(
 /// Updates the controller state for keys-installer mode.
 fn update_pads_keys_installer(
     state: &actions::AppState,
-    status: &tracker::Status<WaveformId, MarkId>,
+    status: &tracker::Status<WaveformId>,
     launchkey: &mut launchkey::Launchkey,
     now: Instant,
     current_beat_start: Instant,
@@ -412,7 +412,7 @@ fn update_pads_keys_installer(
 /// All pads are dark when the active program isn't sequenceable.
 fn update_pads_sequencer(
     state: &actions::AppState,
-    status: &tracker::Status<WaveformId, MarkId>,
+    status: &tracker::Status<WaveformId>,
     launchkey: &mut launchkey::Launchkey,
     now: Instant,
     current_beat_duration: std::time::Duration,

@@ -93,7 +93,6 @@ impl tracker::Id for WaveformId {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum MarkId {
-    TopLevel, // a mark for the whole Program
     /// One slider, qualified by the program slot whose binding declares it.
     Slider {
         program: usize,
@@ -102,7 +101,6 @@ pub enum MarkId {
     Amplitude,          // use to set top-level amplitude
     Terminator,         // used to stop programs
     MetronomeAmplitude, // used to set the level of the metronome click
-    UserDefined(u32),
     /// Records which program text built the waveform it marks.
     Trace(TraceRef),
 }
@@ -110,7 +108,6 @@ pub enum MarkId {
 impl fmt::Display for MarkId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            MarkId::TopLevel => write!(f, "top-level"),
             MarkId::Slider { program, label } => {
                 write!(
                     f,
@@ -122,7 +119,6 @@ impl fmt::Display for MarkId {
             MarkId::Amplitude => write!(f, "amplitude"),
             MarkId::Terminator => write!(f, "terminator"),
             MarkId::MetronomeAmplitude => write!(f, "metronome"),
-            MarkId::UserDefined(id) => write!(f, "{:?}", id),
             MarkId::Trace(_) => write!(f, "trace"),
         }
     }

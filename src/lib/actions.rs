@@ -262,7 +262,7 @@ impl AppState {
 
 /// Read-only snapshot of the world used by the reducer.
 pub struct Context<'a> {
-    pub status: &'a tracker::Status<WaveformId, MarkId>,
+    pub status: &'a tracker::Status<WaveformId>,
     pub now: Instant,
     /// The environment programs are checked and evaluated in (prelude,
     /// module cache) — used by `Action::Complete` to find the names in
@@ -1010,7 +1010,7 @@ fn owns_active_program(state: &AppState) -> bool {
 /// already-evaluated waveform or instrument.
 pub fn refused_by_ownership(
     state: &AppState,
-    status: &tracker::Status<WaveformId, MarkId>,
+    status: &tracker::Status<WaveformId>,
     now: Instant,
     action: &Action,
 ) -> bool {
@@ -2264,10 +2264,9 @@ mod tests {
     use std::time::Duration;
 
     /// A tracker status with no waveforms at all — nothing active, nothing pending.
-    fn empty_status() -> tracker::Status<WaveformId, MarkId> {
+    fn empty_status() -> tracker::Status<WaveformId> {
         tracker::Status {
             buffer_start: Instant::now(),
-            marks: vec![],
             start_times: Vec::new(),
             tracker_load: None,
             allocations: None,
@@ -2276,7 +2275,7 @@ mod tests {
 
     /// A status with program 0's waveform starting at `start` (before `now` =
     /// active, after `now` = pending).
-    fn status_with_start(start: Instant) -> tracker::Status<WaveformId, MarkId> {
+    fn status_with_start(start: Instant) -> tracker::Status<WaveformId> {
         let mut status = empty_status();
         status.start_times.push((WaveformId::Program(0), start));
         status
@@ -2287,7 +2286,7 @@ mod tests {
     /// but the prelude fail to resolve.
     fn apply_with_status(
         state: &mut AppState,
-        status: &tracker::Status<WaveformId, MarkId>,
+        status: &tracker::Status<WaveformId>,
         now: Instant,
         action: Action,
     ) -> Vec<Effect> {
@@ -3569,7 +3568,7 @@ _ = saw(220);";
 
     /// A status with program 0's anchor step starting at `start` (before
     /// `now` = active, after `now` = pending).
-    fn status_with_anchor(start: Instant) -> tracker::Status<WaveformId, MarkId> {
+    fn status_with_anchor(start: Instant) -> tracker::Status<WaveformId> {
         let mut status = empty_status();
         status.start_times.push((
             WaveformId::Step {
@@ -4339,7 +4338,7 @@ _ = saw(220);";
 
     /// A status whose measure boundaries (4 beats at 60 bpm) fall at `t0`
     /// plus 0, 4, 8 and 12 seconds.
-    fn measures(t0: Instant) -> tracker::Status<WaveformId, MarkId> {
+    fn measures(t0: Instant) -> tracker::Status<WaveformId> {
         let mut status = empty_status();
         for k in 0..4 {
             status.start_times.push((

@@ -299,7 +299,7 @@ mod tests {
 
     #[test]
     fn analyze_rejects_piped_or_wrapped_body() {
-        assert!(analyze("[1] | on_beats(b) | mark(1)").is_none());
+        assert!(analyze("[1] | on_beats(b) | fin(time - 1)").is_none());
         assert!(analyze("1 + ([1] | on_beats(b))").is_none());
     }
 

@@ -50,8 +50,8 @@ fn binary_arithmetic(int_conjunct: bool) -> Type {
 }
 
 /// The result type of curried waveform filters (`fin(len)`, `filter(...)`,
-/// `capture(name)`, `mark(id)`): applied to a waveform they produce a waveform,
-/// and a seq threads through (`builtins::curry`).
+/// `capture(name)`): applied to a waveform they produce a waveform, and a seq
+/// threads through (`builtins::curry`).
 fn waveform_filter() -> Type {
     Type::intersection(vec![
         Type::function(vec![Type::waveform()], Type::non_const_wave()),
@@ -203,10 +203,8 @@ pub fn signature(name: &str) -> Option<Type> {
         // Every element must be a seq, and a fold of seqs is itself a seq — the
         // empty fold being the empty seq, `\`'s identity.
         "__sequence" => Type::function(vec![Type::List(Box::new(Type::seq()))], Type::seq()),
-        // Added by the native prelude rather than `add_bindings`. The mark
-        // id is hard-checked integral (and >= 1) at runtime.
-        "mark" => Type::function(vec![Type::int()], waveform_filter()),
-        // Takes a string and returns an identity function.
+        // Added by the native prelude rather than `add_bindings`. Takes a
+        // string and returns an identity function.
         "debug" => Type::function(
             vec![Type::String],
             Type::Forall(vec![0], Box::new(Type::function(vec![a()], a()))),
@@ -248,8 +246,7 @@ mod tests {
 
     #[test]
     fn prelude_only_builtins_have_signatures() {
-        // These are bound by the native prelude, not `add_bindings`.
-        assert!(signature("mark").is_some());
+        // This is bound by the native prelude, not `add_bindings`.
         assert!(signature("debug").is_some());
     }
 
@@ -540,7 +537,7 @@ mod tests {
     /// Every built-in with numeric-ground conjuncts conforms to them — the
     /// signature-faithfulness obligation of the sound configuration. Conjuncts
     /// over non-numeric domains (lists, functions, ∀-polymorphic) are out of
-    /// scope here; `mark` and `debug` are prelude-native.
+    /// scope here; `debug` is prelude-native.
     #[test]
     fn signatures_conform_to_the_runtime() {
         let mut bindings: Vec<SourceBinding<u32, ()>> = Vec::new();

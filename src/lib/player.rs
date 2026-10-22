@@ -163,7 +163,7 @@ impl Player {
         &self,
         set: &ProgramSet,
         program_index: usize,
-        status: &tracker::Status<WaveformId, MarkId>,
+        status: &tracker::Status<WaveformId>,
         start: Start,
         repeat_after_measures: Option<u32>,
         waveform_marks: &mut HashMap<WaveformId, PlayedMarks>,
@@ -197,7 +197,7 @@ impl Player {
         &self,
         set: &ProgramSet,
         program_index: usize,
-        status: &tracker::Status<WaveformId, MarkId>,
+        status: &tracker::Status<WaveformId>,
         start: Start,
         repeat_after_measures: Option<u32>,
         waveform_marks: &mut HashMap<WaveformId, PlayedMarks>,
@@ -232,9 +232,8 @@ impl Player {
         let id = WaveformId::Program(program_index);
         self.sender
             .send(tracker::Command::Play {
-                // TODO maybe extend the top-level mark to the full measure?
                 id: id.clone(),
-                waveform: build_top_level_waveform(waveform, program.level_db()),
+                waveform: build_leveled_waveform(waveform, program.level_db()),
                 start: start_instant,
                 repeat_every,
             })
@@ -277,7 +276,7 @@ impl Player {
         self.sender
             .send(tracker::Command::Play {
                 id: id.clone(),
-                waveform: build_top_level_waveform(waveform, program.level_db()),
+                waveform: build_leveled_waveform(waveform, program.level_db()),
                 start: None,
                 repeat_every: None,
             })
@@ -292,7 +291,7 @@ impl Player {
         &self,
         set: &ProgramSet,
         program_index: usize,
-        status: &tracker::Status<WaveformId, MarkId>,
+        status: &tracker::Status<WaveformId>,
         start: Start,
         repeat_after_measures: Option<u32>,
         waveform_marks: &mut HashMap<WaveformId, PlayedMarks>,
@@ -356,7 +355,7 @@ impl Player {
                     program: program_index,
                     sixteenth: ANCHOR_SIXTEENTH,
                 },
-                waveform: build_top_level_waveform(
+                waveform: build_leveled_waveform(
                     silence_of_beats(pattern_beats, self.tempo),
                     program.level_db(),
                 ),
@@ -381,7 +380,7 @@ impl Player {
         set: &ProgramSet,
         program_index: usize,
         sixteenth: u8,
-        status: &tracker::Status<WaveformId, MarkId>,
+        status: &tracker::Status<WaveformId>,
         default_repeat_measures: Option<u32>,
         waveform_marks: &mut HashMap<WaveformId, PlayedMarks>,
     ) -> Option<String> {
@@ -442,8 +441,7 @@ impl Player {
     }
 
     /// Plays a note waveform under `WaveformId::Key(key)` immediately,
-    /// wrapped with the top-level amplitude/terminator
-    /// marks at `level_db`, and records its marks, `marks`, in `waveform_marks`.
+    /// wrapped with the amplitude/terminator marks at `level_db`, and records its marks, `marks`, in `waveform_marks`.
     pub fn play_note(
         &self,
         key: u8,
@@ -455,7 +453,7 @@ impl Player {
         let id = WaveformId::Key(key);
         let _ = self.sender.send(tracker::Command::Play {
             id: id.clone(),
-            waveform: build_top_level_waveform(waveform, level_db),
+            waveform: build_leveled_waveform(waveform, level_db),
             start: None,
             repeat_every: None,
         });
@@ -507,7 +505,7 @@ impl Player {
     pub fn start_beats(
         &self,
         environment: &Environment,
-        status_receiver: &mpsc::Receiver<tracker::Status<WaveformId, MarkId>>,
+        status_receiver: &mpsc::Receiver<tracker::Status<WaveformId>>,
         precompute: bool,
     ) {
         let mut beats = self.beats_waveform(environment);
@@ -544,19 +542,17 @@ impl Player {
         }
     }
 
-    /// Builds the per-measure beats waveform — a sequence of `mark`-tagged
-    /// beats used to keep timing visible to the rest of the runtime as well as
-    /// generating metronome clicks.
+    /// Builds the per-measure beats waveform: one measure of metronome clicks,
+    /// one on each beat, whose level a `MetronomeAmplitude` mark sets.
     pub fn beats_waveform(&self, environment: &Environment) -> waveform::Waveform<MarkId> {
         let seconds_per_beat = duration_from_beats(self.tempo, 1).as_secs_f32();
         let mut ws = Vec::new();
         for i in 0..self.beats_per_measure {
             ws.push(format!(
-                "({} * _metronome_amplitude) | fin(time - {}) | seq(time - {}) | mark({})",
+                "({} * _metronome_amplitude) | fin(time - {}) | seq(time - {})",
                 click_source(i == 0),
                 seconds_per_beat,
                 seconds_per_beat,
-                i + 1
             ));
         }
         let source = format!("<[{}]>", ws.join(", "));
@@ -573,10 +569,7 @@ impl Player {
             .map(|s| s.expr)
         {
             Ok(expr::Expr::Seq { waveform, .. }) => match waveform.expr {
-                expr::Expr::Waveform(waveform) => waveform::Waveform::<MarkId>::Marked {
-                    id: MarkId::TopLevel,
-                    waveform: Box::new(optimizer::optimize(waveform)),
-                },
+                expr::Expr::Waveform(waveform) => optimizer::optimize(waveform),
                 expr => panic!("Error creating beats waveform with seq, got {}", expr),
             },
             Ok(expr) => panic!("Error creating beats waveform, got {}", expr),
@@ -687,18 +680,6 @@ fn build_leveled_waveform(
     ))
 }
 
-/// Wraps `waveform` with the standard top-level marks: a `TopLevel` mark
-/// around the amplitude/terminator wrap of `build_leveled_waveform`.
-fn build_top_level_waveform(
-    waveform: waveform::Waveform<MarkId>,
-    level_db: f32,
-) -> waveform::Waveform<MarkId> {
-    waveform::Waveform::Marked {
-        id: MarkId::TopLevel,
-        waveform: Box::new(build_leveled_waveform(waveform, level_db)),
-    }
-}
-
 /// Builds a silent waveform lasting the given number of beats.
 fn silence_of_beats(beats: f32, tempo: u32) -> waveform::Waveform<MarkId> {
     use waveform::Waveform::{BinaryOp, Const, Fin, Time};
@@ -717,7 +698,7 @@ fn silence_of_beats(beats: f32, tempo: u32) -> waveform::Waveform<MarkId> {
 /// Beats waveform, or `None` when `status` holds no Beats waveform starting
 /// after `now`.
 pub fn next_measure_start(
-    status: &tracker::Status<WaveformId, MarkId>,
+    status: &tracker::Status<WaveformId>,
     now: time::Instant,
 ) -> Option<time::Instant> {
     measure_starts(status).filter(|&start| start > now).min()
@@ -726,7 +707,7 @@ pub fn next_measure_start(
 /// Returns the latest measure boundary at or before `now`, or `None` when
 /// `status` holds no Beats waveform starting by then.
 pub fn previous_measure_start(
-    status: &tracker::Status<WaveformId, MarkId>,
+    status: &tracker::Status<WaveformId>,
     now: time::Instant,
 ) -> Option<time::Instant> {
     measure_starts(status).filter(|&start| start <= now).max()
@@ -734,7 +715,7 @@ pub fn previous_measure_start(
 
 /// Returns the start of every Beats waveform in `status`.
 fn measure_starts(
-    status: &tracker::Status<WaveformId, MarkId>,
+    status: &tracker::Status<WaveformId>,
 ) -> impl Iterator<Item = time::Instant> + '_ {
     status
         .start_times
@@ -765,10 +746,9 @@ mod tests {
 
     use super::*;
 
-    fn empty_status() -> tracker::Status<WaveformId, MarkId> {
+    fn empty_status() -> tracker::Status<WaveformId> {
         tracker::Status {
             buffer_start: Instant::now(),
-            marks: vec![],
             start_times: Vec::new(),
             tracker_load: None,
             allocations: None,
@@ -823,31 +803,31 @@ mod tests {
         }
     }
 
-    // Each beat and the whole measure must have a known length, with or
-    // without precompute, so that their marks have durations.
+    // The measure has a known length, and each beat keeps the mark the
+    // metronome switch substitutes, with or without precompute.
     #[test]
-    fn beats_have_known_lengths() {
+    fn beats_last_a_measure_and_keep_their_metronome_marks() {
         let environment = Environment::new(8000, 90, std::path::PathBuf::new());
         let (player, _receiver) = test_player();
         let mut generator = generator::Generator::new(8000);
         let beats = player.beats_waveform(&environment);
         let precomputed = generator.precompute(beats.clone());
         for waveform in [beats, precomputed] {
+            // A beat at 90 bpm is 2/3 s: 5334 samples at 8000 Hz, rounded up.
+            assert_eq!(
+                generator.known_length(&waveform),
+                Some(4 * 5334),
+                "for beats {}",
+                waveform
+            );
             let mut lengths = Vec::new();
             collect_mark_lengths(&generator, &waveform, &mut lengths);
-            // A beat at 90 bpm is 2/3 s: 5334 samples at 8000 Hz, rounded up.
-            let expected = [
-                (MarkId::TopLevel, Some(4 * 5334)),
-                (MarkId::UserDefined(1), Some(5334)),
-                (MarkId::MetronomeAmplitude, Some(usize::MAX)),
-                (MarkId::UserDefined(2), Some(5334)),
-                (MarkId::MetronomeAmplitude, Some(usize::MAX)),
-                (MarkId::UserDefined(3), Some(5334)),
-                (MarkId::MetronomeAmplitude, Some(usize::MAX)),
-                (MarkId::UserDefined(4), Some(5334)),
-                (MarkId::MetronomeAmplitude, Some(usize::MAX)),
-            ];
-            assert_eq!(lengths, expected, "for beats {}", waveform);
+            assert_eq!(
+                lengths,
+                vec![(MarkId::MetronomeAmplitude, Some(usize::MAX)); 4],
+                "for beats {}",
+                waveform
+            );
         }
     }
 
@@ -966,10 +946,6 @@ mod tests {
         );
         // All entries share the loop period.
         assert!(plays.iter().all(|p| p.3 == one_measure));
-        // Only the anchor carries the TopLevel mark.
-        assert!(!format!("{}", step_on_1.1).contains("top-level"));
-        assert!(!format!("{}", step_on_2_5.1).contains("top-level"));
-        assert!(format!("{}", anchor.1).contains("top-level"));
         // Each step's marks add its own literal; the anchor has none.
         let sequence = set.program(0).unwrap().sequence().unwrap();
         for sixteenth in [0, 6] {
@@ -1010,7 +986,7 @@ mod tests {
         assert_eq!(*id, WaveformId::Program(0));
         assert_eq!(*start, None, "a voice starts immediately");
         assert_eq!(*repeat_every, None, "a voice plays once");
-        assert!(format!("{}", waveform).contains("top-level"));
+        assert!(format!("{}", waveform).contains("terminator"));
     }
 
     #[test]

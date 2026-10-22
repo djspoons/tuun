@@ -13,7 +13,7 @@ use realfft::RealFftPlanner;
 use realfft::num_complex::{Complex, ComplexFloat};
 
 use crate::actions::{AppState, Mode};
-use crate::ids::{ANCHOR_SIXTEENTH, MarkId, WaveformId, WaveformSelector};
+use crate::ids::{ANCHOR_SIXTEENTH, WaveformId, WaveformSelector};
 use crate::launchkey;
 use crate::metric::Metric;
 use crate::player::{self, PlayedMarks};
@@ -184,7 +184,7 @@ impl<'ttf> Renderer<'ttf> {
     pub fn render(
         &mut self,
         state: &AppState,
-        status: &tracker::Status<WaveformId, MarkId>,
+        status: &tracker::Status<WaveformId>,
         scope: &scope::Scope,
         metrics: &mut Metrics,
         encoder_mode: Option<launchkey::EncoderMode>,
@@ -1243,7 +1243,7 @@ pub fn lit_ranges(
 /// The measure is the one whose Beats waveform started last by then. Before
 /// any has started, it's the first beat of an odd measure starting then.
 pub fn current_beat_info(
-    status: &tracker::Status<WaveformId, MarkId>,
+    status: &tracker::Status<WaveformId>,
     tempo: u32,
     beats_per_measure: u32,
 ) -> (u32, Instant, Duration, bool) {
@@ -1611,7 +1611,6 @@ mod tests {
         let second = Duration::from_secs(1);
         let status = |buffer_start, start_times| tracker::Status {
             buffer_start,
-            marks: Vec::new(),
             start_times,
             tracker_load: None,
             allocations: None,

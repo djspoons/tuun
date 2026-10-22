@@ -188,22 +188,16 @@ pub fn main() {
             }
         }
         // Call the tracker's callback until all of the waveforms have finished
-        // playing. Every played waveform carries a terminator mark, while a
-        // sequence's top-level mark is on its anchor alone, which can end
-        // before its last step does.
+        // playing.
         loop {
             tracker.callback(&mut out);
             let status = status_receiver.recv().unwrap();
-            let mark_count = status
-                .marks
-                .iter()
-                .filter(|mark| mark.mark_id == MarkId::Terminator)
-                .count();
-            if mark_count == 0 {
+            let remaining = status.start_times.len();
+            if remaining == 0 {
                 println!("All waveforms finished");
                 break;
             }
-            println!("Still running, {} waveforms remaining", mark_count);
+            println!("Still running, {} waveforms remaining", remaining);
         }
         process::exit(0);
     }
@@ -367,7 +361,6 @@ pub fn main() {
 
     let mut status = tracker::Status {
         buffer_start: Instant::now(),
-        marks: Vec::new(),
         start_times: Vec::new(),
         tracker_load: None,
         allocations: None,
@@ -530,7 +523,7 @@ fn run_effects(
     runner: &mut effects::EffectRunner,
     state: &mut actions::AppState,
     launchkey: Option<&mut launchkey::Launchkey>,
-    status: &tracker::Status<WaveformId, MarkId>,
+    status: &tracker::Status<WaveformId>,
     effects: Vec<actions::Effect>,
 ) {
     let mut world = effects::World { launchkey, status };
@@ -543,7 +536,7 @@ fn finish_job(
     runner: &mut effects::EffectRunner,
     state: &mut actions::AppState,
     launchkey: Option<&mut launchkey::Launchkey>,
-    status: &tracker::Status<WaveformId, MarkId>,
+    status: &tracker::Status<WaveformId>,
     reply: processing::Reply,
 ) {
     let mut world = effects::World { launchkey, status };
@@ -556,7 +549,7 @@ fn dispatch_actions(
     runner: &mut effects::EffectRunner,
     state: &mut actions::AppState,
     launchkey: Option<&mut launchkey::Launchkey>,
-    status: &tracker::Status<WaveformId, MarkId>,
+    status: &tracker::Status<WaveformId>,
     actions: Vec<actions::Action>,
 ) {
     let mut world = effects::World { launchkey, status };
@@ -587,9 +580,9 @@ fn main_loop_waker(
 /// Applies a freshly received tracker status: folds its metrics into
 /// `metrics` and replaces `status` with it.
 fn apply_status(
-    new_status: tracker::Status<WaveformId, MarkId>,
+    new_status: tracker::Status<WaveformId>,
     metrics: &mut renderer::Metrics,
-    status: &mut tracker::Status<WaveformId, MarkId>,
+    status: &mut tracker::Status<WaveformId>,
 ) {
     if let Some(ratio) = new_status.tracker_load {
         metrics.tracker_load.set_max(ratio);

@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use crate::ids::{MarkId, WaveformId};
+use crate::ids::WaveformId;
 use crate::tracker;
 
 /// The number of output samples Snapshot shows.
@@ -111,7 +111,7 @@ pub enum ScanColumn {
 ///
 /// Any active or pending start of the odd Beats waveform will do: its starts
 /// differ by whole multiples of two measures.
-pub fn measure_origin(status: &tracker::Status<WaveformId, MarkId>) -> Option<Instant> {
+pub fn measure_origin(status: &tracker::Status<WaveformId>) -> Option<Instant> {
     status
         .start_times
         .iter()
@@ -670,9 +670,8 @@ mod tests {
     fn measure_origin_is_the_odd_beats_start() {
         let now = Instant::now();
         let start = |id, offset| (id, now + Duration::from_secs(offset));
-        let status = |start_times| Status::<WaveformId, MarkId> {
+        let status = |start_times| Status::<WaveformId> {
             buffer_start: now,
-            marks: Vec::new(),
             start_times,
             tracker_load: None,
             allocations: None,

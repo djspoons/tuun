@@ -1,12 +1,12 @@
 //! The environment program text is parsed, checked, and evaluated in — compute
 //! only, no tracker I/O.
 //!
-//! `Environment` owns the prelude (built-ins plus `tempo`, `sample_rate`,
-//! `mark`, and `debug`) and the module cache backing `open` directives, and
-//! shares the module table that locates an error in its source file when it
-//! becomes a [`Diagnostic`]. The checking and evaluation entry points take
-//! `&self`; their mutable state hides behind `Cell`s and `RefCell`s, and the
-//! module table behind a `Mutex`.
+//! `Environment` owns the prelude (built-ins plus `tempo`, `sample_rate` and
+//! `debug`) and the module cache backing `open` directives, and shares the
+//! module table that locates an error in its source file when it becomes a
+//! [`Diagnostic`]. The checking and evaluation entry points take `&self`; their
+//! mutable state hides behind `Cell`s and `RefCell`s, and the module table
+//! behind a `Mutex`.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -29,40 +29,6 @@ use crate::signatures;
 use crate::trace::{self, Trace};
 use crate::trace_walk::{self, WaveformMarks};
 use crate::waveform;
-
-/// The `mark(N)` built-in: wraps a waveform in a `MarkId::UserDefined`
-/// mark.
-fn mark(
-    arguments: Vec<expr::Expr<MarkId, Source>>,
-) -> Result<expr::Expr<MarkId, Source>, expr::Error<Source>> {
-    Ok(match &arguments[..] {
-        [argument]
-            if argument
-                .as_const_float()
-                .is_some_and(|id| id >= 1.0 && id.fract() == 0.0) =>
-        {
-            let id = arguments[0]
-                .as_const_float()
-                .expect("guard checked")
-                .round() as u32;
-            expr::Expr::BuiltIn {
-                name: format!("mark({})", id),
-                function: builtins::curry(
-                    expr::BuiltInKind::Arranges,
-                    move |waveform: Box<waveform::Waveform<MarkId>>| waveform::Waveform::Marked {
-                        id: MarkId::UserDefined(id),
-                        waveform,
-                    },
-                ),
-            }
-        }
-        // TODO could be Error::Eval if this is a negative integer... but we
-        // should probably rethink exactly what the argument is for anyway
-        _ => {
-            return Err(expr::Error::internal_here("Invalid argument for mark"));
-        }
-    })
-}
 
 /// Returns the error to report for a module that failed to parse: the
 /// first of `errors`, whose span already locates it in the module.
@@ -157,7 +123,7 @@ pub struct Environment {
     /// What checker findings become
     check_mode: CheckMode,
     /// Built-ins plus the definitions [`Environment::new`] adds (`tempo`,
-    /// `sample_rate`, `mark`, `debug`); implicitly opened at the top of
+    /// `sample_rate`, `debug`); implicitly opened at the top of
     /// every other loaded module — see [`Environment::resolve`].
     prelude: Vec<expr::SourceBinding<MarkId, Source>>,
     /// Filesystem root for module resolution. A module path
@@ -201,8 +167,8 @@ pub struct Environment {
 }
 
 impl Environment {
-    /// Builds an environment whose prelude defines `tempo`, `sample_rate`,
-    /// `mark`, and `debug` alongside the built-ins.
+    /// Builds an environment whose prelude defines `tempo`, `sample_rate` and
+    /// `debug` alongside the built-ins.
     pub fn new(sample_rate: u32, tempo: u32, library_root: path::PathBuf) -> Environment {
         Environment::with_module_table(sample_rate, tempo, library_root, ModuleTable::default())
     }
@@ -227,13 +193,6 @@ impl Environment {
         prelude.push(def("tempo", SourceExpr::float(tempo as f32)));
         prelude.push(def("sample_rate", SourceExpr::float(sample_rate as f32)));
 
-        prelude.push(def(
-            "mark",
-            SourceExpr::from(expr::Expr::BuiltIn {
-                name: "mark".to_string(),
-                function: expr::BuiltInFn::new(expr::BuiltInKind::Arranges, mark),
-            }),
-        ));
         prelude.push(def(
             "debug",
             builtins::debug(|message| println!("{}", message)),

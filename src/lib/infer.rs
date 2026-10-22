@@ -4015,7 +4015,7 @@ mod tests {
     }
 
     /// Builds a prelude mirroring the native one: the built-ins plus
-    /// `tempo`, `sample_rate`, `mark`, and `debug`, and then the test
+    /// `tempo`, `sample_rate` and `debug`, and then the test
     /// stand-ins `w2`, `f1`, `f2`, and `src_w1`. The extra built-ins get stub
     /// closures — the checker only looks at their names.
     fn test_prelude<S: Clone + std::fmt::Debug + 'static>() -> Vec<SourceBinding<u32, S>> {
@@ -4028,15 +4028,6 @@ mod tests {
         prelude.push(SourceBinding::definition(
             Pattern::Identifier("sample_rate".to_string()),
             SourceExpr::float(44100.0),
-        ));
-        prelude.push(SourceBinding::definition(
-            Pattern::Identifier("mark".to_string()),
-            SourceExpr::from(Expr::BuiltIn {
-                name: "mark".to_string(),
-                function: BuiltInFn::new(BuiltInKind::Arranges, |_| {
-                    Err(Error::internal_here("stub"))
-                }),
-            }),
         ));
         prelude.push(SourceBinding::definition(
             Pattern::Identifier("debug".to_string()),

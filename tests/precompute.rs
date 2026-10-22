@@ -26,7 +26,6 @@ fn played(
 ) -> Waveform<MarkId> {
     let status = tracker::Status {
         buffer_start: Instant::now(),
-        marks: Vec::new(),
         start_times: Vec::new(),
         tracker_load: None,
         allocations: None,

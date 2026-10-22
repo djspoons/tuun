@@ -1,17 +1,32 @@
 //! Checks that trace marks never change what plays: every program in the library
-//! and the top-level `test*.tuun` files evaluates, with trace marks made and
-//! then stripped at the evaluation boundary, to the same tree as with no trace
-//! marks made at all.
+//! evaluates, with trace marks made and then stripped at the evaluation
+//! boundary, to the same tree as with no trace marks made at all, and plays a
+//! tree whose only marks are substitution marks.
+//!
+//! Both tests evaluate every program in the library, so they are slow and
+//! ignored by default. Run them with `--ignored`:
+//!
+//! ```text
+//! cargo test --test tracing -- --ignored
+//! ```
 #![cfg(feature = "native")]
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::time::Instant;
 
 use tuun::environment::Environment;
 use tuun::expr::{Binding, Expr, SourceExpr};
+use tuun::ids::MarkId;
 use tuun::optimizer;
+use tuun::player::{Player, Start};
+use tuun::processing;
 use tuun::programs::{Evaluated, EvaluationInput, ProgramSet};
 use tuun::trace;
+use tuun::tracker::{self, Status};
+use tuun::waveform::Waveform;
 
 const SAMPLE_RATE: u32 = 8000;
 
@@ -28,6 +43,79 @@ fn tuun_files(dir: &Path, found: &mut Vec<PathBuf>) {
             found.push(path);
         }
     }
+}
+
+/// Returns every `.tuun` file in the library except the untracked `private`
+/// modules, sorted.
+fn program_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    tuun_files(&root.join("lib"), &mut files);
+    let private = root.join("lib/v0/private");
+    files.retain(|path| !path.starts_with(&private));
+    files.sort();
+    files
+}
+
+/// Appends the id of every mark in `waveform` to `found`.
+fn mark_ids(waveform: &Waveform<MarkId>, found: &mut Vec<MarkId>) {
+    use Waveform::*;
+    match waveform {
+        Const(_) | Time(_) | Noise | Fixed(_, _) => {}
+        Fin {
+            length: a,
+            waveform: b,
+            ..
+        }
+        | Append(a, b, _)
+        | Phase {
+            frequency: a,
+            offset: b,
+            ..
+        }
+        | BinaryOp(_, a, b)
+        | Reset {
+            trigger: a,
+            waveform: b,
+            ..
+        } => {
+            mark_ids(a, found);
+            mark_ids(b, found);
+        }
+        UnaryOp(_, a) | Captured { waveform: a, .. } => mark_ids(a, found),
+        Alt {
+            trigger,
+            positive_waveform,
+            negative_waveform,
+        } => {
+            mark_ids(trigger, found);
+            mark_ids(positive_waveform, found);
+            mark_ids(negative_waveform, found);
+        }
+        Filter {
+            waveform,
+            feed_forward,
+            feedback,
+            ..
+        } => {
+            mark_ids(waveform, found);
+            for coefficient in feed_forward.iter().chain(feedback) {
+                mark_ids(coefficient, found);
+            }
+        }
+        Marked { id, waveform } => {
+            found.push(id.clone());
+            mark_ids(waveform, found);
+        }
+    }
+}
+
+/// Returns whether `id` marks a place that is substituted while a waveform
+/// plays.
+fn substitutes(id: &MarkId) -> bool {
+    matches!(
+        id,
+        MarkId::Terminator | MarkId::Amplitude | MarkId::MetronomeAmplitude | MarkId::Slider { .. }
+    )
 }
 
 /// Returns a printable form of `evaluated`, playing a keys instrument's note
@@ -87,18 +175,11 @@ fn stripped(environment: &Environment, input: &EvaluationInput) -> Option<String
 /// marking off, for every waveform, step, and keys program. Reading marks off
 /// a waveform program plays the same tree as stripping them.
 #[test]
+#[ignore]
 fn trace_marked_programs_play_the_same_tree_as_unmarked() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let library_root = root.join("lib/v0");
-    let mut files = Vec::new();
-    tuun_files(&root.join("lib"), &mut files);
-    for entry in fs::read_dir(&root).expect("read the crate root").flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with("test") && name.ends_with(".tuun") {
-            files.push(entry.path());
-        }
-    }
-    files.sort();
+    let files = program_files(&root);
 
     let environment = Environment::new(SAMPLE_RATE, 90, library_root);
     let mut compared = 0;
@@ -136,5 +217,68 @@ fn trace_marked_programs_play_the_same_tree_as_unmarked() {
     }
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
     // Guards against a library move silently emptying the check.
-    assert!(compared >= 30, "compared only {} programs", compared);
+    assert!(compared >= 50, "compared only {} programs", compared);
+}
+
+/// Every tree played, whether a program's waveform, a sequence's steps and
+/// anchor, a keys note or the Beats waveform, holds no marks but the places
+/// substituted while it plays.
+#[test]
+#[ignore]
+fn played_trees_carry_only_substitution_marks() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let environment = Environment::new(SAMPLE_RATE, 90, root.join("lib/v0"));
+    let (sender, receiver) = mpsc::channel();
+    let player = Player::new(90, 4, sender);
+    let status = Status {
+        buffer_start: Instant::now(),
+        start_times: Vec::new(),
+        tracker_load: None,
+        allocations: None,
+    };
+    let mut trees = vec![("Beats".to_string(), player.beats_waveform(&environment))];
+    for path in &program_files(&root) {
+        let source = fs::read_to_string(path).expect("read a program file");
+        let Ok((mut set, _)) = ProgramSet::from_source(source, path.clone()) else {
+            continue;
+        };
+        for index in 0..set.programs().len() {
+            let input = set.evaluation_input(index);
+            let outcome = processing::process(&environment, &input, false);
+            if set.record(index, input.text.into(), outcome).is_err() {
+                continue;
+            }
+            let name = format!("{} {}", path.display(), set.display_name(index));
+            if let Some(Evaluated::KeysInstrument(function)) = set.programs()[index].evaluated() {
+                let note = environment.apply_note_function(
+                    function,
+                    vec![SourceExpr::float(60.0), SourceExpr::float(0.7)],
+                );
+                if let Ok((note_on, note_off, _)) = note {
+                    trees.push((format!("{} note-on", name), note_on));
+                    trees.push((format!("{} note-off", name), note_off));
+                }
+            } else if set.programs()[index].is_playable() {
+                player.play_program(&set, index, &status, Start::Now, None, &mut HashMap::new());
+                for command in receiver.try_iter() {
+                    if let tracker::Command::Play { id, waveform, .. } = command {
+                        trees.push((format!("{} {:?}", name, id), waveform));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut unexpected = Vec::new();
+    for (name, tree) in &trees {
+        let mut found = Vec::new();
+        mark_ids(tree, &mut found);
+        found.retain(|id| !substitutes(id));
+        if !found.is_empty() {
+            unexpected.push(format!("{}: {:?}", name, found));
+        }
+    }
+    assert!(unexpected.is_empty(), "{}", unexpected.join("\n"));
+    // Guards against a library move silently emptying the check.
+    assert!(trees.len() >= 50, "checked only {} trees", trees.len());
 }

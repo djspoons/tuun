@@ -91,14 +91,7 @@ This can then be used in a different version of our low-pass filter example.
 
 ### Implementation
 
-Sliders are implemented by prepending a waveform expression with a set of bindings. For example, our first low-pass filter example would look something like this:
-```
-let
-  Q = 0.707 | mark(slider("Q"))
-in
-  square(220) | rbj.lpf(Q, 2000)
-```
-Note that this `mark` pseudo-syntax is not supported by the parser, but is added automatically before waveform expressions are evaluated. In the example above, this corresponds to the following waveform:
+Sliders are implemented by prepending a waveform expression with a set of bindings, one per slider. Each binds the slider's name to its current value, wrapped in a mark that names the slider. For example, before evaluating our first low-pass filter example, `square(220) | rbj.lpf(Q, 2000)`, Tuun binds `Q` to the following waveform:
 ```
 Marked(slider("Q"), Const(0.707))
 ```

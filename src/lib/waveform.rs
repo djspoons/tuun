@@ -160,10 +160,9 @@ pub enum Waveform<MarkId, State = ()> {
         positive_waveform: Box<Waveform<MarkId, State>>,
         negative_waveform: Box<Waveform<MarkId, State>>,
     },
-    /// Generates the same samples as the inner waveform. Tracker status updates will include a list of
-    /// marked waveforms, along with their start times and durations, and so marked waveforms can be
-    /// used to signal that a certain event will occur or has occurred. Marked waveforms can also be
-    /// used with Command::Modify to create dynamically changing waveforms.
+    /// Generates the same samples as the inner waveform. Marked waveforms can
+    /// be used with
+    /// Command::Modify to create dynamically changing waveforms.
     Marked {
         id: MarkId,
         waveform: Box<Waveform<MarkId, State>>,

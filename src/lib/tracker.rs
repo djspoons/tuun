@@ -64,25 +64,11 @@ pub enum Command<I: Id, M> {
 }
 
 #[derive(Debug, Clone)]
-pub struct Mark<I, M> {
-    pub waveform_id: I,
-    pub mark_id: M,
-    pub start: Instant,
-    /// How long the marked waveform plays for, or `None` when it is infinite or
-    /// its length isn't known without generating it.
-    pub duration: Option<Duration>,
-}
-
-#[derive(Debug, Clone)]
-pub struct Status<I, M>
+pub struct Status<I>
 where
     I: Clone + Send,
-    M: Clone + Send,
 {
     pub buffer_start: Instant,
-    // Marks for each active waveform as well as any pending waveforms; a mark may appear more
-    // than once if a given waveform is both active and pending
-    pub marks: Vec<Mark<I, M>>,
     /// The start of each waveform that is active, pending, or finished during
     /// this status's buffer; a waveform both active and pending (repeating)
     /// appears once for each.
@@ -93,23 +79,7 @@ where
     pub allocations: Option<usize>,
 }
 
-impl<I, M> Status<I, M>
-where
-    I: Id,
-    M: Clone + Send + PartialEq,
-{
-    pub fn has_pending_mark(&self, when: Instant, selector: &I::Selector, mark: &M) -> bool {
-        self.marks
-            .iter()
-            .any(|w| selector.matches(&w.waveform_id) && w.mark_id == *mark && w.start > when)
-    }
-
-    pub fn has_active_mark(&self, when: Instant, selector: &I::Selector, mark: &M) -> bool {
-        self.marks
-            .iter()
-            .any(|w| selector.matches(&w.waveform_id) && w.mark_id == *mark && w.start <= when)
-    }
-
+impl<I: Id> Status<I> {
     /// Returns whether a waveform matched by `selector` starts after `when`.
     pub fn has_pending(&self, when: Instant, selector: &I::Selector) -> bool {
         self.next_pending_start(when, selector).is_some()
@@ -130,21 +100,6 @@ where
             .iter()
             .filter(|(id, start)| selector.matches(id) && *start > when)
             .map(|(_, start)| *start)
-            .min()
-    }
-
-    /// Returns the earliest start among matching marks scheduled after
-    /// `when`, or `None` when no matching mark is pending.
-    pub fn next_pending_mark_start(
-        &self,
-        when: Instant,
-        selector: &I::Selector,
-        mark: &M,
-    ) -> Option<Instant> {
-        self.marks
-            .iter()
-            .filter(|w| selector.matches(&w.waveform_id) && w.mark_id == *mark && w.start > when)
-            .map(|w| w.start)
             .min()
     }
 }
@@ -230,7 +185,6 @@ where
     id: I,
     waveform: generator::Waveform<M>,
     start: Instant,
-    marks: Vec<Mark<I, M>>,
     // Open files used by Captured waveforms
     capture_state: HashMap<String, hound::WavWriter<BufWriter<std::fs::File>>>,
 }
@@ -241,25 +195,22 @@ where
     M: Clone,
 {
     id: I,
-    // TODO it seems like pending shouldn't have state, but because of the way
-    // we currently process marks, we do need state. Remove someday?
-    waveform: generator::Waveform<M>,
+    // Initialized when the waveform becomes active.
+    waveform: waveform::Waveform<M>,
     start: Instant,
     repeat_every: Option<Duration>,
-    marks: Vec<Mark<I, M>>,
 }
 
-pub struct Tracker<'a, I, M>
+pub struct Tracker<I, M>
 where
     I: Id,
     M: Clone + Send + fmt::Display,
 {
-    generator: generator::Generator<'a>,
     sample_rate: u32,
     captured_output_dir: path::PathBuf,
     captured_file_prefix: String,
     command_receiver: mpsc::Receiver<Command<I, M>>,
-    status_sender: mpsc::Sender<Status<I, M>>,
+    status_sender: mpsc::Sender<Status<I>>,
     sample_producer: SampleProducer,
     output_latency: Duration,
 
@@ -276,7 +227,7 @@ where
     next_capture_serial: u64,
 }
 
-impl<'a, I, M> Tracker<'a, I, M>
+impl<I, M> Tracker<I, M>
 where
     I: Id,
     M: Clone + Send + Debug + PartialEq + fmt::Display,
@@ -293,12 +244,11 @@ where
         captured_output_dir: path::PathBuf,
         captured_file_prefix: String,
         command_receiver: mpsc::Receiver<Command<I, M>>,
-        status_sender: mpsc::Sender<Status<I, M>>,
+        status_sender: mpsc::Sender<Status<I>>,
         sample_producer: SampleProducer,
         output_latency: Duration,
-    ) -> Tracker<'a, I, M> {
+    ) -> Tracker<I, M> {
         Tracker {
-            generator: generator::Generator::new(sample_rate),
             sample_rate,
             captured_output_dir,
             captured_file_prefix,
@@ -441,89 +391,7 @@ fn signed_millis(a: Instant, b: Instant) -> f64 {
     }
 }
 
-/// Returns how long `waveform` plays for when it is finite and its length can
-/// be determined without generating it.
-fn known_duration<M>(
-    generator: &generator::Generator,
-    sample_rate: u32,
-    waveform: &generator::Waveform<M>,
-) -> Option<Duration> {
-    match generator.known_length(waveform)? {
-        usize::MAX => None,
-        len => Some(duration_from_samples(len as u64, sample_rate)),
-    }
-}
-
-/// Appends a mark to `out` for each Marked waveform within `waveform`, which
-/// starts at `start`.
-///
-/// Marks that follow part of `waveform` whose duration isn't known are omitted
-/// since their starts aren't known either.
-fn process_marked<I, M>(
-    generator: &generator::Generator,
-    sample_rate: u32,
-    waveform_id: &I,
-    start: Instant,
-    waveform: &generator::Waveform<M>,
-    out: &mut Vec<Mark<I, M>>,
-) where
-    M: Clone + Debug + fmt::Display,
-    I: Clone,
-{
-    use waveform::Waveform::*;
-    match waveform {
-        Const(_) | Time(_) | Noise | Fixed(_, _) => {}
-        // TODO Fin seems not quite right here, since its length might truncate any marks inside it
-        Fin { waveform, .. }
-        | Filter { waveform, .. }
-        | Reset {
-            trigger: waveform, ..
-        }
-        | Alt {
-            trigger: waveform, ..
-        }
-        | Captured { waveform, .. } => {
-            process_marked(
-                generator,
-                sample_rate,
-                waveform_id,
-                start,
-                waveform.as_ref(),
-                out,
-            );
-        }
-        Append(a, b, _) => {
-            process_marked(generator, sample_rate, waveform_id, start, a, out);
-            if let Some(a_duration) = known_duration(generator, sample_rate, a) {
-                let start = start + a_duration;
-                process_marked(generator, sample_rate, waveform_id, start, b.as_ref(), out);
-            }
-        }
-        Phase {
-            frequency: a,
-            offset: b,
-            ..
-        }
-        | BinaryOp(_, a, b) => {
-            process_marked(generator, sample_rate, waveform_id, start, a, out);
-            process_marked(generator, sample_rate, waveform_id, start, b, out);
-        }
-        UnaryOp(_, a) => {
-            process_marked(generator, sample_rate, waveform_id, start, a, out);
-        }
-        Marked { waveform, id } => {
-            out.push(Mark {
-                waveform_id: waveform_id.clone(),
-                mark_id: id.clone(),
-                start,
-                duration: known_duration(generator, sample_rate, waveform),
-            });
-            process_marked(generator, sample_rate, waveform_id, start, waveform, out);
-        }
-    }
-}
-
-impl<'a, I, M> audio::AudioCallback for Tracker<'a, I, M>
+impl<I, M> audio::AudioCallback for Tracker<I, M>
 where
     I: Id,
     M: Clone + Debug + Send + PartialEq + fmt::Display,
@@ -539,7 +407,6 @@ where
 
         let mut status_to_send = Status {
             buffer_start,
-            marks: Vec::new(),
             start_times: Vec::new(),
             tracker_load: None,
             allocations: None,
@@ -554,16 +421,14 @@ where
         );
         status_to_send.allocations = Some(allocations);
 
-        // Copy the marks and starts from finished, active and pending waveforms
-        // into the status.
+        // Copy the starts of finished, active and pending waveforms into the
+        // status.
         for active in finished.iter().chain(&self.active_waveforms) {
-            status_to_send.marks.extend_from_slice(&active.marks);
             status_to_send
                 .start_times
                 .push((active.id.clone(), active.start));
         }
         for pending in &self.pending_waveforms {
-            status_to_send.marks.extend_from_slice(&pending.marks);
             status_to_send
                 .start_times
                 .push((pending.id.clone(), pending.start));
@@ -574,7 +439,7 @@ where
     }
 }
 
-impl<'a, I, M> Tracker<'a, I, M>
+impl<I, M> Tracker<I, M>
 where
     I: Id,
     M: Clone + Debug + Send + PartialEq + fmt::Display,
@@ -582,7 +447,7 @@ where
     /// Returns the time at which the next buffer starts playing, as counted by
     /// the samples generated so far. Modifies waveforms as necessary.
     ///
-    /// Counting samples keeps each waveform's marks aligned with the samples
+    /// Counting samples keeps each waveform's start aligned with the samples
     /// it generates. When the count strays from `expected` (the wall-clock
     /// estimate) by more than `MAX_CLOCK_ERROR`, resynchronizes to `expected`
     /// and shifts every active and pending waveform by the same amount.
@@ -607,11 +472,9 @@ where
         };
         for active in &mut self.active_waveforms {
             shift(&mut active.start);
-            active.marks.iter_mut().for_each(|m| shift(&mut m.start));
         }
         for pending in &mut self.pending_waveforms {
             shift(&mut pending.start);
-            pending.marks.iter_mut().for_each(|m| shift(&mut m.start));
         }
         self.clock_origin = Some(expected);
         self.samples_elapsed = 0;
@@ -638,23 +501,11 @@ where
                         id, start, waveform
                     );
                 }
-                let start = start.unwrap_or(buffer_start);
-                let mut marks = Vec::new();
-                let waveform = generator::initialize_state(waveform);
-                process_marked(
-                    &self.generator,
-                    self.sample_rate,
-                    &id,
-                    start,
-                    &waveform,
-                    &mut marks,
-                );
                 self.pending_waveforms.push(PendingWaveform {
                     id,
                     waveform,
-                    start,
+                    start: start.unwrap_or(buffer_start),
                     repeat_every,
-                    marks,
                 });
                 self.pending_waveforms.sort_by_key(|w| w.start);
             }
@@ -667,40 +518,17 @@ where
                     "Received command to replace mark {:?} in waveforms {:?} with new waveform: {}",
                     mark_id, selector, waveform
                 );
-                let waveform = generator::initialize_state(waveform);
+                let initialized = generator::initialize_state(waveform.clone());
                 for active in &mut self.active_waveforms {
                     if selector.matches(&active.id) {
-                        waveform::substitute(&mut active.waveform, &mark_id, &waveform);
+                        waveform::substitute(&mut active.waveform, &mark_id, &initialized);
                         println!("  new active waveform is: {}", active.waveform);
-                        // Recompute the marks
-                        active.marks.clear();
-                        process_marked(
-                            &self.generator,
-                            self.sample_rate,
-                            &active.id,
-                            active.start,
-                            // We need to re-initialize here because this waveform has moved forward
-                            // from the beginning, so if we use `active.start` above, we need to actually
-                            // restart here too.
-                            &generator::initialize_state(active.waveform.clone()),
-                            &mut active.marks,
-                        );
                     }
                 }
                 for pending in &mut self.pending_waveforms {
                     if selector.matches(&pending.id) {
                         waveform::substitute(&mut pending.waveform, &mark_id, &waveform);
                         println!("  new pending waveform is: {}", pending.waveform);
-                        // Recompute the marks
-                        pending.marks.clear();
-                        process_marked(
-                            &self.generator,
-                            self.sample_rate,
-                            &pending.id,
-                            pending.start,
-                            &pending.waveform,
-                            &mut pending.marks,
-                        );
                     }
                 }
             }
@@ -796,7 +624,6 @@ where
                         id: pending.id.clone(),
                         start: pending.start,
                         waveform,
-                        marks: pending.marks,
                         capture_state,
                     });
 
@@ -814,17 +641,6 @@ where
                             pending.id, pending.start,
                         );
                         */
-                        pending.marks = Vec::new();
-                        let waveform = generator::initialize_state(pending.waveform);
-                        process_marked(
-                            &self.generator,
-                            self.sample_rate,
-                            &pending.id,
-                            pending.start,
-                            &waveform,
-                            &mut pending.marks,
-                        );
-                        pending.waveform = waveform;
                         self.pending_waveforms.push(pending);
                         self.pending_waveforms.sort_by_key(|w| w.start);
                     }
@@ -911,9 +727,9 @@ mod tests {
     /// A tracker under test with its command sender, status receiver and sample
     /// consumer.
     type TestTracker = (
-        Tracker<'static, WaveformId, MarkId>,
+        Tracker<WaveformId, MarkId>,
         mpsc::Sender<Command<WaveformId, MarkId>>,
-        mpsc::Receiver<Status<WaveformId, MarkId>>,
+        mpsc::Receiver<Status<WaveformId>>,
         SampleConsumer,
     );
 
@@ -968,61 +784,10 @@ mod tests {
     }
 
     #[test]
-    fn process_marked_gives_marks_known_durations() {
-        use waveform::Waveform::{Append, Const, Fin, Fixed, Marked};
-        let marked = |id, waveform| Marked {
-            id,
-            waveform: Box::new(waveform),
-        };
-        let append = |a, b| Append(Box::new(a), Box::new(b), ());
-        // A part whose length isn't known without generating it.
-        let unknown = Fin {
-            length: Box::new(Fixed(vec![-1.0, 1.0], ())),
-            waveform: Box::new(Const(0.0)),
-            state: (),
-        };
-        // At 4 samples per second, mark 1 lasts one second, mark 2's duration is unknown, mark 3
-        // follows an unknown part, and mark 4 is infinite.
-        let waveform = marked(
-            4,
-            append(
-                append(
-                    marked(1, Fixed(vec![0.0; 4], ())),
-                    append(marked(2, unknown), marked(3, Fixed(vec![0.0; 4], ()))),
-                ),
-                Const(0.0),
-            ),
-        );
-        let start = Instant::now();
-        let mut marks: Vec<Mark<u32, u32>> = Vec::new();
-        process_marked(
-            &generator::Generator::new(4),
-            4,
-            &0,
-            start,
-            &generator::initialize_state(waveform),
-            &mut marks,
-        );
-        let marks: Vec<_> = marks
-            .iter()
-            .map(|m| (m.mark_id, m.start - start, m.duration))
-            .collect();
-        let second = Duration::from_secs(1);
-        assert_eq!(
-            marks,
-            vec![
-                (4, Duration::ZERO, None),
-                (1, Duration::ZERO, Some(second)),
-                (2, second, None),
-            ]
-        );
-    }
-
-    #[test]
     fn callback_pushes_its_samples_and_then_a_header() {
         let (mut tracker, sender, status_receiver, mut consumer) = test_tracker();
         sender
-            .send(play(WaveformId::Program(0), marked(MarkId::TopLevel, 0.5)))
+            .send(play(WaveformId::Program(0), waveform::Waveform::Const(0.5)))
             .unwrap();
         let mut out = vec![0.0f32; 64];
         tracker.callback(&mut out);
@@ -1153,7 +918,7 @@ mod tests {
             sender
                 .send(Command::Play {
                     id,
-                    waveform: marked(MarkId::TopLevel, 1.0),
+                    waveform: waveform::Waveform::Const(1.0),
                     start,
                     repeat_every: None,
                 })
@@ -1186,7 +951,7 @@ mod tests {
         sender
             .send(Command::Play {
                 id: current_cycle_step.clone(),
-                waveform: marked(MarkId::TopLevel, 1.0),
+                waveform: waveform::Waveform::Const(1.0),
                 start: None,
                 repeat_every: Some(Duration::from_secs(1)),
             })
@@ -1198,7 +963,7 @@ mod tests {
                     program: 3,
                     sixteenth: 0,
                 },
-                waveform: marked(MarkId::TopLevel, 1.0),
+                waveform: waveform::Waveform::Const(1.0),
                 start: Some(now + Duration::from_secs(10)),
                 repeat_every: Some(Duration::from_secs(1)),
             })
@@ -1269,9 +1034,8 @@ mod tests {
     fn status_selector_queries_distinguish_active_and_pending() {
         let now = Instant::now();
         let later = now + Duration::from_secs(1);
-        let status = Status::<WaveformId, MarkId> {
+        let status = Status::<WaveformId> {
             buffer_start: now,
-            marks: Vec::new(),
             start_times: vec![
                 (WaveformId::Program(3), later + Duration::from_secs(1)),
                 (
@@ -1327,7 +1091,7 @@ mod tests {
 
         let captured = |value| waveform::Waveform::Captured {
             file_stem: "shared".to_string(),
-            waveform: Box::new(marked(MarkId::TopLevel, value)),
+            waveform: Box::new(waveform::Waveform::Const(value)),
         };
         command_sender
             .send(play(WaveformId::Program(0), captured(1.0)))
@@ -1363,17 +1127,14 @@ mod tests {
         use waveform::Waveform::*;
         let now = Instant::now();
         for (even, offset) in [(false, Duration::ZERO), (true, length)] {
-            let beat = Marked {
-                id: MarkId::TopLevel,
-                waveform: Box::new(Fin {
-                    length: Box::new(BinaryOp(
-                        waveform::BinaryOperator::Subtract,
-                        Box::new(Time(())),
-                        Box::new(Const(length.as_secs_f32())),
-                    )),
-                    waveform: Box::new(Const(0.0)),
-                    state: (),
-                }),
+            let beat = Fin {
+                length: Box::new(BinaryOp(
+                    waveform::BinaryOperator::Subtract,
+                    Box::new(Time(())),
+                    Box::new(Const(length.as_secs_f32())),
+                )),
+                waveform: Box::new(Const(0.0)),
+                state: (),
             };
             sender
                 .send(Command::Play {
@@ -1386,35 +1147,34 @@ mod tests {
         }
     }
 
-    /// Returns whether a mark of the second Beats waveform covers the
-    /// status's `buffer_start`.
+    /// Returns whether the second of the waveforms `play_alternating_beats`
+    /// played, each lasting `length`, covers the status's `buffer_start`.
     ///
-    /// Panics when no mark covers `buffer_start`.
-    fn even_beat_covers_buffer_start(status: &Status<WaveformId, MarkId>) -> bool {
+    /// Panics when neither covers `buffer_start`.
+    fn even_beat_covers_buffer_start(status: &Status<WaveformId>, length: Duration) -> bool {
         let covering: Vec<_> = status
-            .marks
+            .start_times
             .iter()
-            .filter(|m| {
-                m.start <= status.buffer_start
-                    && m.duration
-                        .is_some_and(|d| status.buffer_start < m.start + d)
+            .filter(|(_, start)| {
+                *start <= status.buffer_start && status.buffer_start < *start + length
             })
             .collect();
         assert!(
             !covering.is_empty(),
-            "no mark covers {:?}: {:?}",
+            "no waveform covers {:?}: {:?}",
             status.buffer_start,
-            status.marks
+            status.start_times
         );
         covering
             .iter()
-            .any(|m| m.waveform_id == WaveformId::Beats(true))
+            .any(|(id, _)| *id == WaveformId::Beats(true))
     }
 
     #[test]
     fn alternating_repeats_cover_buffer_start_when_the_audio_clock_runs_fast() {
         let (mut tracker, sender, status_receiver, _samples) = test_tracker();
-        play_alternating_beats(&sender, Duration::from_millis(100));
+        let length = Duration::from_millis(100);
+        play_alternating_beats(&sender, length);
 
         // Calling back without waiting generates samples far faster than
         // real time, as an extreme case of an audio clock running fast.
@@ -1422,7 +1182,8 @@ mod tests {
         let mut even_covered = false;
         for _ in 0..300 {
             tracker.callback(&mut out);
-            even_covered |= even_beat_covers_buffer_start(&status_receiver.try_recv().unwrap());
+            even_covered |=
+                even_beat_covers_buffer_start(&status_receiver.try_recv().unwrap(), length);
         }
         assert!(even_covered, "the second waveform should have played");
     }
@@ -1430,7 +1191,8 @@ mod tests {
     #[test]
     fn alternating_repeats_cover_buffer_start_when_the_audio_clock_runs_slow() {
         let (mut tracker, sender, status_receiver, _samples) = test_tracker();
-        play_alternating_beats(&sender, Duration::from_millis(50));
+        let length = Duration::from_millis(50);
+        play_alternating_beats(&sender, length);
 
         // Waiting longer than each 8ms buffer between callbacks generates
         // samples slower than real time, as an audio clock running slow.
@@ -1442,7 +1204,7 @@ mod tests {
             tracker.callback(&mut out);
             std::thread::sleep(Duration::from_millis(11));
             let status = status_receiver.try_recv().unwrap();
-            even_covered |= even_beat_covers_buffer_start(&status);
+            even_covered |= even_beat_covers_buffer_start(&status, length);
             buffer_starts.push(status.buffer_start);
         }
         assert!(even_covered, "the second waveform should have played");
