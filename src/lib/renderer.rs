@@ -1,10 +1,11 @@
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use sdl2::Sdl;
 use sdl2::pixels::Color;
 use sdl2::rect::Rect;
-use sdl2::render::{TextureCreator, TextureQuery};
+use sdl2::render::{BlendMode, TextureCreator, TextureQuery};
 use sdl2::ttf::{Font, Sdl2TtfContext};
 use sdl2::video::WindowContext;
 
@@ -19,6 +20,7 @@ use crate::player::{self, PlayedMarks};
 use crate::programs::{PROGRAMS_PER_BANK, Program, ProgramSet, SliderDisplay};
 use crate::recorder::{Finish, Phase};
 use crate::scope;
+use crate::trace_walk::Segment;
 use crate::tracker;
 
 fn make_texture<'t>(
@@ -293,6 +295,19 @@ impl<'ttf> Renderer<'ttf> {
             };
             if let Some((circle_color, circle_alpha)) = circle {
                 self.draw_circle(&texture_creator, circle_color, circle_alpha, y);
+            }
+
+            // Mark highlights go behind the text.
+            if highlights_row(mode, active_program_index, index) && !program.is_empty() {
+                let lit = lit_ranges(
+                    index,
+                    program.text(),
+                    &status.start_times,
+                    &state.waveform_marks,
+                    self.sample_rate,
+                    now,
+                );
+                self.draw_highlights(program.text(), &lit, program_color, y);
             }
 
             match *mode {
@@ -940,6 +955,32 @@ impl<'ttf> Renderer<'ttf> {
         self.font.size_of(s).unwrap().0 as i32
     }
 
+    /// Draws a block in `color` at half opacity behind each of `ranges`, byte
+    /// ranges of `text` as drawn on the row at `y`.
+    fn draw_highlights(&mut self, text: &str, ranges: &[Range<usize>], color: Color, y: i32) {
+        const INSET: i32 = 4;
+        let rects: Vec<Rect> = ranges
+            .iter()
+            .filter_map(|range| {
+                // Measure the whole prefix, as the text's runs do, so blocks
+                // keep the font's kerning.
+                let x = self.text_width(text.get(..range.start)?);
+                let end = self.text_width(text.get(..range.end)?);
+                Some(Rect::new(
+                    self.nav_width as i32 + x,
+                    y + INSET,
+                    (end - x).max(0) as u32,
+                    (self.line_height as i32 - 2 * INSET) as u32,
+                ))
+            })
+            .collect();
+        self.canvas.set_blend_mode(BlendMode::Blend);
+        self.canvas
+            .set_draw_color(Color::RGBA(color.r, color.g, color.b, 128));
+        self.canvas.fill_rects(&rects).unwrap();
+        self.canvas.set_blend_mode(BlendMode::None);
+    }
+
     fn draw_cursor(
         &mut self,
         color: Color,
@@ -1153,6 +1194,64 @@ pub fn strip_marks(
     strip
 }
 
+/// Returns whether the row of the program at `index` draws mark highlights in
+/// `mode`, whose active program is at `active_program_index`: every row does
+/// but the one being edited.
+pub fn highlights_row(mode: &Mode, active_program_index: usize, index: usize) -> bool {
+    !(matches!(mode, Mode::Edit { .. }) && index == active_program_index)
+}
+
+/// Returns the byte ranges of `text`, the text of the program at `program`,
+/// that are lit at `now`: in order, with overlapping and touching ranges
+/// merged.
+///
+/// A mark of a waveform that started at `start_times` lights its range while
+/// one of its segments, measured in samples at `sample_rate`, sounds. Only the
+/// marks in `waveform_marks` played from the program and lit against `text`
+/// count.
+pub fn lit_ranges(
+    program: usize,
+    text: &str,
+    start_times: &[(WaveformId, Instant)],
+    waveform_marks: &HashMap<WaveformId, PlayedMarks>,
+    sample_rate: u32,
+    now: Instant,
+) -> Vec<Range<usize>> {
+    let samples = |n: usize| Duration::from_secs_f64(n as f64 / sample_rate as f64);
+    let mut lit = Vec::new();
+    for (id, start) in start_times {
+        let Some(played) = waveform_marks.get(id) else {
+            continue;
+        };
+        // Marks lit against other text would point at the wrong code.
+        if played.program != program || *played.text != *text {
+            continue;
+        }
+        let segments = &played.marks.segments;
+        let sounding = |segment: &Segment| {
+            let from = *start + samples(segment.offset);
+            from <= now
+                && segment
+                    .duration
+                    .is_none_or(|duration| now < from + samples(duration))
+        };
+        for mark in played.marks.marks.iter().chain(&played.extra) {
+            if segments[mark.segments.clone()].iter().any(sounding) {
+                lit.push(mark.text_range.clone());
+            }
+        }
+    }
+    lit.sort_by_key(|range| range.start);
+    let mut merged: Vec<Range<usize>> = Vec::new();
+    for range in lit {
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => merged.push(range),
+        }
+    }
+    merged
+}
+
 /// Returns the beat playing at `status.buffer_start`: its number within the
 /// measure, its start, its duration, and whether its measure is even.
 pub fn current_beat_info(
@@ -1194,12 +1293,11 @@ pub fn current_beat_info(
 
 #[cfg(test)]
 mod tests {
-    use std::ops::Range;
     use std::sync::Arc;
 
     use crate::programs::Evaluated;
     use crate::sequencer::Sequence;
-    use crate::trace_walk::{Segment, WaveformMarks};
+    use crate::trace_walk::{self, WaveformMarks};
     use crate::waveform::Waveform;
 
     use super::*;
@@ -1331,5 +1429,196 @@ mod tests {
         ];
         let strip = strip_marks(&start_times, &waveform_marks, &set, TEMPO, SAMPLE_RATE);
         assert_eq!(strip, vec![]);
+    }
+
+    const TEXT: &str = "_ = $440 * Qw;";
+
+    fn mark(text_range: Range<usize>, segments: Range<usize>) -> trace_walk::Mark {
+        trace_walk::Mark {
+            text_range,
+            segments,
+        }
+    }
+
+    /// Returns the played marks of a waveform of program 0, lit against
+    /// `TEXT`, with `segments`, `marks` and `extra` marks.
+    fn played_with(
+        segments: Vec<Segment>,
+        marks: Vec<trace_walk::Mark>,
+        extra: Vec<trace_walk::Mark>,
+    ) -> PlayedMarks {
+        PlayedMarks {
+            program: 0,
+            text: Arc::from(TEXT),
+            marks: Arc::new(WaveformMarks { segments, marks }),
+            extra,
+        }
+    }
+
+    /// Returns the ranges of `TEXT` lit on program 0's row at `at` after
+    /// `start`, with program 0's waveform `played` started at `start`.
+    fn lit_at(played: PlayedMarks, start: Instant, at: Duration) -> Vec<Range<usize>> {
+        let id = WaveformId::Program(0);
+        let waveform_marks = HashMap::from([(id.clone(), played)]);
+        lit_ranges(
+            0,
+            TEXT,
+            &[(id, start)],
+            &waveform_marks,
+            SAMPLE_RATE,
+            start + at,
+        )
+    }
+
+    #[test]
+    fn lit_ranges_light_a_mark_only_while_its_segment_sounds() {
+        let start = Instant::now();
+        let played = || played_with(vec![segment(80, Some(80))], vec![mark(4..8, 0..1)], vec![]);
+        assert_eq!(lit_at(played(), start, samples(79)), vec![]);
+        assert_eq!(lit_at(played(), start, samples(80)), vec![4..8]);
+        assert_eq!(lit_at(played(), start, samples(159)), vec![4..8]);
+        assert_eq!(lit_at(played(), start, samples(160)), vec![]);
+    }
+
+    #[test]
+    fn lit_ranges_wait_for_a_pending_waveform_to_start() {
+        let now = Instant::now();
+        let id = WaveformId::Program(0);
+        let played = played_with(vec![segment(0, Some(80))], vec![mark(4..8, 0..1)], vec![]);
+        let waveform_marks = HashMap::from([(id.clone(), played)]);
+        let start = now + samples(40);
+        let lit = |at: Instant| {
+            lit_ranges(
+                0,
+                TEXT,
+                &[(id.clone(), start)],
+                &waveform_marks,
+                SAMPLE_RATE,
+                at,
+            )
+        };
+        assert_eq!(lit(now), vec![]);
+        assert_eq!(lit(start), vec![4..8]);
+    }
+
+    #[test]
+    fn lit_ranges_light_a_mark_during_the_segments_in_its_scope_only() {
+        let start = Instant::now();
+        let played = || {
+            played_with(
+                vec![segment(0, Some(80)), segment(80, Some(80))],
+                // `$440` in the first segment, `*` in both.
+                vec![mark(4..8, 0..1), mark(9..10, 0..2)],
+                vec![],
+            )
+        };
+        assert_eq!(lit_at(played(), start, samples(40)), vec![4..8, 9..10]);
+        assert_eq!(lit_at(played(), start, samples(120)), vec![9..10]);
+    }
+
+    #[test]
+    fn lit_ranges_go_dark_in_a_gap_between_segments() {
+        let start = Instant::now();
+        let played = || {
+            played_with(
+                vec![segment(0, Some(80)), segment(160, Some(80))],
+                vec![mark(4..8, 0..2)],
+                vec![],
+            )
+        };
+        assert_eq!(lit_at(played(), start, samples(40)), vec![4..8]);
+        assert_eq!(lit_at(played(), start, samples(120)), vec![]);
+        assert_eq!(lit_at(played(), start, samples(200)), vec![4..8]);
+    }
+
+    #[test]
+    fn lit_ranges_light_a_segment_without_a_duration_until_the_waveform_ends() {
+        let start = Instant::now();
+        let played = played_with(vec![segment(0, None)], vec![mark(4..8, 0..1)], vec![]);
+        assert_eq!(lit_at(played, start, Duration::from_secs(3600)), vec![4..8]);
+    }
+
+    #[test]
+    fn lit_ranges_merge_overlapping_and_touching_ranges() {
+        let start = Instant::now();
+        let played = played_with(
+            vec![segment(0, Some(80))],
+            vec![mark(9..13, 0..1), mark(4..8, 0..1), mark(4..10, 0..1)],
+            vec![],
+        );
+        assert_eq!(lit_at(played, start, samples(0)), vec![4..13]);
+    }
+
+    #[test]
+    fn lit_ranges_skip_marks_lit_against_other_text() {
+        let start = Instant::now();
+        let mut played = played_with(vec![segment(0, Some(80))], vec![mark(4..8, 0..1)], vec![]);
+        played.text = Arc::from("_ = $330 * Qw;");
+        assert_eq!(lit_at(played, start, samples(0)), vec![]);
+    }
+
+    #[test]
+    fn lit_ranges_skip_other_programs_waveforms() {
+        let start = Instant::now();
+        let mut played = played_with(vec![segment(0, Some(80))], vec![mark(4..8, 0..1)], vec![]);
+        played.program = 1;
+        assert_eq!(lit_at(played, start, samples(0)), vec![]);
+    }
+
+    #[test]
+    fn lit_ranges_light_a_steps_literal_only_during_its_own_hit() {
+        let start = Instant::now();
+        // `[1, 5] | on_beats(c)`: the steps share the step waveform's marks,
+        // which light `c`, and each adds its literal.
+        let text = "[1, 5] | on_beats(c)";
+        let shared = Arc::new(WaveformMarks {
+            segments: vec![segment(0, Some(80))],
+            marks: vec![mark(18..19, 0..1)],
+        });
+        let step = |sixteenth: u8, literal: Range<usize>| {
+            (
+                WaveformId::Step {
+                    program: 0,
+                    sixteenth,
+                },
+                PlayedMarks {
+                    program: 0,
+                    text: Arc::from(text),
+                    marks: shared.clone(),
+                    extra: vec![mark(literal, 0..1)],
+                },
+            )
+        };
+        let (first, first_marks) = step(0, 1..2);
+        let (second, second_marks) = step(16, 4..5);
+        let waveform_marks =
+            HashMap::from([(first.clone(), first_marks), (second.clone(), second_marks)]);
+        let start_times = [(first, start), (second, start + samples(160))];
+        let lit = |at: Duration| {
+            lit_ranges(
+                0,
+                text,
+                &start_times,
+                &waveform_marks,
+                SAMPLE_RATE,
+                start + at,
+            )
+        };
+        assert_eq!(lit(samples(40)), vec![1..2, 18..19]);
+        assert_eq!(lit(samples(120)), vec![]);
+        assert_eq!(lit(samples(200)), vec![4..5, 18..19]);
+    }
+
+    #[test]
+    fn highlights_row_skips_only_the_row_being_edited() {
+        let edit = Mode::Edit {
+            cursor_position: 0,
+            errors: vec![],
+            completion: None,
+        };
+        assert!(!highlights_row(&edit, 2, 2));
+        assert!(highlights_row(&edit, 2, 3));
+        assert!(highlights_row(&Mode::Select, 2, 2));
+        assert!(highlights_row(&Mode::Keys, 2, 2));
     }
 }

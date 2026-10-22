@@ -3,6 +3,7 @@
 //! waveforms built-ins build.
 
 use std::cell::Cell;
+use std::fmt::{self, Debug, Display};
 use std::sync::Arc;
 
 use crate::expr::{Expr, SourceExpr, Span};
@@ -97,6 +98,78 @@ pub enum Step<S> {
         /// The arguments' traces.
         parents: Vec<Arc<Trace<S>>>,
     },
+}
+
+/// Prints a trace as `⟨span, via, outer⟩`, with `·` for a missing span,
+/// outer or head, `ε` for an empty via, and a trailing `*` when the trace
+/// reaches program text.
+impl<S: Debug> Display for Trace<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "⟨")?;
+        match &self.span {
+            Some(span) => write_span(f, span)?,
+            None => write!(f, "·")?,
+        }
+        match &self.via {
+            Some(via) => write!(f, ", {via}")?,
+            None => write!(f, ", ε")?,
+        }
+        match &self.outer {
+            Some(outer) => write!(f, ", {outer}⟩")?,
+            None => write!(f, ", ·⟩")?,
+        }
+        if self.reaches_program {
+            write!(f, "*")?;
+        }
+        Ok(())
+    }
+}
+
+/// Prints the whole chain ending at this step, oldest step first, separated
+/// by ` · `.
+impl<S: Debug> Display for Via<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(prev) = &self.prev {
+            write!(f, "{prev} · ")?;
+        }
+        write!(f, "{}", self.step)
+    }
+}
+
+/// Prints a step as `use(span)`, `call(span)` or `built(head, [parents])`.
+impl<S: Debug> Display for Step<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Step::UseSite(span) => {
+                write!(f, "use(")?;
+                write_span(f, span)?;
+                write!(f, ")")
+            }
+            Step::Call(span) => {
+                write!(f, "call(")?;
+                write_span(f, span)?;
+                write!(f, ")")
+            }
+            Step::Built { head, parents } => {
+                match head {
+                    Some(head) => write!(f, "built({head}, [")?,
+                    None => write!(f, "built(·, [")?,
+                }
+                for (i, parent) in parents.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{parent}")?;
+                }
+                write!(f, "])")
+            }
+        }
+    }
+}
+
+/// Writes `span` as `source@start..end`.
+fn write_span<S: Debug>(f: &mut fmt::Formatter<'_>, span: &Span<S>) -> fmt::Result {
+    write!(f, "{:?}@{:?}", span.source, span.range)
 }
 
 /// Mark id types that may carry a trace.

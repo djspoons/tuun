@@ -12,7 +12,7 @@ use sdl2::audio::AudioCallback;
 
 use tuun::environment::Environment;
 use tuun::ids::{MarkId, WaveformId};
-use tuun::player::{Player, Start};
+use tuun::player::{PlayedMarks, Player, Start};
 use tuun::processing;
 use tuun::programs::ProgramSet;
 use tuun::renderer::{self, StripMark};
@@ -25,10 +25,16 @@ const TEMPO: u32 = 120;
 /// Evaluates every program in `source`, plays each playable one at `start`,
 /// and lets the tracker call back once.
 ///
-/// Returns the strip's marks as the renderer draws them, and the marks the
-/// tracker reads off `mark(1)` in program and step waveforms, each placed on the
-/// clock.
-fn play_all(source: &str, start: Instant) -> (Vec<StripMark>, Vec<StripMark>) {
+/// Returns the evaluated programs, the tracker's status, and the played marks
+/// of each waveform played.
+fn play(
+    source: &str,
+    start: Instant,
+) -> (
+    ProgramSet,
+    Status<WaveformId, MarkId>,
+    HashMap<WaveformId, PlayedMarks>,
+) {
     let library_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lib/v0");
     let environment = Environment::new(SAMPLE_RATE, TEMPO, library_root);
     let (mut set, _) =
@@ -77,7 +83,17 @@ fn play_all(source: &str, start: Instant) -> (Vec<StripMark>, Vec<StripMark>) {
     let status = status_receiver
         .try_recv()
         .expect("the tracker sends a status");
+    (set, status, waveform_marks)
+}
 
+/// Evaluates every program in `source`, plays each playable one at `start`,
+/// and lets the tracker call back once.
+///
+/// Returns the strip's marks as the renderer draws them, and the marks the
+/// tracker reads off `mark(1)` in program and step waveforms, each placed on the
+/// clock.
+fn play_all(source: &str, start: Instant) -> (Vec<StripMark>, Vec<StripMark>) {
+    let (set, status, waveform_marks) = play(source, start);
     let strip = renderer::strip_marks(
         &status.start_times,
         &waveform_marks,
@@ -135,6 +151,36 @@ fn t1_draws_two_marks_without_mark_1() {
         from(start, &strip),
         vec![(0, Duration::ZERO, q), (0, q * 3 / 2, q)]
     );
+}
+
+/// T1: each note lights `$x`, `*`, `Qw` and its own frequency while it
+/// sounds, and nothing lights between the notes.
+#[test]
+fn t1_lights_each_note_while_it_sounds() {
+    let start = Instant::now() + Duration::from_secs(1);
+    let source = "open std;\n\
+                  #{level_db=0}\n\
+                  _ = <map(fn (x) => $x * Qw | unseq() | seq(time - Q*1.5), [220, 330])>;\n";
+    let (set, status, waveform_marks) = play(source, start);
+    let text = set.programs()[0].text();
+    let lit = |at: Duration| -> Vec<&str> {
+        renderer::lit_ranges(
+            0,
+            text,
+            &status.start_times,
+            &waveform_marks,
+            SAMPLE_RATE,
+            start + at,
+        )
+        .into_iter()
+        .map(|range| &text[range])
+        .collect()
+    };
+    let q = Duration::from_millis(500);
+    assert_eq!(lit(q / 2), vec!["$x", "*", "Qw", "220"]);
+    assert_eq!(lit(q * 5 / 4), Vec::<&str>::new());
+    assert_eq!(lit(q * 2), vec!["$x", "*", "Qw", "330"]);
+    assert_eq!(lit(q * 3), Vec::<&str>::new());
 }
 
 /// Every mark the strip drew from `mark(1)` in `second.tuun` and the
