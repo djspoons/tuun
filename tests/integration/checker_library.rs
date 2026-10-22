@@ -4,9 +4,7 @@
 //! change to a signature, a built-in, or a library module can move these as
 //! well as a checker change.
 
-mod common;
-
-use common::{LibraryModule, Scope, declared_residue, runtime_sort};
+use crate::common::{LibraryModule, Scope, declared_residue, runtime_sort};
 use tuun::eval;
 use tuun::expr::{Binding, Pattern, SourceBinding};
 use tuun::infer::{ModuleCache, check_program};
@@ -323,7 +321,7 @@ fn rounds() -> usize {
 /// --nocapture`), for comparing a change against the build before it.
 ///
 /// ```text
-/// cargo test --release --test checker_library library_timing -- --ignored --nocapture
+/// cargo test --release --test integration checker_library::library_timing -- --ignored --nocapture
 /// ```
 #[test]
 #[ignore]

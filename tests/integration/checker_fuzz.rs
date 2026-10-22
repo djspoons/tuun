@@ -9,9 +9,7 @@
 //! An additional sweep, `wide_function_fuzz`, generates its own programs:
 //! functions too wide to tabulate.
 
-mod common;
-
-use common::{Rng, Scope, declared_residue, runtime_sort, sweep_bounds};
+use crate::common::{Rng, Scope, declared_residue, runtime_sort, sweep_bounds};
 use tuun::eval;
 use tuun::infer::{ModuleCache, check_program};
 use tuun::parser::parse_program;
@@ -321,7 +319,7 @@ fn the_accepted_set_is_unchanged() {
 /// `COUNT` to sweep further:
 ///
 /// ```text
-/// SEED=7 COUNT=50000 cargo test --test checker_fuzz soundness_fuzz -- --ignored --nocapture
+/// SEED=7 COUNT=50000 cargo test --test integration checker_fuzz::soundness_fuzz -- --ignored --nocapture
 /// ```
 #[test]
 #[ignore]
@@ -473,7 +471,7 @@ fn false_positive_fuzz() {
 /// of the form "declared `waveform or seq`, evaluated to a constant".
 ///
 /// ```text
-/// SEED=7 COUNT=50000 cargo test --release --test checker_fuzz wide_function_fuzz -- --ignored --nocapture
+/// SEED=7 COUNT=50000 cargo test --release --test integration checker_fuzz::wide_function_fuzz -- --ignored --nocapture
 /// ```
 #[test]
 #[ignore]

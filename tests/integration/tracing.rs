@@ -7,7 +7,7 @@
 //! ignored by default. Run them with `--ignored`:
 //!
 //! ```text
-//! cargo test --test tracing -- --ignored
+//! cargo test --test integration tracing:: -- --ignored
 //! ```
 #![cfg(feature = "native")]
 

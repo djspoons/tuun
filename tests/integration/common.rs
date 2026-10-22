@@ -2,9 +2,6 @@
 //! and embedded library as a module scope, a seeded random source, and the
 //! helpers that compare a checked type against an evaluated value.
 
-// Each test crate compiles this module and uses only part of it.
-#![allow(dead_code)]
-
 use tuun::builtins;
 use tuun::expr::{
     Binding, BuiltInFn, BuiltInKind, Error, ErrorKind, Expr, Pattern, SourceBinding, SourceExpr,
