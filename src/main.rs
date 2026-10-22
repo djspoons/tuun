@@ -513,7 +513,13 @@ pub fn main() {
             );
 
             if let Some(launchkey) = launchkey.as_mut() {
-                midi_input::update_launchkey_state(&state, &status, launchkey);
+                midi_input::update_launchkey_state(
+                    &state,
+                    &status,
+                    args.tempo,
+                    args.beats_per_measure,
+                    launchkey,
+                );
             }
         }
     }

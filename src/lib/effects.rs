@@ -375,17 +375,18 @@ impl EffectRunner {
                     return;
                 }
                 // Cancel playback from the next cycle boundary on — the
-                // pending TopLevel mark (a monolithic program's queued copy,
+                // next pending playback (a monolithic program's queued copy,
                 // or a sequence's anchor). Steps of the current cycle still
                 // play out, matching how a monolithic program's active
                 // waveform finishes its measure.
-                let selector = WaveformSelector::ProgramVoices(program_index);
-                if let Some(after) = world.status.next_pending_mark_start(
+                if let Some(after) = world.status.next_pending_start(
                     Instant::now(),
-                    &selector,
-                    &MarkId::TopLevel,
+                    &WaveformSelector::ProgramPlayback(program_index),
                 ) {
-                    self.player.remove_pending(selector, Some(after));
+                    self.player.remove_pending(
+                        WaveformSelector::ProgramVoices(program_index),
+                        Some(after),
+                    );
                 }
             }
             Effect::SetMetronome(on) => {
@@ -694,6 +695,7 @@ fn sync_encoders(state: &AppState, launchkey: &mut launchkey::Launchkey) {
 mod tests {
     use std::sync::Arc;
 
+    use crate::ids::ANCHOR_SIXTEENTH;
     use crate::tracker::Select;
     use crate::waveform;
 
@@ -1503,20 +1505,25 @@ mod tests {
         )
         .expect("test source should parse");
 
-        // With a pending TopLevel mark (here a sequence anchor's next
-        // cycle), remove-pending is bounded at that cycle boundary so the
-        // current cycle's steps play out.
+        // With a pending playback (here a sequence anchor's next cycle),
+        // remove-pending is bounded at that cycle boundary so the current
+        // cycle's steps play out, even one still pending.
         let next_cycle = Instant::now() + std::time::Duration::from_secs(1);
         let mut status = empty_status();
-        status.marks.push(tracker::Mark {
-            waveform_id: WaveformId::Step {
+        status.start_times.push((
+            WaveformId::Step {
                 program: 0,
-                sixteenth: player::ANCHOR_SIXTEENTH,
+                sixteenth: 4,
             },
-            mark_id: MarkId::TopLevel,
-            start: next_cycle,
-            duration: Some(std::time::Duration::ZERO),
-        });
+            next_cycle - std::time::Duration::from_millis(500),
+        ));
+        status.start_times.push((
+            WaveformId::Step {
+                program: 0,
+                sixteenth: ANCHOR_SIXTEENTH,
+            },
+            next_cycle,
+        ));
         let mut world = World {
             launchkey: None,
             status: &status,
@@ -1534,7 +1541,7 @@ mod tests {
             "expected a bounded RemovePending"
         );
 
-        // Without any pending TopLevel mark there's nothing to cancel.
+        // Without any pending playback there's nothing to cancel.
         let status = empty_status();
         let mut world = World {
             launchkey: None,

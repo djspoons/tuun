@@ -106,17 +106,17 @@ pub enum ScanColumn {
     Head,
 }
 
-/// Returns the start of the timekeeping mark that Scan's passes are aligned to,
-/// or `None` when `status` has no such mark.
+/// Returns the start of the timekeeping waveform that Scan's passes are aligned
+/// to, or `None` when `status` has no such waveform.
 ///
-/// Any active or pending top-level mark of the odd Beats waveform will do: its
-/// starts differ by whole multiples of two measures.
+/// Any active or pending start of the odd Beats waveform will do: its starts
+/// differ by whole multiples of two measures.
 pub fn measure_origin(status: &tracker::Status<WaveformId, MarkId>) -> Option<Instant> {
     status
-        .marks
+        .start_times
         .iter()
-        .find(|m| m.waveform_id == WaveformId::Beats(false) && m.mark_id == MarkId::TopLevel)
-        .map(|m| m.start)
+        .find(|(id, _)| *id == WaveformId::Beats(false))
+        .map(|(_, start)| *start)
 }
 
 /// What one column of Scan holds.
@@ -353,7 +353,7 @@ impl Scope {
 
 #[cfg(test)]
 mod tests {
-    use crate::tracker::{Mark, SampleProducer, Status, sample_rings};
+    use crate::tracker::{SampleProducer, Status, sample_rings};
 
     use super::*;
 
@@ -667,18 +667,13 @@ mod tests {
     }
 
     #[test]
-    fn measure_origin_is_the_odd_beats_top_level_start() {
+    fn measure_origin_is_the_odd_beats_start() {
         let now = Instant::now();
-        let mark = |waveform_id, mark_id, offset| Mark {
-            waveform_id,
-            mark_id,
-            start: now + Duration::from_secs(offset),
-            duration: None,
-        };
-        let status = |marks| Status {
+        let start = |id, offset| (id, now + Duration::from_secs(offset));
+        let status = |start_times| Status::<WaveformId, MarkId> {
             buffer_start: now,
-            marks,
-            start_times: Vec::new(),
+            marks: Vec::new(),
+            start_times,
             tracker_load: None,
             allocations: None,
         };
@@ -686,16 +681,15 @@ mod tests {
         assert_eq!(measure_origin(&status(vec![])), None);
         assert_eq!(
             measure_origin(&status(vec![
-                mark(WaveformId::Beats(true), MarkId::TopLevel, 1),
-                mark(WaveformId::Beats(false), MarkId::Terminator, 2),
-                mark(WaveformId::Program(0), MarkId::TopLevel, 3),
+                start(WaveformId::Beats(true), 1),
+                start(WaveformId::Program(0), 3),
             ])),
             None
         );
         assert_eq!(
             measure_origin(&status(vec![
-                mark(WaveformId::Beats(true), MarkId::TopLevel, 1),
-                mark(WaveformId::Beats(false), MarkId::TopLevel, 4),
+                start(WaveformId::Beats(true), 1),
+                start(WaveformId::Beats(false), 4),
             ])),
             Some(now + Duration::from_secs(4))
         );

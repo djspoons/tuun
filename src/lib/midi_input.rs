@@ -1,9 +1,8 @@
 use std::time::Instant;
 
 use crate::actions;
-use crate::ids::{MarkId, WaveformId, WaveformSelector};
+use crate::ids::{ANCHOR_SIXTEENTH, MarkId, WaveformId, WaveformSelector};
 use crate::launchkey;
-use crate::player;
 use crate::programs::{PROGRAMS_PER_BANK, Program, ProgramKind};
 use crate::recorder;
 use crate::renderer;
@@ -137,6 +136,8 @@ pub fn classify(
 pub fn update_launchkey_state(
     state: &actions::AppState,
     status: &tracker::Status<WaveformId, MarkId>,
+    tempo: u32,
+    beats_per_measure: u32,
     launchkey: &mut launchkey::Launchkey,
 ) {
     // TODO update slider state
@@ -163,7 +164,7 @@ pub fn update_launchkey_state(
 
     let now = Instant::now();
     let (_current_beat, current_beat_start, current_beat_duration, _even_measure) =
-        renderer::current_beat_info(now, status);
+        renderer::current_beat_info(status, tempo, beats_per_measure);
 
     launchkey.set_record_brightness(match &state.mode {
         actions::Mode::Record { .. } => U7_MAX,
@@ -282,12 +283,8 @@ fn update_pads_clip_launcher(
                 current_beat_duration,
             );
             launchkey.set_daw_top_pad_color(i as u8, r, g, b);
-        } else if status.has_active_mark(
-            now,
-            &WaveformSelector::ProgramVoices(program_index),
-            &MarkId::TopLevel,
-        ) || (is_installed_keys
-            && status.has_active_mark(now, &WaveformSelector::AllKeys, &MarkId::TopLevel))
+        } else if status.has_active(now, &WaveformSelector::ProgramPlayback(program_index))
+            || (is_installed_keys && status.has_active(now, &WaveformSelector::AllKeys))
         {
             let (r, g, b) = pulsed(
                 (0, U7_MAX, 0),
@@ -318,11 +315,7 @@ fn update_pads_clip_launcher(
         if take_phase == Some(recorder::Phase::Armed) {
             launchkey.set_daw_bottom_pad_color(i as u8, U7_MAX, 0, 0);
         } else if take_phase == Some(recorder::Phase::Finishing(recorder::Finish::Play))
-            || status.has_pending_mark(
-                now,
-                &WaveformSelector::ProgramVoices(program_index),
-                &MarkId::TopLevel,
-            )
+            || status.has_pending(now, &WaveformSelector::ProgramPlayback(program_index))
         {
             launchkey.set_daw_bottom_pad_color(i as u8, 0, 127, 0);
         } else if is_installed_keys {
@@ -435,14 +428,14 @@ fn update_pads_sequencer(
     // so it lands on the right page of a multi-measure pattern.
     let anchor = WaveformId::Step {
         program: state.active_program_index,
-        sixteenth: player::ANCHOR_SIXTEENTH,
+        sixteenth: ANCHOR_SIXTEENTH,
     };
-    let mut cycle_start: Option<Instant> = None;
-    for mark in &status.marks {
-        if mark.waveform_id == anchor && mark.mark_id == MarkId::TopLevel && mark.start <= now {
-            cycle_start = Some(cycle_start.map_or(mark.start, |s| s.max(mark.start)));
-        }
-    }
+    let cycle_start = status
+        .start_times
+        .iter()
+        .filter(|(id, start)| *id == anchor && *start <= now)
+        .map(|(_, start)| *start)
+        .max();
     let playhead = cycle_start.map(|cycle_start| {
         let sixteenth_duration = current_beat_duration / 4;
         let position = now

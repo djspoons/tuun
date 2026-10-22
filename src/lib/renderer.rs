@@ -13,7 +13,7 @@ use realfft::RealFftPlanner;
 use realfft::num_complex::{Complex, ComplexFloat};
 
 use crate::actions::{AppState, Mode};
-use crate::ids::{MarkId, WaveformId, WaveformSelector};
+use crate::ids::{ANCHOR_SIXTEENTH, MarkId, WaveformId, WaveformSelector};
 use crate::launchkey;
 use crate::metric::Metric;
 use crate::player::{self, PlayedMarks};
@@ -201,7 +201,7 @@ impl<'ttf> Renderer<'ttf> {
         // TODO so much clean-up
         let now = Instant::now();
         let (current_beat, current_beat_start, current_beat_duration, even_measure) =
-            current_beat_info(now, status);
+            current_beat_info(status, self.tempo, self.beats_per_measure);
         // Alpha for things that fade over the beat: opaque at its start.
         let beat_fade = u8::MAX
             - (beat_phase(now, current_beat_start, current_beat_duration) * u8::MAX as f32) as u8;
@@ -244,11 +244,7 @@ impl<'ttf> Renderer<'ttf> {
                 .color()
                 .map(|(r, g, b)| Color::RGB(r, g, b))
                 .unwrap_or(INACTIVE_COLOR);
-            let sounding = status.has_active_mark(
-                now,
-                &WaveformSelector::ProgramVoices(index),
-                &MarkId::TopLevel,
-            );
+            let sounding = status.has_active(now, &WaveformSelector::ProgramPlayback(index));
             let take_phase = match mode {
                 Mode::Record { take, .. } if index == active_program_index => Some(take.phase()),
                 _ => None,
@@ -286,11 +282,7 @@ impl<'ttf> Renderer<'ttf> {
                 Some(Phase::Finishing(Finish::Play)) => Some((ACTIVE_COLOR, u8::MAX)),
                 Some(Phase::Recording | Phase::Finishing(Finish::Silent)) => None,
                 None => status
-                    .has_pending_mark(
-                        now,
-                        &WaveformSelector::ProgramVoices(index),
-                        &MarkId::TopLevel,
-                    )
+                    .has_pending(now, &WaveformSelector::ProgramPlayback(index))
                     .then_some((ACTIVE_COLOR, u8::MAX)),
             };
             if let Some((circle_color, circle_alpha)) = circle {
@@ -500,6 +492,8 @@ impl<'ttf> Renderer<'ttf> {
         // sample clock: a mark starting at the next measure then never draws a sliver at the
         // end of this one.
         let sample_duration = Duration::from_secs_f64(1.0 / self.sample_rate as f64);
+        let marks_duration = player::duration_from_beats(self.tempo, self.beats_per_measure as u64)
+            - sample_duration;
         let strip = strip_marks(
             &status.start_times,
             &state.waveform_marks,
@@ -510,32 +504,22 @@ impl<'ttf> Renderer<'ttf> {
         // Each mark's rectangle, its colour, and whether it's sounding.
         let mut rects = Vec::new();
         for even in [false, true] {
-            // Start with a point far into the future.
-            let mut marks_start = Instant::now()
-                + Duration::from_secs_f32(
-                    (self.tempo as f32 / 60.0) / 4.0 * self.beats_per_measure as f32,
-                ); // TODO something better?
-            let mut marks_duration = Duration::from_secs(0);
+            // The oldest odd/even Beats waveform's measure.
+            let Some(marks_start) = status
+                .start_times
+                .iter()
+                .filter(|(id, _)| *id == WaveformId::Beats(even))
+                .map(|(_, start)| *start)
+                .min()
+            else {
+                continue;
+            };
             let marks_width = self.width as f32 / 4.0; // for one measure
             let marks_x_offset = if even {
                 5.0 * self.width as f32 / 8.0
             } else {
                 3.0 * self.width as f32 / 8.0
             };
-            // Find the start of the first Beats waveform that's odd/even
-            for mark in status.marks.iter() {
-                if mark.waveform_id == WaveformId::Beats(even)
-                    && mark.mark_id == MarkId::TopLevel
-                    && let Some(duration) = mark.duration
-                {
-                    // We want to find the oldest even/odd beats in the marks.
-                    if mark.start < marks_start {
-                        marks_start = mark.start;
-                        // Make the duration shorter by one sample to avoid spurious overlaps due to rounding.
-                        marks_duration = duration - sample_duration;
-                    }
-                }
-            }
             for mark in &strip {
                 // A mark running into the next measure continues there.
                 let Some(part) = mark.within(marks_start, marks_duration) else {
@@ -1160,7 +1144,7 @@ pub fn strip_marks(
             },
             WaveformId::Step {
                 program,
-                sixteenth: player::ANCHOR_SIXTEENTH,
+                sixteenth: ANCHOR_SIXTEENTH,
             } => match set.program(*program).and_then(Program::sequence) {
                 Some(sequence) => (
                     *program,
@@ -1252,41 +1236,40 @@ pub fn lit_ranges(
     merged
 }
 
-/// Returns the beat playing at `status.buffer_start`: its number within the
+/// Returns the beat playing at `status.buffer_start`, at `tempo` beats per
+/// minute and `beats_per_measure` beats to a measure: its number within the
 /// measure, its start, its duration, and whether its measure is even.
+///
+/// The measure is the one whose Beats waveform started last by then. Before
+/// any has started, it's the first beat of an odd measure starting then.
 pub fn current_beat_info(
-    now: Instant,
     status: &tracker::Status<WaveformId, MarkId>,
+    tempo: u32,
+    beats_per_measure: u32,
 ) -> (u32, Instant, Duration, bool) {
-    let mut current_beat = 0;
-    let mut current_beat_start = now;
-    let mut current_beat_duration = Duration::from_secs(1);
-    let mut even_measure = false;
-    for mark in status.marks.iter() {
-        if let WaveformId::Beats(even) = mark.waveform_id {
-            // XXX sometimes this doesn't match anything?
-            if let Some(duration) = mark.duration
-                && mark.start <= status.buffer_start
-                && mark.start + duration > status.buffer_start
-                && let MarkId::UserDefined(beat) = mark.mark_id
-            {
-                current_beat = beat;
-                current_beat_start = mark.start;
-                current_beat_duration = duration;
-                even_measure = even;
-            }
-        }
-    }
-    if current_beat == 0 {
-        panic!(
-            "No current beat found in marks at time {:?}: {:?}",
-            status.buffer_start, status.marks
-        );
-    }
+    let beat_duration = player::duration_from_beats(tempo, 1);
+    let measure = status
+        .start_times
+        .iter()
+        .filter_map(|(id, start)| match id {
+            WaveformId::Beats(even) if *start <= status.buffer_start => Some((*start, *even)),
+            _ => None,
+        })
+        .max_by_key(|(start, _)| *start);
+    let Some((measure_start, even_measure)) = measure else {
+        return (1, status.buffer_start, beat_duration, false);
+    };
+    // A measure whose samples run a little past the tempo's stays on its
+    // last beat.
+    let beat = (status
+        .buffer_start
+        .duration_since(measure_start)
+        .div_duration_f32(beat_duration) as u32)
+        .min(beats_per_measure.saturating_sub(1));
     (
-        current_beat,
-        current_beat_start,
-        current_beat_duration,
+        beat + 1,
+        measure_start + beat_duration * beat,
+        beat_duration,
         even_measure,
     )
 }
@@ -1386,7 +1369,7 @@ mod tests {
         let start = Instant::now();
         let anchor = WaveformId::Step {
             program: 0,
-            sixteenth: player::ANCHOR_SIXTEENTH,
+            sixteenth: ANCHOR_SIXTEENTH,
         };
         let set = sequenced_set(&[1.0, 2.5], vec![segment(8, Some(80))]);
         let strip = strip_marks(
@@ -1620,5 +1603,49 @@ mod tests {
         assert!(highlights_row(&edit, 2, 3));
         assert!(highlights_row(&Mode::Select, 2, 2));
         assert!(highlights_row(&Mode::Keys, 2, 2));
+    }
+
+    #[test]
+    fn the_current_beat_comes_from_the_latest_beats_start() {
+        let t0 = Instant::now();
+        let second = Duration::from_secs(1);
+        let status = |buffer_start, start_times| tracker::Status {
+            buffer_start,
+            marks: Vec::new(),
+            start_times,
+            tracker_load: None,
+            allocations: None,
+        };
+        // At 60 bpm and 4 beats a measure: odd at t0, even at t0 + 4 s, and
+        // the odd one's next pass pending at t0 + 8 s.
+        let start_times = vec![
+            (WaveformId::Beats(false), t0),
+            (WaveformId::Beats(true), t0 + 4 * second),
+            (WaveformId::Beats(false), t0 + 8 * second),
+        ];
+        let at = |seconds: f64| {
+            current_beat_info(
+                &status(t0 + Duration::from_secs_f64(seconds), start_times.clone()),
+                TEMPO,
+                4,
+            )
+        };
+        assert_eq!(at(0.0), (1, t0, second, false));
+        assert_eq!(at(2.5), (3, t0 + 2 * second, second, false));
+        assert_eq!(at(5.0), (2, t0 + 5 * second, second, true));
+        // A measure running past the tempo's length stays on its last beat.
+        assert_eq!(
+            current_beat_info(
+                &status(t0 + Duration::from_secs_f64(4.5), start_times[..1].to_vec()),
+                TEMPO,
+                4
+            ),
+            (4, t0 + 3 * second, second, false)
+        );
+        // Before any Beats waveform starts, it's beat 1 of an odd measure.
+        assert_eq!(
+            current_beat_info(&status(t0, start_times[1..].to_vec()), TEMPO, 4),
+            (1, t0, second, false)
+        );
     }
 }

@@ -11,7 +11,7 @@ use crate::diagnostics::Source;
 use crate::environment::Environment;
 use crate::expr;
 use crate::generator;
-use crate::ids::{MarkId, WaveformId, WaveformSelector};
+use crate::ids::{ANCHOR_SIXTEENTH, MarkId, WaveformId, WaveformSelector};
 use crate::optimizer;
 use crate::programs::{Evaluated, Program, ProgramSet};
 use crate::sequencer;
@@ -19,10 +19,6 @@ use crate::slider;
 use crate::trace_walk::{self, WaveformMarks};
 use crate::tracker;
 use crate::waveform;
-
-/// Sentinel sixteenth for a program's silent anchor step, played alongside
-/// the real steps to carry the family's `TopLevel` mark.
-pub const ANCHOR_SIXTEENTH: u8 = u8::MAX;
 
 /// The marks of a waveform sent to play, and the program text they index into.
 #[derive(Clone, Debug)]
@@ -158,9 +154,8 @@ impl Player {
     /// A waveform plays as one tracker entry under
     /// `WaveformId::Program(program_index)`. A sequence plays decomposed: one
     /// scheduled, independently repeating `WaveformId::Step` per listed step,
-    /// plus a silent anchor step carrying the `TopLevel` mark. Either starts
-    /// where `start` says, repeating every `repeat_after_measures` measures if
-    /// given.
+    /// plus a silent anchor step that spans each pass. Either starts where
+    /// `start` says, repeating every `repeat_after_measures` measures if given.
     ///
     /// Records the marks of each waveform played in `waveform_marks`, by the id
     /// it plays under.
@@ -223,7 +218,10 @@ impl Player {
         let start_instant = match start {
             Start::Now => None,
             Start::NextMeasure => Some(next_measure_start(status, now).unwrap_or_else(|| {
-                panic!("No next measure found at {:?}: {:?}", now, status.marks)
+                panic!(
+                    "No next measure found at {:?}: {:?}",
+                    now, status.start_times
+                )
             })),
             Start::At(instant) => Some(instant),
         };
@@ -316,7 +314,10 @@ impl Player {
         let base = match start {
             Start::Now => now,
             Start::NextMeasure => next_measure_start(status, now).unwrap_or_else(|| {
-                panic!("No next measure found at {:?}: {:?}", now, status.marks)
+                panic!(
+                    "No next measure found at {:?}: {:?}",
+                    now, status.start_times
+                )
             }),
             Start::At(instant) => instant,
         };
@@ -370,7 +371,7 @@ impl Player {
     /// occurrence of its sixteenth — this cycle when the instant is still
     /// ahead, otherwise the next cycle.
     ///
-    /// The cycle phase and period are read from the anchor step's marks in
+    /// The cycle phase and period are read from the anchor step's starts in
     /// `status`; `default_repeat_measures` supplies the period when only a
     /// queued (pending) anchor is visible. Returns a user-visible warning
     /// when the step can't sound (no upcoming occurrence), and `None`
@@ -394,14 +395,11 @@ impl Player {
         // The cycle the family is in now, and the queued next cycle.
         let mut cycle_start: Option<time::Instant> = None;
         let mut next_cycle_start: Option<time::Instant> = None;
-        for mark in &status.marks {
-            if mark.waveform_id == anchor && mark.mark_id == MarkId::TopLevel {
-                if mark.start <= now {
-                    cycle_start = Some(cycle_start.map_or(mark.start, |s| s.max(mark.start)));
-                } else {
-                    next_cycle_start =
-                        Some(next_cycle_start.map_or(mark.start, |s| s.min(mark.start)));
-                }
+        for &(_, start) in status.start_times.iter().filter(|(id, _)| *id == anchor) {
+            if start <= now {
+                cycle_start = Some(cycle_start.map_or(start, |s| s.max(start)));
+            } else {
+                next_cycle_start = Some(next_cycle_start.map_or(start, |s| s.min(start)));
             }
         }
         let offset = beat_offset(self.tempo, sequencer::sixteenth_beat(sixteenth));
@@ -516,34 +514,27 @@ impl Player {
         if precompute {
             beats = generator::Generator::new(environment.sample_rate()).precompute(beats);
         }
+        let measure = duration_from_beats(self.tempo, self.beats_per_measure as u64);
         // Play the odd Beats waveform starting immediately and repeating every two measures
         self.sender
             .send(tracker::Command::Play {
                 id: WaveformId::Beats(false),
                 waveform: beats.clone(),
                 start: None,
-                repeat_every: Some(
-                    duration_from_beats(self.tempo, self.beats_per_measure as u64) * 2,
-                ),
+                repeat_every: Some(measure * 2),
             })
             .unwrap();
         // We need to wait to start the even Beats until we know when the odd Beats started
         'start_even_beats: loop {
             if let Ok(status) = status_receiver.recv() {
-                for mark in status.marks {
-                    if mark.waveform_id == WaveformId::Beats(false)
-                        && mark.mark_id == MarkId::TopLevel
-                        && let Some(duration) = mark.duration
-                    {
+                for (id, start) in status.start_times {
+                    if id == WaveformId::Beats(false) {
                         self.sender
                             .send(tracker::Command::Play {
                                 id: WaveformId::Beats(true),
                                 waveform: beats,
-                                start: Some(mark.start + duration),
-                                repeat_every: Some(
-                                    duration_from_beats(self.tempo, self.beats_per_measure as u64)
-                                        * 2,
-                                ),
+                                start: Some(start + measure),
+                                repeat_every: Some(measure * 2),
                             })
                             .unwrap();
                         break 'start_even_beats;
@@ -723,7 +714,7 @@ fn silence_of_beats(beats: f32, tempo: u32) -> waveform::Waveform<MarkId> {
 }
 
 /// Returns the first measure boundary after `now`: the earliest start of a
-/// Beats waveform's top-level mark, or `None` when `status` holds no such mark
+/// Beats waveform, or `None` when `status` holds no Beats waveform starting
 /// after `now`.
 pub fn next_measure_start(
     status: &tracker::Status<WaveformId, MarkId>,
@@ -733,7 +724,7 @@ pub fn next_measure_start(
 }
 
 /// Returns the latest measure boundary at or before `now`, or `None` when
-/// `status` holds no Beats top-level mark starting by then.
+/// `status` holds no Beats waveform starting by then.
 pub fn previous_measure_start(
     status: &tracker::Status<WaveformId, MarkId>,
     now: time::Instant,
@@ -741,20 +732,19 @@ pub fn previous_measure_start(
     measure_starts(status).filter(|&start| start <= now).max()
 }
 
-/// Returns the start of every Beats waveform's top-level mark in `status`.
+/// Returns the start of every Beats waveform in `status`.
 fn measure_starts(
     status: &tracker::Status<WaveformId, MarkId>,
 ) -> impl Iterator<Item = time::Instant> + '_ {
     status
-        .marks
+        .start_times
         .iter()
-        .filter(|mark| {
-            matches!(mark.waveform_id, WaveformId::Beats(_)) && mark.mark_id == MarkId::TopLevel
-        })
-        .map(|mark| mark.start)
+        .filter(|(id, _)| id.is_beats())
+        .map(|(_, start)| *start)
 }
 
-fn duration_from_beats(tempo: u32, beats: u64) -> time::Duration {
+/// Returns how long `beats` beats last at `tempo` beats per minute.
+pub fn duration_from_beats(tempo: u32, beats: u64) -> time::Duration {
     time::Duration::from_secs_f32(beats as f32 * 60.0 / tempo as f32)
 }
 
@@ -791,12 +781,9 @@ mod tests {
         let mut status = empty_status();
         // Out of order, as the odd and even Beats waveforms interleave.
         for (k, even) in [(1, true), (0, false), (2, false)] {
-            status.marks.push(tracker::Mark {
-                waveform_id: WaveformId::Beats(even),
-                mark_id: MarkId::TopLevel,
-                start: t0 + Duration::from_secs(4 * k),
-                duration: Some(Duration::from_secs(4)),
-            });
+            status
+                .start_times
+                .push((WaveformId::Beats(even), t0 + Duration::from_secs(4 * k)));
         }
         let now = t0 + Duration::from_secs(5);
         assert_eq!(
@@ -907,16 +894,14 @@ mod tests {
         (player, receiver)
     }
 
-    fn anchor_mark(program: usize, start: Instant) -> tracker::Mark<WaveformId, MarkId> {
-        tracker::Mark {
-            waveform_id: WaveformId::Step {
+    fn anchor_start(program: usize, start: Instant) -> (WaveformId, Instant) {
+        (
+            WaveformId::Step {
                 program,
                 sixteenth: ANCHOR_SIXTEENTH,
             },
-            mark_id: MarkId::TopLevel,
             start,
-            duration: Some(Duration::ZERO),
-        }
+        )
     }
 
     #[test]
@@ -1072,7 +1057,7 @@ mod tests {
         let cycle = now - Duration::from_millis(100);
         let next_cycle = cycle + duration_from_beats(90, 4);
         let mut status = empty_status();
-        status.marks = vec![anchor_mark(0, cycle), anchor_mark(0, next_cycle)];
+        status.start_times = vec![anchor_start(0, cycle), anchor_start(0, next_cycle)];
 
         // Sixteenth 8 is beat 3, two beats into the cycle — still ahead.
         let message = player.play_step(&set, 0, 8, &status, None, &mut HashMap::new());
@@ -1109,7 +1094,7 @@ mod tests {
         let cycle = now - Duration::from_secs(1);
         let next_cycle = cycle + duration_from_beats(90, 4);
         let mut status = empty_status();
-        status.marks = vec![anchor_mark(0, cycle), anchor_mark(0, next_cycle)];
+        status.start_times = vec![anchor_start(0, cycle), anchor_start(0, next_cycle)];
 
         // Sixteenth 0 is beat 1, which started the cycle — already passed.
         let message = player.play_step(&set, 0, 0, &status, None, &mut HashMap::new());
@@ -1130,7 +1115,7 @@ mod tests {
 
         let now = Instant::now();
         let mut status = empty_status();
-        status.marks = vec![anchor_mark(0, now - Duration::from_secs(1))];
+        status.start_times = vec![anchor_start(0, now - Duration::from_secs(1))];
 
         let message = player.play_step(&set, 0, 0, &status, None, &mut HashMap::new());
         assert!(message.unwrap().contains("passed"));
@@ -1148,7 +1133,7 @@ mod tests {
         let now = Instant::now();
         let cycle = now - Duration::from_millis(100);
         let mut status = empty_status();
-        status.marks = vec![anchor_mark(0, cycle)];
+        status.start_times = vec![anchor_start(0, cycle)];
 
         // Sixteenth 8 is beat 3, two beats into the cycle — still ahead, so
         // the step does sound; only its repeat is at issue.

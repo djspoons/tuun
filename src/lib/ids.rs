@@ -34,6 +34,10 @@ pub enum WaveformId {
     Key(u8),
 }
 
+/// Sentinel sixteenth for a program's silent anchor step, played alongside the
+/// real steps to span each pass of its sequence.
+pub const ANCHOR_SIXTEENTH: u8 = u8::MAX;
+
 impl WaveformId {
     pub fn is_beats(&self) -> bool {
         matches!(self, WaveformId::Beats(_))
@@ -51,6 +55,10 @@ pub enum WaveformSelector {
     /// A program's whole voice family: its top-level waveform and any of its
     /// step waveforms.
     ProgramVoices(usize),
+    /// The waveforms that show a program playing: its top-level waveform, and
+    /// its sequence's anchor, which spans each pass. Unlike `ProgramVoices`,
+    /// this does not include its other step waveforms.
+    ProgramPlayback(usize),
     /// Every program, step, and key waveform; not the Beats timekeepers.
     AllVoices,
     /// Both Beats timekeepers.
@@ -65,6 +73,13 @@ impl tracker::Select<WaveformId> for WaveformSelector {
             WaveformSelector::ProgramVoices(p) => matches!(
                 id,
                 WaveformId::Program(i) | WaveformId::Step { program: i, .. } if i == p
+            ),
+            WaveformSelector::ProgramPlayback(p) => matches!(
+                id,
+                WaveformId::Program(i) | WaveformId::Step {
+                    program: i,
+                    sixteenth: ANCHOR_SIXTEENTH,
+                } if i == p
             ),
             WaveformSelector::AllVoices => !id.is_beats(),
             WaveformSelector::AllBeats => id.is_beats(),
@@ -206,6 +221,26 @@ mod tests {
         assert!(selector.matches(&WaveformId::Beats(false)));
         assert!(selector.matches(&WaveformId::Beats(true)));
         assert!(!selector.matches(&WaveformId::Program(0)));
+        assert!(!selector.matches(&WaveformId::Key(60)));
+    }
+
+    #[test]
+    fn selector_program_playback_matches_program_and_its_anchor() {
+        let selector = WaveformSelector::ProgramPlayback(2);
+        assert!(selector.matches(&WaveformId::Program(2)));
+        assert!(selector.matches(&WaveformId::Step {
+            program: 2,
+            sixteenth: ANCHOR_SIXTEENTH
+        }));
+        assert!(!selector.matches(&WaveformId::Step {
+            program: 2,
+            sixteenth: 0
+        }));
+        assert!(!selector.matches(&WaveformId::Program(3)));
+        assert!(!selector.matches(&WaveformId::Step {
+            program: 3,
+            sixteenth: ANCHOR_SIXTEENTH
+        }));
         assert!(!selector.matches(&WaveformId::Key(60)));
     }
 

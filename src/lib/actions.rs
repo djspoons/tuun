@@ -12,7 +12,7 @@ use std::time::Instant;
 use crate::diagnostics::{self, Diagnostic, Source};
 use crate::environment;
 use crate::expr;
-use crate::ids::{MarkId, WaveformId, WaveformSelector};
+use crate::ids::{ANCHOR_SIXTEENTH, MarkId, WaveformId, WaveformSelector};
 use crate::keys;
 use crate::launchkey;
 use crate::player;
@@ -620,11 +620,10 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
         Action::StopProgram(i) => stop_program_effects(state, ctx, i),
         Action::RemovePendingProgram(i) => remove_pending_effects(state, ctx, i),
         Action::ToggleProgramPlayback(i) => {
-            if ctx.status.has_active_mark(
-                ctx.now,
-                &WaveformSelector::ProgramVoices(i),
-                &MarkId::TopLevel,
-            ) {
+            if ctx
+                .status
+                .has_active(ctx.now, &WaveformSelector::ProgramPlayback(i))
+            {
                 stop_program_effects(state, ctx, i)
             } else if state.keys.as_ref().is_some_and(|k| k.id == i) {
                 vec![]
@@ -640,11 +639,10 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             }
         }
         Action::ToggleProgramPendingPlayback(i) => {
-            if ctx.status.has_pending_mark(
-                ctx.now,
-                &WaveformSelector::ProgramVoices(i),
-                &MarkId::TopLevel,
-            ) {
+            if ctx
+                .status
+                .has_pending(ctx.now, &WaveformSelector::ProgramPlayback(i))
+            {
                 remove_pending_effects(state, ctx, i)
             } else if state.keys.as_ref().is_some_and(|k| k.id == i) {
                 vec![]
@@ -1020,7 +1018,7 @@ pub fn refused_by_ownership(
         return false;
     }
     let owned = state.active_program_index;
-    let voices = WaveformSelector::ProgramVoices(owned);
+    let playback = WaveformSelector::ProgramPlayback(owned);
     match *action {
         Action::SelectProgram(_)
         | Action::AdvanceProgram(_)
@@ -1035,11 +1033,9 @@ pub fn refused_by_ownership(
         Action::StartProgramVoice(i) => i == owned,
         Action::Transport(Transport::Play) => true,
         // The toggles are refused only when they would start or queue.
-        Action::ToggleProgramPlayback(i) => {
-            i == owned && !status.has_active_mark(now, &voices, &MarkId::TopLevel)
-        }
+        Action::ToggleProgramPlayback(i) => i == owned && !status.has_active(now, &playback),
         Action::ToggleProgramPendingPlayback(i) => {
-            i == owned && !status.has_pending_mark(now, &voices, &MarkId::TopLevel)
+            i == owned && !status.has_pending(now, &playback)
         }
         // Actions that check the editor mode themselves, such as reload and
         // undo, refuse there.
@@ -1107,11 +1103,10 @@ fn refused_by_processing(state: &AppState, action: &Action) -> Option<Vec<Effect
 /// pending or it is the installed keys program.
 fn transport_play_effects(state: &AppState, ctx: &Context) -> Vec<Effect> {
     let i = state.active_program_index;
-    if ctx.status.has_pending_mark(
-        ctx.now,
-        &WaveformSelector::ProgramVoices(i),
-        &MarkId::TopLevel,
-    ) || state.keys.as_ref().is_some_and(|k| k.id == i)
+    if ctx
+        .status
+        .has_pending(ctx.now, &WaveformSelector::ProgramPlayback(i))
+        || state.keys.as_ref().is_some_and(|k| k.id == i)
     {
         vec![]
     } else {
@@ -1353,11 +1348,10 @@ fn play_program_effects(
 /// `UpdateSource` runs last so that a failed save's error message isn't
 /// overwritten by the "Stopped program" status.
 fn stop_program_effects(state: &AppState, ctx: &Context, i: usize) -> Vec<Effect> {
-    if !ctx.status.has_active_mark(
-        ctx.now,
-        &WaveformSelector::ProgramVoices(i),
-        &MarkId::TopLevel,
-    ) {
+    if !ctx
+        .status
+        .has_active(ctx.now, &WaveformSelector::ProgramPlayback(i))
+    {
         return vec![];
     }
     vec![
@@ -1376,11 +1370,10 @@ fn stop_program_effects(state: &AppState, ctx: &Context, i: usize) -> Vec<Effect
 /// `UpdateSource` runs last so that a failed save's error message isn't
 /// overwritten by the "Removed pending" status.
 fn remove_pending_effects(state: &AppState, ctx: &Context, i: usize) -> Vec<Effect> {
-    if !ctx.status.has_pending_mark(
-        ctx.now,
-        &WaveformSelector::ProgramVoices(i),
-        &MarkId::TopLevel,
-    ) {
+    if !ctx
+        .status
+        .has_pending(ctx.now, &WaveformSelector::ProgramPlayback(i))
+    {
         return vec![];
     }
     vec![
@@ -1485,13 +1478,9 @@ fn apply_toggle_sequencer_step(state: &mut AppState, ctx: &Context, sixteenth: u
 fn sequence_is_live(ctx: &Context, program_index: usize) -> bool {
     let anchor = WaveformSelector::Only(WaveformId::Step {
         program: program_index,
-        sixteenth: player::ANCHOR_SIXTEENTH,
+        sixteenth: ANCHOR_SIXTEENTH,
     });
-    ctx.status
-        .has_active_mark(ctx.now, &anchor, &MarkId::TopLevel)
-        || ctx
-            .status
-            .has_pending_mark(ctx.now, &anchor, &MarkId::TopLevel)
+    ctx.status.has_active(ctx.now, &anchor) || ctx.status.has_pending(ctx.now, &anchor)
 }
 
 /// Returns the sixteenths holding a step of `text`, or none when `text` isn't
@@ -2274,7 +2263,7 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    /// A tracker status with no marks at all — nothing active, nothing pending.
+    /// A tracker status with no waveforms at all — nothing active, nothing pending.
     fn empty_status() -> tracker::Status<WaveformId, MarkId> {
         tracker::Status {
             buffer_start: Instant::now(),
@@ -2285,16 +2274,11 @@ mod tests {
         }
     }
 
-    /// A status with a single TopLevel mark for program 0 starting at `start`
-    /// (before `now` = active, after `now` = pending).
-    fn status_with_mark(start: Instant) -> tracker::Status<WaveformId, MarkId> {
+    /// A status with program 0's waveform starting at `start` (before `now` =
+    /// active, after `now` = pending).
+    fn status_with_start(start: Instant) -> tracker::Status<WaveformId, MarkId> {
         let mut status = empty_status();
-        status.marks.push(tracker::Mark {
-            waveform_id: WaveformId::Program(0),
-            mark_id: MarkId::TopLevel,
-            start,
-            duration: Some(Duration::from_secs(1)),
-        });
+        status.start_times.push((WaveformId::Program(0), start));
         status
     }
 
@@ -3355,7 +3339,7 @@ _ = saw(220);";
     fn toggle_program_playback_stops_when_active() {
         let mut state = test_state();
         let now = Instant::now();
-        let status = status_with_mark(now - Duration::from_secs(1));
+        let status = status_with_start(now - Duration::from_secs(1));
         let effects = apply_with_status(&mut state, &status, now, Action::ToggleProgramPlayback(0));
         assert!(
             matches!(effects[0], Effect::StopProgram(0)),
@@ -3369,7 +3353,7 @@ _ = saw(220);";
     fn start_program_voice_plays_even_when_already_active() {
         let mut state = test_state();
         let now = Instant::now();
-        let status = status_with_mark(now - Duration::from_secs(1));
+        let status = status_with_start(now - Duration::from_secs(1));
         let effects = apply_with_status(&mut state, &status, now, Action::StartProgramVoice(0));
         assert!(
             matches!(effects[0], Effect::PlayProgramVoice(0)),
@@ -3483,7 +3467,7 @@ _ = saw(220);";
     fn toggle_queued_program_removes_pending_when_queued() {
         let mut state = test_state();
         let now = Instant::now();
-        let status = status_with_mark(now + Duration::from_secs(1));
+        let status = status_with_start(now + Duration::from_secs(1));
         let effects = apply_with_status(
             &mut state,
             &status,
@@ -3521,7 +3505,7 @@ _ = saw(220);";
         let mut state = test_state();
         let now = Instant::now();
         // A mark starting in the past is active: StopProgram applies.
-        let status = status_with_mark(now - Duration::from_secs(1));
+        let status = status_with_start(now - Duration::from_secs(1));
         let effects = apply_with_status(&mut state, &status, now, Action::StopProgram(0));
         assert!(
             effects.iter().any(|e| matches!(e, Effect::UpdateSource(0))),
@@ -3529,7 +3513,7 @@ _ = saw(220);";
             effects
         );
         // A mark starting in the future is pending: RemovePendingProgram applies.
-        let status = status_with_mark(now + Duration::from_secs(1));
+        let status = status_with_start(now + Duration::from_secs(1));
         let effects = apply_with_status(&mut state, &status, now, Action::RemovePendingProgram(0));
         assert!(
             effects.iter().any(|e| matches!(e, Effect::UpdateSource(0))),
@@ -3553,7 +3537,7 @@ _ = saw(220);";
     fn enter_edit_mode_removes_pending_playback() {
         let mut state = test_state();
         let now = Instant::now();
-        let status = status_with_mark(now + Duration::from_secs(1));
+        let status = status_with_start(now + Duration::from_secs(1));
         let effects = apply_with_status(&mut state, &status, now, Action::EnterEditMode);
         assert!(
             matches!(state.mode, Mode::Edit { .. }),
@@ -3583,19 +3567,17 @@ _ = saw(220);";
         .expect("test source should parse")
     }
 
-    /// A status with a TopLevel mark for program 0's anchor step starting at
-    /// `start` (before `now` = active, after `now` = pending).
+    /// A status with program 0's anchor step starting at `start` (before
+    /// `now` = active, after `now` = pending).
     fn status_with_anchor(start: Instant) -> tracker::Status<WaveformId, MarkId> {
         let mut status = empty_status();
-        status.marks.push(tracker::Mark {
-            waveform_id: WaveformId::Step {
+        status.start_times.push((
+            WaveformId::Step {
                 program: 0,
-                sixteenth: player::ANCHOR_SIXTEENTH,
+                sixteenth: ANCHOR_SIXTEENTH,
             },
-            mark_id: MarkId::TopLevel,
             start,
-            duration: Some(Duration::from_secs(1)),
-        });
+        ));
         status
     }
 
@@ -3870,17 +3852,46 @@ _ = saw(220);";
     fn transport_play_noops_when_already_pending() {
         let mut state = test_state();
         let now = Instant::now();
-        let status = status_with_mark(now + Duration::from_secs(1));
+        let status = status_with_start(now + Duration::from_secs(1));
         let effects =
             apply_with_status(&mut state, &status, now, Action::Transport(Transport::Play));
         assert!(effects.is_empty(), "expected no effects, got {:?}", effects);
     }
 
     #[test]
+    fn transport_play_queues_a_playing_sequence_despite_its_pending_steps() {
+        let mut state = sequencer_state();
+        let now = Instant::now();
+        // A one-shot pass: its anchor started, and a later step waits.
+        let mut status = status_with_anchor(now - Duration::from_secs(1));
+        status.start_times.push((
+            WaveformId::Step {
+                program: 0,
+                sixteenth: 8,
+            },
+            now + Duration::from_secs(1),
+        ));
+        let effects =
+            apply_with_status(&mut state, &status, now, Action::Transport(Transport::Play));
+        assert!(
+            matches!(
+                effects[0],
+                Effect::PlayProgram {
+                    program_index: 0,
+                    start: player::Start::NextMeasure,
+                    ..
+                }
+            ),
+            "expected a queued PlayProgram, got {:?}",
+            effects
+        );
+    }
+
+    #[test]
     fn transport_stop_removes_active_program_pending_playback() {
         let mut state = test_state();
         let now = Instant::now();
-        let status = status_with_mark(now + Duration::from_secs(1));
+        let status = status_with_start(now + Duration::from_secs(1));
         let effects =
             apply_with_status(&mut state, &status, now, Action::Transport(Transport::Stop));
         assert!(
@@ -4031,7 +4042,7 @@ _ = saw(220);";
     fn owned_program_can_stop_and_dequeue_while_editing() {
         let mut state = editing_state();
         let now = Instant::now();
-        let active = status_with_mark(now - Duration::from_millis(100));
+        let active = status_with_start(now - Duration::from_millis(100));
         for action in [Action::StopProgram(0), Action::ToggleProgramPlayback(0)] {
             let effects = apply_with_status(&mut state, &active, now, action);
             assert!(
@@ -4040,7 +4051,7 @@ _ = saw(220);";
                 effects
             );
         }
-        let pending = status_with_mark(now + Duration::from_millis(100));
+        let pending = status_with_start(now + Duration::from_millis(100));
         for action in [
             Action::RemovePendingProgram(0),
             Action::Transport(Transport::Stop),
@@ -4331,12 +4342,10 @@ _ = saw(220);";
     fn measures(t0: Instant) -> tracker::Status<WaveformId, MarkId> {
         let mut status = empty_status();
         for k in 0..4 {
-            status.marks.push(tracker::Mark {
-                waveform_id: WaveformId::Beats(k % 2 == 1),
-                mark_id: MarkId::TopLevel,
-                start: t0 + Duration::from_secs(4 * k),
-                duration: Some(Duration::from_secs(4)),
-            });
+            status.start_times.push((
+                WaveformId::Beats(k % 2 == 1),
+                t0 + Duration::from_secs(4 * k),
+            ));
         }
         status
     }
@@ -4524,12 +4533,9 @@ _ = saw(220);";
         let t0 = Instant::now();
         let mut state = record_state(RECORD_SOURCE, 1);
         let mut status = measures(t0);
-        status.marks.push(tracker::Mark {
-            waveform_id: WaveformId::Program(1),
-            mark_id: MarkId::TopLevel,
-            start: t0 + Duration::from_secs(4),
-            duration: Some(Duration::from_secs(1)),
-        });
+        status
+            .start_times
+            .push((WaveformId::Program(1), t0 + Duration::from_secs(4)));
         let now = t0 + Duration::from_secs(1);
         let effects = apply_with_status(&mut state, &status, now, record());
         assert_eq!(take_phase(&state), Phase::Armed);

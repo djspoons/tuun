@@ -110,6 +110,29 @@ where
             .any(|w| selector.matches(&w.waveform_id) && w.mark_id == *mark && w.start <= when)
     }
 
+    /// Returns whether a waveform matched by `selector` starts after `when`.
+    pub fn has_pending(&self, when: Instant, selector: &I::Selector) -> bool {
+        self.next_pending_start(when, selector).is_some()
+    }
+
+    /// Returns whether a waveform matched by `selector` started at or before
+    /// `when`.
+    pub fn has_active(&self, when: Instant, selector: &I::Selector) -> bool {
+        self.start_times
+            .iter()
+            .any(|(id, start)| selector.matches(id) && *start <= when)
+    }
+
+    /// Returns the earliest start after `when` of a waveform matched by
+    /// `selector`, or `None` when none is pending.
+    pub fn next_pending_start(&self, when: Instant, selector: &I::Selector) -> Option<Instant> {
+        self.start_times
+            .iter()
+            .filter(|(id, start)| selector.matches(id) && *start > when)
+            .map(|(_, start)| *start)
+            .min()
+    }
+
     /// Returns the earliest start among matching marks scheduled after
     /// `when`, or `None` when no matching mark is pending.
     pub fn next_pending_mark_start(
@@ -1145,7 +1168,7 @@ mod tests {
         tracker.callback(&mut out);
 
         let status = status_receiver.try_recv().expect("expected a status");
-        let remaining: Vec<_> = status.marks.iter().map(|m| &m.waveform_id).collect();
+        let remaining: Vec<_> = status.start_times.iter().map(|(id, _)| id).collect();
         assert_eq!(remaining, vec![&WaveformId::Key(60)]);
     }
 
@@ -1190,10 +1213,10 @@ mod tests {
 
         // The next-cycle step is gone; the current-cycle step still played —
         // and exactly once: with its repeat cleared it left no re-queued
-        // pending mark behind.
+        // pending copy behind.
         assert_eq!(out[0], 1.0);
         let status = status_receiver.try_recv().expect("expected a status");
-        let remaining: Vec<_> = status.marks.iter().map(|m| &m.waveform_id).collect();
+        let remaining: Vec<_> = status.start_times.iter().map(|(id, _)| id).collect();
         assert_eq!(remaining, vec![&current_cycle_step]);
     }
 
@@ -1245,41 +1268,41 @@ mod tests {
     #[test]
     fn status_selector_queries_distinguish_active_and_pending() {
         let now = Instant::now();
-        let mark = |id, start| Mark {
-            waveform_id: id,
-            mark_id: MarkId::TopLevel,
-            start,
-            duration: Some(Duration::ZERO),
-        };
-        let status = Status {
+        let later = now + Duration::from_secs(1);
+        let status = Status::<WaveformId, MarkId> {
             buffer_start: now,
-            marks: vec![
-                mark(WaveformId::Program(3), now + Duration::from_secs(1)),
-                mark(
+            marks: Vec::new(),
+            start_times: vec![
+                (WaveformId::Program(3), later + Duration::from_secs(1)),
+                (
                     WaveformId::Step {
                         program: 3,
                         sixteenth: 4,
                     },
-                    now + Duration::from_secs(1),
+                    later,
                 ),
-                mark(WaveformId::Key(60), now - Duration::from_secs(1)),
+                (WaveformId::Key(60), now - Duration::from_secs(1)),
             ],
-            start_times: Vec::new(),
             tracker_load: None,
             allocations: None,
         };
 
         let voices = WaveformSelector::ProgramVoices(3);
-        assert!(status.has_pending_mark(now, &voices, &MarkId::TopLevel));
-        assert!(!status.has_active_mark(now, &voices, &MarkId::TopLevel));
+        assert!(status.has_pending(now, &voices));
+        assert!(!status.has_active(now, &voices));
+        assert_eq!(status.next_pending_start(now, &voices), Some(later));
 
-        assert!(status.has_active_mark(now, &WaveformSelector::AllKeys, &MarkId::TopLevel));
-        assert!(!status.has_pending_mark(now, &WaveformSelector::AllKeys, &MarkId::TopLevel));
+        assert!(status.has_active(now, &WaveformSelector::AllKeys));
+        assert!(!status.has_pending(now, &WaveformSelector::AllKeys));
+        assert_eq!(
+            status.next_pending_start(now, &WaveformSelector::AllKeys),
+            None
+        );
 
         let only = WaveformSelector::Only(WaveformId::Key(60));
-        assert!(status.has_active_mark(now, &only, &MarkId::TopLevel));
+        assert!(status.has_active(now, &only));
         let other = WaveformSelector::Only(WaveformId::Key(61));
-        assert!(!status.has_active_mark(now, &other, &MarkId::TopLevel));
+        assert!(!status.has_active(now, &other));
     }
 
     #[test]
