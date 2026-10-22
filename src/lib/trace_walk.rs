@@ -101,9 +101,10 @@ where
             });
         }
     }
-    if let Some(text_range) = instrument.and_then(|i| place::<M, S>(i)) {
-        for k in 0..walk.segments.len() {
-            if !lit.marks.iter().any(|m| m.segments.contains(&k)) {
+    let instrument_ranges = instrument.map(place::<M, S>).unwrap_or_default();
+    for k in 0..walk.segments.len() {
+        if !lit.marks.iter().any(|m| m.segments.contains(&k)) {
+            for text_range in &instrument_ranges {
                 lit.add(Mark {
                     text_range: text_range.clone(),
                     segments: k..k + 1,
@@ -373,30 +374,31 @@ fn oldest<S>(via: &Option<Arc<Via<S>>>) -> Option<&Step<S>> {
 }
 
 /// Returns the program text a value with `trace` lights: where it was
-/// written, else the first program text it went through.
+/// written, and every use site and call it went through, newest first.
 ///
 /// Where a value was written is the head of the built-in that made it, when
 /// that head lights, and its span otherwise; a built value's span is the
 /// built-in's call, never what it lights.
-fn place<M: CarriesTrace<S>, S>(trace: &Trace<S>) -> Option<Range<usize>> {
+fn place<M: CarriesTrace<S>, S>(trace: &Trace<S>) -> Vec<Range<usize>> {
     if !trace.reaches_program {
-        return None;
+        return vec![];
     }
-    let written = match oldest(&trace.via) {
-        Some(Step::Built { head, .. }) => head.as_deref().and_then(place::<M, S>),
-        _ => trace.span.as_ref().and_then(program_range::<M, S>),
+    let mut out = match oldest(&trace.via) {
+        Some(Step::Built { head, .. }) => head.as_deref().map(place::<M, S>).unwrap_or_default(),
+        _ => trace
+            .span
+            .as_ref()
+            .and_then(program_range::<M, S>)
+            .into_iter()
+            .collect(),
     };
     // A `Built` step is only ever the oldest, so the rest are use sites and
-    // calls. The chain is newest first, so the oldest in program text is the
-    // last found.
-    written.or_else(|| {
-        steps(&trace.via)
-            .filter_map(|step| match step {
-                Step::UseSite(span) | Step::Call(span) => program_range::<M, S>(span),
-                Step::Built { .. } => None,
-            })
-            .last()
-    })
+    // calls.
+    out.extend(steps(&trace.via).filter_map(|step| match step {
+        Step::UseSite(span) | Step::Call(span) => program_range::<M, S>(span),
+        Step::Built { .. } => None,
+    }));
+    out
 }
 
 /// Returns the parents of `trace`'s oldest step when it was built by a
@@ -415,7 +417,7 @@ fn lit_parents<S>(trace: &Trace<S>) -> &[Arc<Trace<S>>] {
 /// one with no trace mark beneath it, also lights the arguments its value
 /// consumed, through built-ins whose heads light.
 fn lights<M: CarriesTrace<S>, S>(trace: &Arc<Trace<S>>, folded: bool) -> Vec<Range<usize>> {
-    let mut out: Vec<Range<usize>> = place::<M, S>(trace).into_iter().collect();
+    let mut out: Vec<Range<usize>> = place::<M, S>(trace);
     if folded {
         // The parents graph is shared and can be deep, so this walks it with
         // a stack and visits each trace once.
@@ -689,11 +691,11 @@ mod tests {
                 parents: vec![],
             }],
         );
-        assert_eq!(place::<Id, Text>(&built), Some(3..4));
+        assert_eq!(place::<Id, Text>(&built), vec![Range { start: 3, end: 4 }]);
     }
 
     #[test]
-    fn a_library_value_lights_the_first_program_text_it_went_through() {
+    fn a_library_value_lights_each_program_text_it_went_through() {
         let used = trace(
             Some(library()),
             vec![
@@ -702,7 +704,7 @@ mod tests {
                 Step::UseSite(span(1..2)),
             ],
         );
-        assert_eq!(place::<Id, Text>(&used), Some(5..8));
+        assert_eq!(place::<Id, Text>(&used), [1..2, 5..8]);
     }
 
     #[test]

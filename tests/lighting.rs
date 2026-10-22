@@ -185,6 +185,7 @@ fn t1_each_mapped_note_lights_its_own_element_and_the_shared_code() {
         lit(&v),
         [
             "$x: 0..500 750..1250",
+            "x: 0..500 750..1250",
             "*: 0..500 750..1250",
             "Qw: 0..500 750..1250",
             "220: 0..500",
