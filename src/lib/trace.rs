@@ -18,37 +18,29 @@ pub struct Trace<S> {
     /// Where the value went afterwards, newest step first; the path of this
     /// trace.
     pub via: Option<Arc<Via<S>>>,
-    /// The container's trace, for a part tagged with a trace of its own.
-    pub outer: Option<Arc<Trace<S>>>,
-    /// Whether `span`, `via` or `outer` reaches program text.
+    /// Whether `span` or `via` reaches program text.
     pub reaches_program: bool,
 }
 
 impl<S> Trace<S> {
     /// Builds a trace, deciding whether it reaches program text by `M`'s
     /// [`CarriesTrace::in_program`].
-    pub fn new<M: CarriesTrace<S>>(
-        span: Option<Span<S>>,
-        via: Option<Arc<Via<S>>>,
-        outer: Option<Arc<Trace<S>>>,
-    ) -> Trace<S> {
+    pub fn new<M: CarriesTrace<S>>(span: Option<Span<S>>, via: Option<Arc<Via<S>>>) -> Trace<S> {
         let reaches_program = span.as_ref().is_some_and(M::in_program)
-            || via.as_ref().is_some_and(|v| v.reaches_program)
-            || outer.as_ref().is_some_and(|o| o.reaches_program);
+            || via.as_ref().is_some_and(|v| v.reaches_program);
         Trace {
             span,
             via,
-            outer,
             reaches_program,
         }
     }
 
-    /// Returns the trace of `expr`: its span and via, with no container.
+    /// Returns the trace of `expr`: its span and via.
     pub fn of<M: CarriesTrace<S>>(expr: &SourceExpr<M, S>) -> Trace<S>
     where
         S: Clone,
     {
-        Trace::new::<M>(expr.span.clone(), expr.via.clone(), None)
+        Trace::new::<M>(expr.span.clone(), expr.via.clone())
     }
 }
 
@@ -83,7 +75,7 @@ impl<S> Via<S> {
 }
 
 /// What happened to a value at one step of its `via` chain.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Step<S> {
     /// A substituted variable or a module projection, at the place it was
     /// written.
@@ -100,9 +92,8 @@ pub enum Step<S> {
     },
 }
 
-/// Prints a trace as `⟨span, via, outer⟩`, with `·` for a missing span,
-/// outer or head, `ε` for an empty via, and a trailing `*` when the trace
-/// reaches program text.
+/// Prints a trace as `⟨span, via⟩`, with `·` for a missing span or head, `ε`
+/// for an empty via, and a trailing `*` when the trace reaches program text.
 impl<S: Debug> Display for Trace<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "⟨")?;
@@ -111,12 +102,8 @@ impl<S: Debug> Display for Trace<S> {
             None => write!(f, "·")?,
         }
         match &self.via {
-            Some(via) => write!(f, ", {via}")?,
-            None => write!(f, ", ε")?,
-        }
-        match &self.outer {
-            Some(outer) => write!(f, ", {outer}⟩")?,
-            None => write!(f, ", ·⟩")?,
+            Some(via) => write!(f, ", {via}⟩")?,
+            None => write!(f, ", ε⟩")?,
         }
         if self.reaches_program {
             write!(f, "*")?;

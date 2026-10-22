@@ -1408,7 +1408,7 @@ mod tests {
     /// Returns `w` under a trace mark.
     fn traced(w: Waveform<Traced>) -> Waveform<Traced> {
         Waveform::Marked {
-            id: Traced(Arc::new(trace::Trace::new::<Traced>(None, None, None))),
+            id: Traced(Arc::new(trace::Trace::new::<Traced>(None, None))),
             waveform: Box::new(w),
         }
     }

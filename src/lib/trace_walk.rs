@@ -40,17 +40,13 @@ pub struct WaveformMarks {
 }
 
 /// Returns the trace of the evaluation result `result` as a waveform: for a
-/// `Seq`, its waveform part's, linked to the `Seq`'s as the part's container;
-/// for any other value, its own.
+/// `Seq` whose waveform part has a span or via of its own, the part's; for
+/// any other value, its own.
 pub fn result_trace<M: CarriesTrace<S>, S: Clone>(result: &SourceExpr<M, S>) -> Arc<Trace<S>> {
     let own = Arc::new(Trace::of(result));
     match &result.expr {
         Expr::Seq { waveform, .. } if waveform.span.is_some() || waveform.via.is_some() => {
-            Arc::new(Trace::new::<M>(
-                waveform.span.clone(),
-                waveform.via.clone(),
-                Some(own),
-            ))
+            Arc::new(Trace::of(waveform))
         }
         _ => own,
     }
@@ -105,7 +101,7 @@ where
             });
         }
     }
-    if let Some(text_range) = instrument.and_then(|i| place::<M, S>(i, 1)) {
+    if let Some(text_range) = instrument.and_then(|i| place::<M, S>(i)) {
         for k in 0..walk.segments.len() {
             if !lit.marks.iter().any(|m| m.segments.contains(&k)) {
                 lit.add(Mark {
@@ -377,36 +373,30 @@ fn oldest<S>(via: &Option<Arc<Via<S>>>) -> Option<&Step<S>> {
 }
 
 /// Returns the program text a value with `trace` lights: where it was
-/// written, else the first program text it went through, else (following
-/// `outer` at most `outer_hops` times) its container's place.
+/// written, else the first program text it went through.
 ///
 /// Where a value was written is the head of the built-in that made it, when
 /// that head lights, and its span otherwise; a built value's span is the
 /// built-in's call, never what it lights.
-fn place<M: CarriesTrace<S>, S>(trace: &Trace<S>, outer_hops: usize) -> Option<Range<usize>> {
+fn place<M: CarriesTrace<S>, S>(trace: &Trace<S>) -> Option<Range<usize>> {
     if !trace.reaches_program {
         return None;
     }
     let written = match oldest(&trace.via) {
-        Some(Step::Built { head, .. }) => head.as_deref().and_then(|h| place::<M, S>(h, 0)),
+        Some(Step::Built { head, .. }) => head.as_deref().and_then(place::<M, S>),
         _ => trace.span.as_ref().and_then(program_range::<M, S>),
     };
     // A `Built` step is only ever the oldest, so the rest are use sites and
     // calls. The chain is newest first, so the oldest in program text is the
     // last found.
-    written
-        .or_else(|| {
-            steps(&trace.via)
-                .filter_map(|step| match step {
-                    Step::UseSite(span) | Step::Call(span) => program_range::<M, S>(span),
-                    Step::Built { .. } => None,
-                })
-                .last()
-        })
-        .or_else(|| match &trace.outer {
-            Some(outer) if outer_hops > 0 => place::<M, S>(outer, outer_hops - 1),
-            _ => None,
-        })
+    written.or_else(|| {
+        steps(&trace.via)
+            .filter_map(|step| match step {
+                Step::UseSite(span) | Step::Call(span) => program_range::<M, S>(span),
+                Step::Built { .. } => None,
+            })
+            .last()
+    })
 }
 
 /// Returns the parents of `trace`'s oldest step when it was built by a
@@ -425,7 +415,7 @@ fn lit_parents<S>(trace: &Trace<S>) -> &[Arc<Trace<S>>] {
 /// one with no trace mark beneath it, also lights the arguments its value
 /// consumed, through built-ins whose heads light.
 fn lights<M: CarriesTrace<S>, S>(trace: &Arc<Trace<S>>, folded: bool) -> Vec<Range<usize>> {
-    let mut out: Vec<Range<usize>> = place::<M, S>(trace, 1).into_iter().collect();
+    let mut out: Vec<Range<usize>> = place::<M, S>(trace).into_iter().collect();
     if folded {
         // The parents graph is shared and can be deep, so this walks it with
         // a stack and visits each trace once.
@@ -433,7 +423,7 @@ fn lights<M: CarriesTrace<S>, S>(trace: &Arc<Trace<S>>, folded: bool) -> Vec<Ran
         let mut seen = HashSet::new();
         while let Some(parent) = stack.pop() {
             if seen.insert(Arc::as_ptr(parent)) && parent.reaches_program {
-                out.extend(place::<M, S>(parent, 1));
+                out.extend(place::<M, S>(parent));
                 stack.extend(lit_parents(parent));
             }
         }
@@ -507,14 +497,14 @@ mod tests {
     }
 
     fn written(range: Range<usize>) -> Arc<Trace<Text>> {
-        Arc::new(Trace::new::<Id>(Some(span(range)), None, None))
+        Arc::new(Trace::new::<Id>(Some(span(range)), None))
     }
 
     fn trace(span: Option<Span<Text>>, steps: Vec<Step<Text>>) -> Arc<Trace<Text>> {
         let via = steps
             .into_iter()
             .fold(None, |prev, step| Some(Via::push::<Id>(step, prev)));
-        Arc::new(Trace::new::<Id>(span, via, None))
+        Arc::new(Trace::new::<Id>(span, via))
     }
 
     fn mark(trace: &Arc<Trace<Text>>, w: W) -> W {
@@ -699,7 +689,7 @@ mod tests {
                 parents: vec![],
             }],
         );
-        assert_eq!(place::<Id, Text>(&built, 1), Some(3..4));
+        assert_eq!(place::<Id, Text>(&built), Some(3..4));
     }
 
     #[test]
@@ -712,16 +702,7 @@ mod tests {
                 Step::UseSite(span(1..2)),
             ],
         );
-        assert_eq!(place::<Id, Text>(&used, 1), Some(5..8));
-    }
-
-    #[test]
-    fn a_container_is_followed_one_hop() {
-        let outer = written(7..8);
-        let middle = Arc::new(Trace::new::<Id>(Some(library()), None, Some(outer)));
-        let inner = Trace::new::<Id>(Some(library()), None, Some(middle.clone()));
-        assert_eq!(place::<Id, Text>(&middle, 1), Some(7..8));
-        assert_eq!(place::<Id, Text>(&inner, 1), None);
+        assert_eq!(place::<Id, Text>(&used), Some(5..8));
     }
 
     #[test]

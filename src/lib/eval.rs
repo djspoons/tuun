@@ -132,11 +132,10 @@ where
                             via,
                         });
                     }
-                    let mut value = value.clone();
-                    if let Some(span) = span {
-                        value.via = Some(Via::push::<M>(Step::UseSite(span), value.via.take()));
-                    }
-                    return Ok(value);
+                    return Ok(match span {
+                        Some(span) => push_step(value.clone(), &Step::UseSite(span)),
+                        None => value.clone(),
+                    });
                 }
             }
             return Err(self::Error::eval(
@@ -361,7 +360,7 @@ fn tag_in<M: CarriesTrace<S>, S: Clone>(expr: Expr<M, S>, trace: &Arc<Trace<S>>)
 
 /// Returns the surface part `part` of a value whose trace is `container`,
 /// tagged as [`tag_in`] does: with the container's trace when the part has no
-/// span or via of its own, else with its own, linked to the container's.
+/// span or via of its own, else with its own.
 fn tag_part<M: CarriesTrace<S>, S: Clone>(
     part: SourceExpr<M, S>,
     container: &Arc<Trace<S>>,
@@ -372,13 +371,59 @@ fn tag_part<M: CarriesTrace<S>, S: Clone>(
             if span.is_none() && via.is_none() {
                 tag_in(expr, container)
             } else {
-                let own = Trace::new::<M>(span.clone(), via.clone(), Some(container.clone()));
+                let own = Trace::new::<M>(span.clone(), via.clone());
                 tag_in(expr, &Arc::new(own))
             }
         }
         expr => expr,
     };
     SourceExpr { expr, span, via }
+}
+
+/// Returns `value` with `step` added as the newest step of its via, and of the
+/// via of each part at its surface (`Seq` parts, list elements, tuple fields,
+/// and theirs) that has a span or via of its own.
+///
+/// An anonymous part takes its container's trace when it is tagged (see
+/// [`tag_part`]), so it sees the step there.
+fn push_step<M: CarriesTrace<S>, S: Clone>(
+    value: SourceExpr<M, S>,
+    step: &Step<S>,
+) -> SourceExpr<M, S> {
+    let SourceExpr { expr, span, via } = value;
+    let via = Some(Via::push::<M>(step.clone(), via));
+    SourceExpr {
+        expr: push_step_into_parts(expr, step),
+        span,
+        via,
+    }
+}
+
+/// Returns `expr` with `step` pushed, as [`push_step`] does, onto each part
+/// at its surface that has a span or via of its own.
+fn push_step_into_parts<M: CarriesTrace<S>, S: Clone>(
+    expr: Expr<M, S>,
+    step: &Step<S>,
+) -> Expr<M, S> {
+    let push = |part: SourceExpr<M, S>| {
+        if part.span.is_none() && part.via.is_none() {
+            SourceExpr {
+                expr: push_step_into_parts(part.expr, step),
+                ..part
+            }
+        } else {
+            push_step(part, step)
+        }
+    };
+    match expr {
+        Expr::Seq { offset, waveform } => Expr::Seq {
+            offset: Box::new(push(*offset)),
+            waveform: Box::new(push(*waveform)),
+        },
+        Expr::List(exprs) => Expr::List(exprs.into_iter().map(push).collect()),
+        Expr::Tuple(exprs) => Expr::Tuple(exprs.into_iter().map(push).collect()),
+        expr => expr,
+    }
 }
 
 /// Returns `part` with each trace mark at its surface lifted off: the marked
@@ -581,11 +626,11 @@ where
                         context.push((name.clone(), value));
                     }
                     let body = substitute(&mut context, *body)?;
-                    let mut result = evaluate_closed(body)?;
-                    if let Some(site) = site {
-                        result.via = Some(Via::push::<M>(Step::Call(site), result.via.take()));
-                    }
-                    Ok(result)
+                    let result = evaluate_closed(body)?;
+                    Ok(match site {
+                        Some(site) => push_step(result, &Step::Call(site)),
+                        None => result,
+                    })
                 }
                 (
                     BuiltIn {
@@ -603,7 +648,7 @@ where
                             span.clone(),
                         ));
                     }
-                    let head = Trace::new::<M>(function.span, function.via, None);
+                    let head = Trace::new::<M>(function.span, function.via);
                     apply_builtin(&builtin, arguments, span, head)
                 }
                 (function, _) => Err(Error::internal(
@@ -619,12 +664,10 @@ where
         }),
         Expr::Project { module, name } => match evaluate_closed(*module)?.expr {
             Expr::BoundModule(entries) => match entries.into_iter().find(|(n, _)| n == &name) {
-                Some((_, mut value)) => {
-                    if let Some(span) = span {
-                        value.via = Some(Via::push::<M>(Step::UseSite(span), value.via.take()));
-                    }
-                    Ok(value)
-                }
+                Some((_, value)) => Ok(match span {
+                    Some(span) => push_step(value, &Step::UseSite(span)),
+                    None => value,
+                }),
                 None => Err(Error::eval(
                     format!("Module has no binding '{}'", name),
                     span,
@@ -1454,6 +1497,19 @@ mod tests {
         }
 
         #[test]
+        fn use_sites_and_calls_reach_a_values_parts() {
+            let program = "let x = [1] in f(x)";
+            let Expr::List(parts) = traced(program).expr else {
+                panic!("expected a list");
+            };
+            assert_eq!(text(program, parts[0].span.as_ref().unwrap()), "1");
+            assert_eq!(
+                steps(program, &parts[0].via),
+                ["use x", "use lib", "call f(x)"]
+            );
+        }
+
+        #[test]
         fn a_pipe_call_is_sited_at_its_function_expression() {
             let program = "2 | f";
             assert_eq!(steps(program, &traced(program).via), ["use lib", "call f"]);
@@ -1527,7 +1583,6 @@ mod tests {
             Arc::new(Trace::new::<Traced>(
                 Some(Span::new(Text::Program, range)),
                 None,
-                None,
             ))
         }
 
@@ -1547,7 +1602,7 @@ mod tests {
         }
 
         #[test]
-        fn a_seq_part_with_its_own_trace_links_to_its_container() {
+        fn a_seq_part_with_its_own_trace_keeps_it() {
             let own = SourceExpr {
                 expr: Expr::float(1.0),
                 span: Some(Span::new(Text::Program, 0..1)),
@@ -1566,12 +1621,11 @@ mod tests {
                 panic!("expected a marked offset");
             };
             assert!(Arc::ptr_eq(&id.0, &container));
-            // A part with its own keeps it, linked to the container's.
+            // A part with its own keeps it.
             let Expr::Waveform(Waveform::Marked { id, .. }) = &waveform.expr else {
                 panic!("expected a marked waveform");
             };
             assert_eq!(id.0.span.as_ref().unwrap().range, 0..1);
-            assert!(Arc::ptr_eq(id.0.outer.as_ref().unwrap(), &container));
         }
 
         #[test]
