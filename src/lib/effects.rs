@@ -160,6 +160,7 @@ impl EffectRunner {
         let Some(PendingJob::Program {
             index,
             generation,
+            text,
             on_success,
             on_failure,
             message,
@@ -196,7 +197,7 @@ impl EffectRunner {
         {
             return;
         }
-        match state.programs.record(index, outcome) {
+        match state.programs.record(index, text, outcome) {
             Ok(warnings) => {
                 // Warnings are informational: the program plays regardless, and
                 // only the status line reports them.
@@ -311,6 +312,7 @@ impl EffectRunner {
                     world.status,
                     start,
                     repeat_after_measures,
+                    &mut state.waveform_marks,
                 );
                 if let Some(message) = message
                     && !matches!(start, player::Start::At(_))
@@ -319,10 +321,11 @@ impl EffectRunner {
                 }
             }
             Effect::PlayProgramVoice(program_index) => {
-                if let Some(message) = self
-                    .player
-                    .play_program_voice(&state.programs, program_index)
-                {
+                if let Some(message) = self.player.play_program_voice(
+                    &state.programs,
+                    program_index,
+                    &mut state.waveform_marks,
+                ) {
                     state.message = message;
                 }
             }
@@ -338,6 +341,7 @@ impl EffectRunner {
                     sixteenth,
                     world.status,
                     state.repeat_after_measures,
+                    &mut state.waveform_marks,
                 ) {
                     state.message = message;
                 }
@@ -405,6 +409,7 @@ impl EffectRunner {
                 };
                 let generation = program.generation();
                 let input = state.programs.evaluation_input(program_index);
+                let text = input.text.as_str().into();
                 if self.jobs.send(processing::Job::Program(input)).is_err() {
                     state.message = "The processing thread has stopped".to_string();
                     return;
@@ -414,6 +419,7 @@ impl EffectRunner {
                 state.processing.push_back(PendingJob::Program {
                     index: program_index,
                     generation,
+                    text,
                     on_success,
                     on_failure,
                     message,
@@ -441,6 +447,7 @@ impl EffectRunner {
                     let new_keys = Keys {
                         id: program_index,
                         function: expr.clone(),
+                        text: program.evaluated_text().clone(),
                         note_off_waveforms: HashMap::new(),
                     };
                     state.keys = Some(new_keys);
@@ -476,13 +483,25 @@ impl EffectRunner {
                     expr::SourceExpr::float(velocity as f32 / 127.0),
                 ];
                 match self.environment.apply_note_function(&keys.function, args) {
-                    Ok((mut note_on, note_off, _marks)) => {
+                    Ok((mut note_on, note_off, marks)) => {
                         keys.note_off_waveforms.insert(key, note_off);
                         // `note_on`'s `Marked(Slider { .. })` nodes still hold
                         // the values from when the instrument was originally
                         // evaluated, so swap in the current runtime ones.
                         player::substitute_current_slider_values(&mut note_on, &state.programs);
-                        self.player.play_note(key, note_on, program.level_db());
+                        let marks = player::PlayedMarks {
+                            program: keys.id,
+                            text: keys.text.clone(),
+                            marks,
+                            extra: vec![],
+                        };
+                        self.player.play_note(
+                            key,
+                            note_on,
+                            program.level_db(),
+                            marks,
+                            &mut state.waveform_marks,
+                        );
                     }
                     Err(error) => {
                         let diagnostic = self.environment.diagnose(
@@ -673,6 +692,8 @@ fn sync_encoders(state: &AppState, launchkey: &mut launchkey::Launchkey) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crate::tracker::Select;
     use crate::waveform;
 
@@ -710,6 +731,7 @@ mod tests {
         tracker::Status {
             buffer_start: Instant::now(),
             marks: vec![],
+            start_times: Vec::new(),
             tracker_load: None,
             allocations: None,
         }
@@ -1179,6 +1201,7 @@ mod tests {
         state.keys = Some(Keys {
             id: 0,
             function: expr::SourceExpr::float(0.0),
+            text: Arc::default(),
             note_off_waveforms: HashMap::new(),
         });
 
@@ -1339,6 +1362,7 @@ mod tests {
         state.keys = Some(Keys {
             id: 0,
             function: expr::SourceExpr::float(0.0),
+            text: Arc::default(),
             note_off_waveforms: HashMap::new(),
         });
         std::fs::write(&path, "#{").unwrap();

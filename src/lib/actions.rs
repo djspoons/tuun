@@ -4,8 +4,9 @@
 //! `Action`s. `apply` then mutates `AppState` and returns `Effect`s, which
 //! the runner in `effects.rs` executes against the outside world.
 
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Range;
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::diagnostics::{self, Diagnostic, Source};
@@ -138,6 +139,8 @@ pub enum PendingJob {
         index: usize,
         /// The program's generation when the job was sent.
         generation: u64,
+        /// The program's text when the job was sent: the text evaluated.
+        text: Arc<str>,
         /// The effects to run once a successful result is recorded.
         on_success: Vec<Effect>,
         /// The effects to run once a failed result is recorded.
@@ -188,6 +191,8 @@ pub struct AppState {
     /// The jobs sent to the processing thread whose replies haven't been
     /// applied, in the order they were sent (the order replies arrive in).
     pub processing: VecDeque<PendingJob>,
+    /// The marks of the waveform last sent to play under each id.
+    pub waveform_marks: HashMap<WaveformId, player::PlayedMarks>,
 }
 
 impl AppState {
@@ -213,6 +218,7 @@ impl AppState {
             should_exit: false,
             message,
             processing: VecDeque::new(),
+            waveform_marks: HashMap::new(),
         })
     }
 
@@ -2273,6 +2279,7 @@ mod tests {
         tracker::Status {
             buffer_start: Instant::now(),
             marks: vec![],
+            start_times: Vec::new(),
             tracker_load: None,
             allocations: None,
         }
@@ -3302,6 +3309,7 @@ _ = saw(220);";
         state.keys = Some(keys::Keys {
             id: 0,
             function: expr::SourceExpr::float(0.0),
+            text: Arc::default(),
             note_off_waveforms: Default::default(),
         });
     }
@@ -4157,10 +4165,13 @@ _ = saw(220);";
     /// Marks an evaluation of the program at `index` as waiting on the
     /// processing thread.
     fn pend_evaluation(state: &mut AppState, index: usize) {
-        let generation = state.programs.programs()[index].generation();
+        let program = &state.programs.programs()[index];
+        let generation = program.generation();
+        let text = program.text().into();
         state.processing.push_back(PendingJob::Program {
             index,
             generation,
+            text,
             on_success: vec![Effect::SetMode(Mode::Select)],
             on_failure: vec![],
             message: String::new(),

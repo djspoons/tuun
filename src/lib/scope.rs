@@ -678,6 +678,7 @@ mod tests {
         let status = |marks| Status {
             buffer_start: now,
             marks,
+            start_times: Vec::new(),
             tracker_load: None,
             allocations: None,
         };

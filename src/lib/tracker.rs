@@ -83,6 +83,10 @@ where
     // Marks for each active waveform as well as any pending waveforms; a mark may appear more
     // than once if a given waveform is both active and pending
     pub marks: Vec<Mark<I, M>>,
+    /// The start of each waveform that is active, pending, or finished during
+    /// this status's buffer; a waveform both active and pending (repeating)
+    /// appears once for each.
+    pub start_times: Vec<(I, Instant)>,
     // The current tracker load, the ratio of sample frequency to samples generated per second
     pub tracker_load: Option<f32>,
     // The number of buffers allocated while generating this status's buffer
@@ -513,6 +517,7 @@ where
         let mut status_to_send = Status {
             buffer_start,
             marks: Vec::new(),
+            start_times: Vec::new(),
             tracker_load: None,
             allocations: None,
         };
@@ -526,16 +531,19 @@ where
         );
         status_to_send.allocations = Some(allocations);
 
-        // Copy the marks from finished waveforms into the status
-        for active in finished {
+        // Copy the marks and starts from finished, active and pending waveforms
+        // into the status.
+        for active in finished.iter().chain(&self.active_waveforms) {
             status_to_send.marks.extend_from_slice(&active.marks);
-        }
-        // Copy the marks from active and pending waveforms into the status
-        for active in &self.active_waveforms {
-            status_to_send.marks.extend_from_slice(&active.marks);
+            status_to_send
+                .start_times
+                .push((active.id.clone(), active.start));
         }
         for pending in &self.pending_waveforms {
             status_to_send.marks.extend_from_slice(&pending.marks);
+            status_to_send
+                .start_times
+                .push((pending.id.clone(), pending.start));
         }
 
         self.status_sender.send(status_to_send).unwrap();
@@ -1190,6 +1198,51 @@ mod tests {
     }
 
     #[test]
+    fn status_reports_the_starts_of_finished_active_and_pending_waveforms() {
+        use waveform::Waveform::{Const, Fixed};
+        let (mut tracker, sender, status_receiver, _samples) = test_tracker();
+        let now = Instant::now();
+        let later = now + Duration::from_secs(10);
+        // Finishes within the first buffer.
+        sender
+            .send(play(WaveformId::Program(0), Fixed(vec![1.0; 8], ())))
+            .unwrap();
+        sender
+            .send(play(WaveformId::Program(1), Const(1.0)))
+            .unwrap();
+        sender
+            .send(Command::Play {
+                id: WaveformId::Program(2),
+                waveform: Const(1.0),
+                start: Some(later),
+                repeat_every: None,
+            })
+            .unwrap();
+        let mut out = vec![0.0f32; 64];
+        tracker.callback(&mut out);
+
+        let status = status_receiver.try_recv().unwrap();
+        let start = status.buffer_start;
+        assert_eq!(
+            status.start_times,
+            vec![
+                (WaveformId::Program(0), start),
+                (WaveformId::Program(1), start),
+                (WaveformId::Program(2), later),
+            ]
+        );
+        tracker.callback(&mut out);
+        let ids: Vec<_> = status_receiver
+            .try_recv()
+            .unwrap()
+            .start_times
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(ids, vec![WaveformId::Program(1), WaveformId::Program(2)]);
+    }
+
+    #[test]
     fn status_selector_queries_distinguish_active_and_pending() {
         let now = Instant::now();
         let mark = |id, start| Mark {
@@ -1211,6 +1264,7 @@ mod tests {
                 ),
                 mark(WaveformId::Key(60), now - Duration::from_secs(1)),
             ],
+            start_times: Vec::new(),
             tracker_load: None,
             allocations: None,
         };

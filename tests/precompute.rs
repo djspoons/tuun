@@ -2,6 +2,7 @@
 //! same waveform as precomputing each play of it.
 #![cfg(feature = "native")]
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Instant;
@@ -26,11 +27,12 @@ fn played(
     let status = tracker::Status {
         buffer_start: Instant::now(),
         marks: Vec::new(),
+        start_times: Vec::new(),
         tracker_load: None,
         allocations: None,
     };
     player
-        .play_program(set, 0, &status, Start::Now, None)
+        .play_program(set, 0, &status, Start::Now, None, &mut HashMap::new())
         .expect("the program plays");
     match commands.try_recv() {
         Ok(tracker::Command::Play { waveform, .. }) => waveform,
@@ -44,8 +46,10 @@ fn processed(environment: &Environment, source: &str, precompute: bool) -> Progr
     let (mut set, warning) = ProgramSet::from_source(source.to_string(), PathBuf::new())
         .expect("test source should parse");
     assert_eq!(warning, "");
-    let outcome = processing::process(environment, &set.evaluation_input(0), precompute);
-    set.record(0, outcome).expect("the program evaluates");
+    let input = set.evaluation_input(0);
+    let outcome = processing::process(environment, &input, precompute);
+    set.record(0, input.text.into(), outcome)
+        .expect("the program evaluates");
     set
 }
 

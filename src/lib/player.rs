@@ -3,7 +3,8 @@
 //! `Player` owns the sender that goes straight to the tracker. All methods take
 //! `&self`.
 
-use std::sync::mpsc;
+use std::collections::HashMap;
+use std::sync::{Arc, mpsc};
 use std::time;
 
 use crate::diagnostics::Source;
@@ -12,15 +13,45 @@ use crate::expr;
 use crate::generator;
 use crate::ids::{MarkId, WaveformId, WaveformSelector};
 use crate::optimizer;
-use crate::programs::{Evaluated, ProgramSet};
+use crate::programs::{Evaluated, Program, ProgramSet};
 use crate::sequencer;
 use crate::slider;
+use crate::trace_walk::{self, WaveformMarks};
 use crate::tracker;
 use crate::waveform;
 
 /// Sentinel sixteenth for a program's silent anchor step, played alongside
 /// the real steps to carry the family's `TopLevel` mark.
 pub const ANCHOR_SIXTEENTH: u8 = u8::MAX;
+
+/// The marks of a waveform sent to play, and the program text they index into.
+#[derive(Clone, Debug)]
+pub struct PlayedMarks {
+    /// The index of the program the waveform comes from.
+    pub program: usize,
+    /// The program text the marks' byte ranges index into.
+    pub text: Arc<str>,
+    /// The marks of the waveform as evaluated.
+    pub marks: Arc<WaveformMarks>,
+    /// Additional `marks`, such as a step's literal marks.
+    pub extra: Vec<trace_walk::Mark>,
+}
+
+/// Returns the played marks of a waveform of the program at `program_index`,
+/// whose marks as evaluated are `marks`.
+fn played_marks(
+    program_index: usize,
+    program: &Program,
+    marks: &Arc<WaveformMarks>,
+    extra: Vec<trace_walk::Mark>,
+) -> PlayedMarks {
+    PlayedMarks {
+        program: program_index,
+        text: program.evaluated_text().clone(),
+        marks: marks.clone(),
+        extra,
+    }
+}
 
 pub fn db_to_amplitude(db: f32) -> f32 {
     10.0_f32.powf(db / 20.0)
@@ -130,6 +161,9 @@ impl Player {
     /// plus a silent anchor step carrying the `TopLevel` mark. Either starts
     /// where `start` says, repeating every `repeat_after_measures` measures if
     /// given.
+    ///
+    /// Records the marks of each waveform played in `waveform_marks`, by the id
+    /// it plays under.
     pub fn play_program(
         &self,
         set: &ProgramSet,
@@ -137,13 +171,28 @@ impl Player {
         status: &tracker::Status<WaveformId, MarkId>,
         start: Start,
         repeat_after_measures: Option<u32>,
+        waveform_marks: &mut HashMap<WaveformId, PlayedMarks>,
     ) -> Option<String> {
         // A sequence always plays decomposed, so the sequencer can edit its
         // steps live.
         if set.program(program_index)?.sequence().is_some() {
-            self.play_sequence(set, program_index, status, start, repeat_after_measures)
+            self.play_sequence(
+                set,
+                program_index,
+                status,
+                start,
+                repeat_after_measures,
+                waveform_marks,
+            )
         } else {
-            self.play_waveform(set, program_index, status, start, repeat_after_measures)
+            self.play_waveform(
+                set,
+                program_index,
+                status,
+                start,
+                repeat_after_measures,
+                waveform_marks,
+            )
         }
     }
 
@@ -156,8 +205,12 @@ impl Player {
         status: &tracker::Status<WaveformId, MarkId>,
         start: Start,
         repeat_after_measures: Option<u32>,
+        waveform_marks: &mut HashMap<WaveformId, PlayedMarks>,
     ) -> Option<String> {
         let program = set.program(program_index)?;
+        let Some(Evaluated::Waveform(waveform, marks)) = program.evaluated() else {
+            return None;
+        };
         let message = play_waveform_message(
             &set.display_name(program_index),
             repeat_after_measures,
@@ -174,19 +227,21 @@ impl Player {
             })),
             Start::At(instant) => Some(instant),
         };
-        let mut waveform = program.waveform().cloned()?;
+        let mut waveform = waveform.clone();
         // Substitute the program's current slider positions before handing
         // the waveform to the tracker (since the cached ones may be old).
         substitute_current_slider_values(&mut waveform, set);
+        let id = WaveformId::Program(program_index);
         self.sender
             .send(tracker::Command::Play {
                 // TODO maybe extend the top-level mark to the full measure?
-                id: WaveformId::Program(program_index),
+                id: id.clone(),
                 waveform: build_top_level_waveform(waveform, program.level_db()),
                 start: start_instant,
                 repeat_every,
             })
             .unwrap();
+        waveform_marks.insert(id, played_marks(program_index, program, marks, vec![]));
         Some(message)
     }
 
@@ -203,23 +258,33 @@ impl Player {
     ///
     /// A program reading `[1, 2, 3, 4] | on_beats(kick)` plays `kick` once,
     /// where [`Player::play_program`] would play all four steps.
-    pub fn play_program_voice(&self, set: &ProgramSet, program_index: usize) -> Option<String> {
+    ///
+    /// Records the waveform's marks in `waveform_marks`.
+    pub fn play_program_voice(
+        &self,
+        set: &ProgramSet,
+        program_index: usize,
+        waveform_marks: &mut HashMap<WaveformId, PlayedMarks>,
+    ) -> Option<String> {
         let program = set.program(program_index)?;
         let display_name = set.display_name(program_index);
-        let mut waveform = match program.evaluated()? {
-            Evaluated::Waveform(waveform, _) => waveform.clone(),
-            Evaluated::Sequence(sequence) => sequence.step_waveform.clone(),
+        let (waveform, marks) = match program.evaluated()? {
+            Evaluated::Waveform(waveform, marks) => (waveform, marks),
+            Evaluated::Sequence(sequence) => (&sequence.step_waveform, &sequence.step_marks),
             Evaluated::KeysInstrument(_) => return None,
         };
+        let mut waveform = waveform.clone();
         substitute_current_slider_values(&mut waveform, set);
+        let id = WaveformId::Program(program_index);
         self.sender
             .send(tracker::Command::Play {
-                id: WaveformId::Program(program_index),
+                id: id.clone(),
                 waveform: build_top_level_waveform(waveform, program.level_db()),
                 start: None,
                 repeat_every: None,
             })
             .unwrap();
+        waveform_marks.insert(id, played_marks(program_index, program, marks, vec![]));
         Some(format!("Playing voice of {}", display_name))
     }
 
@@ -232,6 +297,7 @@ impl Player {
         status: &tracker::Status<WaveformId, MarkId>,
         start: Start,
         repeat_after_measures: Option<u32>,
+        waveform_marks: &mut HashMap<WaveformId, PlayedMarks>,
     ) -> Option<String> {
         let program = set.program(program_index)?;
         let sequence = program.sequence()?;
@@ -257,17 +323,22 @@ impl Player {
         let mut step = sequence.step_waveform.clone();
         substitute_current_slider_values(&mut step, set);
         for step_beat in sequence.step_beats() {
+            let sixteenth = sequencer::sixteenth_for_beat(step_beat);
+            let id = WaveformId::Step {
+                program: program_index,
+                sixteenth,
+            };
             self.sender
                 .send(tracker::Command::Play {
-                    id: WaveformId::Step {
-                        program: program_index,
-                        sixteenth: sequencer::sixteenth_for_beat(step_beat),
-                    },
+                    id: id.clone(),
                     waveform: build_leveled_waveform(step.clone(), program.level_db()),
-                    start: Some(base + duration_from_beats_f32(self.tempo, step_beat - 1.0)),
+                    start: Some(base + beat_offset(self.tempo, step_beat)),
                     repeat_every,
                 })
                 .unwrap();
+            let extra = sequence.step_literal_marks(sixteenth);
+            let marks = played_marks(program_index, program, &sequence.step_marks, extra);
+            waveform_marks.insert(id, marks);
         }
         // The anchor spans the whole pattern so the family reads as playing
         // for as long as its steps do.
@@ -303,7 +374,7 @@ impl Player {
     /// `status`; `default_repeat_measures` supplies the period when only a
     /// queued (pending) anchor is visible. Returns a user-visible warning
     /// when the step can't sound (no upcoming occurrence), and `None`
-    /// otherwise.
+    /// otherwise. Records the step's marks in `waveform_marks` when it plays.
     pub fn play_step(
         &self,
         set: &ProgramSet,
@@ -311,6 +382,7 @@ impl Player {
         sixteenth: u8,
         status: &tracker::Status<WaveformId, MarkId>,
         default_repeat_measures: Option<u32>,
+        waveform_marks: &mut HashMap<WaveformId, PlayedMarks>,
     ) -> Option<String> {
         let program = set.program(program_index)?;
         let sequence = program.sequence()?;
@@ -332,8 +404,7 @@ impl Player {
                 }
             }
         }
-        let offset =
-            duration_from_beats_f32(self.tempo, sequencer::sixteenth_beat(sixteenth) - 1.0);
+        let offset = beat_offset(self.tempo, sequencer::sixteenth_beat(sixteenth));
         let start = match (cycle_start, next_cycle_start) {
             (Some(cycle), _) if cycle + offset > now => cycle + offset,
             (_, Some(next_cycle)) => next_cycle + offset,
@@ -356,28 +427,41 @@ impl Player {
         };
         let mut step = sequence.step_waveform.clone();
         substitute_current_slider_values(&mut step, set);
+        let id = WaveformId::Step {
+            program: program_index,
+            sixteenth,
+        };
         let _ = self.sender.send(tracker::Command::Play {
-            id: WaveformId::Step {
-                program: program_index,
-                sixteenth,
-            },
+            id: id.clone(),
             waveform: build_leveled_waveform(step, program.level_db()),
             start: Some(start),
             repeat_every,
         });
+        let extra = sequence.step_literal_marks(sixteenth);
+        let marks = played_marks(program_index, program, &sequence.step_marks, extra);
+        waveform_marks.insert(id, marks);
         None
     }
 
     /// Plays a note waveform under `WaveformId::Key(key)` immediately,
     /// wrapped with the top-level amplitude/terminator
-    /// marks at `level_db`.
-    pub fn play_note(&self, key: u8, waveform: waveform::Waveform<MarkId>, level_db: f32) {
+    /// marks at `level_db`, and records its marks, `marks`, in `waveform_marks`.
+    pub fn play_note(
+        &self,
+        key: u8,
+        waveform: waveform::Waveform<MarkId>,
+        level_db: f32,
+        marks: PlayedMarks,
+        waveform_marks: &mut HashMap<WaveformId, PlayedMarks>,
+    ) {
+        let id = WaveformId::Key(key);
         let _ = self.sender.send(tracker::Command::Play {
-            id: WaveformId::Key(key),
+            id: id.clone(),
             waveform: build_top_level_waveform(waveform, level_db),
             start: None,
             repeat_every: None,
         });
+        waveform_marks.insert(id, marks);
     }
 
     /// Fades out the waveforms matched by the selector over a short ramp. A
@@ -674,6 +758,12 @@ fn duration_from_beats(tempo: u32, beats: u64) -> time::Duration {
     time::Duration::from_secs_f32(beats as f32 * 60.0 / tempo as f32)
 }
 
+/// Returns the time from the start of a sequence's pass to the start of its
+/// step on `beat` (1-based), at `tempo` beats per minute.
+pub fn beat_offset(tempo: u32, beat: f32) -> time::Duration {
+    duration_from_beats_f32(tempo, beat - 1.0)
+}
+
 /// Fractional-beat sibling of `duration_from_beats`, for sixteenth offsets.
 fn duration_from_beats_f32(tempo: u32, beats: f32) -> time::Duration {
     time::Duration::from_secs_f32(beats * 60.0 / tempo as f32)
@@ -689,6 +779,7 @@ mod tests {
         tracker::Status {
             buffer_start: Instant::now(),
             marks: vec![],
+            start_times: Vec::new(),
             tracker_load: None,
             allocations: None,
         }
@@ -797,10 +888,11 @@ mod tests {
                 .expect("test source should parse");
         assert!(message.is_empty(), "{}", message);
         let environment = Environment::new(8000, 90, std::path::PathBuf::new());
+        let input = set.evaluation_input(0);
         let evaluated = environment
-            .evaluate_program(&set.evaluation_input(0))
+            .evaluate_program(&input)
             .expect("test program should evaluate");
-        set.record(0, Ok((Some(evaluated), Vec::new())))
+        set.record(0, input.text.into(), Ok((Some(evaluated), Vec::new())))
             .expect("a success records");
         assert!(set.program(0).unwrap().sequence().is_some());
         set
@@ -832,7 +924,15 @@ mod tests {
         let set = sequenced_set();
         let (player, receiver) = test_player();
 
-        let message = player.play_program(&set, 0, &empty_status(), Start::Now, Some(1));
+        let mut waveform_marks = HashMap::new();
+        let message = player.play_program(
+            &set,
+            0,
+            &empty_status(),
+            Start::Now,
+            Some(1),
+            &mut waveform_marks,
+        );
         assert!(message.is_some());
 
         let commands: Vec<_> = receiver.try_iter().collect();
@@ -885,6 +985,18 @@ mod tests {
         assert!(!format!("{}", step_on_1.1).contains("top-level"));
         assert!(!format!("{}", step_on_2_5.1).contains("top-level"));
         assert!(format!("{}", anchor.1).contains("top-level"));
+        // Each step's marks add its own literal; the anchor has none.
+        let sequence = set.program(0).unwrap().sequence().unwrap();
+        for sixteenth in [0, 6] {
+            let marks = &waveform_marks[&WaveformId::Step {
+                program: 0,
+                sixteenth,
+            }];
+            assert_eq!(marks.program, 0);
+            assert_eq!(marks.extra, sequence.step_literal_marks(sixteenth));
+            assert_eq!(marks.text, *set.program(0).unwrap().evaluated_text());
+        }
+        assert_eq!(waveform_marks.len(), 2);
     }
 
     /// A sequence's voice is one hit, not the pattern — where `play_program`
@@ -894,7 +1006,7 @@ mod tests {
         let set = sequenced_set();
         let (player, receiver) = test_player();
 
-        let message = player.play_program_voice(&set, 0);
+        let message = player.play_program_voice(&set, 0, &mut HashMap::new());
         assert!(message.is_some());
 
         let commands: Vec<_> = receiver.try_iter().collect();
@@ -924,15 +1036,20 @@ mod tests {
                 .expect("test source should parse");
         assert!(message.is_empty(), "{}", message);
         let environment = Environment::new(8000, 90, std::path::PathBuf::new());
+        let input = set.evaluation_input(0);
         let evaluated = environment
-            .evaluate_program(&set.evaluation_input(0))
+            .evaluate_program(&input)
             .expect("test program should evaluate");
-        set.record(0, Ok((Some(evaluated), Vec::new())))
+        set.record(0, input.text.into(), Ok((Some(evaluated), Vec::new())))
             .expect("a success records");
         assert!(set.program(0).unwrap().sequence().is_none());
 
         let (player, receiver) = test_player();
-        assert!(player.play_program_voice(&set, 0).is_some());
+        assert!(
+            player
+                .play_program_voice(&set, 0, &mut HashMap::new())
+                .is_some()
+        );
 
         let commands: Vec<_> = receiver.try_iter().collect();
         assert_eq!(commands.len(), 1);
@@ -958,7 +1075,7 @@ mod tests {
         status.marks = vec![anchor_mark(0, cycle), anchor_mark(0, next_cycle)];
 
         // Sixteenth 8 is beat 3, two beats into the cycle — still ahead.
-        let message = player.play_step(&set, 0, 8, &status, None);
+        let message = player.play_step(&set, 0, 8, &status, None, &mut HashMap::new());
         assert!(message.is_none());
 
         let commands: Vec<_> = receiver.try_iter().collect();
@@ -995,7 +1112,7 @@ mod tests {
         status.marks = vec![anchor_mark(0, cycle), anchor_mark(0, next_cycle)];
 
         // Sixteenth 0 is beat 1, which started the cycle — already passed.
-        let message = player.play_step(&set, 0, 0, &status, None);
+        let message = player.play_step(&set, 0, 0, &status, None, &mut HashMap::new());
         assert!(message.is_none());
 
         let commands: Vec<_> = receiver.try_iter().collect();
@@ -1015,7 +1132,7 @@ mod tests {
         let mut status = empty_status();
         status.marks = vec![anchor_mark(0, now - Duration::from_secs(1))];
 
-        let message = player.play_step(&set, 0, 0, &status, None);
+        let message = player.play_step(&set, 0, 0, &status, None, &mut HashMap::new());
         assert!(message.unwrap().contains("passed"));
         assert!(receiver.try_iter().next().is_none());
     }
@@ -1035,7 +1152,7 @@ mod tests {
 
         // Sixteenth 8 is beat 3, two beats into the cycle — still ahead, so
         // the step does sound; only its repeat is at issue.
-        let message = player.play_step(&set, 0, 8, &status, Some(1));
+        let message = player.play_step(&set, 0, 8, &status, Some(1), &mut HashMap::new());
         assert!(message.is_none());
 
         let commands: Vec<_> = receiver.try_iter().collect();

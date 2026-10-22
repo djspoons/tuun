@@ -2,6 +2,7 @@
 //! note-on/-off events.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::diagnostics::Source;
 use crate::expr;
@@ -21,6 +22,9 @@ pub struct Keys {
     /// does not change the installed instrument. Should be a closed value
     /// except for references to sliders.
     pub function: expr::SourceExpr<MarkId, Source>,
+    /// The program's text that `function` was evaluated from, which the byte
+    /// ranges of its notes' marks index into.
+    pub text: Arc<str>,
     /// The note-off waveform captured at note-on time for each held key
     /// (keys are MIDI note numbers).
     pub note_off_waveforms: HashMap<u8, waveform::Waveform<MarkId>>,

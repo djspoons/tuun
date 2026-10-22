@@ -258,6 +258,9 @@ pub struct Program {
     /// `None` when never evaluated, when the last evaluation failed, or when it
     /// was of an empty text.
     evaluated: Option<Evaluated>,
+    /// The text of the last evaluation recorded, which `evaluated`'s marks
+    /// index into.
+    evaluated_text: Arc<str>,
     /// Undo/redo history for Edit-mode text changes.
     history: EditHistory,
     /// Counts the replacements of `text` by [`Program::set_text`].
@@ -276,6 +279,7 @@ impl Program {
             level_db: 0.0,
             kind: ProgramKind::Waveform,
             evaluated: None,
+            evaluated_text: Arc::default(),
             history: EditHistory::default(),
             generation: 0,
         }
@@ -332,6 +336,7 @@ impl Program {
                     level_db,
                     kind,
                     evaluated: None,
+                    evaluated_text: Arc::default(),
                     history: EditHistory::default(),
                     generation: 0,
                 })
@@ -387,6 +392,12 @@ impl Program {
     /// evaluated again.
     pub fn evaluated(&self) -> Option<&Evaluated> {
         self.evaluated.as_ref()
+    }
+
+    /// Returns the text of the last evaluation recorded: the text the byte
+    /// ranges of [`Program::evaluated`]'s marks index into.
+    pub fn evaluated_text(&self) -> &Arc<str> {
+        &self.evaluated_text
     }
 
     /// Returns the waveform if the last recorded evaluation produced one that
@@ -962,16 +973,18 @@ impl ProgramSet {
         &self.source
     }
 
-    /// Records `outcome` as the result of evaluating the program at `index`,
-    /// and returns its diagnostics: the warnings on success, the errors (and
-    /// any warnings) on failure.
+    /// Records `outcome` as the result of evaluating `text` as the program at
+    /// `index`, and returns its diagnostics: the warnings on success, the
+    /// errors (and any warnings) on failure.
     ///
     /// A failure drops any previous result.
     pub fn record(
         &mut self,
         index: usize,
+        text: Arc<str>,
         outcome: Outcome,
     ) -> Result<Vec<Diagnostic>, Vec<Diagnostic>> {
+        self.programs[index].evaluated_text = text;
         match outcome {
             Ok((evaluated, warnings)) => {
                 self.programs[index].evaluated = evaluated;

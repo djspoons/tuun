@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use sdl2::Sdl;
@@ -14,7 +15,8 @@ use crate::actions::{AppState, Mode};
 use crate::ids::{MarkId, WaveformId, WaveformSelector};
 use crate::launchkey;
 use crate::metric::Metric;
-use crate::programs::{PROGRAMS_PER_BANK, SliderDisplay};
+use crate::player::{self, PlayedMarks};
+use crate::programs::{PROGRAMS_PER_BANK, Program, ProgramSet, SliderDisplay};
 use crate::recorder::{Finish, Phase};
 use crate::scope;
 use crate::tracker;
@@ -479,11 +481,19 @@ impl<'ttf> Renderer<'ttf> {
         let marks_total_height = (marks_bottom - programs_bottom).max(0.0);
         let marks_row_height = marks_total_height / PROGRAMS_PER_BANK as f32;
         let marks_y_padding = 6.0;
-        // We "round" some values below by sample_duration as Instant is a lot more precise.
-        // For example, sometimes a program will start just before the measure it's supposed
-        // to start in, so we move its start time slightly to account for this. Not sure I did
-        // that exactly right, but this seems close enough for now.
+        // Each measure is drawn one sample short, as Instant is a lot more precise than the
+        // sample clock: a mark starting at the next measure then never draws a sliver at the
+        // end of this one.
         let sample_duration = Duration::from_secs_f64(1.0 / self.sample_rate as f64);
+        let strip = strip_marks(
+            &status.start_times,
+            &state.waveform_marks,
+            &state.programs,
+            self.tempo,
+            self.sample_rate,
+        );
+        // Each mark's rectangle, its colour, and whether it's sounding.
+        let mut rects = Vec::new();
         for even in [false, true] {
             // Start with a point far into the future.
             let mut marks_start = Instant::now()
@@ -511,52 +521,40 @@ impl<'ttf> Renderer<'ttf> {
                     }
                 }
             }
-            for mark in status.marks.iter().rev() {
-                // Reverse so we draw earlier ones last
-                let program_index = match &mark.waveform_id {
-                    WaveformId::Program(index) => *index,
-                    WaveformId::Step { program, .. } => *program,
-                    _ => continue,
-                };
-                // Only draw Mark(1), and only when its width is known.
-                if mark.mark_id != MarkId::UserDefined(1) {
-                    continue;
-                }
-                let Some(duration) = mark.duration else {
+            for mark in &strip {
+                // A mark running into the next measure continues there.
+                let Some(part) = mark.within(marks_start, marks_duration) else {
                     continue;
                 };
-                // Skip marks that don't start during this measure.
-                if mark.start < marks_start - sample_duration
-                    || mark.start >= marks_start + marks_duration
-                {
-                    continue;
-                }
+                let program_index = mark.program;
                 let row = program_index % PROGRAMS_PER_BANK;
                 let mut program_color = programs[program_index]
                     .color()
                     .map(|(r, g, b)| Color::RGB(r, g, b))
                     .unwrap_or(INACTIVE_COLOR);
-                program_color.a = 128;
-                if now < mark.start || now >= mark.start + duration {
+                let sounding = mark.start <= now && now < mark.start + mark.duration;
+                if !sounding {
                     program_color.r /= 2;
                     program_color.g /= 2;
                     program_color.b /= 2;
                 }
-                self.canvas.set_draw_color(program_color);
-                let x = (mark.start - marks_start).as_secs_f32() / marks_duration.as_secs_f32()
+                let x = (part.start - marks_start).as_secs_f32() / marks_duration.as_secs_f32()
                     * marks_width
                     + marks_x_offset;
                 let y = row as f32 * marks_row_height + programs_bottom;
-                let width = duration.as_secs_f32() / marks_duration.as_secs_f32() * marks_width;
+                let width =
+                    part.duration.as_secs_f32() / marks_duration.as_secs_f32() * marks_width;
                 let height = marks_row_height - marks_y_padding;
-                self.canvas
-                    .fill_rect(sdl2::rect::Rect::new(
-                        x as i32,
-                        y as i32,
-                        width as u32,
-                        height as u32,
-                    ))
-                    .unwrap();
+                let rect = Rect::new(x as i32, y as i32, width as u32, height as u32);
+                rects.push((sounding, program_color, rect));
+            }
+        }
+        // Sounding marks go on top, so overlaps never hide where one starts or
+        // ends.
+        for sounding in [false, true] {
+            for (_, color, rect) in rects.iter().filter(|(s, _, _)| *s == sounding) {
+                self.canvas.set_draw_color(*color);
+                self.canvas.fill_rect(*rect).unwrap();
             }
         }
 
@@ -1056,6 +1054,105 @@ pub fn beat_phase(now: Instant, beat_start: Instant, beat_duration: Duration) ->
         .min(1.0)
 }
 
+/// One rectangle of the measure strip: a segment of a waveform a program
+/// plays, placed on the clock.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StripMark {
+    /// The index of the program the waveform comes from.
+    pub program: usize,
+    pub start: Instant,
+    pub duration: Duration,
+}
+
+impl StripMark {
+    /// Returns the part of the mark that falls between `start` and
+    /// `start + duration`, or `None` when no part of it does.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::time::{Duration, Instant};
+    /// use tuun::renderer::StripMark;
+    ///
+    /// let start = Instant::now();
+    /// let second = Duration::from_secs(1);
+    /// let mark = StripMark { program: 0, start: start + second / 2, duration: second };
+    /// let part = mark.within(start + second, second).unwrap();
+    /// assert_eq!((part.start, part.duration), (start + second, second / 2));
+    /// assert_eq!(mark.within(start + 2 * second, second), None);
+    /// ```
+    pub fn within(&self, start: Instant, duration: Duration) -> Option<StripMark> {
+        let from = self.start.max(start);
+        let to = (self.start + self.duration).min(start + duration);
+        (from < to).then(|| StripMark {
+            program: self.program,
+            start: from,
+            duration: to - from,
+        })
+    }
+}
+
+/// Returns the measure strip's marks for the waveforms that start at
+/// `start_times`, with segments measured in samples at `sample_rate`.
+///
+/// A `Program` waveform has a mark for each segment with a duration in its
+/// played marks in `waveform_marks`. A sequence's anchor has one for each such
+/// segment of its program's step marks in `set`, at each step of the program's
+/// sequence in `set`, placed at `tempo`. Segments with the same offset and
+/// duration in one waveform's marks give one mark. Other waveforms have none.
+pub fn strip_marks(
+    start_times: &[(WaveformId, Instant)],
+    waveform_marks: &HashMap<WaveformId, PlayedMarks>,
+    set: &ProgramSet,
+    tempo: u32,
+    sample_rate: u32,
+) -> Vec<StripMark> {
+    let samples = |n: usize| Duration::from_secs_f64(n as f64 / sample_rate as f64);
+    let mut strip = Vec::new();
+    for (id, start) in start_times {
+        // The waveform's program, its segments, and where they start from
+        // the waveform's start.
+        let (program, segments, starts) = match id {
+            WaveformId::Program(program) => match waveform_marks.get(id) {
+                Some(played) => (*program, &played.marks.segments, vec![Duration::ZERO]),
+                None => continue,
+            },
+            WaveformId::Step {
+                program,
+                sixteenth: player::ANCHOR_SIXTEENTH,
+            } => match set.program(*program).and_then(Program::sequence) {
+                Some(sequence) => (
+                    *program,
+                    &sequence.step_marks.segments,
+                    sequence
+                        .step_beats()
+                        .map(|beat| player::beat_offset(tempo, beat))
+                        .collect(),
+                ),
+                None => continue,
+            },
+            _ => continue,
+        };
+        let mut drawn = HashSet::new();
+        for segment in segments {
+            let Some(duration) = segment.duration else {
+                continue;
+            };
+            if !drawn.insert((segment.offset, duration)) {
+                continue;
+            }
+            for step_start in &starts {
+                strip.push(StripMark {
+                    program,
+                    start: *start + *step_start + samples(segment.offset),
+                    duration: samples(duration),
+                });
+            }
+        }
+    }
+    strip
+}
+
 /// Returns the beat playing at `status.buffer_start`: its number within the
 /// measure, its start, its duration, and whether its measure is even.
 pub fn current_beat_info(
@@ -1093,4 +1190,146 @@ pub fn current_beat_info(
         current_beat_duration,
         even_measure,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ops::Range;
+    use std::sync::Arc;
+
+    use crate::programs::Evaluated;
+    use crate::sequencer::Sequence;
+    use crate::trace_walk::{Segment, WaveformMarks};
+    use crate::waveform::Waveform;
+
+    use super::*;
+
+    const SAMPLE_RATE: u32 = 8000;
+    const TEMPO: u32 = 60;
+
+    fn segment(offset: usize, duration: Option<usize>) -> Segment {
+        Segment { offset, duration }
+    }
+
+    fn samples(n: u64) -> Duration {
+        Duration::from_secs_f64(n as f64 / SAMPLE_RATE as f64)
+    }
+
+    /// Returns the played marks of a waveform of program `program` whose
+    /// segments are `segments`.
+    fn played(program: usize, segments: Vec<Segment>) -> PlayedMarks {
+        PlayedMarks {
+            program,
+            text: Arc::default(),
+            marks: Arc::new(WaveformMarks {
+                segments,
+                marks: vec![],
+            }),
+            extra: vec![],
+        }
+    }
+
+    /// Returns a set whose program 0 is a sequence with steps on `beats` and
+    /// whose step waveform has `segments`.
+    fn sequenced_set(beats: &[f32], segments: Vec<Segment>) -> ProgramSet {
+        let (mut set, _) =
+            ProgramSet::from_source("#{level_db=0}\nx = 1;\n".to_string(), Default::default())
+                .expect("the fixture parses");
+        let steps: Vec<(f32, Range<usize>)> = beats.iter().map(|&beat| (beat, 0..1)).collect();
+        let sequence = Sequence {
+            steps,
+            step_waveform: Waveform::Const(0.0),
+            step_marks: Arc::new(WaveformMarks {
+                segments,
+                marks: vec![],
+            }),
+        };
+        set.record(
+            0,
+            Arc::default(),
+            Ok((Some(Evaluated::Sequence(sequence)), vec![])),
+        )
+        .expect("a success records");
+        set
+    }
+
+    #[test]
+    fn strip_marks_place_a_program_waveforms_segments_once_each() {
+        let start = Instant::now();
+        let id = WaveformId::Program(3);
+        let segments = vec![
+            segment(0, Some(80)),
+            segment(0, Some(80)),
+            segment(100, None),
+            segment(160, Some(40)),
+        ];
+        let waveform_marks = HashMap::from([(id.clone(), played(3, segments))]);
+        let set = sequenced_set(&[], vec![]);
+        let strip = strip_marks(&[(id, start)], &waveform_marks, &set, TEMPO, SAMPLE_RATE);
+        assert_eq!(
+            strip,
+            vec![
+                StripMark {
+                    program: 3,
+                    start,
+                    duration: samples(80),
+                },
+                StripMark {
+                    program: 3,
+                    start: start + samples(160),
+                    duration: samples(40),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn strip_marks_place_a_sequences_steps_from_its_anchor() {
+        let start = Instant::now();
+        let anchor = WaveformId::Step {
+            program: 0,
+            sixteenth: player::ANCHOR_SIXTEENTH,
+        };
+        let set = sequenced_set(&[1.0, 2.5], vec![segment(8, Some(80))]);
+        let strip = strip_marks(
+            &[(anchor, start)],
+            &HashMap::new(),
+            &set,
+            TEMPO,
+            SAMPLE_RATE,
+        );
+        let starts: Vec<_> = strip.iter().map(|mark| mark.start - start).collect();
+        assert_eq!(
+            starts,
+            vec![samples(8), Duration::from_secs_f32(1.5) + samples(8)]
+        );
+        assert!(
+            strip
+                .iter()
+                .all(|mark| mark.program == 0 && mark.duration == samples(80))
+        );
+    }
+
+    #[test]
+    fn strip_marks_skip_steps_keys_and_waveforms_without_marks() {
+        let start = Instant::now();
+        let step = WaveformId::Step {
+            program: 0,
+            sixteenth: 0,
+        };
+        let key = WaveformId::Key(60);
+        let waveform_marks = HashMap::from([
+            (step.clone(), played(0, vec![segment(0, Some(80))])),
+            (key.clone(), played(0, vec![segment(0, Some(80))])),
+        ]);
+        let set = sequenced_set(&[1.0], vec![segment(0, Some(80))]);
+        let start_times = [
+            (step, start),
+            (key, start),
+            (WaveformId::Program(1), start),
+            (WaveformId::Beats(false), start),
+        ];
+        let strip = strip_marks(&start_times, &waveform_marks, &set, TEMPO, SAMPLE_RATE);
+        assert_eq!(strip, vec![]);
+    }
 }

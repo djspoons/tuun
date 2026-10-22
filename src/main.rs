@@ -153,12 +153,12 @@ pub fn main() {
                 display_name,
                 state.programs.programs()[program_index].text()
             );
-            let outcome = processing::process(
-                &environment,
-                &state.programs.evaluation_input(program_index),
-                false,
-            );
-            match state.programs.record(program_index, outcome) {
+            let input = state.programs.evaluation_input(program_index);
+            let outcome = processing::process(&environment, &input, false);
+            match state
+                .programs
+                .record(program_index, input.text.into(), outcome)
+            {
                 Ok(warnings) => {
                     for warning in &warnings {
                         println!("Warning: {}", warning);
@@ -170,6 +170,7 @@ pub fn main() {
                             &status,
                             player::Start::Now,
                             None,
+                            &mut state.waveform_marks,
                         );
                     } else {
                         println!("Program {} did not evaluate to a waveform", display_name);
@@ -367,6 +368,7 @@ pub fn main() {
     let mut status = tracker::Status {
         buffer_start: Instant::now(),
         marks: Vec::new(),
+        start_times: Vec::new(),
         tracker_load: None,
         allocations: None,
     };

@@ -162,8 +162,9 @@ pub fn load(
         if set.programs()[index].is_empty() {
             continue;
         }
-        let outcome = process(environment, &set.evaluation_input(index), precompute);
-        if set.record(index, outcome).is_err() {
+        let input = set.evaluation_input(index);
+        let outcome = process(environment, &input, precompute);
+        if set.record(index, input.text.into(), outcome).is_err() {
             failed.push(index);
         }
     }
@@ -260,16 +261,18 @@ mod tests {
     fn processing_an_empty_program_succeeds_with_no_result() {
         let mut set = set_from("#{level_db=0}\nkick = 1 | fin(time - 1);\n");
         let environment = Environment::new(8000, 90, PathBuf::new());
-        let outcome = process(&environment, &set.evaluation_input(0), false);
-        assert!(set.record(0, outcome).is_ok());
+        let input = set.evaluation_input(0);
+        let outcome = process(&environment, &input, false);
+        assert!(set.record(0, input.text.into(), outcome).is_ok());
         assert!(set.programs()[0].evaluated().is_some());
 
         // Clearing the text must not surface a parse error — an empty
         // program is a deletion in progress — and the old result goes.
         set.program_mut(0).unwrap().set_text("  ".to_string());
-        let outcome = process(&environment, &set.evaluation_input(0), false);
+        let input = set.evaluation_input(0);
+        let outcome = process(&environment, &input, false);
         assert!(matches!(outcome, Ok((None, ref warnings)) if warnings.is_empty()));
-        assert!(set.record(0, outcome).is_ok());
+        assert!(set.record(0, input.text.into(), outcome).is_ok());
         assert!(set.programs()[0].evaluated().is_none());
     }
 
