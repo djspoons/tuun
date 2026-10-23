@@ -376,6 +376,51 @@ fn t14_each_phrase_note_lights_its_key_and_velocity() {
 }
 
 #[test]
+fn a_mapped_element_lights_the_lambdas_use_of_it() {
+    let v = voice("<map(fn (x) => x, [$220 * Qw | unseq() | seq(time - Q)])>");
+    assert_eq!(
+        lit(&v),
+        [
+            "x: 0..500",
+            "$220: 0..500",
+            "220: 0..500",
+            "*: 0..500",
+            "Qw: 0..500"
+        ]
+    );
+}
+
+#[test]
+fn a_reduced_accumulator_lights_the_lambdas_use_of_it() {
+    let v = voice("reduce(fn (acc, y) => acc, $220 * Qw | unseq(), [1])");
+    assert_eq!(
+        lit(&v),
+        [
+            "acc: 0..500",
+            "$220: 0..500",
+            "220: 0..500",
+            "*: 0..500",
+            "Qw: 0..500"
+        ]
+    );
+}
+
+#[test]
+fn an_accumulator_built_in_the_lambda_lights_its_seed_and_operator() {
+    let v = voice("reduce(fn (acc, y) => $acc * Qw | unseq(), 220, [1])");
+    assert_eq!(
+        lit(&v),
+        [
+            "$acc: 0..500",
+            "acc: 0..500",
+            "*: 0..500",
+            "Qw: 0..500",
+            "220: 0..500"
+        ]
+    );
+}
+
+#[test]
 fn note_names_light_during_their_own_notes() {
     // As the counterpoint lessons write melodies: each name is a constant
     // the note's frequency was folded from.

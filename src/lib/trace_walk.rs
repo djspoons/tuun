@@ -373,18 +373,20 @@ fn oldest<S>(via: &Option<Arc<Via<S>>>) -> Option<&Step<S>> {
     steps(via).last()
 }
 
-/// Returns the program text a value with `trace` lights: where it was
-/// written, and every use site and call it went through, newest first.
+/// Returns the program text a value with `trace` lights: where it was written,
+/// and every use site and call it went through, newest first.
 ///
-/// Where a value was written is the head of the built-in that made it, when
-/// that head lights, and its span otherwise; a built value's span is the
-/// built-in's call, never what it lights.
+/// Where a value was written is its span, unless a built-in made it. A new
+/// value's span is the built-in's call, which never lights: where it was
+/// written is the place of the head of a built-in that computed it, and nothing
+/// for one that assembled it.
 fn place<M: CarriesTrace<S>, S>(trace: &Trace<S>) -> Vec<Range<usize>> {
     if !trace.reaches_program {
         return vec![];
     }
     let mut out = match oldest(&trace.via) {
-        Some(Step::Built { head, .. }) => head.as_deref().map(place::<M, S>).unwrap_or_default(),
+        Some(Step::Computed { head, .. }) => place::<M, S>(head),
+        Some(Step::Assembled) => vec![],
         _ => trace
             .span
             .as_ref()
@@ -392,30 +394,27 @@ fn place<M: CarriesTrace<S>, S>(trace: &Trace<S>) -> Vec<Range<usize>> {
             .into_iter()
             .collect(),
     };
-    // A `Built` step is only ever the oldest, so the rest are use sites and
+    // A built-in's step is only ever the oldest, so the rest are use sites and
     // calls.
     out.extend(steps(&trace.via).filter_map(|step| match step {
         Step::UseSite(span) | Step::Call(span) => program_range::<M, S>(span),
-        Step::Built { .. } => None,
+        Step::Computed { .. } | Step::Assembled => None,
     }));
     out
 }
 
-/// Returns the parents of `trace`'s oldest step when it was built by a
-/// built-in whose head lights.
+/// Returns the parents of `trace`'s oldest step when a built-in computed it,
+/// wherever its head was written.
 fn lit_parents<S>(trace: &Trace<S>) -> &[Arc<Trace<S>>] {
     match oldest(&trace.via) {
-        Some(Step::Built {
-            head: Some(_),
-            parents,
-        }) => parents,
+        Some(Step::Computed { parents, .. }) => parents,
         _ => &[],
     }
 }
 
-/// Returns the program text a mark with `trace` lights. A `folded` mark,
-/// one with no trace mark beneath it, also lights the arguments its value
-/// consumed, through built-ins whose heads light.
+/// Returns the program text a mark with `trace` lights. A `folded` mark, one
+/// with no trace mark beneath it, also lights the arguments its value consumed,
+/// through built-ins that computed it (see [`lit_parents`]).
 fn lights<M: CarriesTrace<S>, S>(trace: &Arc<Trace<S>>, folded: bool) -> Vec<Range<usize>> {
     let mut out: Vec<Range<usize>> = place::<M, S>(trace);
     if folded {
@@ -686,8 +685,8 @@ mod tests {
         let head = written(3..4);
         let built = trace(
             Some(span(0..9)),
-            vec![Step::Built {
-                head: Some(head),
+            vec![Step::Computed {
+                head,
                 parents: vec![],
             }],
         );
@@ -708,14 +707,11 @@ mod tests {
     }
 
     #[test]
-    fn a_folded_constant_lights_its_consumed_arguments_through_lit_heads() {
-        let built = |head: Option<Arc<Trace<Text>>>, parents| {
-            trace(None, vec![Step::Built { head, parents }])
-        };
-        // `(1 + 2)`, then consumed by a built-in that arranges.
-        let sum = built(Some(written(2..3)), vec![written(1..2), written(3..4)]);
-        let chosen = built(None, vec![written(9..10)]);
-        let folded = built(Some(written(5..6)), vec![sum.clone(), chosen]);
+    fn a_folded_constant_lights_its_consumed_arguments() {
+        let computed = |head, parents| trace(None, vec![Step::Computed { head, parents }]);
+        // `(1 + 2)`, then consumed by another computation.
+        let sum = computed(written(2..3), vec![written(1..2), written(3..4)]);
+        let folded = computed(written(5..6), vec![sum.clone()]);
         let w = mark(&folded, Waveform::Const(3.0));
         let ranges: HashSet<Range<usize>> = walked(op(w, note(1.0)), &dark())
             .marks

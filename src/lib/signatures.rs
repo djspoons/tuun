@@ -220,8 +220,10 @@ mod tests {
 
     use super::*;
     use crate::builtins;
+    use crate::eval::BuiltInCall;
     use crate::expr::ErrorKind;
-    use crate::expr::{Binding, BuiltInFn, Expr, Pattern, SourceBinding, boxed};
+    use crate::expr::{Binding, BuiltInFn, Error, Expr, Pattern, SourceBinding, SourceExpr, boxed};
+    use crate::trace::Trace;
     use crate::types::{Refinement, Sort};
     use crate::waveform::{BinaryOperator, Waveform};
 
@@ -422,6 +424,18 @@ mod tests {
         arities
     }
 
+    /// Applies `function` to `arguments`, written nowhere,
+    /// in a call written nowhere, and returns its result's value.
+    fn apply(
+        function: &BuiltInFn<u32, ()>,
+        arguments: Vec<Expr<u32, ()>>,
+    ) -> Result<Expr<u32, ()>, Error<()>> {
+        let arguments: Vec<SourceExpr<u32, ()>> =
+            arguments.into_iter().map(SourceExpr::from).collect();
+        let call = BuiltInCall::new(None, Trace::new::<u32>(None, None), &arguments);
+        function.0(arguments, &call).map(|result| result.expr)
+    }
+
     /// Conformance of one callable to its table at one arity, mirroring
     /// selection semantics: every atom vector covered by some conjunct must
     /// evaluate without error to a value within the *first* covering conjunct's
@@ -452,7 +466,7 @@ mod tests {
             });
             let arguments: Vec<Expr<u32, ()>> =
                 vector.iter().map(|atom| representative(*atom)).collect();
-            let result = function.0(arguments);
+            let result = apply(function, arguments);
             let Some((_, declared)) = governing else {
                 // The signature says this call cannot happen, so the builtin
                 // should refuse it on sort or arity — an internal error. A

@@ -10,7 +10,7 @@ use crate::expr::{Expr, SourceExpr, Span};
 use crate::waveform::Waveform;
 
 /// A value's provenance: the payload of a trace mark id, and the head and
-/// parents of a [`Step::Built`].
+/// parents of a [`Step::Computed`].
 #[derive(Debug)]
 pub struct Trace<S> {
     /// Where the value was written.
@@ -60,10 +60,10 @@ impl<S> Via<S> {
     pub fn push<M: CarriesTrace<S>>(step: Step<S>, prev: Option<Arc<Via<S>>>) -> Arc<Via<S>> {
         let here = match &step {
             Step::UseSite(span) | Step::Call(span) => M::in_program(span),
-            Step::Built { head, parents } => {
-                head.as_ref().is_some_and(|h| h.reaches_program)
-                    || parents.iter().any(|p| p.reaches_program)
+            Step::Computed { head, parents } => {
+                head.reaches_program || parents.iter().any(|p| p.reaches_program)
             }
+            Step::Assembled => false,
         };
         let reaches_program = here || prev.as_ref().is_some_and(|p| p.reaches_program);
         Arc::new(Via {
@@ -82,17 +82,22 @@ pub enum Step<S> {
     UseSite(Span<S>),
     /// A user function's result, at the place the call was written.
     Call(Span<S>),
-    /// A built-in's own result: one that isn't an argument handed back.
-    Built {
-        /// Where the built-in was named, or `None` when the built-in
-        /// [arranges](crate::expr::BuiltInKind::Arranges) its arguments.
-        head: Option<Arc<Trace<S>>>,
+    /// A new value a built-in
+    /// [computed](crate::eval::BuiltInCall::computed): one whose audible
+    /// samples the built-in decides.
+    Computed {
+        /// Where the built-in was named.
+        head: Arc<Trace<S>>,
         /// The arguments' traces.
         parents: Vec<Arc<Trace<S>>>,
     },
+    /// A new value a built-in
+    /// [assembled](crate::eval::BuiltInCall::assembled): one whose audible
+    /// samples, if any, are its arguments'.
+    Assembled,
 }
 
-/// Prints a trace as `⟨span, via⟩`, with `·` for a missing span or head, `ε`
+/// Prints a trace as `⟨span, via⟩`, with `·` for a missing span, `ε`
 /// for an empty via, and a trailing `*` when the trace reaches program text.
 impl<S: Debug> Display for Trace<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -123,7 +128,8 @@ impl<S: Debug> Display for Via<S> {
     }
 }
 
-/// Prints a step as `use(span)`, `call(span)` or `built(head, [parents])`.
+/// Prints a step as `use(span)`, `call(span)`, `computed(head, [parents])`
+/// or `assembled`.
 impl<S: Debug> Display for Step<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -137,11 +143,8 @@ impl<S: Debug> Display for Step<S> {
                 write_span(f, span)?;
                 write!(f, ")")
             }
-            Step::Built { head, parents } => {
-                match head {
-                    Some(head) => write!(f, "built({head}, [")?,
-                    None => write!(f, "built(·, [")?,
-                }
+            Step::Computed { head, parents } => {
+                write!(f, "computed({head}, [")?;
                 for (i, parent) in parents.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
@@ -150,6 +153,7 @@ impl<S: Debug> Display for Step<S> {
                 }
                 write!(f, "])")
             }
+            Step::Assembled => write!(f, "assembled"),
         }
     }
 }
@@ -191,9 +195,9 @@ thread_local! {
 
 /// Sets whether evaluation on the current thread makes trace marks.
 ///
-/// It does until this turns it off. Off, evaluation still records each
-/// value's `via`, but builds the same waveforms as a mark id type that
-/// carries no trace.
+/// It does until this turns it off. Off, evaluation builds the same waveforms
+/// as a mark id type that carries no trace, and records the same `via` for each
+/// value.
 pub fn set_trace_marking(on: bool) {
     TRACE_MARKING.with(|marking| marking.set(on));
 }
@@ -210,16 +214,6 @@ pub fn root_trace<M: CarriesTrace<S>, S>(w: &Waveform<M>) -> Option<&Arc<Trace<S
         Waveform::Marked { id, .. } => id.as_trace(),
         _ => None,
     }
-}
-
-/// Returns `w` looking through any trace marks at its root.
-pub fn peel<M: CarriesTrace<S>, S>(mut w: &Waveform<M>) -> &Waveform<M> {
-    while let Waveform::Marked { id, waveform } = w
-        && id.as_trace().is_some()
-    {
-        w = waveform;
-    }
-    w
 }
 
 /// Returns `w` without the trace marks at its root.

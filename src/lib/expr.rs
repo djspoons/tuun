@@ -7,7 +7,8 @@ use std::fmt::{Debug, Display};
 use std::ops::Range;
 use std::sync::Arc;
 
-use crate::trace::{self, CarriesTrace, Via};
+use crate::eval::BuiltInCall;
+use crate::trace::{CarriesTrace, Via};
 use crate::waveform;
 
 /// A byte range plus the identity of the text it indexes.
@@ -208,32 +209,33 @@ impl<S> Display for Error<S> {
     }
 }
 
-/// The shared function backing a [`BuiltInFn`]: a function from a
-/// vector of values to a value.
-// TODO carry element-level spans, so `map` can point at the failing
-// element's origin rather than at the whole call.
-pub type BuiltInImpl<M, S> =
-    Arc<dyn Fn(Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>> + Send + Sync>;
+/// The shared function backing a [`BuiltInFn`]: a function from its arguments,
+/// with their traces, and the call it's applied in, to its result with its
+/// trace.
+pub type BuiltInImpl<M, S> = Arc<
+    dyn Fn(Vec<SourceExpr<M, S>>, &BuiltInCall<S>) -> Result<SourceExpr<M, S>, Error<S>>
+        + Send
+        + Sync,
+>;
 
+/// The function behind a built-in.
+///
+/// It gives its result a trace: an argument it hands back (or a part of
+/// one) keeps its own, and a result it builds takes one from
+/// [`BuiltInCall::computed`] or [`BuiltInCall::assembled`], as does each part
+/// it builds.
 #[derive(Clone)]
-pub struct BuiltInFn<M, S = ()>(pub BuiltInImpl<M, S>, pub BuiltInKind);
-
-/// How a built-in's result relates to its arguments.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BuiltInKind {
-    /// It computes new samples from its arguments' values.
-    Computes,
-    /// It builds no new samples: it chooses among its arguments, moves or times
-    /// them, or makes a value that isn't a waveform.
-    Arranges,
-}
+pub struct BuiltInFn<M, S = ()>(pub BuiltInImpl<M, S>);
 
 impl<M, S> BuiltInFn<M, S> {
+    /// Returns a built-in backed by `f`.
     pub fn new(
-        kind: BuiltInKind,
-        f: impl Fn(Vec<Expr<M, S>>) -> Result<Expr<M, S>, Error<S>> + Send + Sync + 'static,
+        f: impl Fn(Vec<SourceExpr<M, S>>, &BuiltInCall<S>) -> Result<SourceExpr<M, S>, Error<S>>
+        + Send
+        + Sync
+        + 'static,
     ) -> BuiltInFn<M, S> {
-        BuiltInFn(Arc::new(f), kind)
+        BuiltInFn(Arc::new(f))
     }
 }
 
@@ -409,11 +411,17 @@ impl<M, S> Expr<M, S> {
     where
         M: CarriesTrace<S>,
     {
-        match self {
-            Expr::Waveform(w) => match trace::peel(w) {
-                waveform::Waveform::Const(value) => Some(*value),
-                _ => None,
-            },
+        let Expr::Waveform(w) = self else {
+            return None;
+        };
+        let mut w = w;
+        while let waveform::Waveform::Marked { id, waveform } = w
+            && id.as_trace().is_some()
+        {
+            w = waveform;
+        }
+        match w {
+            waveform::Waveform::Const(value) => Some(*value),
             _ => None,
         }
     }

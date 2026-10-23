@@ -3993,7 +3993,7 @@ mod tests {
     use super::*;
 
     use crate::builtins;
-    use crate::expr::{BuiltInFn, BuiltInKind};
+    use crate::expr::BuiltInFn;
     use crate::parser::{parse_module, parse_program};
     use crate::signatures;
 
@@ -4018,7 +4018,8 @@ mod tests {
     /// `tempo`, `sample_rate` and `debug`, and then the test
     /// stand-ins `w2`, `f1`, `f2`, and `src_w1`. The extra built-ins get stub
     /// closures — the checker only looks at their names.
-    fn test_prelude<S: Clone + std::fmt::Debug + 'static>() -> Vec<SourceBinding<u32, S>> {
+    fn test_prelude<S: Clone + std::fmt::Debug + Send + Sync + 'static>()
+    -> Vec<SourceBinding<u32, S>> {
         let mut prelude: Vec<SourceBinding<u32, S>> = Vec::new();
         builtins::add_bindings(&mut prelude);
         prelude.push(SourceBinding::definition(
@@ -4040,7 +4041,7 @@ mod tests {
             Pattern::Identifier("w2".to_string()),
             SourceExpr::from(Expr::BuiltIn {
                 name: "w2".to_string(),
-                function: BuiltInFn::new(BuiltInKind::Arranges, |arguments: Vec<Expr<u32, S>>| {
+                function: BuiltInFn::new(|arguments: Vec<SourceExpr<u32, S>>, _call| {
                     arguments
                         .into_iter()
                         .next()
@@ -4054,7 +4055,7 @@ mod tests {
             Pattern::Identifier("f1".to_string()),
             SourceExpr::from(Expr::BuiltIn {
                 name: "f1".to_string(),
-                function: BuiltInFn::new(BuiltInKind::Arranges, |arguments: Vec<Expr<u32, S>>| {
+                function: BuiltInFn::new(|arguments: Vec<SourceExpr<u32, S>>, _call| {
                     arguments
                         .into_iter()
                         .next()
@@ -4069,7 +4070,7 @@ mod tests {
             Pattern::Identifier("f2".to_string()),
             SourceExpr::from(Expr::BuiltIn {
                 name: "f2".to_string(),
-                function: BuiltInFn::new(BuiltInKind::Arranges, |arguments: Vec<Expr<u32, S>>| {
+                function: BuiltInFn::new(|arguments: Vec<SourceExpr<u32, S>>, _call| {
                     arguments
                         .into_iter()
                         .next()

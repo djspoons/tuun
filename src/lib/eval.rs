@@ -8,8 +8,8 @@ use std::fmt::{Debug, Display};
 use std::sync::Arc;
 
 use crate::expr::{
-    Binding, BuiltInFn, BuiltInKind, Error, Expr, NamedExpr, NamedExprs, Pattern, SourceBinding,
-    SourceExpr, Span,
+    Binding, BuiltInFn, Error, Expr, NamedExpr, NamedExprs, Pattern, SourceBinding, SourceExpr,
+    Span,
 };
 use crate::trace::{self, CarriesTrace, Step, Trace, Via};
 use crate::waveform::Waveform;
@@ -42,8 +42,10 @@ fn extend_with_trivial_context<M, S>(
 ///
 /// Fails on expressions which are open with respect to context.
 ///
-/// Rebuilt nodes keep their spans as provenance (a substituted variable keeps
-/// the span of the value's defining expression).
+/// Rebuilt nodes keep their spans and vias as provenance. A substituted
+/// variable keeps the span of the value's defining expression, and records
+/// where the variable was written as a `UseSite` step on the value's via and
+/// on the vias of its surface parts (see [`push_step`]).
 fn substitute<M, S>(
     context: &mut Vec<(String, SourceExpr<M, S>)>,
     expr: SourceExpr<M, S>,
@@ -271,6 +273,10 @@ fn call_site<M, S: Clone>(span: &Option<Span<S>>, function: &SourceExpr<M, S>) -
         }) => written,
         _ => function.span.as_ref()?,
     };
+    // TODO a parenthesized function expression, as in `(fn (x) => x)(a)`,
+    // also starts after its application does, so that call is sited at
+    // `fn (x) => x` as if it were a pipe. The function and the argument
+    // still light, but the whole call doesn't.
     Some(if written.range.start > span.range.start {
         written.clone()
     } else {
@@ -278,14 +284,72 @@ fn call_site<M, S: Clone>(span: &Option<Span<S>>, function: &SourceExpr<M, S>) -
     })
 }
 
+/// A built-in application as the built-in sees it: where the call was
+/// written, and the traces of its function expression and its arguments.
+// TODO is this the right place for this? maybe trace.rs?
+pub struct BuiltInCall<S> {
+    span: Option<Span<S>>,
+    head: Arc<Trace<S>>,
+    parents: Vec<Arc<Trace<S>>>,
+}
+
+impl<S: Clone> BuiltInCall<S> {
+    /// Returns the call at `span` of a function expression whose trace is
+    /// `head` to `arguments`.
+    pub fn new<M: CarriesTrace<S>>(
+        span: Option<Span<S>>,
+        head: Trace<S>,
+        arguments: &[SourceExpr<M, S>],
+    ) -> BuiltInCall<S> {
+        BuiltInCall {
+            span,
+            head: Arc::new(head),
+            parents: arguments
+                .iter()
+                .map(|argument| Arc::new(Trace::of(argument)))
+                .collect(),
+        }
+    }
+
+    /// Returns `expr` as a new value this call computed, one whose audible
+    /// samples it decides: written at the call, with a
+    /// [`Step::Computed`] step.
+    pub fn computed<M: CarriesTrace<S>>(&self, expr: Expr<M, S>) -> SourceExpr<M, S> {
+        let step = Step::Computed {
+            head: self.head.clone(),
+            parents: self.parents.clone(),
+        };
+        self.written(expr, step)
+    }
+
+    /// Returns `expr` as a new value this call assembled, one whose audible
+    /// samples, if any, are its arguments': written at the call, with a
+    /// [`Step::Assembled`] step.
+    pub fn assembled<M: CarriesTrace<S>>(&self, expr: Expr<M, S>) -> SourceExpr<M, S> {
+        self.written(expr, Step::Assembled)
+    }
+
+    fn written<M: CarriesTrace<S>>(&self, expr: Expr<M, S>, step: Step<S>) -> SourceExpr<M, S> {
+        SourceExpr {
+            expr,
+            span: self.span.clone(),
+            via: Some(Via::push::<M>(step, None)),
+        }
+    }
+}
+
+/// Returns the value of `argument`, with each waveform at its surface marked
+/// with the argument's trace (or a part's own), ready to embed in a node a
+/// built-in builds.
+///
+/// See [`tag_in`] for which waveforms are marked.
+pub fn embed<M: CarriesTrace<S>, S: Clone>(argument: SourceExpr<M, S>) -> Expr<M, S> {
+    let trace = Arc::new(Trace::of(&argument));
+    tag_in(argument.expr, &trace)
+}
+
 /// Applies the built-in `builtin` to `arguments` in a call at `span` whose
 /// function expression has the trace `head`.
-///
-/// Each argument's surface waveforms are tagged with its trace before the call,
-/// and each trace mark at the surface of the result is lifted back off after
-/// it. A result whose root was a trace mark is that argument handed back, and
-/// keeps the argument's trace; any other result records the call as a `Built`
-/// step.
 fn apply_builtin<M, S>(
     builtin: &BuiltInFn<M, S>,
     arguments: Vec<SourceExpr<M, S>>,
@@ -296,38 +360,41 @@ where
     M: CarriesTrace<S>,
     S: Clone,
 {
-    let parents: Vec<Arc<Trace<S>>> = arguments
-        .iter()
-        .map(|argument| Arc::new(Trace::of(argument)))
-        .collect();
-    let actuals: Vec<Expr<M, S>> = arguments
-        .into_iter()
-        .zip(&parents)
-        .map(|(argument, trace)| tag_in(argument.expr, trace))
-        .collect();
+    let call = BuiltInCall::new(span, head, &arguments);
     // Errors point at the whole `f(x, y)` call site, since built-ins don't
-    // see spans. An error that already has a span came from a function the
+    // report spans. An error that already has a span came from a function the
     // built-in applied (e.g. `map`'s), and that span is more precise, so keep
     // it.
-    let expr = builtin.0(actuals).map_err(|error| error.or_at(span.clone()))?;
-    let (mut result, routed) = lift_out(SourceExpr {
-        expr,
-        span,
-        via: None,
-    });
-    if !routed {
-        let head = match builtin.1 {
-            BuiltInKind::Computes => Some(Arc::new(head)),
-            BuiltInKind::Arranges => None,
-        };
-        result.via = Some(Via::push::<M>(Step::Built { head, parents }, None));
-    }
+    let result = builtin.0(arguments, &call).map_err(|error| error.or_at(call.span.clone()))?;
+    // A sub-expression with neither span nor via lights nothing: a built result
+    // or sub-expression should come from `computed` or `assembled`. A mark at
+    // the surface would be an embedded argument handed back, whose trace is the
+    // sub-expressions's own.
+    debug_assert!(
+        surface_is_traced(&result),
+        "a built-in's result has a sub-expression with no span or via, or a trace mark at its surface"
+    );
     Ok(result)
+}
+
+/// Returns whether `value` and each sub-expression at its surface (`Seq` parts,
+/// list elements, tuple fields, and theirs) has a span or a via, and no
+/// waveform there has a trace mark at its root.
+fn surface_is_traced<M: CarriesTrace<S>, S>(value: &SourceExpr<M, S>) -> bool {
+    if value.span.is_none() && value.via.is_none() {
+        return false;
+    }
+    match &value.expr {
+        Expr::Waveform(w) => trace::root_trace(w).is_none(),
+        Expr::Seq { offset, waveform } => surface_is_traced(offset) && surface_is_traced(waveform),
+        Expr::List(exprs) | Expr::Tuple(exprs) => exprs.iter().all(surface_is_traced),
+        _ => true,
+    }
 }
 
 /// Returns `expr` with each waveform at its surface (the root, `Seq` parts,
 /// list elements, tuple fields) marked with the trace of what holds it, the
-/// container's `trace` or the part's own.
+/// container's `trace` or the part's own, for [`embed`].
 ///
 /// A waveform's old trace marks at its root are replaced, never stacked. A
 /// trace that doesn't reach program text could never light anything, so it
@@ -426,50 +493,6 @@ fn push_step_into_parts<M: CarriesTrace<S>, S: Clone>(
     }
 }
 
-/// Returns `part` with each trace mark at its surface lifted off: the marked
-/// node is removed and the part it marked takes its trace's span and via. Also
-/// returns whether `part`'s own root was a trace mark.
-fn lift_out<M: CarriesTrace<S>, S: Clone>(part: SourceExpr<M, S>) -> (SourceExpr<M, S>, bool) {
-    let SourceExpr { expr, span, via } = part;
-    let lift = |part: SourceExpr<M, S>| lift_out(part).0;
-    match expr {
-        Expr::Waveform(w) => match trace::root_trace(&w).cloned() {
-            Some(trace) => {
-                let lifted = SourceExpr {
-                    expr: Expr::Waveform(trace::strip_root_trace_marks(w)),
-                    span: trace.span.clone(),
-                    via: trace.via.clone(),
-                };
-                (lifted, true)
-            }
-            None => (
-                SourceExpr {
-                    expr: Expr::Waveform(w),
-                    span,
-                    via,
-                },
-                false,
-            ),
-        },
-        Expr::Seq { offset, waveform } => {
-            let expr = Expr::Seq {
-                offset: Box::new(lift(*offset)),
-                waveform: Box::new(lift(*waveform)),
-            };
-            (SourceExpr { expr, span, via }, false)
-        }
-        Expr::List(exprs) => {
-            let expr = Expr::List(exprs.into_iter().map(lift).collect());
-            (SourceExpr { expr, span, via }, false)
-        }
-        Expr::Tuple(exprs) => {
-            let expr = Expr::Tuple(exprs.into_iter().map(lift).collect());
-            (SourceExpr { expr, span, via }, false)
-        }
-        expr => (SourceExpr { expr, span, via }, false),
-    }
-}
-
 /// Evaluates a closed expression to a value. Closed expressions do not contain
 /// variables.
 ///
@@ -477,9 +500,10 @@ fn lift_out<M: CarriesTrace<S>, S: Clone>(part: SourceExpr<M, S>) -> (SourceExpr
 /// fails, but skips the needless substitution pass.
 ///
 /// The result's spans are provenance (see [`SourceExpr`]): an expression that
-/// is already a value keeps its span, an extracted sub-value (a chosen
-/// branch, an applied function's body) keeps its own, and a built-in
-/// application's result carries the span of the call site.
+/// is already a value keeps its span, an extracted sub-value (a chosen branch,
+/// an applied function's body) keeps its own, and a built-in application's
+/// result carries the span of the call site, unless it is an argument (or a
+/// part of one) the built-in handed back.
 pub fn evaluate_closed<M, S>(expr: SourceExpr<M, S>) -> Result<SourceExpr<M, S>, Error<S>>
 where
     M: Clone + fmt::Display + fmt::Debug + CarriesTrace<S>,
@@ -1313,7 +1337,7 @@ mod tests {
 
         type Value = SourceExpr<Traced, Text>;
 
-        type StandIn = fn(Vec<Expr<Traced, Text>>) -> Result<Expr<Traced, Text>, Error<Text>>;
+        type StandIn = fn(Vec<Value>, &BuiltInCall<Text>) -> Result<Value, Error<Text>>;
 
         fn waveform(expr: Expr<Traced, Text>) -> Waveform<Traced> {
             match expr {
@@ -1323,43 +1347,47 @@ mod tests {
         }
 
         /// The stand-in built-ins: `build` computes from both arguments,
-        /// embedding them, `wrap` arranges one by embedding it, `pass` hands
-        /// its argument back, and `double` computes from a constant it
-        /// consumes.
+        /// embedding them, `wrap` assembles one by embedding it, `pass` hands
+        /// its argument back, `careless` builds a seq with a part it gives no
+        /// trace, and `double` computes from a constant it consumes.
         fn stand_ins() -> Vec<SourceBinding<Traced, Text>> {
-            fn def(name: &str, kind: BuiltInKind, f: StandIn) -> SourceBinding<Traced, Text> {
+            fn def(name: &str, f: StandIn) -> SourceBinding<Traced, Text> {
                 SourceBinding::definition(
                     Pattern::Identifier(name.to_string()),
                     SourceExpr::from(Expr::BuiltIn {
                         name: name.to_string(),
-                        function: BuiltInFn::new(kind, f),
+                        function: BuiltInFn::new(f),
                     }),
                 )
             }
             vec![
-                def("build", BuiltInKind::Computes, |mut arguments| {
-                    let b = waveform(arguments.pop().unwrap());
-                    let a = waveform(arguments.pop().unwrap());
-                    Ok(Expr::Waveform(Waveform::BinaryOp(
+                def("build", |mut arguments, call| {
+                    let b = waveform(embed(arguments.pop().unwrap()));
+                    let a = waveform(embed(arguments.pop().unwrap()));
+                    Ok(call.computed(Expr::Waveform(Waveform::BinaryOp(
                         BinaryOperator::Add,
                         Box::new(a),
                         Box::new(b),
-                    )))
+                    ))))
                 }),
-                def("wrap", BuiltInKind::Arranges, |mut arguments| {
-                    let a = waveform(arguments.pop().unwrap());
-                    Ok(Expr::Waveform(Waveform::Fin {
+                def("wrap", |mut arguments, call| {
+                    let a = waveform(embed(arguments.pop().unwrap()));
+                    Ok(call.assembled(Expr::Waveform(Waveform::Fin {
                         length: Box::new(Waveform::Const(1.0)),
                         waveform: Box::new(a),
                         state: (),
+                    })))
+                }),
+                def("pass", |mut arguments, _call| Ok(arguments.pop().unwrap())),
+                def("careless", |mut arguments, call| {
+                    Ok(call.assembled(Expr::Seq {
+                        offset: Box::new(SourceExpr::float(1.0)),
+                        waveform: Box::new(arguments.pop().unwrap()),
                     }))
                 }),
-                def("pass", BuiltInKind::Arranges, |mut arguments| {
-                    Ok(arguments.pop().unwrap())
-                }),
-                def("double", BuiltInKind::Computes, |arguments| {
-                    let value = arguments[0].as_const_float().expect("a constant");
-                    Ok(Expr::float(2.0 * value))
+                def("double", |arguments, call| {
+                    let value = arguments[0].expr.as_const_float().expect("a constant");
+                    Ok(call.computed(Expr::float(2.0 * value)))
                 }),
             ]
         }
@@ -1367,7 +1395,8 @@ mod tests {
         const LIBRARY: &str = "f = fn(x) => x;\n\
                                g = fn(a) => fn(b) => b;\n\
                                c = build(1, 2);\n\
-                               one = 1;\n";
+                               one = 1;\n\
+                               passed = pass(one);\n";
 
         /// Evaluates `program` with the stand-ins and the library opened, and
         /// the library also bound as `lib`.
@@ -1415,8 +1444,8 @@ mod tests {
         }
 
         /// Returns the steps of `via`, oldest first: `use x`, `call f(1)`,
-        /// or `built h` naming where the head of a built-in that computes
-        /// was last seen (`-` for one that arranges).
+        /// `computed h` naming where the built-in's head was last seen, or
+        /// `assembled`.
         fn steps(program: &str, via: &Option<Arc<Via<Text>>>) -> Vec<String> {
             let mut out = Vec::new();
             let mut via = via.as_deref();
@@ -1424,10 +1453,8 @@ mod tests {
                 out.push(match &step.step {
                     Step::UseSite(span) => format!("use {}", text(program, span)),
                     Step::Call(span) => format!("call {}", text(program, span)),
-                    Step::Built { head, .. } => match head {
-                        Some(head) => format!("built {}", seen(program, head)),
-                        None => "built -".to_string(),
-                    },
+                    Step::Computed { head, .. } => format!("computed {}", seen(program, head)),
+                    Step::Assembled => "assembled".to_string(),
                 });
                 via = step.prev.as_deref();
             }
@@ -1435,12 +1462,12 @@ mod tests {
             out
         }
 
-        /// Returns the `Built` parents of `value`'s oldest step, each as
+        /// Returns the `Computed` parents of `value`'s oldest step, each as
         /// where it was last seen.
         fn parents(program: &str, value: &Value) -> Vec<String> {
             let mut via = value.via.as_deref();
             while let Some(step) = via {
-                if let Step::Built { parents, .. } = &step.step {
+                if let Step::Computed { parents, .. } = &step.step {
                     return parents.iter().map(|p| seen(program, p)).collect();
                 }
                 via = step.prev.as_deref();
@@ -1532,20 +1559,44 @@ mod tests {
         }
 
         #[test]
+        fn routing_does_not_depend_on_trace_marks() {
+            // An argument whose trace reaches no program text carries no mark.
+            let program = "passed";
+            assert_eq!(
+                steps(program, &traced(program).via),
+                ["use lib", "use passed"]
+            );
+            // Nor does any argument with trace marking off.
+            trace::set_trace_marking(false);
+            let program = "let x = 1 in pass(x)";
+            let value = traced(program);
+            trace::set_trace_marking(true);
+            assert_eq!(steps(program, &value.via), ["use x"]);
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "a built-in's result has a sub-expression with no span or via")]
+        fn a_built_part_with_no_trace_is_caught() {
+            traced("careless(2)");
+        }
+
+        #[test]
         fn a_built_result_embeds_its_arguments_marks() {
             let program = "build(1, 2)";
             let value = traced(program);
-            assert_eq!(steps(program, &value.via), ["built build"]);
+            assert_eq!(steps(program, &value.via), ["computed build"]);
             assert_eq!(parents(program, &value), ["1", "2"]);
             assert_eq!(marks(program, &waveform(value.expr)), ["1", "2"]);
         }
 
         #[test]
-        fn a_dark_head_records_no_head() {
+        fn an_assembled_result_records_no_head_or_parents() {
             let program = "wrap(1)";
             let value = traced(program);
-            assert_eq!(steps(program, &value.via), ["built -"]);
-            assert_eq!(parents(program, &value), ["1"]);
+            assert_eq!(steps(program, &value.via), ["assembled"]);
+            assert!(parents(program, &value).is_empty());
+            assert_eq!(marks(program, &waveform(value.expr)), ["1"]);
         }
 
         #[test]
@@ -1553,7 +1604,7 @@ mod tests {
             // `double` reads its argument's value through the mark.
             let program = "double(3)";
             let value = traced(program);
-            assert_eq!(steps(program, &value.via), ["built double"]);
+            assert_eq!(steps(program, &value.via), ["computed double"]);
             assert_eq!(parents(program, &value), ["3"]);
             assert!(matches!(waveform(value.expr), Waveform::Const(v) if v == 6.0));
         }
@@ -1574,7 +1625,7 @@ mod tests {
             let program = "build(1, 2)";
             let value = traced(program);
             trace::set_trace_marking(true);
-            assert_eq!(steps(program, &value.via), ["built build"]);
+            assert_eq!(steps(program, &value.via), ["computed build"]);
             assert!(marks(program, &waveform(value.expr)).is_empty());
         }
 
@@ -1626,29 +1677,6 @@ mod tests {
                 panic!("expected a marked waveform");
             };
             assert_eq!(id.0.span.as_ref().unwrap().range, 0..1);
-        }
-
-        #[test]
-        fn lifting_moves_surface_marks_back_onto_their_parts() {
-            let mark = written(0..1);
-            let list: Value = SourceExpr::from(Expr::List(vec![SourceExpr::from(Expr::Waveform(
-                Waveform::Marked {
-                    id: Traced(mark.clone()),
-                    waveform: Box::new(Waveform::Const(1.0)),
-                },
-            ))]));
-            let (lifted, routed) = lift_out(list);
-            // A list is never itself an argument handed back.
-            assert!(!routed);
-            let Expr::List(elements) = lifted.expr else {
-                panic!("expected a list");
-            };
-            assert_eq!(elements[0].expr.as_const_float(), Some(1.0));
-            assert!(matches!(
-                elements[0].expr,
-                Expr::Waveform(Waveform::Const(_))
-            ));
-            assert_eq!(elements[0].span.as_ref().unwrap().range, 0..1);
         }
     }
 }
