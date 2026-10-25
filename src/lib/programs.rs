@@ -531,6 +531,14 @@ impl Program {
         self.level_db = level_db;
     }
 
+    /// Sets the program's declared kind.
+    ///
+    /// The previous evaluation result is kept, though it may no longer match
+    /// the kind until the program is evaluated again.
+    pub fn set_kind(&mut self, kind: ProgramKind) {
+        self.kind = kind;
+    }
+
     /// Sets the slider at `slider_index` to `normalized` (clamped to
     /// 0.0..=1.0) and returns its label and new denormalized value, or
     /// `None` if there is no slider at that index.
@@ -715,6 +723,66 @@ impl ProgramSet {
             None => false,
             Some(synced) => file_mtime(&self.input_path) != Some(synced),
         }
+    }
+
+    /// Returns the message that refuses a write because the backing file has
+    /// changed on disk (see [`ProgramSet::disk_changed`]).
+    pub fn stale_message(&self) -> String {
+        format!(
+            "Not saved: {} changed on disk (reload first)",
+            self.display_path()
+        )
+    }
+
+    /// Returns the `skip_slots` of the binding of the program at `index`, or
+    /// `None` when the slot has no binding.
+    pub fn skip_slots(&self, index: usize) -> Option<u32> {
+        let program = self.programs.get(index)?;
+        self.bindings
+            .get(program.binding_index)
+            .map(read_skip_slots)
+    }
+
+    /// Returns the slot of the last program in the file, counting a program
+    /// pushed past the last slot (which isn't loaded), or `None` when the file
+    /// has no programs.
+    pub fn last_slot(&self) -> Option<usize> {
+        walk_ui_positions(&self.bindings, self.source.len())
+            .last()
+            .map(|(position, _, _)| *position)
+    }
+
+    /// Writes the backing file with the binding of the program at `index`
+    /// given `skip_slots`, and returns the new source.
+    ///
+    /// The set itself is left as it was, so it reads as changed on disk until
+    /// the new source is loaded. Refuses, with a user-visible message, when the
+    /// slot has no binding or the backing file has changed on disk.
+    pub fn write_skip_slots(&mut self, index: usize, skip_slots: u32) -> Result<String, String> {
+        if self.disk_changed() {
+            return Err(self.stale_message());
+        }
+        let program = &self.programs[index];
+        let Some(binding) = self.bindings.get(program.binding_index) else {
+            return Err(format!("{} is empty", self.display_name(index)));
+        };
+        let mut new_source = self.source.clone();
+        if let Some((span, replacement)) =
+            skip_slots_edit(binding, skip_slots, program.level_db(), &self.source)
+        {
+            new_source.replace_range(span, &replacement);
+        }
+        // Skip the file write when no path is set, as `splice` does.
+        if !self.input_path.as_os_str().is_empty()
+            && let Err(e) = fs::write(&self.input_path, &new_source)
+        {
+            return Err(format!(
+                "Warning: failed to write {}: {}",
+                self.input_path.display(),
+                e
+            ));
+        }
+        Ok(new_source)
     }
 
     /// Returns the current contents of the backing file, or the error message
@@ -1006,17 +1074,24 @@ const ANNOTATION_EPSILON: f32 = 1e-4;
 /// Returns annotation-persistence edits for `program` against its parsed
 /// `binding`.
 ///
-/// This includes one for `level_db` if the runtime level has diverged from what
-/// the binding's last `Level` annotation encodes, and one for `sliders` if any
-/// slider's current normalized value has diverged from its parsed initial
-/// value. Returns an empty list when nothing has changed.
+/// This includes one for `keys` if the program's kind has diverged from the
+/// binding's annotations, one for `level_db` if the runtime level has diverged
+/// from what the binding's last `Level` annotation encodes, and one for
+/// `sliders` if any slider's current normalized value has diverged from its
+/// parsed initial value. Returns an empty list when nothing has changed.
 fn annotation_edits(
     program: &Program,
     binding: &expr::SourceBinding<MarkId, Source>,
     source: &str,
 ) -> Vec<(Range<usize>, String)> {
     let mut edits = Vec::new();
-    if let Some(edit) = level_edit(program, binding, source) {
+    let keys = keys_edit(program, binding, source);
+    // Removing a lone `keys` annotation writes `level_db=…` in its place, so a
+    // level edit would write it twice.
+    let replaces_lone_keys =
+        keys.is_some() && program.kind() == ProgramKind::Waveform && binding.annotations.len() == 1;
+    edits.extend(keys);
+    if !replaces_lone_keys && let Some(edit) = level_edit(program, binding, source) {
         edits.push(edit);
     }
     if let Some(edit) = sliders_edit(program, binding) {
@@ -1051,6 +1126,38 @@ fn level_edit(
             // `Level` annotation exists in source yet.
             Some(insert_annotation_edit(binding, &body, source))
         }
+    }
+}
+
+/// Returns the edit that adds or removes the binding's `keys` annotation, or
+/// `None` if the program's kind matches what the binding encodes.
+///
+/// Removing the binding's only annotation writes `level_db=…` in its place, so
+/// the binding stays a UI program.
+fn keys_edit(
+    program: &Program,
+    binding: &expr::SourceBinding<MarkId, Source>,
+    source: &str,
+) -> Option<(Range<usize>, String)> {
+    let parsed = last_annotation_of(binding, |a| match a {
+        expr::Annotation::Keys => Some(()),
+        _ => None,
+    });
+    match (program.kind(), parsed) {
+        (ProgramKind::Keys, None) => Some(insert_annotation_edit(
+            binding,
+            &format!("{}", expr::Annotation::Keys),
+            source,
+        )),
+        (ProgramKind::Waveform, Some((_, Some(span)))) if binding.annotations.len() == 1 => Some((
+            span,
+            format!("{}", expr::Annotation::Level(program.level_db())),
+        )),
+        // TODO a repeated `keys` annotation keeps all but the last.
+        (ProgramKind::Waveform, Some((_, Some(span)))) => {
+            Some(remove_annotation_edit(span, source))
+        }
+        _ => None,
     }
 }
 
@@ -1329,10 +1436,7 @@ impl ProgramSet {
         // reload.
         // TODO double check this... seems like we can get into some weird states
         if self.disk_changed() {
-            return Err(format!(
-                "Not saved: {} changed on disk (reload first)",
-                self.display_path()
-            ));
+            return Err(self.stale_message());
         }
         let edited_span = self.programs[program_index].span.clone();
         let mut edited_text = self.programs[program_index].text().to_string();
@@ -2153,6 +2257,65 @@ kick = pulse(60);";
 #{level_db=-3, color=rgb(255,0,0)}
 kick = pulse(60);"
         );
+    }
+
+    #[test]
+    fn gaining_keys_prepends_the_annotation() {
+        let mut state = state_from("#{level_db=-6}\nk = 1;");
+        state.program_mut(0).unwrap().set_kind(ProgramKind::Keys);
+        state.splice(0).unwrap();
+        assert_eq!(state.source, "#{keys, level_db=-6}\nk = 1;");
+    }
+
+    #[test]
+    fn losing_keys_removes_the_annotation() {
+        let mut state = state_from("#{level_db=-6, keys}\nk = 1;");
+        state
+            .program_mut(0)
+            .unwrap()
+            .set_kind(ProgramKind::Waveform);
+        state.splice(0).unwrap();
+        assert_eq!(state.source, "#{level_db=-6}\nk = 1;");
+    }
+
+    #[test]
+    fn losing_a_lone_keys_annotation_swaps_in_level_db() {
+        // A binding with no annotation would no longer be a program.
+        let mut state = state_from("#{keys}\nk = 1;");
+        let program = state.program_mut(0).unwrap();
+        program.set_kind(ProgramKind::Waveform);
+        program.set_level_db(-2.0);
+        state.splice(0).unwrap();
+        assert_eq!(state.source, "#{level_db=-2}\nk = 1;");
+        assert_eq!(state.display_name(0), "A:1 (k)");
+    }
+
+    #[test]
+    fn write_skip_slots_returns_the_moved_source() {
+        let source =
+            "#{level_db=0}\na = 1;\n#{skip_slots=2, level_db=0}\nb = 2;\n#{level_db=0}\nc = 3;";
+        let mut state = state_from(source);
+        assert_eq!(state.skip_slots(3), Some(2));
+        assert_eq!(state.skip_slots(1), None);
+        assert_eq!(state.last_slot(), Some(4));
+
+        let moved = state.write_skip_slots(3, 3).unwrap();
+        assert_eq!(
+            moved,
+            "#{level_db=0}\na = 1;\n#{skip_slots=3, level_db=0}\nb = 2;\n#{level_db=0}\nc = 3;"
+        );
+        // The set itself is unchanged until the new source is loaded.
+        assert_eq!(state.source, source);
+        let (moved_set, _) = ProgramSet::from_source(moved, PathBuf::new()).unwrap();
+        assert_eq!(moved_set.display_name(4), "A:5 (b)");
+        assert_eq!(moved_set.display_name(5), "A:6 (c)");
+
+        let moved = state.write_skip_slots(3, 0).unwrap();
+        assert_eq!(
+            moved,
+            "#{level_db=0}\na = 1;\n#{level_db=0}\nb = 2;\n#{level_db=0}\nc = 3;"
+        );
+        assert!(state.write_skip_slots(1, 1).is_err());
     }
 
     #[test]

@@ -1,7 +1,8 @@
+use std::cell::Cell;
 use std::time::Instant;
 
 use crate::actions;
-use crate::actions::Mode;
+use crate::actions::{Mode, PrefixKey};
 use crate::programs::{PROGRAMS_PER_BANK, Program};
 
 /// Maps a QWERTY scancode to a MIDI note number for Keys (piano) mode.
@@ -38,12 +39,35 @@ fn scancode_to_midi_note(scancode: sdl2::keyboard::Scancode) -> Option<u8> {
     })
 }
 
+/// Returns whether `scancode` is a modifier key, which neither completes nor
+/// cancels a prefix key.
+fn is_modifier(scancode: sdl2::keyboard::Scancode) -> bool {
+    use sdl2::keyboard::Scancode;
+    matches!(
+        scancode,
+        Scancode::LCtrl
+            | Scancode::RCtrl
+            | Scancode::LShift
+            | Scancode::RShift
+            | Scancode::LAlt
+            | Scancode::RAlt
+            | Scancode::LGui
+            | Scancode::RGui
+            | Scancode::CapsLock
+            | Scancode::Mode
+    )
+}
+
 /// Configuration for the SDL2 classifier — display geometry (used by mouse
 /// motion handling) and whether mouse events should be observed at all.
 pub struct InputHandler {
     handle_mouse_events: bool,
     display_width: u32,
     display_height: u32,
+    /// Whether text input is dropped until the next key press: set when a
+    /// key press completes or cancels a prefix key, since SDL follows a
+    /// printable key's press with its text.
+    swallow_text_input: Cell<bool>,
 }
 
 impl InputHandler {
@@ -52,6 +76,7 @@ impl InputHandler {
             handle_mouse_events,
             display_width,
             display_height,
+            swallow_text_input: Cell::new(false),
         }
     }
 
@@ -69,7 +94,13 @@ impl InputHandler {
         use sdl2::event::Event;
         let mode: &Mode = &state.mode;
         match event {
-            Event::Quit { .. } => Some(vec![Action::Exit]),
+            // Quitting takes two presses. The window's close button and Cmd-Q
+            // in the app menu both arrive as a quit event.
+            Event::Quit { .. } => Some(if state.pending_prefix == Some(PrefixKey::Quit) {
+                vec![Action::Exit]
+            } else {
+                vec![Action::StartPrefix(PrefixKey::Quit)]
+            }),
             Event::KeyDown {
                 scancode,
                 keymod,
@@ -115,6 +146,54 @@ impl InputHandler {
         // gui_mod is "command" on a Mac
         let gui_mod = keymod.contains(Mod::LGUIMOD) || keymod.contains(Mod::RGUIMOD);
         let shift = keymod.contains(Mod::LSHIFTMOD) || keymod.contains(Mod::RSHIFTMOD);
+        // Text input follows its own key press, so the text of a key press
+        // that completed or cancelled a prefix is dropped up to here.
+        self.swallow_text_input.set(false);
+        // Cmd-Q's quit event is the press that counts; if a key press for it
+        // also arrives, it does nothing.
+        // Hypothesis (unverified): on a Mac, Cmd-Q arrives only as a quit
+        // event.
+        if let Some(Scancode::Q) = scancode
+            && gui_mod
+        {
+            return Some(vec![]);
+        }
+        // A pending prefix key takes the next key press, whatever the mode:
+        // the press completes a prefixed command or cancels the prefix. A
+        // modifier press or a held key's auto-repeat does neither.
+        if let Some(prefix) = state.pending_prefix {
+            if repeat || scancode.is_some_and(is_modifier) {
+                return Some(vec![]);
+            }
+            self.swallow_text_input.set(true);
+            let command = match (prefix, scancode) {
+                (PrefixKey::Annotation, Some(Scancode::K)) => {
+                    Some(Action::ToggleKeysAnnotation(active_program_index))
+                }
+                (PrefixKey::Annotation, Some(Scancode::U)) => Some(Action::ChangeSkipSlots {
+                    program_index: active_program_index,
+                    delta: -1,
+                }),
+                (PrefixKey::Annotation, Some(Scancode::D)) => Some(Action::ChangeSkipSlots {
+                    program_index: active_program_index,
+                    delta: 1,
+                }),
+                _ => None,
+            };
+            return Some(std::iter::once(Action::EndPrefix).chain(command).collect());
+        }
+        // Cmd-N starts an annotation command in the modes that don't own the
+        // active program's text.
+        if let Some(Scancode::N) = scancode
+            && gui_mod
+        {
+            return Some(match mode {
+                Mode::Select | Mode::Keys if !repeat => {
+                    vec![Action::StartPrefix(PrefixKey::Annotation)]
+                }
+                _ => vec![],
+            });
+        }
         // Ctrl+S switches the scope view in every mode, once per press: a held
         // chord's auto-repeat would flip it back and forth.
         if let Some(Scancode::S) = scancode
@@ -127,14 +206,8 @@ impl InputHandler {
             });
         }
         // Keys mode: piano keystrokes → NoteOn (suppress on auto-repeat so a
-        // held key doesn't retrigger), Escape leaves keys mode, Ctrl+C still
-        // exits.
+        // held key doesn't retrigger), Escape leaves keys mode.
         if let Mode::Keys = mode {
-            if let Some(Scancode::C) = scancode
-                && ctrl
-            {
-                return Some(vec![Action::Exit]);
-            }
             if let Some(Scancode::Escape) = scancode {
                 return Some(vec![Action::EnterSelectMode]);
             }
@@ -154,8 +227,6 @@ impl InputHandler {
             return Some(vec![]);
         }
         match (mode, scancode) {
-            // Ctrl+C exits in every mode.
-            (_, Some(Scancode::C)) if ctrl => Some(vec![Action::Exit]),
             (Mode::Select, Some(Scancode::R)) if gui_mod => Some(vec![Action::ReloadSource]),
             (Mode::Select, Some(Scancode::Up)) => Some(vec![Action::AdvanceProgram(-1)]),
             (Mode::Select, Some(Scancode::Down)) => Some(vec![Action::AdvanceProgram(1)]),
@@ -314,6 +385,9 @@ impl InputHandler {
         state: &actions::AppState,
     ) -> Option<Vec<actions::Action>> {
         use actions::Action;
+        if self.swallow_text_input.replace(false) || state.pending_prefix.is_some() {
+            return Some(vec![]);
+        }
         match state.mode {
             Mode::Select => match text {
                 "D" => Some(vec![Action::PrintEvaluatedProgram(
@@ -360,15 +434,13 @@ mod tests {
     }
 
     #[test]
-    fn record_mode_accepts_only_ctrl_c_and_ctrl_s() {
+    fn record_mode_accepts_only_ctrl_s() {
         let handler = InputHandler::new(true, 800, 600);
         let now = Instant::now();
         let state = test_state(Mode::Record {
             take: recorder::Take::arm("kb".to_string(), 60, now, now),
             keys_program: 0,
         });
-        let exit = handler.classify_keydown(Some(Scancode::C), Mod::LCTRLMOD, false, &state);
-        assert!(matches!(exit.as_deref(), Some([Action::Exit])));
         let toggle = handler.classify_keydown(Some(Scancode::S), Mod::LCTRLMOD, false, &state);
         assert!(matches!(toggle.as_deref(), Some([Action::ToggleScopeView])));
         for (scancode, keymod) in [
@@ -379,6 +451,8 @@ mod tests {
             (Scancode::R, Mod::LGUIMOD),
             (Scancode::LAlt, Mod::NOMOD),
             (Scancode::Z, Mod::LGUIMOD),
+            (Scancode::C, Mod::LCTRLMOD),
+            (Scancode::N, Mod::LGUIMOD),
         ] {
             let actions = handler.classify_keydown(Some(scancode), keymod, false, &state);
             assert!(
@@ -442,18 +516,191 @@ mod tests {
     }
 
     #[test]
-    fn keys_mode_ctrl_c_exits() {
-        // Ctrl+C is a universal quit and must work even when in Keys
-        // mode (where Escape is bound to exiting the mode, not the app).
+    fn ctrl_c_does_not_exit() {
         let handler = InputHandler::new(false, 800, 600);
-        let state = test_state(Mode::Keys);
+        for mode in [
+            Mode::Select,
+            Mode::Edit {
+                cursor_position: 0,
+                errors: vec![],
+                completion: None,
+            },
+            Mode::Keys,
+        ] {
+            let state = test_state(mode);
+            let actions = handler.classify_keydown(Some(Scancode::C), Mod::LCTRLMOD, false, &state);
+            assert!(
+                !actions.iter().flatten().any(|a| matches!(a, Action::Exit)),
+                "{:?} gave {:?}",
+                state.mode,
+                actions
+            );
+        }
+    }
+
+    /// Returns `state` with `prefix` pending.
+    fn pending(mut state: AppState, prefix: PrefixKey) -> AppState {
+        state.pending_prefix = Some(prefix);
+        state
+    }
+
+    #[test]
+    fn quitting_takes_two_quit_events() {
+        let handler = InputHandler::new(false, 800, 600);
+        let quit = sdl2::event::Event::Quit { timestamp: 0 };
+        let state = test_state(Mode::Select);
+        let first = handler.classify(&quit, &state);
+        assert!(matches!(
+            first.as_deref(),
+            Some([Action::StartPrefix(PrefixKey::Quit)])
+        ));
+        let state = pending(test_state(Mode::Select), PrefixKey::Quit);
+        let second = handler.classify(&quit, &state);
+        assert!(matches!(second.as_deref(), Some([Action::Exit])));
+        // A quit event while another prefix waits starts the quit prefix.
+        let state = pending(test_state(Mode::Keys), PrefixKey::Annotation);
+        let actions = handler.classify(&quit, &state);
+        assert!(matches!(
+            actions.as_deref(),
+            Some([Action::StartPrefix(PrefixKey::Quit)])
+        ));
+    }
+
+    #[test]
+    fn a_key_press_cancels_a_pending_quit() {
+        let handler = InputHandler::new(false, 800, 600);
+        let state = pending(test_state(Mode::Select), PrefixKey::Quit);
+        for (scancode, keymod) in [
+            (Scancode::Escape, Mod::NOMOD),
+            (Scancode::Return, Mod::NOMOD),
+            (Scancode::S, Mod::LCTRLMOD),
+            (Scancode::K, Mod::NOMOD),
+        ] {
+            let actions = handler.classify_keydown(Some(scancode), keymod, false, &state);
+            assert!(
+                matches!(actions.as_deref(), Some([Action::EndPrefix])),
+                "{:?} gave {:?}",
+                scancode,
+                actions
+            );
+        }
+        // The cancelling key's text does nothing either.
+        let actions = handler.classify_text_input("k", &test_state(Mode::Select));
+        assert!(matches!(actions.as_deref(), Some([])), "{:?}", actions);
+    }
+
+    #[test]
+    fn modifiers_repeats_and_cmd_q_leave_a_prefix_pending() {
+        let handler = InputHandler::new(false, 800, 600);
+        let state = pending(test_state(Mode::Keys), PrefixKey::Quit);
+        for (scancode, keymod, repeat) in [
+            (Scancode::LGui, Mod::LGUIMOD, false),
+            (Scancode::RShift, Mod::RSHIFTMOD, false),
+            (Scancode::Z, Mod::NOMOD, true),
+            (Scancode::Q, Mod::LGUIMOD, false),
+        ] {
+            let actions = handler.classify_keydown(Some(scancode), keymod, repeat, &state);
+            assert!(
+                matches!(actions.as_deref(), Some([])),
+                "{:?} gave {:?}",
+                scancode,
+                actions
+            );
+        }
+    }
+
+    #[test]
+    fn cmd_n_starts_the_annotation_prefix_in_select_and_keys_modes() {
+        let handler = InputHandler::new(false, 800, 600);
+        for mode in [Mode::Select, Mode::Keys] {
+            let state = test_state(mode);
+            let actions = handler.classify_keydown(Some(Scancode::N), Mod::LGUIMOD, false, &state);
+            assert!(
+                matches!(
+                    actions.as_deref(),
+                    Some([Action::StartPrefix(PrefixKey::Annotation)])
+                ),
+                "{:?} gave {:?}",
+                state.mode,
+                actions
+            );
+        }
+        let state = test_state(Mode::Edit {
+            cursor_position: 0,
+            errors: vec![],
+            completion: None,
+        });
+        let actions = handler.classify_keydown(Some(Scancode::N), Mod::LGUIMOD, false, &state);
+        assert!(matches!(actions.as_deref(), Some([])), "{:?}", actions);
+    }
+
+    #[test]
+    fn annotation_prefix_completes_on_k_u_and_d() {
+        let handler = InputHandler::new(false, 800, 600);
+        let state = pending(test_state(Mode::Select), PrefixKey::Annotation);
+        let classify = |scancode, keymod| {
+            handler
+                .classify_keydown(Some(scancode), keymod, false, &state)
+                .expect("key press should be classified")
+        };
+        assert!(matches!(
+            classify(Scancode::K, Mod::NOMOD)[..],
+            [Action::EndPrefix, Action::ToggleKeysAnnotation(0)]
+        ));
+        // Cmd may still be held from the prefix key.
+        assert!(matches!(
+            classify(Scancode::U, Mod::LGUIMOD)[..],
+            [
+                Action::EndPrefix,
+                Action::ChangeSkipSlots {
+                    program_index: 0,
+                    delta: -1
+                }
+            ]
+        ));
+        assert!(matches!(
+            classify(Scancode::D, Mod::NOMOD)[..],
+            [
+                Action::EndPrefix,
+                Action::ChangeSkipSlots {
+                    program_index: 0,
+                    delta: 1
+                }
+            ]
+        ));
+        assert!(matches!(
+            classify(Scancode::X, Mod::NOMOD)[..],
+            [Action::EndPrefix]
+        ));
+        // In Select mode `k` would enter Keys mode, but its text follows the
+        // press that completed the prefix.
+        let actions = handler.classify_text_input("k", &test_state(Mode::Select));
+        assert!(matches!(actions.as_deref(), Some([])), "{:?}", actions);
+        // Text after the next key press is read again.
+        handler.classify_keydown(
+            Some(Scancode::M),
+            Mod::NOMOD,
+            false,
+            &test_state(Mode::Select),
+        );
+        let actions = handler.classify_text_input("m", &test_state(Mode::Select));
+        assert!(matches!(
+            actions.as_deref(),
+            Some([Action::ToggleMetronome])
+        ));
+    }
+
+    #[test]
+    fn annotation_prefix_in_keys_mode_plays_no_note() {
+        let handler = InputHandler::new(false, 800, 600);
+        let state = pending(test_state(Mode::Keys), PrefixKey::Annotation);
         let actions = handler
-            .classify_keydown(Some(Scancode::C), Mod::LCTRLMOD, false, &state)
-            .expect("Ctrl+C in Keys mode should produce actions");
+            .classify_keydown(Some(Scancode::D), Mod::NOMOD, false, &state)
+            .expect("D should be classified");
         assert!(
-            matches!(actions[0], Action::Exit),
-            "expected Exit, got {:?}",
-            actions[0]
+            !actions.iter().any(|a| matches!(a, Action::NoteOn { .. })),
+            "got {:?}",
+            actions
         );
     }
 
@@ -513,7 +760,6 @@ mod tests {
 
     #[test]
     fn keys_mode_bare_c_still_emits_note_on() {
-        // Sanity check that the Ctrl+C carve-out didn't break piano C.
         let handler = InputHandler::new(false, 800, 600);
         let state = test_state(Mode::Keys);
         let actions = handler

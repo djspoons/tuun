@@ -267,6 +267,10 @@ impl EffectRunner {
             .remove_pending(WaveformSelector::AllVoices, None);
         // The installed instrument was a snapshot of the old set.
         state.keys = None;
+        // Keys mode plays the instrument just uninstalled.
+        if matches!(state.mode, actions::Mode::Keys) {
+            state.mode = actions::Mode::Select;
+        }
         state.programs = set;
         // Baselines are re-seeded from the new set rather than kept since a
         // slider mark names a program slot, which the new set may fill with an
@@ -443,6 +447,18 @@ impl EffectRunner {
                     state.message = message;
                 }
             }
+
+            Effect::MoveProgram {
+                program_index,
+                skip_slots,
+                to,
+            } => match state.programs.write_skip_slots(program_index, skip_slots) {
+                Ok(source) => {
+                    state.active_program_index = to;
+                    self.load(state, source, false);
+                }
+                Err(message) => state.message = message,
+            },
 
             Effect::ReloadSource => match state.programs.read_backing_file() {
                 Ok(source) => self.load(state, source, false),
@@ -1369,6 +1385,58 @@ mod tests {
             "got: {}",
             state.message
         );
+    }
+
+    #[test]
+    fn move_program_writes_the_file_and_reloads_with_the_selection() {
+        let (command_sender, _command_receiver) = mpsc::channel();
+        let (slider_sender, _slider_receiver) = mpsc::channel();
+        let player = player::Player::new(90, 4, command_sender);
+        let environment = environment::Environment::new(44100, 90, std::path::PathBuf::new());
+        let (job_sender, job_receiver) = mpsc::channel();
+        let mut runner = EffectRunner::new(player, environment, slider_sender, job_sender);
+
+        let path =
+            std::env::temp_dir().join(format!("tuun_move_runner_{}.tuun", std::process::id()));
+        std::fs::write(
+            &path,
+            "#{level_db=0}\na = 1;\n#{skip_slots=1, level_db=0}\nb = 2;\n#{level_db=0}\nc = 3;\n",
+        )
+        .unwrap();
+        let mut state =
+            AppState::from_source(std::fs::read_to_string(&path).unwrap(), path.clone())
+                .expect("test source should parse");
+        state.active_program_index = 2;
+        state.mode = actions::Mode::Keys;
+        let status = empty_status();
+        let mut world = World {
+            launchkey: None,
+            status: &status,
+        };
+        runner.run_one(
+            &mut state,
+            &mut world,
+            Effect::MoveProgram {
+                program_index: 2,
+                skip_slots: 0,
+                to: 1,
+            },
+        );
+        let written = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(
+            written,
+            "#{level_db=0}\na = 1;\n#{level_db=0}\nb = 2;\n#{level_db=0}\nc = 3;\n"
+        );
+        assert!(state.is_loading());
+        process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
+        // `b` and the program after it both moved up, and the selection
+        // followed `b`.
+        assert_eq!(state.active_program_index, 1);
+        assert_eq!(state.programs.display_name(1), "A:2 (b)");
+        assert_eq!(state.programs.display_name(2), "A:3 (c)");
+        // The reload uninstalled the keys instrument Keys mode would play.
+        assert!(matches!(state.mode, actions::Mode::Select));
     }
 
     #[test]

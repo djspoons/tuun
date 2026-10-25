@@ -75,6 +75,9 @@ In "select" mode (when a solid triangle appears at the left-hand side):
 * Left - select the previous program bank
 * Cmd + R - stop playback and **reload** all source files
 * Ctrl + S - switch the **scope** view between "snapshot" and "scan"
+* Cmd + N, then K - add the **keys** annotation to the current program, or remove it
+* Cmd + N, then U - move the current program, and every program after it, **up** one slot
+* Cmd + N, then D - move the current program, and every program after it, **down** one slot
 
 In "edit" mode (when the current program is rendered in white):
 * Enter - play the current program's waveform at the beginning of the next measure
@@ -91,6 +94,9 @@ In "slider" mode (slider marks at top and left turn green):
 In "keys" mode:
 * Bottom two rows of keys (Z to /, S to ;) behave as the keys on MIDI keyboard
 * Escape - return to "select" mode
+* Cmd + N, then K, U or D - change the current program's annotation, as in "select" mode
+
+In every mode, Cmd + Q twice quits. (So does clicking the window's close button twice.) After the first press, any other key cancels.
 
 The scope at the top of the window has two views. "Snapshot" view draws the latest output samples, and "scan" view sweeps the output's range across two measures, turning yellow or red where it nears or passes clipping. Start in Scan with `--scope-view scan`. Snapshot and the spectrum below it redraw according to `--snapshot-refresh-ms`.
 
