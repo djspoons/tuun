@@ -358,6 +358,13 @@ impl EffectRunner {
                     None,
                 );
             }
+            Effect::RecordSequencerStepMarks(program_index) => {
+                player::record_step_marks(
+                    &state.programs,
+                    program_index,
+                    &mut state.waveform_marks,
+                );
+            }
             Effect::StopProgram(program_index) => {
                 if state.programs.program(program_index).is_none() {
                     return;
@@ -1056,6 +1063,100 @@ mod tests {
             "got: {}",
             state.message
         );
+    }
+
+    /// Returns the program text each mark of program 0's step at `sixteenth`
+    /// in `state.waveform_marks` lights, its literals last, or `None` when the
+    /// step has no entry or its entry was lit against other text.
+    fn step_lit_texts(state: &AppState, sixteenth: u8) -> Option<Vec<String>> {
+        let played = state.waveform_marks.get(&WaveformId::Step {
+            program: 0,
+            sixteenth,
+        })?;
+        let text = state.programs.program(0)?.text();
+        if *played.text != *text {
+            return None;
+        }
+        let marks = played.marks.marks.iter().chain(&played.extra);
+        Some(
+            marks
+                .map(|m| text[m.text_range.clone()].to_string())
+                .collect(),
+        )
+    }
+
+    /// Toggling a step of a playing sequence re-records the marks of the steps
+    /// already playing against the new text, and drops a removed step's.
+    #[test]
+    fn a_sequencer_toggle_keeps_the_playing_steps_marks_current() {
+        let (mut runner, _command_receiver, job_receiver) = runner_with_jobs();
+        let mut state = AppState::from_source(
+            "on_beats = fn(w) => fn(bs) => w;\n\
+             #{level_db=0}\n\
+             _ = [1, 2] | on_beats(phase(440, 0) | fin(time - 0.1));\n"
+                .to_string(),
+            std::path::PathBuf::new(),
+        )
+        .expect("test source should parse");
+        let now = Instant::now();
+        let mut status = empty_status();
+        let anchor = WaveformId::Step {
+            program: 0,
+            sixteenth: ANCHOR_SIXTEENTH,
+        };
+        status.start_times = vec![
+            (anchor.clone(), now),
+            (anchor, now + std::time::Duration::from_secs(4)),
+        ];
+        let mut world = World {
+            launchkey: None,
+            status: &status,
+        };
+        runner.run_one(
+            &mut state,
+            &mut world,
+            Effect::EvaluateProgram {
+                program_index: 0,
+                on_success: vec![Effect::PlayProgram {
+                    program_index: 0,
+                    start: player::Start::Now,
+                    repeat_after_measures: Some(1),
+                }],
+                on_failure: vec![],
+            },
+        );
+        process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
+        let before = step_lit_texts(&state, 0).expect("step 0 should have marks");
+        assert_eq!(before.last().map(String::as_str), Some("1"));
+
+        runner.dispatch(
+            &mut state,
+            &mut world,
+            vec![actions::Action::ToggleSequencerStep { sixteenth: 8 }],
+        );
+        process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
+        assert_eq!(
+            state.programs.program(0).unwrap().text(),
+            "[1, 2, 3] | on_beats(phase(440, 0) | fin(time - 0.1))"
+        );
+        assert_eq!(step_lit_texts(&state, 0), Some(before));
+        for (sixteenth, literal) in [(4, "2"), (8, "3")] {
+            let lit = step_lit_texts(&state, sixteenth).expect("each step should have marks");
+            assert_eq!(lit.last().map(String::as_str), Some(literal));
+        }
+
+        runner.dispatch(
+            &mut state,
+            &mut world,
+            vec![actions::Action::ToggleSequencerStep { sixteenth: 4 }],
+        );
+        process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
+        assert!(!state.waveform_marks.contains_key(&WaveformId::Step {
+            program: 0,
+            sixteenth: 4,
+        }));
+        let lit = step_lit_texts(&state, 8).expect("step 8 should have marks");
+        assert_eq!(lit.last().map(String::as_str), Some("3"));
     }
 
     /// A result whose text was replaced after its job was sent is dropped,

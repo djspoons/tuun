@@ -3,7 +3,7 @@
 //! `Player` owns the sender that goes straight to the tracker. All methods take
 //! `&self`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, mpsc};
 use std::time;
 
@@ -46,6 +46,45 @@ fn played_marks(
         text: program.evaluated_text().clone(),
         marks: marks.clone(),
         extra,
+    }
+}
+
+/// Re-records the marks in `waveform_marks` of every step of the program at
+/// `program_index` from its current sequence in `set`, without playing anything.
+///
+/// A step whose sixteenth no longer holds a step of the sequence loses its
+/// entry. Does nothing when the program has no sequence.
+pub fn record_step_marks(
+    set: &ProgramSet,
+    program_index: usize,
+    waveform_marks: &mut HashMap<WaveformId, PlayedMarks>,
+) {
+    let Some(program) = set.program(program_index) else {
+        return;
+    };
+    let Some(sequence) = program.sequence() else {
+        return;
+    };
+    let sixteenths: HashSet<u8> = sequence
+        .step_beats()
+        .map(sequencer::sixteenth_for_beat)
+        .collect();
+    waveform_marks.retain(|id, _| match id {
+        WaveformId::Step { program, sixteenth } if *program == program_index => {
+            sixteenths.contains(sixteenth)
+        }
+        _ => true,
+    });
+    for (id, marks) in waveform_marks.iter_mut() {
+        if let WaveformId::Step {
+            program: p,
+            sixteenth,
+        } = id
+            && *p == program_index
+        {
+            let extra = sequence.step_literal_marks(*sixteenth);
+            *marks = played_marks(program_index, program, &sequence.step_marks, extra);
+        }
     }
 }
 
