@@ -106,7 +106,7 @@ The example below is configured with an envelope that matches the flute sample. 
 
 <div class="container">
   <tuun-synth
-    description="Envelope example"
+    description="ADSR envelope example"
     expanded
     open='["std", "env.finseq"]'
     sliders='["attack_dur:0.32:0.0:1.0","decay_dur:0.0:0.0:1.0","sustain_level_db:0.0:-36.0:2.0","release_dur:0.18:0.0:2.0"]'>
@@ -120,6 +120,33 @@ The example below is configured with an envelope that matches the flute sample. 
     </script>
   </tuun-synth>
 </div>
+
+### Non-linear envelopes
+
+The segments in the envelopes above are all *linear* functions of time. These segments can also take other shapes. A faster (but still smooth) release like an exponential decay can give a punchier sound to drums and other percussion instruments.
+
+The example below mixes two kick-drum-like instruments. Both use a 60 Hz triangle wave and a 100 ms release. With the slider at the left, you hear a linear release; with the slider at the right, you hear an exponential decay release.
+
+<div class="container">
+  <tuun-synth
+    description="Exponential decay envelope example"
+    expanded
+    open='["std"]'
+    use='["env.finseq", "env.expfil"]'
+    sliders='["mix:0:0:1"]'>
+    <script type="text/tuun">
+      let
+        inst_lin = fn(dur, freq_hz) =>
+          triangle(freq_hz) | finseq.R(dur, 1.0),
+        inst_exp = fn(dur, freq_hz) =>
+          triangle(freq_hz) | expfil.R(dur, 1.0),
+      in
+        reset($1, (1 - mix) * inst_lin(0.1, 60) + mix * inst_exp(0.1, 60))
+    </script>
+  </tuun-synth>
+</div>
+
+(The names of the envelopes here partly reveal their implementation: `finseq` implements linear envelopes using `fin` and `seq`, while `expfil` implements exponential envelopes using `filter`.)
 
 ## Overtones
 
@@ -325,9 +352,37 @@ Another example of a instrument that uses PM is a 1980s-style electric piano. Po
 ### Octaves and de-tuning
 
 ### Synchronization
-
-## Noise
  -->
+
+## Transients and noise
+
+Many percussion instruments have a very short burst of high frequency sound called a "transient." On a drum, this is caused by the striking of the drum head by a stick or beater. Without transients, synthesized drums sound dull and muted.
+
+The example below offers two ways to add transients to a short drum sound. The first is a frequency envelope: instead of using a constant frequency, it creates a triangle wave that starts up to three octaves above the desired tone and then rapidly drops in frequency over 20 ms. (The first slider controls the initial frequency.) The second is a short burst of noise: the second and third sliders control the level and duration of that noise. Adjust the sliders to create different drum sounds like a kick, snare, or tom drum.
+
+<div class="container">
+  <tuun-synth
+    description="Transients example"
+    expanded
+    open='["std"]'
+    use='["env.expfil"]'
+    sliders='["freq_multiplier:3:1:8","noise_level_db:-60.0:-60.0:2.0","noise_dur:0.0:0.0:1.0"]'>
+    <script type="text/tuun">
+      let
+        inst = fn(dur, freq_hz) => let
+            freq_env_dur = 0.02,
+            freq_env = max(linear(freq_multiplier, -1/freq_env_dur), 1),
+
+            noise_hit = noise | expfil.R(noise_dur, 1.0),
+          in
+            1.5 * triangle(freq_hz * freq_env)
+              & db2amp(noise_level_db) * noise_hit
+              | expfil.R(dur, 1.0),
+      in
+        reset($1, inst(0.1, 20))
+    </script>
+  </tuun-synth>
+</div>
 
 
 ## MIDI instruments
