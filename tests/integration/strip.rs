@@ -110,8 +110,7 @@ fn from(start: Instant, strip: &[StripMark]) -> Vec<(usize, Duration, Duration)>
     marks
 }
 
-/// T1: the strip draws two marks, a quarter note long, at 0 and 1.5 quarter
-/// notes.
+/// The strip draws two marks, a quarter note long, at 0 and 1.5 quarter notes.
 #[test]
 fn t1_draws_two_marks() {
     let start = Instant::now() + Duration::from_secs(1);
@@ -126,8 +125,8 @@ fn t1_draws_two_marks() {
     );
 }
 
-/// T1: each note lights `$x`, `*`, `Qw` and its own frequency while it
-/// sounds, and nothing lights between the notes.
+/// Each note lights `$x`, `*`, `Qw` and its own frequency while it sounds, and
+/// nothing lights between the notes.
 #[test]
 fn t1_lights_each_note_while_it_sounds() {
     let start = Instant::now() + Duration::from_secs(1);
