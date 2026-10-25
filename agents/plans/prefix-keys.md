@@ -34,8 +34,7 @@ Goals:
 
 - Adds `keys` to the active program's annotation, or removes it. This changes only that program's kind.
 - **No reload.** Handle it like `level_db`: change the kind on the in-memory `Program`, write the annotation back to the file through `splice`, then re-evaluate just that program (`Effect::EvaluateProgram`), since how it evaluates depends on its kind.
-- It doesn't install or uninstall the keys instrument; `K` still does that. One exception: if the program is the **installed keys instrument** and loses `keys`, uninstall it, and release held notes normally, through each note's stored note-off waveform.
-  - Note: uninstalling with `K` today *stops* held keys with a stop ramp (`apply_install_keys`, `src/lib/actions.rs`) instead of releasing them. This plan intentionally releases them; don't copy the `K` path.
+- It doesn't install or uninstall the keys instrument; `K` still does that. One exception: if the program is the **installed keys instrument** and loses `keys`, uninstall it exactly as `K` does (`apply_install_keys`, `src/lib/actions.rs`), which stops held keys with a stop ramp.
 - Voices of a program that gains `keys` keep sounding; they are already-evaluated waveforms.
 
 #### Cmd-N u / d: change `skip_slots`
