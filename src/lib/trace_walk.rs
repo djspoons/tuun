@@ -18,8 +18,9 @@ use crate::waveform::Waveform;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Segment {
     pub offset: usize,
-    /// `None` for sources outside any finite node: they sound as long as the
-    /// waveform does.
+    /// `None` for sources that sound until the waveform ends: those outside
+    /// any finite node, and those in a `Fin` of unknown length that nothing
+    /// outlasts.
     pub duration: Option<usize>,
 }
 
@@ -83,7 +84,7 @@ where
         unclaimed: 0,
         unscoped: 0,
     };
-    let out = walk.walk(root, Some(0), false);
+    let out = walk.walk(root, Some(0), false, true);
     if walk.unclaimed > 0 {
         walk.segments.push(Segment {
             offset: 0,
@@ -164,8 +165,15 @@ impl<S> Walk<S> {
     ///
     /// `offset` is when `w` starts, in samples from the start of the whole waveform, or
     /// `None` if that isn't known. Inside an `opaque` waveform (a `Reset`'s),
-    /// no node is finite and offsets don't advance.
-    fn walk<M>(&mut self, w: Waveform<M>, offset: Option<usize>, opaque: bool) -> Waveform<M>
+    /// no node is finite and offsets don't advance. `ends` is whether the
+    /// whole waveform ends no later than `w` does.
+    fn walk<M>(
+        &mut self,
+        w: Waveform<M>,
+        offset: Option<usize>,
+        opaque: bool,
+        ends: bool,
+    ) -> Waveform<M>
     where
         M: CarriesTrace<S> + Clone + PartialEq,
     {
@@ -177,10 +185,13 @@ impl<S> Walk<S> {
             self.unclaimed,
             self.unscoped,
         );
+        // A child that doesn't set its parent's length, so the waveform may
+        // outlast it.
+        let outlasted = false;
         let out = match w {
             Marked { id, waveform } => match id.as_trace().cloned() {
                 Some(trace) => {
-                    let inner = *self.child(waveform, offset, opaque);
+                    let inner = *self.child(waveform, offset, opaque, ends);
                     self.marks.push(WalkMark {
                         trace,
                         folded: self.marks.len() == m0,
@@ -191,7 +202,7 @@ impl<S> Walk<S> {
                 }
                 None => Marked {
                     id,
-                    waveform: self.child(waveform, offset, opaque),
+                    waveform: self.child(waveform, offset, opaque, ends),
                 },
             },
             // Lengths are dark: they only time a segment.
@@ -201,11 +212,13 @@ impl<S> Walk<S> {
                 state,
             } => Fin {
                 length: Box::new(self.measurable(trace::strip_trace_marks(*length))),
-                waveform: Box::new(self.walk(*waveform, offset, opaque)),
+                waveform: Box::new(self.walk(*waveform, offset, opaque, ends)),
                 state,
             },
+            // After a first part of unknown length, the second part's offset
+            // is unknown too, so its sources get no segment and stay dark.
             Append(a, b, state) => {
-                let a = self.walk(*a, offset, opaque);
+                let a = self.walk(*a, offset, opaque, outlasted);
                 let b_offset = match opaque {
                     true => offset,
                     false => offset
@@ -214,7 +227,7 @@ impl<S> Walk<S> {
                 };
                 Append(
                     Box::new(a),
-                    Box::new(self.walk(*b, b_offset, opaque)),
+                    Box::new(self.walk(*b, b_offset, opaque, ends)),
                     state,
                 )
             }
@@ -225,8 +238,8 @@ impl<S> Walk<S> {
                 waveform,
                 state,
             } => Reset {
-                trigger: self.child(trigger, offset, opaque),
-                waveform: Box::new(self.walk(*waveform, offset, true)),
+                trigger: self.child(trigger, offset, opaque, ends),
+                waveform: Box::new(self.walk(*waveform, offset, true, outlasted)),
                 state,
             },
             Phase {
@@ -235,8 +248,8 @@ impl<S> Walk<S> {
                 state,
             } => {
                 let w = Phase {
-                    frequency: self.child(frequency, offset, opaque),
-                    offset: self.child(phase_offset, offset, opaque),
+                    frequency: self.child(frequency, offset, opaque, ends),
+                    offset: self.child(phase_offset, offset, opaque, ends),
                     state,
                 };
                 self.add_source();
@@ -257,53 +270,66 @@ impl<S> Walk<S> {
                 feedback,
                 state,
             } => Filter {
-                waveform: self.child(waveform, offset, opaque),
+                waveform: self.child(waveform, offset, opaque, ends),
                 feed_forward: feed_forward
                     .into_iter()
-                    .map(|w| self.walk(w, offset, opaque))
+                    .map(|w| self.walk(w, offset, opaque, outlasted))
                     .collect(),
                 feedback: feedback
                     .into_iter()
-                    .map(|w| self.walk(w, offset, opaque))
+                    .map(|w| self.walk(w, offset, opaque, outlasted))
                     .collect(),
                 state,
             },
-            BinaryOp(op, a, b) => BinaryOp(
-                op,
-                self.child(a, offset, opaque),
-                self.child(b, offset, opaque),
-            ),
-            UnaryOp(op, a) => UnaryOp(op, self.child(a, offset, opaque)),
+            // An operator that stops with its shorter operand ends no later
+            // than either of them.
+            BinaryOp(op, a, b) => {
+                let ends = ends && !op.extends_to_longer();
+                BinaryOp(
+                    op,
+                    self.child(a, offset, opaque, ends),
+                    self.child(b, offset, opaque, ends),
+                )
+            }
+            UnaryOp(op, a) => UnaryOp(op, self.child(a, offset, opaque, ends)),
             Alt {
                 trigger,
                 positive_waveform,
                 negative_waveform,
             } => Alt {
-                trigger: self.child(trigger, offset, opaque),
-                positive_waveform: self.child(positive_waveform, offset, opaque),
-                negative_waveform: self.child(negative_waveform, offset, opaque),
+                trigger: self.child(trigger, offset, opaque, ends),
+                positive_waveform: self.child(positive_waveform, offset, opaque, outlasted),
+                negative_waveform: self.child(negative_waveform, offset, opaque, outlasted),
             },
             Captured {
                 file_stem,
                 waveform,
             } => Captured {
                 file_stem,
-                waveform: self.child(waveform, offset, opaque),
+                waveform: self.child(waveform, offset, opaque, ends),
             },
         };
-        // A node's length is only read when it could claim a source or scope
-        // a mark beneath it.
+        // A node's length is only read when it could claim a source or scope a
+        // mark beneath it. A `Fin` whose length can't be measured still ends,
+        // so it claims and scopes too. Its segment runs from its offset until
+        // the waveform ends when nothing outlasts it; otherwise it has none,
+        // and what it holds stays dark.
         let claims = self.unclaimed > unclaimed0;
         let scopes = self.sources > sources0 && self.unscoped > unscoped0;
-        if !opaque
-            && (claims || scopes)
-            && let Some(length) = self.finite_length(&out)
-        {
+        let length = match !opaque && (claims || scopes) {
+            true => {
+                (self.finite_length(&out).map(Some)).or(matches!(out, Fin { .. }).then_some(None))
+            }
+            false => None,
+        };
+        if let Some(length) = length {
             if claims {
-                if let Some(offset) = offset {
+                if let Some(offset) = offset
+                    && (length.is_some() || ends)
+                {
                     self.segments.push(Segment {
                         offset,
-                        duration: Some(length),
+                        duration: length,
                     });
                 }
                 self.unclaimed = unclaimed0;
@@ -327,12 +353,13 @@ impl<S> Walk<S> {
         mut w: Box<Waveform<M>>,
         offset: Option<usize>,
         opaque: bool,
+        ends: bool,
     ) -> Box<Waveform<M>>
     where
         M: CarriesTrace<S> + Clone + PartialEq,
     {
         let inner = std::mem::replace(&mut *w, Waveform::Noise);
-        *w = self.walk(inner, offset, opaque);
+        *w = self.walk(inner, offset, opaque, ends);
         w
     }
 
@@ -586,6 +613,69 @@ mod tests {
                 duration: None
             }]
         );
+    }
+
+    /// A marked source in a `Fin` whose length reads a mark the generator can't
+    /// see through, as a slider's does.
+    fn unmeasurable_note(trace: &Arc<Trace<Text>>) -> W {
+        Waveform::Fin {
+            length: Box::new(Waveform::BinaryOp(
+                BinaryOperator::Subtract,
+                Box::new(Waveform::Time(())),
+                Box::new(Waveform::Marked {
+                    id: Id::Other,
+                    waveform: Box::new(Waveform::Const(1.0)),
+                }),
+            )),
+            waveform: Box::new(mark(trace, Waveform::Noise)),
+            state: (),
+        }
+    }
+
+    #[test]
+    fn a_fin_of_unmeasurable_length_that_ends_the_waveform_sounds_until_it_ends() {
+        let w = append(note(1.0), unmeasurable_note(&written(0..1)));
+        let marks = walked(w, &dark());
+        let open = Segment {
+            offset: 10,
+            duration: None,
+        };
+        assert_eq!(marks.segments, [segment(0, 10), open.clone()]);
+        assert_eq!(
+            marks.marks,
+            [Mark {
+                text_range: 0..1,
+                segments: 1..2
+            }]
+        );
+        // `+` stops with its shorter operand, so the note can't outlast it.
+        let w = Waveform::BinaryOp(
+            BinaryOperator::Add,
+            Box::new(unmeasurable_note(&written(0..1))),
+            Box::new(note(1.0)),
+        );
+        let open = Segment {
+            offset: 0,
+            duration: None,
+        };
+        assert_eq!(walked(w, &dark()).segments, [open, segment(0, 10)]);
+    }
+
+    #[test]
+    fn a_fin_of_unmeasurable_length_that_may_be_outlasted_stays_dark() {
+        // `&` runs as long as its longer operand.
+        let w = Waveform::BinaryOp(
+            BinaryOperator::Merge,
+            Box::new(unmeasurable_note(&written(0..1))),
+            Box::new(note(1.0)),
+        );
+        let marks = walked(w, &dark());
+        assert_eq!(marks.segments, [segment(0, 10)]);
+        assert!(marks.marks.iter().all(|m| m.segments.is_empty()));
+        // Whatever comes after a part outlasts it.
+        let w = append(unmeasurable_note(&written(0..1)), note(1.0));
+        let marks = walked(w, &dark());
+        assert!(marks.marks.iter().all(|m| m.segments.is_empty()));
     }
 
     #[test]
