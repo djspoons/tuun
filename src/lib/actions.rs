@@ -504,6 +504,9 @@ pub enum Effect {
     PlaySequencerStep { program_index: usize, sixteenth: u8 },
     /// Remove one sequencer step's pending playback from the tracker.
     RemovePendingSequencerStep { program_index: usize, sixteenth: u8 },
+    /// Re-record the marks of the program's steps from its current sequence,
+    /// without playing them.
+    RecordSequencerStepMarks(usize),
     /// Turn the metronome click on the Beats waveforms on or off.
     SetMetronome(bool),
     /// Send a Modify command to the tracker for the selected waveforms.
@@ -1449,6 +1452,9 @@ fn apply_toggle_sequencer_step(state: &mut AppState, ctx: &Context, sixteenth: u
     ))];
     let mut on_failure = Vec::new();
     if live {
+        // Steps already playing keep repeating without another Play, so their
+        // marks must follow the new text here.
+        on_success.push(Effect::RecordSequencerStepMarks(i));
         if edit.turned_on {
             on_success.push(Effect::PlaySequencerStep {
                 program_index: i,
@@ -1900,6 +1906,9 @@ fn apply_committed_history_restore(
     if sequence_is_live(ctx, i) {
         let old_steps = step_sixteenths(&old_text);
         let new_steps = step_sixteenths(state.active_program().text());
+        // Steps already playing keep repeating without another Play, so their
+        // marks must follow the restored text here.
+        on_success.push(Effect::RecordSequencerStepMarks(i));
         on_success.extend(new_steps.difference(&old_steps).map(|&sixteenth| {
             Effect::PlaySequencerStep {
                 program_index: i,
@@ -3707,7 +3716,14 @@ _ = saw(220);";
             "expected RemovePendingSequencerStep last, got {:?}",
             effects
         );
-        assert_eq!(effects.len(), 4);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::RecordSequencerStepMarks(0))),
+            "expected RecordSequencerStepMarks, got {:?}",
+            effects
+        );
+        assert_eq!(effects.len(), 5);
 
         let effects = in_run_order(apply_with_status(&mut state, &status, now, Action::Redo));
         assert!(
@@ -3721,7 +3737,14 @@ _ = saw(220);";
             "expected PlaySequencerStep last, got {:?}",
             effects
         );
-        assert_eq!(effects.len(), 4);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::RecordSequencerStepMarks(0))),
+            "expected RecordSequencerStepMarks, got {:?}",
+            effects
+        );
+        assert_eq!(effects.len(), 5);
     }
 
     #[test]
