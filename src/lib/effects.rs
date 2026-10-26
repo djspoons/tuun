@@ -151,7 +151,9 @@ impl EffectRunner {
             processing::Reply::Program(outcome) => outcome,
             processing::Reply::Loaded(loaded) => {
                 match state.processing.pop_front() {
-                    Some(PendingJob::Load { startup }) => self.install(state, loaded, startup),
+                    Some(PendingJob::Load { startup, select }) => {
+                        self.install(state, loaded, startup, select)
+                    }
                     _ => println!("Got a load reply with no load waiting for it"),
                 }
                 return;
@@ -225,8 +227,15 @@ impl EffectRunner {
     /// Playback and the current set are untouched until the reply. Installing
     /// stops every voice; a `source` that doesn't parse leaves everything as it
     /// is and shows the error. `startup` marks the load at startup, whose
-    /// status message names only the failed programs.
-    pub fn load(&mut self, state: &mut AppState, source: String, startup: bool) {
+    /// status message names only the failed programs. Installing selects slot
+    /// `select`, if given.
+    pub fn load(
+        &mut self,
+        state: &mut AppState,
+        source: String,
+        startup: bool,
+        select: Option<usize>,
+    ) {
         let job = processing::Job::Load {
             source,
             input_path: state.programs.input_path().to_path_buf(),
@@ -236,16 +245,19 @@ impl EffectRunner {
             return;
         }
         state.message = actions::PROCESSING_MESSAGE.to_string();
-        state.processing.push_back(PendingJob::Load { startup });
+        state
+            .processing
+            .push_back(PendingJob::Load { startup, select });
     }
 
-    /// Installs `loaded`, the set a load built, in place of the current set, or
-    /// shows its error.
+    /// Installs `loaded`, the set a load built, in place of the current set,
+    /// selecting slot `select` if given, or shows its error.
     fn install(
         &mut self,
         state: &mut AppState,
         loaded: Result<processing::Loaded, String>,
         startup: bool,
+        select: Option<usize>,
     ) {
         let processing::Loaded {
             set,
@@ -267,6 +279,9 @@ impl EffectRunner {
             .remove_pending(WaveformSelector::AllVoices, None);
         // The installed instrument was a snapshot of the old set.
         state.keys = None;
+        if let Some(index) = select {
+            state.active_program_index = index;
+        }
         // Keys mode plays the instrument just uninstalled.
         if matches!(state.mode, actions::Mode::Keys) {
             state.mode = actions::Mode::Select;
@@ -453,15 +468,12 @@ impl EffectRunner {
                 skip_slots,
                 to,
             } => match state.programs.write_skip_slots(program_index, skip_slots) {
-                Ok(source) => {
-                    state.active_program_index = to;
-                    self.load(state, source, false);
-                }
+                Ok(source) => self.load(state, source, false, Some(to)),
                 Err(message) => state.message = message,
             },
 
             Effect::ReloadSource => match state.programs.read_backing_file() {
-                Ok(source) => self.load(state, source, false),
+                Ok(source) => self.load(state, source, false, None),
                 Err(message) => state.message = message,
             },
 
@@ -1429,6 +1441,8 @@ mod tests {
             "#{level_db=0}\na = 1;\n#{level_db=0}\nb = 2;\n#{level_db=0}\nc = 3;\n"
         );
         assert!(state.is_loading());
+        // The selection waits for the moved set.
+        assert_eq!(state.active_program_index, 2);
         process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
         // `b` and the program after it both moved up, and the selection
         // followed `b`.
@@ -1645,7 +1659,7 @@ mod tests {
             launchkey: None,
             status: &status,
         };
-        runner.load(&mut state, source.to_string(), true);
+        runner.load(&mut state, source.to_string(), true, None);
         assert_eq!(state.message, actions::PROCESSING_MESSAGE);
         process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
         assert_eq!(state.message, "Errors in A:2 (bad)");
@@ -1653,7 +1667,7 @@ mod tests {
 
         // A clean set clears the status line.
         let clean = "#{level_db=0}\ngood = 1 | fin(time - 1);\n";
-        runner.load(&mut state, clean.to_string(), true);
+        runner.load(&mut state, clean.to_string(), true, None);
         process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
         assert_eq!(state.message, "");
     }

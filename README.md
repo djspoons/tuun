@@ -96,7 +96,7 @@ In "keys" mode:
 * Escape - return to "select" mode
 * Cmd + N, then K, U or D - change the current program's annotation, as in "select" mode
 
-In every mode, Cmd + Q twice quits. (So does clicking the window's close button twice.) After the first press, any other key cancels.
+In every mode, Cmd + Q twice quits; after the first press, any other key cancels. The Quit menu item and the window's close button quit at once.
 
 The scope at the top of the window has two views. "Snapshot" view draws the latest output samples, and "scan" view sweeps the output's range across two measures, turning yellow or red where it nears or passes clipping. Start in Scan with `--scope-view scan`. Snapshot and the spectrum below it redraw according to `--snapshot-refresh-ms`.
 

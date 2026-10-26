@@ -4,7 +4,7 @@ Add Emacs-style **prefixed commands** (see `agents/CONTEXT.md`: *prefix key*, *p
 
 Goals:
 
-- Quitting takes two presses, Cmd-Q Cmd-Q, so a performance isn't stopped by accident. Ctrl-C no longer quits.
+- Quitting from the keyboard takes two presses, Cmd-Q Cmd-Q, so a performance isn't stopped by accident. The Ctrl-C key binding is removed.
 - Cmd-N k / u / d change the active program's annotation without opening another editor.
 
 ## Behavior
@@ -17,8 +17,9 @@ Goals:
 
 ### Quit: Cmd-Q Cmd-Q
 
-- On macOS, SDL's app menu turns Cmd-Q into `Event::Quit`. The window's close button also sends `Event::Quit`, and per SDL's documentation (unverified in Tuun) so does SIGINT. **Every `Event::Quit` counts as a press of the quit prefix key.** The first press shows `Quit?`; a second `Event::Quit` while `Quit?` is pending exits. As a result, the close button and Ctrl-C in the launching terminal also need two presses. This is intended.
-- Quitting always takes two presses, whether or not anything is playing, in every editor mode.
+- On macOS, Cmd-Q arrives as a `KeyDown` for Q with the GUI modifier, followed in the same batch by an `Event::Quit` from SDL's app menu. The app menu's Quit item sends `Event::Quit` alone, and the window's close button sends a window `Close` event and then `Event::Quit`. SIGINT (Ctrl-C in the launching terminal) also sends `Event::Quit`, at SDL's next event pump. (Observed on a Mac with `src/misc/sdl_event_test.rs`.)
+- **The Cmd-Q `KeyDown` is the quit prefix key**, and the `Event::Quit` right after it is dropped. The first press shows `Quit?`; a second Cmd-Q while `Quit?` is pending exits. Any other `Event::Quit` (the menu item, the close button, SIGINT) exits at once.
+- Cmd-Q always takes two presses, whether or not anything is playing, in every editor mode.
 - Exiting still saves the active program first (`Action::Exit` already emits `Effect::UpdateSource` before `Effect::Exit`). Keep that.
 - Remove both Ctrl-C → `Action::Exit` bindings in `src/lib/sdl2_input.rs`: the Keys-mode one and the all-modes one.
 
@@ -42,14 +43,14 @@ Goals:
 - `u` lowers the active program's `skip_slots` by one, moving it up to a lower slot. `d` raises it by one.
 - Only the active program's annotation changes, so **every later program moves with it**. The main use: after adding a program in another editor and pressing Cmd-R, shift the following programs back up.
 - `u` at `skip_slots=0` does nothing and shows a message. `d` is refused, with a message, if any program would land past the last slot (64).
-- The selection follows the moved program, which may move it into another bank.
+- The selection follows the moved program, which may move it into another bank. It moves once the reloaded set is installed.
 - Program indices shift, so do what Cmd-R does: write the file, then reload it through the same path as `Effect::ReloadSource`. That stops every voice and uninstalls the keys instrument.
 
 ## Implementation sketch
 
 1. **State.** Add a pending prefix key to `AppState`, for example `pending_prefix: Option<PrefixKey>` with `PrefixKey::{Quit, Annotation}`. Showing the prompt sets `state.message`; completing or cancelling clears both.
 2. **Classification (`src/lib/sdl2_input.rs`).**
-   - `Event::Quit` → `Action::Exit` when `Quit` is pending, otherwise an action that sets the `Quit` prefix.
+   - Cmd-Q `KeyDown` → `Action::Exit` when `Quit` is pending, otherwise an action that sets the `Quit` prefix; either way, drop the `Event::Quit` that follows it. Any other `Event::Quit` → `Action::Exit`.
    - Before the existing per-mode match, and before the Keys-mode piano branch: if a prefix is pending, classify the key as the completing command or as a cancel. Skip modifier-only scancodes. Make sure a swallowed key also produces no `TextInput` effect: SDL sends a `TextInput` after the `KeyDown` for printable keys, so the second key of Cmd-N k must not insert or select anything. (Hypothesis, unverified: with Cmd held for the first key only, `k` arrives as both a `KeyDown` and a `TextInput "k"`; in Select mode the `TextInput` would enter Keys mode.)
    - Cmd-N (GUI modifier + `Scancode::N`) in Select or Keys mode → set the `Annotation` prefix.
 3. **Actions (`src/lib/actions.rs`).** New actions, for example `ToggleKeysAnnotation(usize)` and `ChangeSkipSlots { program_index, delta }`, routed through `refused_by_ownership`.
@@ -58,13 +59,9 @@ Goals:
    - `skip_slots`: an edit that sets one binding's `skip_slots`. Reuse `skip_slots_edit`, then write the file and reload.
 5. **Docs.** Update the key list in `README.md`: add Cmd-Q Cmd-Q and the Cmd-N commands, and remove any mention of Ctrl-C.
 6. **Tests** (in `sdl2_input.rs` and `actions.rs`, following the existing style):
-   - One `Event::Quit` doesn't exit, and a second one does; any other key in between cancels.
+   - One Cmd-Q doesn't exit, and a second one does; any other key in between cancels. An `Event::Quit` without a Cmd-Q exits.
    - Ctrl-C no longer exits, in Select, Edit or Keys mode (update the existing Ctrl-C tests).
    - Cmd-N then `d` in Keys mode produces no `NoteOn`.
    - Cmd-N is refused in Edit and Record modes.
    - `k` adds and removes `keys`, re-evaluates, and uninstalls the installed keys instrument when it loses `keys`.
    - `u` at 0 and `d` past slot 64 are refused; `u` and `d` move the program and every later one, and the selection follows.
-
-## Before starting
-
-- On a Mac, confirm that Cmd-Q arrives as a single `Event::Quit` with no `KeyDown`. If a `KeyDown` for Q also arrives, it must not count as a second press.

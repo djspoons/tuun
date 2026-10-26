@@ -68,6 +68,9 @@ pub struct InputHandler {
     /// key press completes or cancels a prefix key, since SDL follows a
     /// printable key's press with its text.
     swallow_text_input: Cell<bool>,
+    /// Whether the next quit event is dropped: set by a Cmd-Q press, since the
+    /// app menu follows that press with a quit event of its own.
+    swallow_quit: Cell<bool>,
 }
 
 impl InputHandler {
@@ -77,6 +80,7 @@ impl InputHandler {
             display_width,
             display_height,
             swallow_text_input: Cell::new(false),
+            swallow_quit: Cell::new(false),
         }
     }
 
@@ -94,12 +98,13 @@ impl InputHandler {
         use sdl2::event::Event;
         let mode: &Mode = &state.mode;
         match event {
-            // Quitting takes two presses. The window's close button and Cmd-Q
-            // in the app menu both arrive as a quit event.
-            Event::Quit { .. } => Some(if state.pending_prefix == Some(PrefixKey::Quit) {
-                vec![Action::Exit]
+            // A quit event exits at once (the app menu's Quit, the window's
+            // close button, Ctrl-C in the terminal), unless it follows a Cmd-Q
+            // press, which is the quit prefix key.
+            Event::Quit { .. } => Some(if self.swallow_quit.replace(false) {
+                vec![]
             } else {
-                vec![Action::StartPrefix(PrefixKey::Quit)]
+                vec![Action::Exit]
             }),
             Event::KeyDown {
                 scancode,
@@ -149,14 +154,21 @@ impl InputHandler {
         // Text input follows its own key press, so the text of a key press
         // that completed or cancelled a prefix is dropped up to here.
         self.swallow_text_input.set(false);
-        // Cmd-Q's quit event is the press that counts; if a key press for it
-        // also arrives, it does nothing.
-        // Hypothesis (unverified): on a Mac, Cmd-Q arrives only as a quit
-        // event.
+        // Likewise, a quit event follows its Cmd-Q press directly.
+        self.swallow_quit.set(false);
+        // Cmd-Q Cmd-Q quits, in every mode and whatever prefix is pending. A
+        // held Cmd-Q's auto-repeat does nothing.
         if let Some(Scancode::Q) = scancode
             && gui_mod
         {
-            return Some(vec![]);
+            self.swallow_quit.set(true);
+            return Some(if repeat {
+                vec![]
+            } else if state.pending_prefix == Some(PrefixKey::Quit) {
+                vec![Action::Exit]
+            } else {
+                vec![Action::StartPrefix(PrefixKey::Quit)]
+            });
         }
         // A pending prefix key takes the next key press, whatever the mode:
         // the press completes a prefixed command or cancels the prefix. A
@@ -545,24 +557,54 @@ mod tests {
     }
 
     #[test]
-    fn quitting_takes_two_quit_events() {
+    fn quitting_takes_two_cmd_q_presses() {
         let handler = InputHandler::new(false, 800, 600);
         let quit = sdl2::event::Event::Quit { timestamp: 0 };
-        let state = test_state(Mode::Select);
-        let first = handler.classify(&quit, &state);
+        // Each Cmd-Q press is followed by the app menu's quit event.
+        let state = test_state(Mode::Keys);
+        let first = handler.classify_keydown(Some(Scancode::Q), Mod::LGUIMOD, false, &state);
         assert!(matches!(
             first.as_deref(),
             Some([Action::StartPrefix(PrefixKey::Quit)])
         ));
-        let state = pending(test_state(Mode::Select), PrefixKey::Quit);
-        let second = handler.classify(&quit, &state);
+        assert!(matches!(
+            handler.classify(&quit, &state).as_deref(),
+            Some([])
+        ));
+        let state = pending(test_state(Mode::Keys), PrefixKey::Quit);
+        let second = handler.classify_keydown(Some(Scancode::Q), Mod::LGUIMOD, false, &state);
         assert!(matches!(second.as_deref(), Some([Action::Exit])));
-        // A quit event while another prefix waits starts the quit prefix.
-        let state = pending(test_state(Mode::Keys), PrefixKey::Annotation);
-        let actions = handler.classify(&quit, &state);
+        assert!(matches!(
+            handler.classify(&quit, &state).as_deref(),
+            Some([])
+        ));
+        // Cmd-Q while another prefix waits starts the quit prefix.
+        let state = pending(test_state(Mode::Select), PrefixKey::Annotation);
+        let actions = handler.classify_keydown(Some(Scancode::Q), Mod::RGUIMOD, false, &state);
         assert!(matches!(
             actions.as_deref(),
             Some([Action::StartPrefix(PrefixKey::Quit)])
+        ));
+        // A held Cmd-Q does nothing more.
+        let actions = handler.classify_keydown(Some(Scancode::Q), Mod::LGUIMOD, true, &state);
+        assert!(matches!(actions.as_deref(), Some([])));
+    }
+
+    #[test]
+    fn a_quit_event_without_cmd_q_exits_at_once() {
+        let handler = InputHandler::new(false, 800, 600);
+        let quit = sdl2::event::Event::Quit { timestamp: 0 };
+        let state = test_state(Mode::Select);
+        assert!(matches!(
+            handler.classify(&quit, &state).as_deref(),
+            Some([Action::Exit])
+        ));
+        // A Cmd-Q press drops only the quit event right after it.
+        handler.classify_keydown(Some(Scancode::Q), Mod::LGUIMOD, false, &state);
+        handler.classify_keydown(Some(Scancode::Escape), Mod::NOMOD, false, &state);
+        assert!(matches!(
+            handler.classify(&quit, &state).as_deref(),
+            Some([Action::Exit])
         ));
     }
 
@@ -590,14 +632,13 @@ mod tests {
     }
 
     #[test]
-    fn modifiers_repeats_and_cmd_q_leave_a_prefix_pending() {
+    fn modifiers_and_repeats_leave_a_prefix_pending() {
         let handler = InputHandler::new(false, 800, 600);
         let state = pending(test_state(Mode::Keys), PrefixKey::Quit);
         for (scancode, keymod, repeat) in [
             (Scancode::LGui, Mod::LGUIMOD, false),
             (Scancode::RShift, Mod::RSHIFTMOD, false),
             (Scancode::Z, Mod::NOMOD, true),
-            (Scancode::Q, Mod::LGUIMOD, false),
         ] {
             let actions = handler.classify_keydown(Some(scancode), keymod, repeat, &state);
             assert!(

@@ -174,6 +174,8 @@ pub enum PendingJob {
         /// Whether this is the load at startup, which reports differently from
         /// a reload.
         startup: bool,
+        /// The slot to select once the set is installed, if any.
+        select: Option<usize>,
     },
 }
 
@@ -613,8 +615,9 @@ pub enum Effect {
 
     // --- I/O ---
     /// Write the backing file with the program's binding given `skip_slots`,
-    /// select slot `to`, and send the new source to the processing thread as
-    /// `ReloadSource` does. A failed write changes nothing.
+    /// and send the new source to the processing thread as `ReloadSource`
+    /// does, selecting slot `to` once the set is installed. A failed write
+    /// changes nothing.
     MoveProgram {
         program_index: usize,
         skip_slots: u32,
@@ -4446,9 +4449,10 @@ _ = saw(220);";
     #[test]
     fn source_changes_are_refused_while_a_set_loads() {
         let mut state = test_state();
-        state
-            .processing
-            .push_back(PendingJob::Load { startup: false });
+        state.processing.push_back(PendingJob::Load {
+            startup: false,
+            select: None,
+        });
         for action in [
             Action::EnterEditMode,
             Action::ToggleSequencerStep { sixteenth: 0 },
