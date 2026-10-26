@@ -1,0 +1,465 @@
+<!doctype html>
+<!-- PROTOTYPE, throwaway. Answers ticket 05 (How do the Launchkey's Loop prefix and pads display and set Loop?).
+     Three variants of the Launchkey Loop editor on one simulated device, switchable with ?variant=A|B|C
+     or the bar at the bottom (or the ← → keys). Open by double-clicking; nothing to install. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Launchkey Loop Prototype</title>
+<style>
+  :root { --bg:#f6f5f2; --fg:#1d1d1f; --muted:#6b6b70; --panel:#ffffff; --line:#dcdad4; --accent:#3a6ff0;
+          --dev:#222327; --dev2:#2e2f34; --devfg:#d8d8dc; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+    --bg:#16171a; --fg:#ececf0; --muted:#9a9aa2; --panel:#1f2024; --line:#34353b; --accent:#7c9bff; } }
+  :root[data-theme="dark"] { --bg:#16171a; --fg:#ececf0; --muted:#9a9aa2; --panel:#1f2024; --line:#34353b; --accent:#7c9bff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.45 system-ui, -apple-system, sans-serif; padding:16px 16px 90px; }
+  main { max-width:980px; margin:0 auto; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  h2 { font-size:15px; margin:18px 0 6px; }
+  p { margin:6px 0; }
+  .muted { color:var(--muted); }
+  code { font:13px ui-monospace, Menlo, monospace; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; margin:12px 0; }
+  .variant-intro b { color:var(--accent); }
+  /* the simulated device */
+  .device { background:var(--dev); color:var(--devfg); border-radius:14px; padding:16px; overflow-x:auto; }
+  .devrow { display:flex; gap:14px; align-items:center; min-width:640px; }
+  .screen { background:#0b0c0e; color:#e9f5ff; font:13px ui-monospace, Menlo, monospace; border-radius:6px;
+            padding:8px 10px; width:170px; min-height:52px; white-space:pre; border:1px solid #444; }
+  .btncol { display:flex; flex-direction:column; gap:8px; }
+  .hbtn { background:var(--dev2); color:var(--devfg); border:1px solid #444; border-radius:6px; padding:6px 8px;
+          font:12px system-ui; cursor:pointer; min-width:64px; position:relative; }
+  .hbtn .led { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; vertical-align:-1px; background:#111; border:1px solid #555; }
+  .hbtn.held { outline:2px solid #fff; }
+  .pads { display:grid; grid-template-columns:repeat(8, 48px); gap:7px; }
+  .pad { width:48px; height:42px; border-radius:6px; border:1px solid #444; background:#101114; cursor:pointer; position:relative;
+         font:11px ui-monospace, monospace; color:rgba(255,255,255,.75); display:flex; align-items:flex-end; justify-content:center; padding-bottom:2px; }
+  .pad .lbl { }
+  .hide-labels .pad .lbl { display:none; }
+  .flash { animation:flash .55s steps(2, jump-none) infinite; }
+  .pulse { animation:pulse 1.2s ease-in-out infinite; }
+  @keyframes flash { 0% { filter:brightness(1.25); } 100% { filter:brightness(.25); } }
+  @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.25; } }
+  /* the tuun screen */
+  table { border-collapse:collapse; width:100%; font-size:14px; }
+  td, th { text-align:left; padding:5px 8px; border-bottom:1px solid var(--line); }
+  tr.active td { background:color-mix(in srgb, var(--accent) 14%, transparent); }
+  tr { cursor:pointer; }
+  .swatch { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:6px; }
+  .status { font:13px ui-monospace, Menlo, monospace; background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:8px; min-height:2.4em; }
+  .log { font:12px ui-monospace, Menlo, monospace; color:var(--muted); max-height:140px; overflow:auto; white-space:pre-wrap; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  @media (max-width:760px) { .grid2 { grid-template-columns:1fr; } }
+  label.opt { margin-right:14px; font-size:13px; }
+  .tabs button, .steps button, .tool { font:13px system-ui; border:1px solid var(--line); background:var(--panel); color:var(--fg);
+         border-radius:6px; padding:4px 9px; margin:2px; cursor:pointer; }
+  .tabs button.on { border-color:var(--accent); color:var(--accent); }
+  .steps button:disabled { opacity:.4; cursor:default; }
+  .steps button.next { border-color:var(--accent); }
+  /* prototype switcher: deliberately not part of the design */
+  #switcher { position:fixed; bottom:16px; left:50%; transform:translateX(-50%); background:#111; color:#fff; border-radius:999px;
+              padding:6px 8px; display:flex; gap:8px; align-items:center; box-shadow:0 6px 24px rgba(0,0,0,.35); font:13px system-ui; z-index:9; }
+  #switcher button { background:#333; color:#fff; border:0; border-radius:999px; width:30px; height:30px; cursor:pointer; font-size:15px; }
+  #switcher span { min-width:220px; text-align:center; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Launchkey Loop editor: three layouts</h1>
+  <p class="muted">Prototype for the ticket "How do the Launchkey's Loop prefix and pads display and set Loop?". Click the device's buttons and pads.
+  Click a row in tuun's program list to select it (as Track ◀ ▶ would). Pad labels describe what each pad means here. The real pads have no text, so turn the labels off to judge the layout by colour alone.</p>
+
+  <div class="card variant-intro" id="intro"></div>
+
+  <div class="device" id="device">
+    <div class="devrow">
+      <div class="btncol">
+        <div class="screen" id="screen"></div>
+        <div style="display:flex; gap:6px">
+          <button class="hbtn" data-btn="play">▶ Play</button>
+          <button class="hbtn" data-btn="stop">■ Stop</button>
+          <button class="hbtn" data-btn="loop" id="loopBtn"><span class="led" id="loopLed"></span>Loop</button>
+        </div>
+      </div>
+      <div class="btncol">
+        <button class="hbtn" data-btn="up">▲</button>
+        <button class="hbtn" data-btn="down">▼</button>
+      </div>
+      <div class="pads" id="pads"></div>
+      <div class="btncol">
+        <button class="hbtn" data-btn="launch">&gt;</button>
+        <button class="hbtn" data-btn="function" id="fnBtn"><span class="led" id="fnLed"></span>Function</button>
+      </div>
+    </div>
+  </div>
+  <p>
+    <label class="opt"><input type="checkbox" id="labels" checked> Show what each pad means</label>
+    <button class="tool" id="reset">Reset</button>
+  </p>
+
+  <div class="grid2">
+    <div class="card">
+      <h2 style="margin-top:0">tuun: bank B</h2>
+      <table id="programs"></table>
+      <p class="muted" style="font-size:13px">Click a row to select it. The ▶ column plays or stops it right away, so you can try editing a program that's already looping.</p>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">Status line</h2>
+      <div class="status" id="status"></div>
+      <h2>Source of the selected program</h2>
+      <div class="status" id="source"></div>
+      <h2>What happened</h2>
+      <div class="log" id="log"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">Walkthroughs</h2>
+    <div class="tabs" id="tabs"></div>
+    <p id="scenarioText"></p>
+    <div class="steps" id="steps"></div>
+  </div>
+</main>
+
+<div id="switcher"><button id="prev" aria-label="Previous variant">←</button><span id="vlabel"></span><button id="next" aria-label="Next variant">→</button></div>
+
+<script>
+// ---------------------------------------------------------------------------
+// The model: pure functions, no DOM. step(state, event) -> state; pads(state) -> LEDs.
+// ---------------------------------------------------------------------------
+const BEATS_PER_MEASURE = 4;
+const VARIANTS = {
+  A: { name: 'Beat ruler', prefix: 'loop' },
+  B: { name: 'Beats + measures', prefix: 'loop' },
+  C: { name: 'Hold Function, whole bank', prefix: 'function' },
+};
+// Variant C's preset cycle, in beats; null = plays once.
+const C_CYCLE = [null, 4, 8, 16];
+
+function initialState(variant) {
+  return {
+    variant,
+    active: 0,
+    programs: [
+      { name: 'kick',   kind: 'wave', color: [230, 80, 60],  loop: 4,    playing: true },
+      { name: 'snare',  kind: 'wave', color: [240, 200, 60], loop: null, playing: false },
+      { name: 'hats',   kind: 'seq',  color: [80, 200, 230], loop: 2,    playing: false },
+      { name: 'bass',   kind: 'wave', color: [140, 90, 240], loop: 24,   playing: false },
+      { name: 'chords', kind: 'wave', color: [90, 220, 120], loop: 3,    playing: false },
+      { name: 'lead',   kind: 'keys', color: [240, 120, 200], loop: null, playing: false },
+      { name: null,     kind: 'empty' },
+      { name: 'drone',  kind: 'wave', color: [200, 200, 200], loop: null, playing: true },
+    ],
+    prefix: false,      // A, B: the Loop prefix is pending
+    held: false,        // C: Function is held
+    screen: ['Clip Launcher', ''],
+    status: '',
+    log: [],
+  };
+}
+
+const display = (s, i) => s.programs[i].name ?? `B:${i + 1}`;
+const beats = n => `${n} beat${n === 1 ? '' : 's'}`;
+const loopText = n => (n == null ? 'once' : beats(n));
+
+// The refusal message for editing program i's Loop, or null when it may be edited.
+function refusal(s, i) {
+  const p = s.programs[i];
+  if (p.kind === 'empty') return `${display(s, i)} is empty`;
+  if (p.kind === 'keys') return `${display(s, i)} plays keys, so it can't loop`;
+  return null;
+}
+
+function setLoop(s, i, n) {
+  const programs = s.programs.map((p, j) => (j === i ? { ...p, loop: n } : p));
+  const name = display(s, i);
+  let msg = n == null ? `${name} plays once` : `${name} loops every ${beats(n)}`;
+  if (s.programs[i].playing) msg += ' from its next launch';
+  return { ...s, programs, status: msg, screen: [name, `Loop: ${loopText(n)}`], log: [msg, ...s.log] };
+}
+
+function note(s, line) { return { ...s, log: [line, ...s.log] }; }
+
+// The value a pad sets in variants A and B, or undefined for "none".
+function padValue(variant, row, i) {
+  if (variant === 'A') return row * 8 + i + 1;
+  if (variant === 'B') return row === 0 ? i + 1 : (i + 1) * BEATS_PER_MEASURE;
+}
+
+function step(s, ev) {
+  const v = s.variant;
+  // Variants A and B: Loop is a prefix on the selected program.
+  if (VARIANTS[v].prefix === 'loop') {
+    if (!s.prefix) {
+      if (ev.type === 'button' && ev.name === 'loop') {
+        const r = refusal(s, s.active);
+        if (r) return note({ ...s, status: r, screen: [display(s, s.active), 'Can\'t loop'] }, `Loop refused: ${r}`);
+        const p = s.programs[s.active];
+        return note({ ...s, prefix: true, status: `Loop ${display(s, s.active)}? (pad) beats (Loop) once`,
+                      screen: [`Loop ${display(s, s.active)}?`, `now: ${loopText(p.loop)}`] }, 'Loop prefix started');
+      }
+      return normalStep(s, ev);
+    }
+    // The prefix is pending: the next press completes or cancels it.
+    if (ev.type === 'pad') return { ...setLoop(s, s.active, padValue(v, ev.row, ev.index)), prefix: false };
+    if (ev.type === 'button' && ev.name === 'loop') return { ...setLoop(s, s.active, null), prefix: false };
+    if (ev.type === 'select') return { ...note(s, 'Loop prefix cancelled (selection changed)'), prefix: false, status: '', active: ev.index, screen: [display(s, ev.index), ''] };
+    if (ev.type === 'playToggle') return normalStep(s, ev); // the computer keyboard/mouse still works
+    return { ...note(s, `Loop prefix cancelled; the ${ev.name ?? ev.type} press is swallowed`), prefix: false, status: '', screen: ['Clip Launcher', ''] };
+  }
+  // Variant C: hold Function; bottom pads cycle each bank program's Loop.
+  if (ev.type === 'button' && ev.name === 'function') {
+    const held = !s.held;
+    return note({ ...s, held, screen: held ? ['Loop', 'pad cycles Loop'] : ['Clip Launcher', ''], status: held ? 'Loop: press a bottom pad to cycle its Loop' : '' },
+                held ? 'Function held' : 'Function released');
+  }
+  if (s.held) {
+    if (ev.type === 'pad' && ev.row === 1) {
+      const r = refusal(s, ev.index);
+      if (r) return note({ ...s, status: r, screen: [display(s, ev.index), 'Can\'t loop'] }, `Loop refused: ${r}`);
+      const cur = s.programs[ev.index].loop;
+      const at = C_CYCLE.indexOf(cur);
+      // A value off the cycle (3 beats, 24 beats) goes to "once".
+      const nextLoop = at === -1 ? null : C_CYCLE[(at + 1) % C_CYCLE.length];
+      return setLoop(s, ev.index, nextLoop);
+    }
+    if (ev.type === 'pad') {
+      const p = s.programs[ev.index];
+      return { ...s, screen: [display(s, ev.index), p.kind === 'empty' ? '' : `Loop: ${loopText(p.loop)}`] };
+    }
+    return s;
+  }
+  return normalStep(s, ev);
+}
+
+// What the device does with no Loop editing in progress (clip launcher, simplified).
+function normalStep(s, ev) {
+  const play = (i, on) => ({ ...s, programs: s.programs.map((p, j) => (j === i ? { ...p, playing: on } : p)) });
+  if (ev.type === 'select') return { ...s, active: ev.index, screen: [display(s, ev.index), ''], status: '' };
+  if (ev.type === 'playToggle' || ev.type === 'pad') {
+    const p = s.programs[ev.index];
+    if (p.kind === 'empty' || p.kind === 'keys') return s;
+    const on = !p.playing;
+    const how = ev.type === 'pad' && ev.row === 0 ? 'now, once' : p.loop == null ? 'at the next measure, once' : `at the next measure, every ${beats(p.loop)}`;
+    const msg = on ? `Playing ${display(s, ev.index)} ${how}` : `Stopped ${display(s, ev.index)}`;
+    return note({ ...play(ev.index, on), status: msg }, msg);
+  }
+  if (ev.type === 'button') return note(s, `${ev.name} pressed (does its usual thing)`);
+  return s;
+}
+
+// The 16 pad LEDs: { color: [r,g,b] | null, level: 'off'|'dim'|'on', flash, label }.
+function pads(s) {
+  const v = s.variant;
+  const out = [];
+  const scale = (c, k) => c.map(x => Math.round(x * k));
+  const white = [255, 255, 255];
+  for (let row = 0; row < 2; row++) for (let i = 0; i < 8; i++) {
+    let led = { color: null, flash: false, label: '' };
+    const editingAB = VARIANTS[v].prefix === 'loop' && s.prefix;
+    if (editingAB) {
+      const p = s.programs[s.active];
+      const val = padValue(v, row, i);
+      led.label = v === 'B' && row === 1 ? `${i + 1}m` : String(val);
+      if (v === 'A') {
+        // A bar graph up to the current value, which flashes; values past 16 flash the last pad.
+        const cur = p.loop;
+        if (cur != null && val <= Math.min(cur, 16)) led.color = scale(p.color, val === Math.min(cur, 16) ? 1 : 0.35);
+        else if (val % BEATS_PER_MEASURE === 0) led.color = scale(white, 0.12); // measure ticks
+        led.flash = cur != null && val === Math.min(cur, 16);
+      } else {
+        // B: beats on top, measures below; the pad(s) equal to the current value flash.
+        led.color = row === 0 ? scale(p.color, 0.3) : scale(white, 0.18);
+        if (p.loop != null && val === p.loop) { led.color = p.color; led.flash = true; }
+      }
+    } else if (v === 'C' && s.held) {
+      const p = s.programs[i];
+      if (row === 0) { // each program's colour, so the columns read
+        led.color = p.kind === 'empty' ? null : scale(p.color, 0.5);
+        led.label = p.kind === 'empty' ? '' : p.name;
+      } else {
+        led.label = p.kind === 'empty' || p.kind === 'keys' ? '' : loopText(p.loop).replace(' beats', 'b').replace(' beat', 'b');
+        led.color = p.kind === 'empty' || p.kind === 'keys' ? null : cColor(p.loop);
+      }
+    } else {
+      // Clip launcher: top = sounding (green) or program colour; bottom = program colour.
+      const p = s.programs[i];
+      if (p.kind !== 'empty') {
+        if (row === 0) {
+          led.color = p.kind === 'keys' ? null : p.playing ? [40, 230, 60] : scale(p.color, 0.5);
+          led.flash = p.kind !== 'keys' && p.playing;
+          led.label = p.kind === 'keys' ? '' : 'now';
+        } else {
+          led.color = p.kind === 'keys' ? null : scale(p.color, 0.5);
+          led.label = p.kind === 'keys' ? '' : 'next m.';
+        }
+      }
+    }
+    out.push(led);
+  }
+  return out;
+}
+
+// Variant C's colour for a Loop value: off-cycle values are white.
+function cColor(loop) {
+  return { null: [25, 25, 25], 4: [60, 220, 60], 8: [230, 210, 40], 16: [250, 130, 30] }[loop] ?? [235, 235, 235];
+}
+
+// The Loop and Function button LEDs: { loop: 0..1 brightness, loopPulse, fn: [r,g,b] | null }.
+function buttonLeds(s) {
+  const p = s.programs[s.active];
+  if (s.variant === 'C') {
+    // Function is RGB: at rest it shows the selected program's Loop in the cycle colours.
+    const fn = p.kind === 'wave' || p.kind === 'seq' ? cColor(p.loop) : null;
+    return { loop: 0, loopPulse: false, fn: s.held ? [255, 255, 255] : fn };
+  }
+  // Loop is white only: lit when the selected program loops, pulsing while the prefix is pending.
+  return { loop: s.prefix ? 1 : p.loop != null ? 0.8 : 0, loopPulse: s.prefix, fn: null };
+}
+
+// ---------------------------------------------------------------------------
+// The page: a thin shell over the model.
+// ---------------------------------------------------------------------------
+const INTRO = {
+  A: `<b>A · Beat ruler.</b> Press <b>Loop</b> to start the Loop prefix on the selected program, as <code>Cmd-N l</code> does. The pads become beats 1–16 (top row 1–8, bottom row 9–16).
+      They light as a bar graph up to the current Loop, and the current value flashes. Faint white pads mark the measure ends. Press a pad to set that many beats.
+      Press <b>Loop</b> again to make the program play once. Anything else cancels and is swallowed. A Loop over 16 beats lights all 16 pads, flashes the last one, and the screen gives the number.`,
+  B: `<b>B · Beats + measures.</b> Same prefix as A (press <b>Loop</b>, then a pad). The top row is 1–8 beats and the bottom row is 1–8 measures (4–32 beats in 4/4).
+      The pad (or pads) equal to the current value flash. A value no pad can set (for example 24 beats is fine, but 10 beats isn't) flashes nothing, and the screen shows the number.
+      Press <b>Loop</b> again for "once".`,
+  C: `<b>C · Hold Function, whole bank.</b> The freed <b>Function</b> button becomes the Loop key, and Loop stays free. Hold it (in this prototype, click once to hold and again to release).
+      Every program in the bank shows its Loop at once: the top row shows the programs' colours and the bottom row shows Loop as a colour (dark = once, green = 1 measure, yellow = 2, orange = 4, white = anything else).
+      A bottom pad cycles that column's program through once → 1 → 2 → 4 measures, so it doesn't need to be selected first. Values outside the cycle go to "once". At rest, the RGB Function LED shows the selected program's Loop.`,
+};
+
+const SCENARIOS = [
+  { title: 'Set a Loop', text: 'Select snare (which plays once) and give it a Loop. Watch the source and the status line.',
+    steps: [['Select snare', { type: 'select', index: 1 }], ['Loop / Function', 'prefix'], ['Bottom pad 1 (for C: snare\'s pad 2)', 'set'], ['Release (C only)', 'release']] },
+  { title: 'Change a looping program', text: 'kick is looping. Change its Loop: the message adds "from its next launch".',
+    steps: [['Select kick', { type: 'select', index: 0 }], ['Loop / Function', 'prefix'], ['Top pad 3 (for C: kick\'s bottom pad)', 'set3'], ['Release (C only)', 'release']] },
+  { title: 'A value the pads can\'t show', text: 'bass loops every 24 beats. How does each layout show that?',
+    steps: [['Select bass', { type: 'select', index: 3 }], ['Loop / Function', 'prefix']] },
+  { title: 'Make it play once', text: 'Remove chords\' Loop. In A and B that is a second Loop press. In C it is cycling back to dark.',
+    steps: [['Select chords', { type: 'select', index: 4 }], ['Loop / Function', 'prefix'], ['Loop again (for C: chords\' bottom pad)', 'once']] },
+  { title: 'Refused on keys', text: 'lead is a keys program, so it can\'t loop.',
+    steps: [['Select lead', { type: 'select', index: 5 }], ['Loop / Function', 'prefix'], ['(C) lead\'s bottom pad', 'cKeys']] },
+  { title: 'Cancel', text: 'Start the prefix, then press Play. The prefix is cancelled and the Play press is swallowed. (In C, holding Function has no prefix to cancel.)',
+    steps: [['Select snare', { type: 'select', index: 1 }], ['Loop', 'prefix'], ['Play', { type: 'button', name: 'play' }]] },
+];
+
+// Turns a scenario step into the event(s) for the current variant.
+function stepEvents(s, what) {
+  if (typeof what === 'object') return [what];
+  const c = s.variant === 'C';
+  switch (what) {
+    case 'prefix': return [{ type: 'button', name: c ? 'function' : 'loop' }];
+    case 'set': return [c ? { type: 'pad', row: 1, index: s.active } : { type: 'pad', row: 1, index: 0 }];
+    case 'set3': return [c ? { type: 'pad', row: 1, index: s.active } : { type: 'pad', row: 0, index: 2 }];
+    case 'once': return [c ? { type: 'pad', row: 1, index: s.active } : { type: 'button', name: 'loop' }];
+    case 'release': return c && s.held ? [{ type: 'button', name: 'function' }] : [];
+    case 'cKeys': return c ? [{ type: 'pad', row: 1, index: 5 }] : [];
+  }
+  return [];
+}
+
+let variant = new URLSearchParams(location.search).get('variant');
+if (!VARIANTS[variant]) variant = 'A';
+let state = initialState(variant);
+let scenario = 0, scenarioStep = 0;
+
+function dispatch(ev) { state = step(state, ev); render(); }
+
+function rgb(c, k = 1) { return c ? `rgb(${c.map(x => Math.round(x * k)).join(',')})` : '#101114'; }
+
+function render() {
+  document.getElementById('intro').innerHTML = INTRO[state.variant];
+  document.getElementById('vlabel').textContent = `${state.variant} (${VARIANTS[state.variant].name})`;
+  document.getElementById('screen').textContent = state.screen.join('\n');
+  const padEl = document.getElementById('pads');
+  padEl.innerHTML = '';
+  pads(state).forEach((led, n) => {
+    const row = n < 8 ? 0 : 1, index = n % 8;
+    const d = document.createElement('div');
+    d.className = 'pad' + (led.flash ? ' flash' : '');
+    d.style.background = rgb(led.color);
+    if (led.color && led.color[0] + led.color[1] + led.color[2] > 500) d.style.color = '#111';
+    d.innerHTML = `<span class="lbl">${led.label}</span>`;
+    d.onclick = () => dispatch({ type: 'pad', row, index });
+    padEl.appendChild(d);
+  });
+  const leds = buttonLeds(state);
+  const loopLed = document.getElementById('loopLed');
+  loopLed.style.background = rgb([255, 255, 255], leds.loop || 0.06);
+  loopLed.className = 'led' + (leds.loopPulse ? ' pulse' : '');
+  document.getElementById('fnLed').style.background = rgb(leds.fn ?? [20, 20, 20]);
+  document.getElementById('fnBtn').classList.toggle('held', state.held);
+  document.getElementById('device').classList.toggle('hide-labels', !document.getElementById('labels').checked);
+
+  const t = document.getElementById('programs');
+  t.innerHTML = '<tr><th>Slot</th><th>Program</th><th>Loop</th><th>▶</th></tr>';
+  state.programs.forEach((p, i) => {
+    const tr = document.createElement('tr');
+    if (i === state.active) tr.className = 'active';
+    const kind = p.kind === 'keys' ? ' (keys)' : p.kind === 'seq' ? ' (sequence)' : '';
+    tr.innerHTML = `<td>B:${i + 1}</td><td>${p.color ? `<span class="swatch" style="background:${rgb(p.color)}"></span>` : ''}${p.name ?? '<span class="muted">empty</span>'}<span class="muted">${kind}</span></td>
+      <td>${p.kind === 'wave' || p.kind === 'seq' ? (p.loop == null ? '<span class="muted">once</span>' : beats(p.loop)) : ''}</td>
+      <td>${p.kind === 'wave' || p.kind === 'seq' ? (p.playing ? '<b>playing</b>' : '<span class="muted">stopped</span>') : ''}</td>`;
+    tr.onclick = e => dispatch(e.target.cellIndex === 3 ? { type: 'playToggle', index: i } : { type: 'select', index: i });
+    t.appendChild(tr);
+  });
+  document.getElementById('status').textContent = state.status || ' ';
+  const a = state.programs[state.active];
+  document.getElementById('source').textContent = a.kind === 'empty' ? '(empty slot)'
+    : `#{${a.kind === 'keys' ? 'keys' : a.loop != null ? `loop_after_beats=${a.loop}` : '<no loop_after_beats>'}}\n${a.name} = …`;
+  document.getElementById('log').textContent = state.log.slice(0, 30).join('\n');
+  renderScenario();
+}
+
+function renderScenario() {
+  const tabs = document.getElementById('tabs');
+  tabs.innerHTML = '';
+  SCENARIOS.forEach((sc, i) => {
+    const b = document.createElement('button');
+    b.textContent = sc.title;
+    if (i === scenario) b.className = 'on';
+    b.onclick = () => { scenario = i; scenarioStep = 0; state = initialState(state.variant); render(); };
+    tabs.appendChild(b);
+  });
+  const sc = SCENARIOS[scenario];
+  document.getElementById('scenarioText').textContent = sc.text;
+  const steps = document.getElementById('steps');
+  steps.innerHTML = '';
+  sc.steps.forEach(([label, what], i) => {
+    const b = document.createElement('button');
+    b.textContent = `${i + 1}. ${label}`;
+    b.disabled = i !== scenarioStep;
+    if (i === scenarioStep) b.className = 'next';
+    b.onclick = () => { stepEvents(state, what).forEach(ev => { state = step(state, ev); }); scenarioStep++; render(); };
+    steps.appendChild(b);
+  });
+}
+
+function switchVariant(d) {
+  const keys = Object.keys(VARIANTS);
+  variant = keys[(keys.indexOf(state.variant) + d + keys.length) % keys.length];
+  const url = new URL(location.href); url.searchParams.set('variant', variant);
+  try { history.replaceState(null, '', url); } catch (e) {}
+  state = initialState(variant); scenarioStep = 0; render();
+}
+
+document.querySelectorAll('[data-btn]').forEach(b => b.onclick = () => dispatch({ type: 'button', name: b.dataset.btn }));
+document.getElementById('labels').onchange = render;
+document.getElementById('reset').onclick = () => { state = initialState(state.variant); scenarioStep = 0; render(); };
+document.getElementById('prev').onclick = () => switchVariant(-1);
+document.getElementById('next').onclick = () => switchVariant(1);
+document.addEventListener('keydown', e => {
+  if (e.target.closest('input, textarea, [contenteditable]')) return;
+  if (e.key === 'ArrowLeft') switchVariant(-1);
+  if (e.key === 'ArrowRight') switchVariant(1);
+});
+render();
+</script>
+</body>
+</html>
