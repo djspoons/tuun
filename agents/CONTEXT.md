@@ -107,7 +107,7 @@ Playback scheduled to begin at a future moment in time (often a measure boundary
 _Avoid_: queued, armed, scheduled, cued
 
 **Repeat**:
-The app-wide setting for whether a launched program plays again after one measure, after two, or not at all.
+A program's own setting, written as an annotation, for whether it plays again a given number of beats after it is launched, and keeps doing so until stopped. A program without one plays once.
 _Avoid_: loop, looping, cycle
 
 **Installed keys instrument**:
