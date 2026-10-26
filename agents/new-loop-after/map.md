@@ -1,0 +1,41 @@
+---
+label: wayfinder:map
+---
+
+# Per-program Loop, written as an annotation
+
+## Destination
+
+A spec, ready to implement in one go, for replacing the app-wide Loop setting with a per-program `loop_after_beats=N` annotation. It covers syntax, semantics, which launches honour it, editing from the keyboard and from the Launchkey, and the doc and glossary changes.
+
+## Notes
+
+- Domain: the tuun live instrument. Use the vocabulary in [`agents/CONTEXT.md`](../CONTEXT.md); **Loop** there is already redefined for this effort. For HITL tickets, call the Skill tool for "grilling" and "domain-modeling".
+- Plan, don't do: tickets resolve decisions. Code changes belong to the implementation that follows the map.
+- Settled while charting (no ticket):
+  - The app-wide setting (`AppState.repeat_after_measures`, `Action::CycleRepeatAfterMeasures`, the Function-pad cycle and its colours) is removed entirely. There is no global fallback. A program without the annotation plays once.
+  - Spelling is `#{loop_after_beats=N}`, where N is a positive whole number of beats.
+  - `loop_after_beats` on a `#{keys}` program is an error.
+  - Only launches that start at the next measure honour Loop. This keeps today's split: pending launches (bottom pads, Play, evaluate-and-play) honour Loop, and immediate launches (top pads, `ToggleProgramPlayback`) play once.
+  - Loop can be edited live, both from the keyboard and from the Launchkey, and is written back to the annotation. The `Cmd-N` annotation prefix command (`PrefixKey::Annotation`) is the guide.
+  - Docs are part of the spec (README Launchkey section, language spec § Annotations, glossary). There is no data migration, because the global setting was never persisted.
+
+## Decisions so far
+
+<!-- one line per closed ticket: - [<title>](tickets/NN-slug.md): <gist> -->
+
+- [Which Launchkey control should carry the Loop prefix, and what can we do with it?](tickets/01-launchkey-loop-button.md): The MK4 37 has no "Repeat" button. The candidates are Loop (CC 118, single-colour LED) and Function (CC 105, RGB). 16 RGB pads are available, and Shift+pad is reserved by the firmware.
+- [How do loops that aren't a whole number of measures behave?](tickets/02-loops-off-the-measure.md): A program plays again every N beats from its launch boundary. It drifts freely off the barline, and overlapping plays (including sequence passes) all sound. A pre-first-pass step edit takes the program's own Loop.
+
+## Not yet specified
+
+- What the Launchkey's Function pad does once it no longer cycles Loop: freed, repurposed, or folded into the Launchkey Loop-prefix design.
+- How the screen shows a program's Loop (program list, status line, launch message wording such as today's "Looping waveform B:3 every 4 beats").
+- Whether the annotation needs a practical upper bound, beyond what the keyboard and Launchkey editors can reach.
+
+## Out of scope
+
+- Fractional beats (e.g. `loop_after_beats=1.5`): whole beats only.
+- Keeping an app-wide Loop as a default for programs without the annotation.
+- Making immediate (top-pad) launches loop.
+- Changing tempo or beats per measure while programs loop. Both are fixed per session, so this belongs to whatever effort makes tempo live ([ticket](tickets/02-loops-off-the-measure.md)).

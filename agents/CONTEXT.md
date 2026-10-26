@@ -114,9 +114,9 @@ _Avoid_: note, pad
 Playback scheduled to begin at a future moment in time (often a measure boundary), not yet sounding. Not armed, which is the recorder waiting for its start boundary.
 _Avoid_: queued, armed, scheduled, cued
 
-**Repeat**:
-A program's own setting, written as an annotation, for whether it plays again a given number of beats after it is launched, and keeps doing so until stopped. The count runs from the launch, not the barline, so repeats may drift across measures; a play still sounding when the next begins keeps sounding. A program without one plays once.
-_Avoid_: loop, looping, cycle
+**Loop**:
+A program's own setting, written as an annotation, for whether it plays again a given number of beats after it is launched, and keeps doing so until stopped. The count runs from the launch, not the barline, so a loop may drift across measures; a play still sounding when the next begins keeps sounding. A program without one plays once.
+_Avoid_: repeat, cycle
 
 **Installed keys instrument**:
 The one keys instrument that sounds when MIDI note-on and note-off events arrive, one voice per held key. Taken from a keys program; at most one is installed at a time.

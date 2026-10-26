@@ -1,6 +1,6 @@
 # Research: the Launchkey "repeat" button (ticket 01)
 
-Answers [`tickets/01-launchkey-repeat-button.md`](../tickets/01-launchkey-repeat-button.md).
+Answers [`tickets/01-launchkey-loop-button.md`](../tickets/01-launchkey-loop-button.md).
 Researched 2026-10-26 against tuun at commit `6e1b64e`.
 
 ## How far to trust this note
@@ -57,10 +57,8 @@ to question:
 
 Points that are still unclear:
 
-- The tuun map uses "Repeat" for the domain concept, and `agents/CONTEXT.md` lists
-  *loop* as a word to avoid. The hardware button is still labelled **Loop**, so code
-  and docs should call the physical control "the Loop button" and use it as the Repeat
-  prefix.
+- When this was researched, the map called the domain concept "Repeat". It has since
+  been renamed **Loop**, so the hardware label now matches the glossary term.
 - The 37's panel labels include **Function**, the button right of the pads. tuun
   already uses it to cycle the app-wide repeat (`Event::PadFunctionDown` →
   `Action::CycleRepeatAfterMeasures`), and the map frees it. Someone may have meant this
