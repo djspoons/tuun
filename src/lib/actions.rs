@@ -126,6 +126,26 @@ impl LaunchMode {
     }
 }
 
+/// A key that does nothing by itself and waits for the next key to pick a
+/// command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefixKey {
+    /// Quits on a second press.
+    Quit,
+    /// Changes the active program's annotation.
+    Annotation,
+}
+
+impl PrefixKey {
+    /// Returns the prompt shown while this prefix key waits.
+    pub fn prompt(self) -> &'static str {
+        match self {
+            PrefixKey::Quit => "Quit?",
+            PrefixKey::Annotation => "Annotation? (k)eys (u)p (d)own",
+        }
+    }
+}
+
 /// The status message shown while a program's result is on its way back from
 /// the processing thread.
 pub const PROCESSING_MESSAGE: &str = "Processing…";
@@ -154,6 +174,8 @@ pub enum PendingJob {
         /// Whether this is the load at startup, which reports differently from
         /// a reload.
         startup: bool,
+        /// The slot to select once the set is installed, if any.
+        select: Option<usize>,
     },
 }
 
@@ -178,8 +200,10 @@ pub struct AppState {
     pub metronome: bool,
     /// Which scope view the screen draws.
     pub scope_view: scope::ScopeView,
-    /// Set by `Effect::Exit`; `main` checks at top of loop and breaks.
-    pub should_exit: bool,
+    /// The prefix key waiting for the next key, if any.
+    pub pending_prefix: Option<PrefixKey>,
+    /// Set by `Effect::Quit`; `main` checks at top of loop and breaks.
+    pub should_quit: bool,
     /// Last user-visible status message. Set by `Effect::ShowMessage` (and
     /// a few direct writes from the reducer / runner). Persists across
     /// mode transitions; cleared explicitly by navigation actions.
@@ -215,7 +239,8 @@ impl AppState {
             sequencer_page: 0,
             metronome: false,
             scope_view: scope::ScopeView::Snapshot,
-            should_exit: false,
+            pending_prefix: None,
+            should_quit: false,
             message,
             processing: VecDeque::new(),
             waveform_marks: HashMap::new(),
@@ -468,6 +493,26 @@ pub enum Action {
     /// `scope::ScopeView::Scan`.
     ToggleScopeView,
 
+    // --- annotations ---
+    /// Add the `keys` annotation to the program, or remove it, saving the
+    /// change and evaluating the program again. A program that loses `keys`
+    /// while installed as the keys instrument is uninstalled.
+    ToggleKeysAnnotation(usize),
+    /// Change the program's `skip_slots` by `delta`, which moves it and every
+    /// later program by `delta` slots, then reload the file. The selection
+    /// follows the program. Refused when it would move the program onto the
+    /// slot before it or past the last slot.
+    ChangeSkipSlots {
+        program_index: usize,
+        delta: i32,
+    },
+
+    // --- prefix keys ---
+    /// Wait for the next key to complete the prefix key, showing its prompt.
+    StartPrefix(PrefixKey),
+    /// Stop waiting on the pending prefix key, clearing its prompt.
+    EndPrefix,
+
     // --- program-related I/O and other effects ---
     ShowMessage(String),
     /// Print the evaluated waveform of the program at the given index.
@@ -475,7 +520,7 @@ pub enum Action {
     /// For keys instruments, use an arbitrary note and velocity to generate an
     /// example waveform.
     PrintEvaluatedProgram(usize),
-    Exit,
+    Quit,
 }
 
 /// Side effects to perform after the reducer runs. The runner translates
@@ -569,6 +614,15 @@ pub enum Effect {
     SetDawModeDisplay(String),
 
     // --- I/O ---
+    /// Write the backing file with the program's binding given `skip_slots`,
+    /// and send the new source to the processing thread as `ReloadSource` does,
+    /// selecting slot `select` once the set is installed. A failed write
+    /// changes nothing.
+    MoveProgram {
+        program_index: usize,
+        skip_slots: u32,
+        select: usize,
+    },
     /// Re-read the backing file and send it to the processing thread to be
     /// rebuilt into a program set. Once the set is built, stop every voice on
     /// the tracker and install it. A file that can't be read or parsed leaves
@@ -586,8 +640,8 @@ pub enum Effect {
     /// For keys instruments, use an arbitrary note and velocity to generate an
     /// example waveform.
     PrintEvaluatedProgram(usize),
-    /// Sets `state.should_exit = true`.
-    Exit,
+    /// Sets `state.should_quit = true`.
+    Quit,
 }
 
 /// Applies an action to state, returning effects for the runner to execute.
@@ -986,13 +1040,30 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             ]
         }
 
+        Action::ToggleKeysAnnotation(i) => apply_toggle_keys_annotation(state, ctx, i),
+        Action::ChangeSkipSlots {
+            program_index,
+            delta,
+        } => apply_change_skip_slots(state, ctx, program_index, delta),
+
+        Action::StartPrefix(prefix) => {
+            state.pending_prefix = Some(prefix);
+            state.message = prefix.prompt().to_string();
+            vec![]
+        }
+        Action::EndPrefix => {
+            state.pending_prefix = None;
+            state.message.clear();
+            vec![]
+        }
+
         Action::ShowMessage(message) => vec![Effect::ShowMessage(message)],
         Action::PrintEvaluatedProgram(program_index) => {
             vec![Effect::PrintEvaluatedProgram(program_index)]
         }
-        Action::Exit => vec![
+        Action::Quit => vec![
             Effect::UpdateSource(state.active_program_index),
-            Effect::Exit,
+            Effect::Quit,
         ],
     }
 }
@@ -1026,7 +1097,9 @@ pub fn refused_by_ownership(
         Action::SelectProgram(_)
         | Action::AdvanceProgram(_)
         | Action::EnterEditMode
-        | Action::ToggleSequencerStep { .. } => true,
+        | Action::ToggleSequencerStep { .. }
+        | Action::ToggleKeysAnnotation(_)
+        | Action::ChangeSkipSlots { .. } => true,
         // Refused only when it would install; uninstalling drops an
         // already-evaluated instrument.
         Action::ToggleInstalledKeys(i) => {
@@ -1051,7 +1124,7 @@ pub fn refused_by_ownership(
 ///
 /// While a program set is loading, the actions that would change the source
 /// (entering Edit mode, toggling a sequencer step, arming a take, undo and
-/// redo, and another reload) are refused with a message, since the loaded set
+/// redo, changing an annotation, and another reload) are refused with a message, since the loaded set
 /// replaces the source they would change.
 ///
 /// While an evaluation of the active program is waiting, entering Edit mode is
@@ -1068,6 +1141,8 @@ fn refused_by_processing(state: &AppState, action: &Action) -> Option<Vec<Effect
                 | Action::Transport(Transport::Record)
                 | Action::Undo
                 | Action::Redo
+                | Action::ToggleKeysAnnotation(_)
+                | Action::ChangeSkipSlots { .. }
                 | Action::ReloadSource
         )
     {
@@ -1522,6 +1597,88 @@ fn apply_install_keys(state: &mut AppState, program_index: usize) -> Vec<Effect>
         ];
     }
     vec![Effect::InstallKeys(program_index)]
+}
+
+/// Applies `Action::ToggleKeysAnnotation`.
+fn apply_toggle_keys_annotation(
+    state: &mut AppState,
+    ctx: &Context,
+    program_index: usize,
+) -> Vec<Effect> {
+    let name = state.programs.display_name(program_index);
+    if state.programs.skip_slots(program_index).is_none() {
+        return vec![Effect::ShowMessage(format!("{} is empty", name))];
+    }
+    if ctx.source_stale {
+        return vec![Effect::ShowMessage(state.programs.stale_message())];
+    }
+    let Some(program) = state.programs.program_mut(program_index) else {
+        return vec![];
+    };
+    let mut effects = vec![];
+    let message = match program.kind() {
+        programs::ProgramKind::Waveform => {
+            program.set_kind(programs::ProgramKind::Keys);
+            format!("Added keys to {}", name)
+        }
+        programs::ProgramKind::Keys => {
+            program.set_kind(programs::ProgramKind::Waveform);
+            if state.keys.as_ref().is_some_and(|k| k.id == program_index) {
+                effects = apply_install_keys(state, program_index);
+                // Keys mode plays the instrument just uninstalled.
+                if matches!(state.mode, Mode::Keys) {
+                    state.mode = Mode::Select;
+                }
+                format!("Removed keys from {} and uninstalled it", name)
+            } else {
+                format!("Removed keys from {}", name)
+            }
+        }
+    };
+    effects.extend([
+        Effect::ShowMessage(message),
+        Effect::EvaluateProgram {
+            program_index,
+            on_success: vec![],
+            on_failure: vec![],
+        },
+        Effect::UpdateSource(program_index),
+    ]);
+    effects
+}
+
+/// Applies `Action::ChangeSkipSlots`.
+fn apply_change_skip_slots(
+    state: &mut AppState,
+    ctx: &Context,
+    program_index: usize,
+    delta: i32,
+) -> Vec<Effect> {
+    let name = state.programs.display_name(program_index);
+    let Some(skip_slots) = state.programs.skip_slots(program_index) else {
+        return vec![Effect::ShowMessage(format!("{} is empty", name))];
+    };
+    if ctx.source_stale {
+        return vec![Effect::ShowMessage(state.programs.stale_message())];
+    }
+    let Some(new_skip_slots) = skip_slots.checked_add_signed(delta) else {
+        return vec![Effect::ShowMessage(format!(
+            "Can't move {} up: no empty slot above it",
+            name
+        ))];
+    };
+    let last_slot = state.programs.last_slot().unwrap_or(program_index);
+    if last_slot as i64 + delta as i64 >= state.programs.programs().len() as i64 {
+        return vec![Effect::ShowMessage(format!(
+            "Can't move {} down: a program would pass the last slot",
+            name
+        ))];
+    }
+    vec![Effect::MoveProgram {
+        program_index,
+        skip_slots: new_skip_slots,
+        select: (program_index as i64 + delta as i64) as usize,
+    }]
 }
 
 /// Re-parses `text` and returns its syntax errors as diagnostics. Empty
@@ -4292,15 +4449,21 @@ _ = saw(220);";
     #[test]
     fn source_changes_are_refused_while_a_set_loads() {
         let mut state = test_state();
-        state
-            .processing
-            .push_back(PendingJob::Load { startup: false });
+        state.processing.push_back(PendingJob::Load {
+            startup: false,
+            select: None,
+        });
         for action in [
             Action::EnterEditMode,
             Action::ToggleSequencerStep { sixteenth: 0 },
             Action::Transport(Transport::Record),
             Action::Undo,
             Action::Redo,
+            Action::ToggleKeysAnnotation(0),
+            Action::ChangeSkipSlots {
+                program_index: 0,
+                delta: 1,
+            },
             Action::ReloadSource,
         ] {
             let description = format!("{:?}", action);
@@ -4854,5 +5017,222 @@ _ = saw(220);";
         }
         assert_eq!(state.active_program_index, 1);
         assert_eq!(take_phase(&state), Phase::Armed);
+    }
+
+    /// Returns a Select-mode state over `source` with `active` as the active
+    /// program.
+    fn annotation_state(source: &str, active: usize) -> AppState {
+        let mut state = AppState::from_source(source.to_string(), std::path::PathBuf::new())
+            .expect("test source should parse");
+        state.active_program_index = active;
+        state
+    }
+
+    #[test]
+    fn prefix_shows_its_prompt_until_it_ends() {
+        let mut state = test_state();
+        let effects =
+            apply_with_empty_status(&mut state, Action::StartPrefix(PrefixKey::Annotation));
+        assert!(effects.is_empty());
+        assert_eq!(state.pending_prefix, Some(PrefixKey::Annotation));
+        assert_eq!(state.message, "Annotation? (k)eys (u)p (d)own");
+        apply_with_empty_status(&mut state, Action::EndPrefix);
+        assert_eq!(state.pending_prefix, None);
+        assert!(state.message.is_empty());
+    }
+
+    #[test]
+    fn toggling_keys_changes_the_kind_saves_and_evaluates() {
+        let mut state = annotation_state("#{level_db=0}\nk = 1;", 0);
+        let effects = apply_with_empty_status(&mut state, Action::ToggleKeysAnnotation(0));
+        assert_eq!(state.active_program().kind(), programs::ProgramKind::Keys);
+        assert!(
+            matches!(
+                &effects[..],
+                [
+                    Effect::ShowMessage(m),
+                    Effect::EvaluateProgram {
+                        program_index: 0,
+                        ..
+                    },
+                    Effect::UpdateSource(0),
+                ] if m == "Added keys to A:1 (k)"
+            ),
+            "got {:?}",
+            effects
+        );
+        let effects = apply_with_empty_status(&mut state, Action::ToggleKeysAnnotation(0));
+        assert_eq!(
+            state.active_program().kind(),
+            programs::ProgramKind::Waveform
+        );
+        assert!(
+            matches!(&effects[0], Effect::ShowMessage(m) if m == "Removed keys from A:1 (k)"),
+            "got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn losing_keys_uninstalls_the_installed_instrument() {
+        let mut state = annotation_state("#{keys}\nk = fn(n, v) => (0, 0);", 0);
+        install_test_keys(&mut state);
+        state.mode = Mode::Keys;
+        let effects = apply_with_empty_status(&mut state, Action::ToggleKeysAnnotation(0));
+        assert!(state.keys.is_none());
+        assert!(matches!(state.mode, Mode::Select));
+        assert!(
+            matches!(
+                &effects[..],
+                [
+                    Effect::ModifyWaveform {
+                        selector: WaveformSelector::AllKeys,
+                        mark_id: MarkId::Terminator,
+                        ..
+                    },
+                    ..,
+                    Effect::EvaluateProgram { .. },
+                    Effect::UpdateSource(0),
+                ]
+            ),
+            "got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn annotation_changes_refuse_an_empty_slot_and_a_stale_file() {
+        let mut state = annotation_state("#{level_db=0}\nk = 1;", 1);
+        for action in [
+            Action::ToggleKeysAnnotation(1),
+            Action::ChangeSkipSlots {
+                program_index: 1,
+                delta: 1,
+            },
+        ] {
+            let effects = apply_with_empty_status(&mut state, action);
+            assert!(
+                matches!(&effects[..], [Effect::ShowMessage(m)] if m == "A:2 is empty"),
+                "got {:?}",
+                effects
+            );
+        }
+        state.active_program_index = 0;
+        for action in [
+            Action::ToggleKeysAnnotation(0),
+            Action::ChangeSkipSlots {
+                program_index: 0,
+                delta: 1,
+            },
+        ] {
+            let effects = apply_with_stale_source(&mut state, action);
+            assert!(
+                matches!(&effects[..], [Effect::ShowMessage(m)] if m.contains("changed on disk")),
+                "got {:?}",
+                effects
+            );
+        }
+        assert_eq!(
+            state.active_program().kind(),
+            programs::ProgramKind::Waveform
+        );
+    }
+
+    #[test]
+    fn annotation_changes_are_refused_while_the_mode_owns_the_program() {
+        let mut state = editing_state();
+        for action in [
+            Action::ToggleKeysAnnotation(0),
+            Action::ChangeSkipSlots {
+                program_index: 0,
+                delta: 1,
+            },
+        ] {
+            let effects = apply_with_empty_status(&mut state, action);
+            assert!(effects.is_empty(), "got {:?}", effects);
+        }
+        assert_eq!(
+            state.active_program().kind(),
+            programs::ProgramKind::Waveform
+        );
+    }
+
+    #[test]
+    fn changing_skip_slots_moves_the_program_and_the_selection() {
+        let mut state = annotation_state(
+            "#{level_db=0}\na = 1;\n#{skip_slots=1, level_db=0}\nb = 2;",
+            2,
+        );
+        let effects = apply_with_empty_status(
+            &mut state,
+            Action::ChangeSkipSlots {
+                program_index: 2,
+                delta: -1,
+            },
+        );
+        assert!(
+            matches!(
+                &effects[..],
+                [Effect::MoveProgram {
+                    program_index: 2,
+                    skip_slots: 0,
+                    select: 1
+                }]
+            ),
+            "got {:?}",
+            effects
+        );
+        let effects = apply_with_empty_status(
+            &mut state,
+            Action::ChangeSkipSlots {
+                program_index: 0,
+                delta: 1,
+            },
+        );
+        assert!(
+            matches!(
+                &effects[..],
+                [Effect::MoveProgram {
+                    program_index: 0,
+                    skip_slots: 1,
+                    select: 1
+                }]
+            ),
+            "got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn changing_skip_slots_refuses_at_zero_and_past_the_last_slot() {
+        let mut state = annotation_state(
+            "#{level_db=0}\na = 1;\n#{skip_slots=62, level_db=0}\nb = 2;",
+            0,
+        );
+        let effects = apply_with_empty_status(
+            &mut state,
+            Action::ChangeSkipSlots {
+                program_index: 0,
+                delta: -1,
+            },
+        );
+        assert!(
+            matches!(&effects[..], [Effect::ShowMessage(m)] if m.starts_with("Can't move A:1 (a) up")),
+            "got {:?}",
+            effects
+        );
+        // `b` is in the last slot, so moving `a` down would push it out.
+        let effects = apply_with_empty_status(
+            &mut state,
+            Action::ChangeSkipSlots {
+                program_index: 0,
+                delta: 1,
+            },
+        );
+        assert!(
+            matches!(&effects[..], [Effect::ShowMessage(m)] if m.starts_with("Can't move A:1 (a) down")),
+            "got {:?}",
+            effects
+        );
     }
 }

@@ -76,6 +76,14 @@ _Avoid_: record, export, bounce
 
 ### The program set
 
+**Annotation**:
+The `#{…}` header on a binding, holding settings such as `level_db`, `skip_slots`, sliders and `keys`. A binding with an annotation occupies a program slot.
+_Avoid_: attribute, tag, header
+
+**Skip slots**:
+The `skip_slots` annotation: how many empty slots come before its program. Changing it moves that program and every later one.
+_Avoid_: offset, gap
+
 **Keys program**:
 A program annotated `#{keys}` that evaluates to a keys instrument. A file may hold several.
 _Avoid_: instrument program, keys patch
@@ -131,6 +139,16 @@ _Avoid_: oscilloscope, buffer view
 **Scan**:
 The scope view that draws a rolling history of the output over a whole number of measures, aligned to measure boundaries, showing each slice's range of sample values, so envelopes and other slow changes are visible.
 _Avoid_: scroll, history, strip chart, envelope view
+
+### The computer keyboard
+
+**Prefix key**:
+A key combination, such as Cmd-N, that does nothing by itself and waits for the next key to pick a command. While it waits, the screen shows its prompt, such as "Annotation?".
+_Avoid_: chord (reads as a musical chord), leader key
+
+**Prefixed command**:
+A prefix key followed by one more key, such as Cmd-N k. Any other key after the prefix key cancels it and is swallowed.
+_Avoid_: chord, key sequence (sequence already means the step sequencer)
 
 ### Modes
 
