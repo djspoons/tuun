@@ -31,6 +31,10 @@ A spec, ready to implement in one go, for replacing the app-wide Loop setting wi
 - [How do the Launchkey's Loop prefix and pads display and set Loop?](tickets/05-launchkey-loop-prefix.md): Holding the Loop button is a temporary DAW pad sub-mode. The top row is 1–8 beats and the bottom row is 1–8 measures. The current value is white and the rest are lit dimly in the program's colour. The last pad pressed wins, pressing the white pad again means once, and the value is written when Loop is released. The Function button is freed and unlit.
 - [How does tuun's screen show a program's Loop?](tickets/06-loop-on-screen.md): Programs other than the active one show `↻` (Loop) or `⌨` (keys) in the gutter, in the program's colour, following the annotation. The active program keeps the triangle. Selecting a program shows e.g. "B:3 kick, loops every 4 beats". Launch messages keep today's wording with N from the annotation, and the status line mirrors a held Launchkey Loop edit.
 
+## Spec
+
+Draft: [spec.md](spec.md). Its keyboard launch keys wait on the open ticket [What do Cmd+Enter and Shift+Cmd+Enter do once Loop is per program?](tickets/07-keyboard-launch-periods.md).
+
 ## Not yet specified
 
 - (none: every remaining question is a ticket)
