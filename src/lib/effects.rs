@@ -151,7 +151,9 @@ impl EffectRunner {
             processing::Reply::Program(outcome) => outcome,
             processing::Reply::Loaded(loaded) => {
                 match state.processing.pop_front() {
-                    Some(PendingJob::Load { startup }) => self.install(state, loaded, startup),
+                    Some(PendingJob::Load { startup, select }) => {
+                        self.install(state, loaded, startup, select)
+                    }
                     _ => println!("Got a load reply with no load waiting for it"),
                 }
                 return;
@@ -225,8 +227,15 @@ impl EffectRunner {
     /// Playback and the current set are untouched until the reply. Installing
     /// stops every voice; a `source` that doesn't parse leaves everything as it
     /// is and shows the error. `startup` marks the load at startup, whose
-    /// status message names only the failed programs.
-    pub fn load(&mut self, state: &mut AppState, source: String, startup: bool) {
+    /// status message names only the failed programs. Installing selects slot
+    /// `select`, if given.
+    pub fn load(
+        &mut self,
+        state: &mut AppState,
+        source: String,
+        startup: bool,
+        select: Option<usize>,
+    ) {
         let job = processing::Job::Load {
             source,
             input_path: state.programs.input_path().to_path_buf(),
@@ -236,16 +245,19 @@ impl EffectRunner {
             return;
         }
         state.message = actions::PROCESSING_MESSAGE.to_string();
-        state.processing.push_back(PendingJob::Load { startup });
+        state
+            .processing
+            .push_back(PendingJob::Load { startup, select });
     }
 
-    /// Installs `loaded`, the set a load built, in place of the current set, or
-    /// shows its error.
+    /// Installs `loaded`, the set a load built, in place of the current set,
+    /// selecting slot `select` if given, or shows its error.
     fn install(
         &mut self,
         state: &mut AppState,
         loaded: Result<processing::Loaded, String>,
         startup: bool,
+        select: Option<usize>,
     ) {
         let processing::Loaded {
             set,
@@ -267,6 +279,13 @@ impl EffectRunner {
             .remove_pending(WaveformSelector::AllVoices, None);
         // The installed instrument was a snapshot of the old set.
         state.keys = None;
+        if let Some(index) = select {
+            state.active_program_index = index;
+        }
+        // Keys mode plays the instrument just uninstalled.
+        if matches!(state.mode, actions::Mode::Keys) {
+            state.mode = actions::Mode::Select;
+        }
         state.programs = set;
         // Baselines are re-seeded from the new set rather than kept since a
         // slider mark names a program slot, which the new set may fill with an
@@ -444,8 +463,17 @@ impl EffectRunner {
                 }
             }
 
+            Effect::MoveProgram {
+                program_index,
+                skip_slots,
+                select,
+            } => match state.programs.write_skip_slots(program_index, skip_slots) {
+                Ok(source) => self.load(state, source, false, Some(select)),
+                Err(message) => state.message = message,
+            },
+
             Effect::ReloadSource => match state.programs.read_backing_file() {
-                Ok(source) => self.load(state, source, false),
+                Ok(source) => self.load(state, source, false, None),
                 Err(message) => state.message = message,
             },
 
@@ -649,8 +677,8 @@ impl EffectRunner {
                     }
                 }
             }
-            Effect::Exit => {
-                state.should_exit = true;
+            Effect::Quit => {
+                state.should_quit = true;
             }
         }
     }
@@ -1372,6 +1400,60 @@ mod tests {
     }
 
     #[test]
+    fn move_program_writes_the_file_and_reloads_with_the_selection() {
+        let (command_sender, _command_receiver) = mpsc::channel();
+        let (slider_sender, _slider_receiver) = mpsc::channel();
+        let player = player::Player::new(90, 4, command_sender);
+        let environment = environment::Environment::new(44100, 90, std::path::PathBuf::new());
+        let (job_sender, job_receiver) = mpsc::channel();
+        let mut runner = EffectRunner::new(player, environment, slider_sender, job_sender);
+
+        let path =
+            std::env::temp_dir().join(format!("tuun_move_runner_{}.tuun", std::process::id()));
+        std::fs::write(
+            &path,
+            "#{level_db=0}\na = 1;\n#{skip_slots=1, level_db=0}\nb = 2;\n#{level_db=0}\nc = 3;\n",
+        )
+        .unwrap();
+        let mut state =
+            AppState::from_source(std::fs::read_to_string(&path).unwrap(), path.clone())
+                .expect("test source should parse");
+        state.active_program_index = 2;
+        state.mode = actions::Mode::Keys;
+        let status = empty_status();
+        let mut world = World {
+            launchkey: None,
+            status: &status,
+        };
+        runner.run_one(
+            &mut state,
+            &mut world,
+            Effect::MoveProgram {
+                program_index: 2,
+                skip_slots: 0,
+                select: 1,
+            },
+        );
+        let written = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(
+            written,
+            "#{level_db=0}\na = 1;\n#{level_db=0}\nb = 2;\n#{level_db=0}\nc = 3;\n"
+        );
+        assert!(state.is_loading());
+        // The selection waits for the moved set.
+        assert_eq!(state.active_program_index, 2);
+        process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
+        // `b` and the program after it both moved up, and the selection
+        // followed `b`.
+        assert_eq!(state.active_program_index, 1);
+        assert_eq!(state.programs.display_name(1), "A:2 (b)");
+        assert_eq!(state.programs.display_name(2), "A:3 (c)");
+        // The reload uninstalled the keys instrument Keys mode would play.
+        assert!(matches!(state.mode, actions::Mode::Select));
+    }
+
+    #[test]
     fn print_evaluated_program_applies_a_keys_instrument() {
         let (command_sender, _command_receiver) = mpsc::channel();
         let (slider_sender, _slider_receiver) = mpsc::channel();
@@ -1577,7 +1659,7 @@ mod tests {
             launchkey: None,
             status: &status,
         };
-        runner.load(&mut state, source.to_string(), true);
+        runner.load(&mut state, source.to_string(), true, None);
         assert_eq!(state.message, actions::PROCESSING_MESSAGE);
         process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
         assert_eq!(state.message, "Errors in A:2 (bad)");
@@ -1585,7 +1667,7 @@ mod tests {
 
         // A clean set clears the status line.
         let clean = "#{level_db=0}\ngood = 1 | fin(time - 1);\n";
-        runner.load(&mut state, clean.to_string(), true);
+        runner.load(&mut state, clean.to_string(), true, None);
         process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
         assert_eq!(state.message, "");
     }
