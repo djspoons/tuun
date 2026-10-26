@@ -115,7 +115,7 @@ Playback scheduled to begin at a future moment in time (often a measure boundary
 _Avoid_: queued, armed, scheduled, cued
 
 **Loop**:
-A program's own setting, written as an annotation, for whether it plays again a given number of beats after it is launched, and keeps doing so until stopped. The count runs from the launch, not the barline, so a loop may drift across measures; a play still sounding when the next begins keeps sounding. A program without one plays once.
+A program's own setting, written as an annotation, for whether it plays again a given number of beats after it is launched, and keeps doing so until stopped. The count runs from the launch, not the barline, so a loop may drift across measures; a play still sounding when the next begins keeps sounding. A change to it takes hold at the program's next launch. A program without one plays once.
 _Avoid_: repeat, cycle
 
 **Installed keys instrument**:
