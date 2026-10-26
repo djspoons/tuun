@@ -26,12 +26,12 @@ A spec, ready to implement in one go, for replacing the app-wide Loop setting wi
 
 - [Which Launchkey control should carry the Loop prefix, and what can we do with it?](tickets/01-launchkey-loop-button.md): The MK4 37 has no "Repeat" button. The candidates are Loop (CC 118, single-colour LED) and Function (CC 105, RGB). 16 RGB pads are available, and Shift+pad is reserved by the firmware.
 - [How do loops that aren't a whole number of measures behave?](tickets/02-loops-off-the-measure.md): A program plays again every N beats from its launch boundary. It drifts freely off the barline, and overlapping plays (including sequence passes) all sound. A pre-first-pass step edit takes the program's own Loop.
+- [Which prefixed commands edit Loop from the keyboard?](tickets/04-keyboard-loop-commands.md): `Cmd-N l` starts a Loop prefix. Then `1`–`9` sets that many beats, `0` makes the program play once, and any other key cancels. It works in Select and Keys modes and is refused on Keys programs, and `Cmd-N k` is refused on a program that loops. The source has no upper bound.
 
 ## Not yet specified
 
 - What the Launchkey's Function pad does once it no longer cycles Loop: freed, repurposed, or folded into the Launchkey Loop-prefix design.
 - How the screen shows a program's Loop (program list, status line, launch message wording such as today's "Looping waveform B:3 every 4 beats").
-- Whether the annotation needs a practical upper bound, beyond what the keyboard and Launchkey editors can reach.
 
 ## Out of scope
 
