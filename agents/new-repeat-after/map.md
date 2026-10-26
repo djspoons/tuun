@@ -25,6 +25,7 @@ A spec, ready to implement in one go, for replacing the app-wide Repeat setting 
 <!-- one line per closed ticket: - [<title>](tickets/NN-slug.md): <gist> -->
 
 - [Which Launchkey control is the Repeat button, and what can we do with it?](tickets/01-launchkey-repeat-button.md): The MK4 37 has no "Repeat" button. The candidates are Loop (CC 118, single-colour LED) and Function (CC 105, RGB). 16 RGB pads are available, and Shift+pad is reserved by the firmware.
+- [How do repeats that aren't a whole number of measures behave?](tickets/02-repeats-off-the-measure.md): A program plays again every N beats from its launch boundary. It drifts freely off the barline, and overlapping plays (including sequence passes) all sound. A pre-first-pass step edit takes the program's own Repeat.
 
 ## Not yet specified
 
@@ -37,3 +38,4 @@ A spec, ready to implement in one go, for replacing the app-wide Repeat setting 
 - Fractional beats (e.g. `repeat_after_beats=1.5`): whole beats only.
 - Keeping an app-wide Repeat as a default for programs without the annotation.
 - Making immediate (top-pad) launches repeat.
+- Changing tempo or beats per measure while programs repeat. Both are fixed per session, so this belongs to whatever effort makes tempo live ([ticket](tickets/02-repeats-off-the-measure.md)).
