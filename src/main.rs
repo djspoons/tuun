@@ -357,7 +357,7 @@ pub fn main() {
     // Evaluate each program from its initial source so that playback and
     // InstallKeys work without needing to enter and exit Edit mode first. The
     // window shows the unevaluated programs until the set is installed.
-    effect_runner.load(&mut state, input, true);
+    effect_runner.load(&mut state, input, true, None);
 
     let mut status = tracker::Status {
         buffer_start: Instant::now(),
@@ -388,7 +388,7 @@ pub fn main() {
     }
     let mut next_render = Instant::now();
     loop {
-        if state.should_exit {
+        if state.should_quit {
             return;
         }
 
