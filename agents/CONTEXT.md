@@ -124,6 +124,10 @@ _Avoid_: the keys, current keys, active instrument
 
 ### The screen
 
+**Gutter**:
+The column to the left of each program's slot digit. On the active program it shows the selection prompt. On every other program it shows that program's Loop (`↻`) or keys (`⌨`) annotation, in the program's colour.
+_Avoid_: badge, margin, prompt column
+
 **Mark highlight**:
 The block drawn in a program's color behind the program text a current mark records.
 _Avoid_: light, glow, highlight (unqualified)
