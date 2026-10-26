@@ -24,6 +24,8 @@ A spec, ready to implement in one go, for replacing the app-wide Repeat setting 
 
 <!-- one line per closed ticket: - [<title>](tickets/NN-slug.md): <gist> -->
 
+- [Which Launchkey control is the Repeat button, and what can we do with it?](tickets/01-launchkey-repeat-button.md): The MK4 37 has no "Repeat" button. The candidates are Loop (CC 118, single-colour LED) and Function (CC 105, RGB). 16 RGB pads are available, and Shift+pad is reserved by the firmware.
+
 ## Not yet specified
 
 - What the Launchkey's Function pad does once it no longer cycles Repeat: freed, repurposed, or folded into the Repeat-button design.
