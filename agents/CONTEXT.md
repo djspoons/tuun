@@ -163,7 +163,7 @@ The pad layout the device reports itself to be in — DAW, or some other layout 
 _Avoid_: DAW mode
 
 **DAW pad sub-mode**:
-What the sixteen pads currently do: Clip Launcher, Keys Installer, or Sequencer. Ours, not the device's.
+What the sixteen pads currently do: Clip Launcher, Keys Installer, or Sequencer, or Loop while the Loop button is held. Ours, not the device's.
 _Avoid_: DAW mode, pad mode
 
 **Editor mode**:
