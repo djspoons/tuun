@@ -1,7 +1,7 @@
 ---
 type: grilling
 status: open
-assignee:
+assignee: djspoons
 blocked_by: []
 ---
 
