@@ -26,6 +26,11 @@ required-features = ["clap"]
 name = "midi_test"
 path = "src/misc/midi_test.rs"
 
+[[bin]]
+name = "sdl_event_test"
+path = "src/misc/sdl_event_test.rs"
+required-features = ["sdl2"]
+
 [features]
 default = ["native"]
 native = ["sdl2", "clap", "rtrb"]
