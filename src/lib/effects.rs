@@ -10,6 +10,7 @@ use std::time::Instant;
 use std::collections::HashMap;
 
 use crate::actions::{self, AppState, Effect, PendingJob};
+use crate::diagnostics;
 use crate::environment;
 use crate::expr;
 use crate::ids::{MarkId, WaveformId, WaveformSelector};
@@ -307,9 +308,18 @@ impl EffectRunner {
         let _ = self
             .slider_sender
             .send(SliderEvent::SetBaselines(slider_values(&state.programs)));
+        // Each failure's full diagnostics go to the terminal; the summary
+        // posted last names the programs on the status line.
         let failed: Vec<String> = failed
             .into_iter()
-            .map(|i| state.programs.display_name(i))
+            .map(|(i, diagnostics)| {
+                let name = state.programs.display_name(i);
+                state.messages.post(
+                    Severity::Error,
+                    format!("{}: {}", name, diagnostics::error_message(&diagnostics)),
+                );
+                name
+            })
             .collect();
         if startup {
             // The parse warning would sit in the status line with nothing
@@ -1733,7 +1743,8 @@ mod tests {
         assert_eq!(on_disk, source);
     }
 
-    /// The load at startup reports only the programs that failed.
+    /// The load at startup names the failed programs on the status line and
+    /// echoes each one's errors.
     #[test]
     fn the_startup_load_names_the_failed_programs() {
         let (mut runner, _command_receiver, job_receiver) = runner_with_jobs();
@@ -1751,6 +1762,19 @@ mod tests {
         process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
         assert_eq!(current_message(&state), "Errors in A:2 (bad)");
         assert!(state.programs.programs()[0].waveform().is_some());
+        // The failure's own error is echoed ahead of the summary.
+        let echoed: Vec<String> = state
+            .messages
+            .take_unechoed()
+            .into_iter()
+            .map(|m| m.text)
+            .collect();
+        assert!(
+            matches!(&echoed[..], [error, summary]
+                if error.starts_with("A:2 (bad): Error:") && summary == "Errors in A:2 (bad)"),
+            "got {:?}",
+            echoed
+        );
 
         // A clean set clears the status line.
         let clean = "#{level_db=0}\ngood = 1 | fin(time - 1);\n";
