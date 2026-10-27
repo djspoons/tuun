@@ -27,7 +27,7 @@ Of the prototype's three layouts, the pads use variant B (beats on top, measures
 - **Device screen.** While Loop is held, the screen shows the program and the value picked so far (e.g. "kick" / "Loop: 10 beats", or "Loop: once"). It updates on every pad press, so a value with no pad (10 beats, 40 beats) can still be read.
 - **Refusals.** These are the same as for `Cmd-N l`: the same editor modes (Select and Keys only, so not an owned program), empty slots, out-of-date source, and keys programs. They are checked when Loop is pressed and again on release. A refused program gets dark pads while Loop is held, and the reason goes on the device screen and the status line ("lead plays keys, so it can't loop").
 - **Other controls** do their normal job while Loop is held. If Track ◀ ▶ changes the selection, any value already picked is dropped, and the pads show the newly selected program. Leaving the DAW pad layout (Shift + pads) while Loop is held also drops the picked value and writes nothing.
-- **The Loop button's light.** It is lit when the selected program has a Loop and dark when it plays once (brightness through CC 118 on channel 4).
+- **The Loop button's light.** It is lit when the selected program has a Loop and dark when it plays once (brightness through CC 118 on channel 4). Correction, found on the hardware later: the light can't go dark. Brightness 0 is a faint white, the same level as the Stop button, so "plays once" is dim. See the [spec](../spec.md).
 - **Function** (CC 105) is freed: it has no action and its light stays off.
 
 Rejected: variant A (a 1–16 beat ruler) and variant C (holding Function to cycle every program in the bank through set values), and a press-then-pad prefix.
