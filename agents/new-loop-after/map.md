@@ -16,7 +16,7 @@ A spec, ready to implement in one go, for replacing the app-wide Loop setting wi
   - The app-wide setting (`AppState.repeat_after_measures`, `Action::CycleRepeatAfterMeasures`, the Function-pad cycle and its colours) is removed entirely. There is no global fallback. A program without the annotation plays once.
   - Spelling is `#{loop_after_beats=N}`, where N is a positive whole number of beats.
   - `loop_after_beats` on a `#{keys}` program is an error.
-  - Only launches that start at the next measure honour Loop. This keeps today's split: pending launches (bottom pads, Play, evaluate-and-play) honour Loop, and immediate launches (top pads, `ToggleProgramPlayback`) play once.
+  - Only launches that start at the next measure honour Loop. This keeps today's split: pending launches (bottom pads, Play, Edit-mode Return) honour Loop, and immediate launches (top pads, Cmd+Return) play once. See [ticket 07](tickets/07-keyboard-launch-periods.md) for the full list.
   - Loop can be edited live, both from the keyboard and from the Launchkey, and is written back to the annotation. The `Cmd-N` annotation prefix command (`PrefixKey::Annotation`) is the guide.
   - Docs are part of the spec (README Launchkey section, language spec § Annotations, glossary). There is no data migration, because the global setting was never persisted.
 
@@ -31,9 +31,11 @@ A spec, ready to implement in one go, for replacing the app-wide Loop setting wi
 - [How do the Launchkey's Loop prefix and pads display and set Loop?](tickets/05-launchkey-loop-prefix.md): Holding the Loop button is a temporary DAW pad sub-mode. The top row is 1–8 beats and the bottom row is 1–8 measures. The current value is white and the rest are lit dimly in the program's colour. The last pad pressed wins, pressing the white pad again means once, and the value is written when Loop is released. The Function button is freed and unlit.
 - [How does tuun's screen show a program's Loop?](tickets/06-loop-on-screen.md): Programs other than the active one show `↻` (Loop) or `⌨` (keys) in the gutter, in the program's colour, following the annotation. The active program keeps the triangle. Selecting a program shows e.g. "B:3 kick, loops every 4 beats". Launch messages keep today's wording with N from the annotation, and the status line mirrors a held Launchkey Loop edit.
 
+- [What do Cmd+Enter and Shift+Cmd+Enter do once Loop is per program?](tickets/07-keyboard-launch-periods.md): Pending launches follow Loop: bottom pads, Play, Edit-mode Return, and finishing a recording with Play. Immediate launches play the whole program once and never stop what's sounding: top pads and Cmd+Return. That includes a Trigger-mode pad on a sequence, which now plays the pattern. Shift+Cmd+Return is dropped.
+
 ## Spec
 
-Draft: [spec.md](spec.md). Its keyboard launch keys wait on the open ticket [What do Cmd+Enter and Shift+Cmd+Enter do once Loop is per program?](tickets/07-keyboard-launch-periods.md).
+[spec.md](spec.md): ready to implement.
 
 ## Not yet specified
 

@@ -28,16 +28,24 @@ Nothing replaces them as a global default, and there's no migration because the 
 
 ## 3. Which launches loop
 
-*Decided while charting.*
+*Decided while charting, and in [What do Cmd+Enter and Shift+Cmd+Enter do once Loop is per program?](tickets/07-keyboard-launch-periods.md)*
 
-Today's split stays the same, except that N now comes from the program's annotation:
+Every launch either starts at the next measure and follows the program's Loop, or starts now and plays once. No key or pad picks its own period.
 
 | Launch | Starts | Loops? |
 | --- | --- | --- |
-| Bottom pad, Play button, evaluate-and-play | next measure (pending) | yes, if the program has `loop_after_beats` |
-| Top pad, `ToggleProgramPlayback` | immediately | never: it plays once, even with the annotation |
+| Bottom pad, Launchkey Play, Edit-mode Return, finishing a recording with Play | next measure (a recording: the take's end boundary) | as the program's `loop_after_beats` says, or once without it |
+| Top pad (Toggle or Trigger), Cmd+Return in Select or Edit mode | now | never, even with the annotation |
 
-**Open:** the keyboard launches that pick their own period are still undecided: Cmd+Return, Shift+Cmd+Return, and plain Return in Edit mode. See [What do Cmd+Enter and Shift+Cmd+Enter do once Loop is per program?](tickets/07-keyboard-launch-periods.md). Until that ticket is resolved, this spec isn't ready to implement.
+- **Cmd+Return**, in Select and Edit modes, plays the whole program once, starting now. Edit mode evaluates first.
+  - For a sequence, the pattern's first beat lands at the press.
+  - It never stops what is already sounding, whatever the launch mode, so pressing it twice layers two plays.
+  - On a program that can't play, it shows today's "Program B:3 is not a valid waveform" message.
+- **Return in Edit mode** evaluates, then makes a pending launch. In Select mode, Return still enters Edit mode.
+- **Shift+Cmd+Return** is removed in both modes, so the key does nothing.
+- **Finishing a recording with Play** (`finish_take`) passes the slot's `loop_after_beats` where it passes `state.repeat_after_measures` today.
+- **A Trigger-mode top pad** plays the whole program from now, like Cmd+Return, so on a sequence it plays the pattern rather than one hit. Delete `Action::StartProgramVoice`, `Effect::PlayProgramVoice` and `Player::play_program_voice`, and route Trigger through `play_program(…, Start::Now, None)` without the stop that Toggle does.
+- `Action::PlayProgram` and `Action::EvaluateAndLeaveEditMode` lose their `repeat_after_measures` field. The pending or immediate choice decides whether the annotation is read.
 
 ## 4. Timing
 
@@ -136,7 +144,7 @@ Today's split stays the same, except that N now comes from the program's annotat
 - **Launch messages** keep today's wording, with N from the annotation, always in beats:
   - Pending and looping: "Looping waveform kick every 4 beats", "Looping sequence kick every 6 beats"
   - Pending, plays once: "Playing waveform kick", "Playing sequence kick"
-  - Immediate: "Playing voice of kick", even for a program that has a Loop
+  - Immediate (top pads and Cmd+Return): "Playing waveform kick", "Playing sequence kick", even for a program that has a Loop. "Playing voice of kick" goes away with `play_program_voice` ([ticket 07](tickets/07-keyboard-launch-periods.md)).
 - **While Loop is held on the Launchkey**, the status line mirrors the device screen, e.g. "Loop kick: 10 beats" or "Loop kick: once", and updates on every press. Releasing Loop replaces it with the write message. The gutter keeps showing the written annotation until the release.
 - **Units** are beats everywhere.
 - Hypothesis (unverified): the renderer's font has both `↻` (U+21BB) and `⌨` (U+2328). Check this on the real font during implementation.
@@ -149,9 +157,14 @@ Today's split stays the same, except that N now comes from the program's annotat
   - Remove the bullets saying bottom pads "optionally repeat every measure or every _other_ measure" and that the "Function" button switches between repeat behaviours.
   - Say that bottom pads and Play loop according to the program's `loop_after_beats`.
   - Describe holding Loop.
-- **README, Keyboard Navigation.** Add "Cmd + N, then L" in Select and Keys modes. Update the Cmd + Enter and Shift + Cmd + Enter lines once the [keyboard launch ticket](tickets/07-keyboard-launch-periods.md) is resolved.
+  - Remove "For sequenced waveforms, 'Trigger' mode only plays one step instead of the whole sequence".
+- **README, Keyboard Navigation.**
+  - Add "Cmd + N, then L" in Select and Keys modes.
+  - Select mode: Cmd + Enter plays the current program once, now.
+  - Edit mode: Enter plays at the next measure, looping as its `loop_after_beats` says, and Cmd + Enter plays it once, now.
+  - Remove both Shift + Cmd + Enter lines.
 - **`docs/language-spec.md` § Annotations.** Add `loop_after_beats=N`: its range, that it can't be combined with `keys`, and which launches honour it.
-- **`agents/CONTEXT.md`.** The Loop, Gutter and DAW pad sub-mode entries already match this spec, so they need no change.
+- **`agents/CONTEXT.md`.** The Loop, Gutter, DAW pad sub-mode and Trigger entries already match this spec, so they need no change.
 
 ## Out of scope
 

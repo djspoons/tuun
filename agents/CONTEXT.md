@@ -187,5 +187,5 @@ The launch mode in which a top pad starts its program when silent and stops it w
 _Avoid_: start/stop
 
 **Trigger**:
-The launch mode in which a top pad always starts a new voice and never stops one, so that repeated presses layer.
+The launch mode in which a top pad always starts its program again, a whole pattern for a sequence, and never stops it, so that repeated presses layer.
 _Avoid_: one-shot, drum mode, always-play, retrigger
