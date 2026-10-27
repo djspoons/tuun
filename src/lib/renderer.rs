@@ -17,7 +17,7 @@ use crate::ids::{ANCHOR_SIXTEENTH, WaveformId, WaveformSelector};
 use crate::launchkey;
 use crate::metric::Metric;
 use crate::player::{self, PlayedMarks};
-use crate::programs::{PROGRAMS_PER_BANK, Program, ProgramSet, SliderDisplay};
+use crate::programs::{PROGRAMS_PER_BANK, Program, ProgramKind, ProgramSet, SliderDisplay};
 use crate::recorder::{Finish, Phase};
 use crate::scope;
 use crate::trace_walk::Segment;
@@ -300,6 +300,26 @@ impl<'ttf> Renderer<'ttf> {
                     now,
                 );
                 self.draw_highlights(program.text(), &lit, program_color, y);
+            }
+
+            // The active program's prompt is drawn below, per mode.
+            if active_program_index != index
+                && let Some(glyph) = gutter_glyph(program)
+            {
+                let glyph_texture =
+                    make_texture(&self.font, program_color, &texture_creator, glyph);
+                let TextureQuery {
+                    width: glyph_width,
+                    height: glyph_height,
+                    ..
+                } = glyph_texture.query();
+                self.canvas
+                    .copy(
+                        &glyph_texture,
+                        None,
+                        Some(sdl2::rect::Rect::new(0, y, glyph_width, glyph_height)),
+                    )
+                    .unwrap();
             }
 
             match *mode {
@@ -1181,6 +1201,19 @@ pub fn strip_marks(
 /// Returns whether the row of the program at `index` draws mark highlights in
 /// `mode`, whose active program is at `active_program_index`: every row does
 /// but the one being edited.
+/// Returns the glyph that marks `program`'s annotations in the gutter, if any.
+///
+/// `↻` marks a program with `loop_after_beats`, and `⌨` a `#{keys}` program.
+pub fn gutter_glyph(program: &Program) -> Option<&'static str> {
+    if program.loop_after_beats().is_some() {
+        Some(" ↻ ")
+    } else if program.kind() == ProgramKind::Keys {
+        Some(" ⌨ ")
+    } else {
+        None
+    }
+}
+
 pub fn highlights_row(mode: &Mode, active_program_index: usize, index: usize) -> bool {
     !(matches!(mode, Mode::Edit { .. }) && index == active_program_index)
 }
@@ -1603,6 +1636,17 @@ mod tests {
         assert!(highlights_row(&edit, 2, 3));
         assert!(highlights_row(&Mode::Select, 2, 2));
         assert!(highlights_row(&Mode::Keys, 2, 2));
+    }
+
+    #[test]
+    fn gutter_glyph_follows_the_annotation() {
+        let (set, _) = ProgramSet::from_source(
+            "#{loop_after_beats=4}\na = 1;\n#{keys}\nb = 1;\n#{level_db=0}\nc = 1;\n".to_string(),
+            Default::default(),
+        )
+        .expect("the fixture parses");
+        let glyphs: Vec<_> = set.programs()[..3].iter().map(gutter_glyph).collect();
+        assert_eq!(glyphs, vec![Some(" ↻ "), Some(" ⌨ "), None]);
     }
 
     #[test]

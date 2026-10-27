@@ -1445,10 +1445,10 @@ fn apply_select_program(state: &mut AppState, i: usize) -> Vec<Effect> {
     }
     let changed = state.active_program_index != i;
     state.active_program_index = i;
-    // Replace the previous status with the newly-selected program's name.
-    // Navigation represents a fresh context, so any prior
+    // Replace the previous status with the newly-selected program's
+    // selection message. Navigation represents a fresh context, so any prior
     // "Removed pending..." / "Playing..." etc. shouldn't carry over.
-    let mut effects = vec![Effect::ShowMessage(state.programs.name(i))];
+    let mut effects = vec![Effect::ShowMessage(state.programs.selection_message(i))];
     if changed {
         effects.push(Effect::SyncEncoders);
     }
@@ -3351,7 +3351,7 @@ mod tests {
     }
 
     #[test]
-    fn advance_program_emits_empty_show_message_to_clear_status() {
+    fn advance_program_replaces_the_status() {
         // Two programs so AdvanceProgram(1) actually moves the index.
         let mut state = AppState::from_source(
             "#{level_db=0}\n_ = test;\n#{level_db=0}\n_ = second;".to_string(),
@@ -3360,22 +3360,22 @@ mod tests {
         .expect("test source should parse");
         let effects = apply_with_empty_status(&mut state, Action::AdvanceProgram(1));
         assert_eq!(state.active_program_index, 1);
-        // The empty ShowMessage is what gets folded into Mode::Select to
-        // wipe any stale "Removed pending..." / "Playing..." text.
+        // The ShowMessage replaces any stale "Removed pending..." /
+        // "Playing..." text.
         assert!(
             effects
                 .iter()
-                .any(|e| matches!(e, Effect::ShowMessage(s) if s.is_empty())),
-            "expected an empty ShowMessage to clear the status, got {:?}",
+                .any(|e| matches!(e, Effect::ShowMessage(s) if s == "A:2")),
+            "expected a ShowMessage replacing the status, got {:?}",
             effects
         );
     }
 
     #[test]
-    fn select_program_shows_binding_name_on_navigate() {
-        // Named binding → status shows the identifier; anonymous `_`
-        // binding → status is left blank; a slot with no source binding
-        // (padding) → also blank.
+    fn select_program_shows_selection_message_on_navigate() {
+        // Named binding → status shows the address and identifier; anonymous
+        // `_` binding → only the address; a slot with no source binding
+        // (padding) → blank.
         let source = "\
 #{level_db=0}
 kick = pulse(60);
@@ -3393,9 +3393,9 @@ _ = saw(220);";
                 _ => None,
             })
             .expect("expected a ShowMessage");
-        assert_eq!(msg, "kick");
+        assert_eq!(msg, "A:1 kick");
 
-        // Slot 2: anonymous `_` — status stays empty.
+        // Slot 2: anonymous `_` — only the address.
         let effects = apply_with_empty_status(&mut state, Action::SelectProgram(1));
         let msg = effects
             .iter()
@@ -3404,7 +3404,7 @@ _ = saw(220);";
                 _ => None,
             })
             .expect("expected a ShowMessage");
-        assert_eq!(msg, "");
+        assert_eq!(msg, "A:2");
 
         // Slot 3: padding (no binding for this slot).
         let effects = apply_with_empty_status(&mut state, Action::SelectProgram(2));
