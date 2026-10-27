@@ -950,6 +950,31 @@ impl ProgramSet {
         }
     }
 
+    /// Returns the status message for selecting the program at `index`.
+    ///
+    /// The message is the bank-relative address, then the binding's name (if
+    /// any), then the program's loop or keys setting. An empty slot gives an
+    /// empty message.
+    pub fn selection_message(&self, index: usize) -> String {
+        let Some(program) = self.programs.get(index) else {
+            return String::new();
+        };
+        if program.is_empty() {
+            return String::new();
+        }
+        let mut message = bank_address(index);
+        let name = self.name(index);
+        if !name.is_empty() {
+            message = format!("{} {}", message, name);
+        }
+        if let Some(beats) = program.loop_after_beats() {
+            message = format!("{}, loops every {} beats", message, beats);
+        } else if program.kind() == ProgramKind::Keys {
+            message = format!("{}, plays keys", message);
+        }
+        message
+    }
+
     /// Returns the bindings to evaluate the program at `index` under: the
     /// file-level bindings preceding it (bindings after it are ignored), with
     /// anonymous `_` definitions filtered out and each remaining definition's
@@ -2477,6 +2502,28 @@ tone = saw(220);";
         let set = state_from(source);
         assert_eq!(set.programs()[0].loop_after_beats(), Some(3));
         assert_eq!(set.programs()[1].loop_after_beats(), None);
+    }
+
+    #[test]
+    fn selection_message_shows_address_name_and_setting() {
+        let source = "\
+#{loop_after_beats=4}
+kick = saw(60);
+#{keys}
+lead = 1;
+#{level_db=0}
+tone = saw(220);
+#{level_db=0}
+_ = saw(110);
+#{skip_slots=1, level_db=0}
+last = saw(55);";
+        let set = state_from(source);
+        assert_eq!(set.selection_message(0), "A:1 kick, loops every 4 beats");
+        assert_eq!(set.selection_message(1), "A:2 lead, plays keys");
+        assert_eq!(set.selection_message(2), "A:3 tone");
+        assert_eq!(set.selection_message(3), "A:4");
+        assert!(set.programs()[4].is_empty());
+        assert_eq!(set.selection_message(4), "");
     }
 
     #[test]

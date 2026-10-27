@@ -1029,8 +1029,8 @@ mod tests {
     }
 
     /// An anchor that is running with nothing queued behind it is a one-shot
-    /// family, so the step must not outlive it — not even when the program
-    /// has a Loop.
+    /// family, so the step must not outlive it — not even when the program has
+    /// a loop.
     #[test]
     fn play_step_does_not_repeat_into_a_one_shot_family() {
         let set = sequenced_set_of("loop_after_beats=4", "[1, 2.5]");
@@ -1096,7 +1096,7 @@ mod tests {
     }
 
     /// A loop that isn't a whole number of measures isn't rounded to one, so
-    /// in 4/4 a waveform with a 3-beat Loop drifts across the measure start.
+    /// in 4/4 a waveform with a 3-beat loop drifts across the measure start.
     #[test]
     fn play_program_loops_a_waveform_every_n_beats_off_the_measure() {
         let set = evaluated_set("#{loop_after_beats=3}\n_ = 1 | fin(time - 1);\n".to_string());
