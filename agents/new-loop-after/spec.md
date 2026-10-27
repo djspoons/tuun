@@ -53,7 +53,7 @@ Every launch either starts at the next measure and follows the program's Loop, o
 
 - A looping program plays again every N beats, counted from the measure boundary where it was launched. The same rule covers waveform and sequence programs.
 - **Drift is allowed.** Nothing snaps the program back to the barline, and nothing rounds N. In 4/4, `loop_after_beats=3` lands on beats 1, 4, 3, 2, and comes back to the barline every 12 beats.
-- **Plays overlap.** If a play is still sounding when the next one starts, both sound. Nothing is cut off and nothing warns. This is the tracker's behaviour today.
+- **Passes overlap.** If a pass is still sounding when the next one starts, both sound. Nothing is cut off and nothing warns. This is the tracker's behaviour today.
 - **Sequences play as written.** Every pass plays all of its steps, even when they extend past beat N, so passes can overlap. No steps are dropped and the program isn't rejected.
 - Internally the period changes from measures to beats. `Player`'s `repeat_after_measures` parameters, and the `measures * beats_per_measure` conversion inside them, become a period in beats.
 - Tempo and beats per measure stay fixed for the session. Changing them live is out of scope.

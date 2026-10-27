@@ -55,9 +55,9 @@ pub enum WaveformSelector {
     /// A program's whole voice family: its top-level waveform and any of its
     /// step waveforms.
     ProgramVoices(usize),
-    /// The waveforms that show a program playing: its top-level waveform, and
-    /// its sequence's anchor, which spans each pass. Unlike `ProgramVoices`,
-    /// this does not include its other step waveforms.
+    /// The waveforms that show a program playing, one voice per pass: its
+    /// top-level waveform, and its sequence's anchor, which spans each pass.
+    /// Unlike `ProgramVoices`, this does not include its other step waveforms.
     ProgramPlayback(usize),
     /// Every program, step, and key waveform; not the Beats timekeepers.
     AllVoices,

@@ -34,6 +34,10 @@ _Avoid_: synth, patch, instrument
 One sounding instance of a program's waveform. A single program may have several voices sounding at once. Launching a sequence plays one voice per listed step.
 _Avoid_: instance, playback, note
 
+**Pass**:
+One repetition of a launched program, from one start to the end of its pattern: a voice of its waveform, or for a sequence, a voice of each listed step and of the silent anchor that spans them. A looping program starts a pass every N beats, and passes may overlap.
+_Avoid_: play (as a noun), repetition, cycle
+
 **Step**:
 One element of a sequenceable program's `on_beats` list. Its value is the beat of the measure it plays on, so `[1, 2.5] | on_beats(w)` has two steps, not two beats.
 _Avoid_: beat, element, hit, note
@@ -115,7 +119,7 @@ Playback scheduled to begin at a future moment in time (often a measure boundary
 _Avoid_: queued, armed, scheduled, cued
 
 **Loop**:
-A program's own setting, written as an annotation, for whether it plays again a given number of beats after it is launched, and keeps doing so until stopped. The count runs from the launch, not the barline, so a loop may drift across measures; a play still sounding when the next begins keeps sounding. A change to it takes hold at the program's next launch. A program without one plays once.
+A program's own setting, written as an annotation, for whether it plays again a given number of beats after it is launched, and keeps doing so until stopped. The count runs from the launch, not the barline, so a loop may drift across measures; a pass still sounding when the next begins keeps sounding. A change to it takes hold at the program's next launch. A program without one plays once.
 _Avoid_: repeat, cycle
 
 **Installed keys instrument**:
