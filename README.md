@@ -123,6 +123,10 @@ Tuun provides a limited MIDI integration, specifically for the Novation Launchke
 * "Play" button starts the current waveform at the beginning of the next measure, looping as its `loop_after_beats` annotation says (or playing once without it)
 * "Record" button arms recording MIDI notes starting at the beginning of the next measure; notes are written into the current program at the end of recording
 * "Stop" button cancels any pending playback for the current program or cancels the current recording
+* Hold the "Loop" button to set the current program's **loop** with the pads, in Select and Keys modes
+  * While it is held, the top row picks 1 to 8 beats and the bottom row 1 to 8 measures, whatever the pad sub-mode; the pads for the current loop are white, and pressing a white pad makes the program play once
+  * The device screen shows the picked loop; releasing "Loop" saves it as the program's `loop_after_beats`, taking effect at its next launch
+  * The button's light is bright when the current program loops and dim when it plays once
 
 * "Metronome" button turns the metronome on or off
 

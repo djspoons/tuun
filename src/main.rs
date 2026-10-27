@@ -382,7 +382,10 @@ pub fn main() {
             &status,
             vec![
                 actions::Effect::SyncEncoders,
-                actions::Effect::SetDawModeDisplay(daw_mode_label),
+                actions::Effect::SetDawModeDisplay {
+                    name: daw_mode_label,
+                    text: String::new(),
+                },
             ],
         );
     }

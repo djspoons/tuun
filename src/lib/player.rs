@@ -186,6 +186,11 @@ impl Player {
         self.tempo
     }
 
+    /// Returns the number of beats in a measure.
+    pub fn beats_per_measure(&self) -> u32 {
+        self.beats_per_measure
+    }
+
     /// Plays the program at `program_index`, substituting its current slider
     /// values. Returns the user-visible message, or `None` when the program's
     /// text didn't evaluate to a waveform or a sequence (or the index is out of

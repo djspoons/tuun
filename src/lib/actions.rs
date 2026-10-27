@@ -105,6 +105,43 @@ impl DawPadMode {
     }
 }
 
+/// The Launchkey's Loop button while it is held.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct LoopHold {
+    /// The program `picked` is for.
+    program_index: usize,
+    /// The Loop picked with the pads, if a pad has been pressed: a period in
+    /// beats, or `None` for "plays once".
+    picked: Option<Option<u32>>,
+}
+
+/// A pad of the Loop editor that the pads show while Loop is held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopPad {
+    /// A top-row pad, which picks a Loop of this many beats.
+    Beats(u32),
+    /// A bottom-row pad, which picks a Loop of this many measures.
+    Measures(u32),
+}
+
+impl LoopPad {
+    /// Returns the Loop this pad picks, in beats.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tuun::actions::LoopPad;
+    /// assert_eq!(LoopPad::Beats(3).beats(4), 3);
+    /// assert_eq!(LoopPad::Measures(3).beats(4), 12);
+    /// ```
+    pub fn beats(self, beats_per_measure: u32) -> u32 {
+        match self {
+            LoopPad::Beats(beats) => beats,
+            LoopPad::Measures(measures) => measures * beats_per_measure,
+        }
+    }
+}
+
 /// How a press of a clip-launcher top pad relates to the program's playback.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LaunchMode {
@@ -220,6 +257,8 @@ pub struct AppState {
     pub processing: VecDeque<PendingJob>,
     /// The marks of the waveform last sent to play under each id.
     pub waveform_marks: HashMap<WaveformId, player::PlayedMarks>,
+    /// The Launchkey's Loop button, while it is held.
+    pub loop_hold: Option<LoopHold>,
 }
 
 impl AppState {
@@ -246,6 +285,7 @@ impl AppState {
             message,
             processing: VecDeque::new(),
             waveform_marks: HashMap::new(),
+            loop_hold: None,
         })
     }
 
@@ -255,6 +295,17 @@ impl AppState {
 
     pub fn active_program(&self) -> &Program {
         &self.programs.programs()[self.active_program_index]
+    }
+
+    /// Returns the Loop shown for the active program while the Launchkey's
+    /// Loop button is held: the value picked for it with the pads, or else its
+    /// `loop_after_beats`. Returns `None` while Loop isn't held.
+    pub fn held_loop(&self) -> Option<Option<u32>> {
+        let hold = self.loop_hold?;
+        Some(match hold.picked {
+            Some(picked) if hold.program_index == self.active_program_index => picked,
+            _ => self.active_program().loop_after_beats(),
+        })
     }
 
     /// Returns when the take being recorded next needs a tick, if it does.
@@ -301,6 +352,8 @@ pub struct Context<'a> {
     pub source_stale: bool,
     /// The tempo in beats per minute.
     pub tempo: u32,
+    /// The number of beats in a measure.
+    pub beats_per_measure: u32,
 }
 
 /// A transport buttons on the controller.
@@ -514,6 +567,18 @@ pub enum Action {
         delta: i32,
     },
 
+    // --- the Launchkey's Loop button ---
+    /// Start holding Loop: until `ReleaseLoop`, the pads pick the active
+    /// program's Loop.
+    HoldLoop,
+    /// Pick the pad's Loop for the active program, or "plays once" when the
+    /// pad's Loop is the one shown. Does nothing unless Loop is held and the
+    /// active program's Loop can be changed.
+    PickLoop(LoopPad),
+    /// Stop holding Loop, saving the picked Loop to the active program if one
+    /// was picked for it.
+    ReleaseLoop,
+
     // --- prefix keys ---
     /// Wait for the next key to complete the prefix key, showing its prompt.
     /// `PrefixKey::Loop` is refused, with a message, when the active
@@ -615,8 +680,8 @@ pub enum Effect {
     SetLaunchkeyEncoderMode(launchkey::EncoderMode),
     /// Update the pad mode on the Launchkey controller.
     SetLaunchkeyPadMode(launchkey::PadMode),
-    /// Push a label onto the controller display strip indicating which DAW mode is active.
-    SetDawModeDisplay(String),
+    /// Show `name` above `text` on the controller's device screen.
+    SetDawModeDisplay { name: String, text: String },
 
     // --- I/O ---
     /// Write the backing file with the program's binding given `skip_slots`,
@@ -835,7 +900,7 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             vec![Effect::ShowMessage("Piano keys enabled".to_string())]
         }
 
-        Action::SelectProgram(i) => apply_select_program(state, i),
+        Action::SelectProgram(i) => apply_select_program(state, ctx, i),
         Action::AdvanceProgram(delta) => {
             let len = state.programs.programs().len() as i32;
             if len == 0 {
@@ -843,7 +908,7 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             } else {
                 let cur = state.active_program_index as i32;
                 let new = ((cur + delta) % len + len) % len;
-                apply_select_program(state, new as usize)
+                apply_select_program(state, ctx, new as usize)
             }
         }
 
@@ -958,6 +1023,11 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
         }
         Action::PadModeChanged { previous, current } => {
             let mut effects = vec![Effect::SetLaunchkeyPadMode(current)];
+            if current != launchkey::PadMode::DAW {
+                // The Loop editor lives on the DAW pads, so leaving them drops
+                // it without saving.
+                state.loop_hold = None;
+            }
             if current == launchkey::PadMode::DAW {
                 if previous == launchkey::PadMode::DAW {
                     state.daw_pad_mode = match state.daw_pad_mode {
@@ -967,7 +1037,10 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
                     };
                 }
                 let label = state.daw_pad_mode.display_name().to_string();
-                effects.push(Effect::SetDawModeDisplay(label.clone()));
+                effects.push(Effect::SetDawModeDisplay {
+                    name: label.clone(),
+                    text: String::new(),
+                });
                 let message = if state.daw_pad_mode == DawPadMode::Sequencer
                     && sequencer::analyze(state.active_program().text()).is_none()
                 {
@@ -1024,10 +1097,20 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             delta,
         } => apply_change_skip_slots(state, ctx, program_index, delta),
 
+        Action::HoldLoop => {
+            state.loop_hold = Some(LoopHold {
+                program_index: state.active_program_index,
+                picked: None,
+            });
+            held_loop_effects(state, ctx.source_stale)
+        }
+        Action::PickLoop(pad) => apply_pick_loop(state, ctx, pad),
+        Action::ReleaseLoop => apply_release_loop(state, ctx),
+
         Action::StartPrefix(prefix) => {
             let i = state.active_program_index;
             if prefix == PrefixKey::Loop
-                && let Some(refusal) = loop_refusal(state, ctx, i)
+                && let Some(refusal) = loop_refusal(state, ctx.source_stale, i)
             {
                 return vec![Effect::ShowMessage(refusal)];
             }
@@ -1464,7 +1547,7 @@ fn remove_pending_effects(state: &AppState, ctx: &Context, i: usize) -> Vec<Effe
     ]
 }
 
-fn apply_select_program(state: &mut AppState, i: usize) -> Vec<Effect> {
+fn apply_select_program(state: &mut AppState, ctx: &Context, i: usize) -> Vec<Effect> {
     if i >= state.programs.programs().len() {
         return vec![];
     }
@@ -1476,6 +1559,12 @@ fn apply_select_program(state: &mut AppState, i: usize) -> Vec<Effect> {
     let mut effects = vec![Effect::ShowMessage(state.programs.selection_message(i))];
     if changed {
         effects.push(Effect::SyncEncoders);
+        // While Loop is held, the pads move on to the new program and drop
+        // what was picked for the old one.
+        if let Some(hold) = &mut state.loop_hold {
+            hold.picked = None;
+            effects.extend(held_loop_effects(state, ctx.source_stale));
+        }
     }
     effects
 }
@@ -1651,14 +1740,14 @@ fn apply_toggle_keys_annotation(
 }
 
 /// Returns why the Loop of the program at `program_index` can't be changed:
-/// the slot is empty, the backing file is stale, or the program plays keys.
-/// Returns `None` when it can be changed.
-pub fn loop_refusal(state: &AppState, ctx: &Context, program_index: usize) -> Option<String> {
+/// the slot is empty, the backing file is stale (`source_stale`), or the
+/// program plays keys. Returns `None` when it can be changed.
+pub fn loop_refusal(state: &AppState, source_stale: bool, program_index: usize) -> Option<String> {
     let name = state.programs.display_name(program_index);
     if state.programs.skip_slots(program_index).is_none() {
         return Some(format!("{} is empty", name));
     }
-    if ctx.source_stale {
+    if source_stale {
         return Some(state.programs.stale_message());
     }
     let program = state.programs.program(program_index)?;
@@ -1698,7 +1787,7 @@ fn apply_set_loop_after_beats(
     program_index: usize,
     beats: Option<u32>,
 ) -> Vec<Effect> {
-    if let Some(refusal) = loop_refusal(state, ctx, program_index) {
+    if let Some(refusal) = loop_refusal(state, ctx.source_stale, program_index) {
         return vec![Effect::ShowMessage(refusal)];
     }
     let name = state.programs.display_name(program_index);
@@ -1713,6 +1802,79 @@ fn apply_set_loop_after_beats(
         Effect::ShowMessage(loop_message(&name, beats, playing)),
         Effect::UpdateSource(program_index),
     ]
+}
+
+/// Returns why the active program's Loop can't be changed with the Launchkey's
+/// Loop button: the editor mode isn't Select or Keys, or one of
+/// [`loop_refusal`]'s reasons. Returns `None` when it can be changed.
+pub fn held_loop_refusal(state: &AppState, source_stale: bool) -> Option<String> {
+    if !matches!(state.mode, Mode::Select | Mode::Keys) {
+        return Some("Loop changes only in Select and Keys modes".to_string());
+    }
+    loop_refusal(state, source_stale, state.active_program_index)
+}
+
+/// Returns the effects that show, on the device screen and the status line,
+/// the active program's held Loop or why it can't be changed.
+fn held_loop_effects(state: &AppState, source_stale: bool) -> Vec<Effect> {
+    let name = state.programs.display_name(state.active_program_index);
+    let (text, message) = match held_loop_refusal(state, source_stale) {
+        Some(refusal) => (refusal.clone(), refusal),
+        None => {
+            let value = match state.held_loop().flatten() {
+                Some(beats) => format!("{} beats", beats),
+                None => "once".to_string(),
+            };
+            (
+                format!("Loop: {}", value),
+                format!("Loop {}: {}", name, value),
+            )
+        }
+    };
+    vec![
+        Effect::SetDawModeDisplay { name, text },
+        Effect::ShowMessage(message),
+    ]
+}
+
+/// Applies `Action::PickLoop`.
+fn apply_pick_loop(state: &mut AppState, ctx: &Context, pad: LoopPad) -> Vec<Effect> {
+    if state.loop_hold.is_none() || held_loop_refusal(state, ctx.source_stale).is_some() {
+        return vec![];
+    }
+    let beats = pad.beats(ctx.beats_per_measure);
+    let picked = (state.held_loop().flatten() != Some(beats)).then_some(beats);
+    state.loop_hold = Some(LoopHold {
+        program_index: state.active_program_index,
+        picked: Some(picked),
+    });
+    held_loop_effects(state, ctx.source_stale)
+}
+
+/// Applies `Action::ReleaseLoop`.
+fn apply_release_loop(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
+    let Some(hold) = state.loop_hold.take() else {
+        return vec![];
+    };
+    let mut effects = vec![Effect::SetDawModeDisplay {
+        name: state.daw_pad_mode.display_name().to_string(),
+        text: String::new(),
+    }];
+    let i = state.active_program_index;
+    if let Some(refusal) = held_loop_refusal(state, ctx.source_stale) {
+        effects.push(Effect::ShowMessage(refusal));
+        return effects;
+    }
+    match hold.picked {
+        Some(_) if state.is_loading() => {
+            effects.push(Effect::ShowMessage(PROCESSING_MESSAGE.to_string()));
+        }
+        Some(beats) if hold.program_index == i => {
+            effects.extend(apply_set_loop_after_beats(state, ctx, i, beats));
+        }
+        _ => effects.push(Effect::ShowMessage(state.programs.selection_message(i))),
+    }
+    effects
 }
 
 /// Applies `Action::ChangeSkipSlots`.
@@ -2531,6 +2693,7 @@ mod tests {
             environment: &environment,
             source_stale: false,
             tempo: 60,
+            beats_per_measure: 4,
         };
         apply(state, &ctx, action)
     }
@@ -2551,6 +2714,7 @@ mod tests {
             environment: &environment,
             source_stale: true,
             tempo: 60,
+            beats_per_measure: 4,
         };
         apply(state, &ctx, action)
     }
@@ -3115,6 +3279,7 @@ mod tests {
             environment: &environment,
             source_stale: false,
             tempo: 60,
+            beats_per_measure: 4,
         };
         apply(state, &ctx, action)
     }
@@ -5306,6 +5471,164 @@ _ = saw(220);";
         );
         assert!(
             matches!(&effects[..], [Effect::ShowMessage(m)] if m.ends_with("so it can't loop")),
+            "got {:?}",
+            effects
+        );
+        assert_eq!(state.active_program().loop_after_beats(), None);
+    }
+
+    /// Returns the text of the last `Effect::ShowMessage` in `effects`.
+    fn last_message(effects: &[Effect]) -> Option<&str> {
+        effects.iter().rev().find_map(|effect| match effect {
+            Effect::ShowMessage(m) => Some(m.as_str()),
+            _ => None,
+        })
+    }
+
+    /// Returns the text of the last `Effect::SetDawModeDisplay` in `effects`.
+    fn last_display(effects: &[Effect]) -> Option<(&str, &str)> {
+        effects.iter().rev().find_map(|effect| match effect {
+            Effect::SetDawModeDisplay { name, text } => Some((name.as_str(), text.as_str())),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn holding_loop_shows_and_saves_the_picked_loop() {
+        let mut state = annotation_state("#{level_db=0}\nkick = 1;", 0);
+        let effects = apply_with_empty_status(&mut state, Action::HoldLoop);
+        assert_eq!(last_display(&effects), Some(("A:1 (kick)", "Loop: once")));
+        assert_eq!(last_message(&effects), Some("Loop A:1 (kick): once"));
+
+        // Two measures of 4/4, then 3 beats: the last press wins.
+        let effects = apply_with_empty_status(&mut state, Action::PickLoop(LoopPad::Measures(2)));
+        assert_eq!(
+            last_display(&effects),
+            Some(("A:1 (kick)", "Loop: 8 beats"))
+        );
+        let effects = apply_with_empty_status(&mut state, Action::PickLoop(LoopPad::Beats(3)));
+        assert_eq!(last_message(&effects), Some("Loop A:1 (kick): 3 beats"));
+        assert_eq!(state.held_loop(), Some(Some(3)));
+        // Nothing is saved until Loop is released.
+        assert_eq!(state.active_program().loop_after_beats(), None);
+
+        let effects = apply_with_empty_status(&mut state, Action::ReleaseLoop);
+        assert_eq!(state.loop_hold, None);
+        assert_eq!(state.active_program().loop_after_beats(), Some(3));
+        assert_eq!(last_display(&effects), Some(("Clip Launcher", "")));
+        assert_eq!(
+            last_message(&effects),
+            Some("A:1 (kick) loops every 3 beats")
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::UpdateSource(0))),
+            "got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn picking_the_shown_loop_picks_plays_once() {
+        let mut state = annotation_state("#{loop_after_beats=4}\nkick = 1;", 0);
+        apply_with_empty_status(&mut state, Action::HoldLoop);
+        assert_eq!(state.held_loop(), Some(Some(4)));
+        // One measure of 4/4 is the 4 beats already shown.
+        let effects = apply_with_empty_status(&mut state, Action::PickLoop(LoopPad::Measures(1)));
+        assert_eq!(state.held_loop(), Some(None));
+        assert_eq!(last_message(&effects), Some("Loop A:1 (kick): once"));
+        let effects = apply_with_empty_status(&mut state, Action::ReleaseLoop);
+        assert_eq!(state.active_program().loop_after_beats(), None);
+        assert_eq!(last_message(&effects), Some("A:1 (kick) plays once"));
+    }
+
+    #[test]
+    fn releasing_loop_without_a_pick_changes_nothing() {
+        let mut state = annotation_state("#{loop_after_beats=4}\nkick = 1;", 0);
+        apply_with_empty_status(&mut state, Action::HoldLoop);
+        let effects = apply_with_empty_status(&mut state, Action::ReleaseLoop);
+        assert_eq!(state.active_program().loop_after_beats(), Some(4));
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::UpdateSource(_))),
+            "got {:?}",
+            effects
+        );
+        assert_eq!(
+            last_message(&effects),
+            Some("A:1 kick, loops every 4 beats")
+        );
+    }
+
+    #[test]
+    fn changing_the_selection_while_holding_loop_drops_the_pick() {
+        let mut state = annotation_state(
+            "#{level_db=0}\nkick = 1;\n#{loop_after_beats=6}\nsnare = 1;",
+            0,
+        );
+        apply_with_empty_status(&mut state, Action::HoldLoop);
+        apply_with_empty_status(&mut state, Action::PickLoop(LoopPad::Beats(2)));
+        let effects = apply_with_empty_status(&mut state, Action::AdvanceProgram(1));
+        assert_eq!(state.held_loop(), Some(Some(6)));
+        assert_eq!(last_message(&effects), Some("Loop A:2 (snare): 6 beats"));
+        // Coming back doesn't restore the pick either.
+        apply_with_empty_status(&mut state, Action::AdvanceProgram(-1));
+        assert_eq!(state.held_loop(), Some(None));
+        apply_with_empty_status(&mut state, Action::ReleaseLoop);
+        assert_eq!(state.active_program().loop_after_beats(), None);
+    }
+
+    #[test]
+    fn leaving_the_daw_pads_while_holding_loop_saves_nothing() {
+        let mut state = annotation_state("#{level_db=0}\nkick = 1;", 0);
+        apply_with_empty_status(&mut state, Action::HoldLoop);
+        apply_with_empty_status(&mut state, Action::PickLoop(LoopPad::Beats(2)));
+        apply_with_empty_status(
+            &mut state,
+            Action::PadModeChanged {
+                previous: launchkey::PadMode::DAW,
+                current: launchkey::PadMode::Other,
+            },
+        );
+        assert_eq!(state.loop_hold, None);
+        let effects = apply_with_empty_status(&mut state, Action::ReleaseLoop);
+        assert!(effects.is_empty(), "got {:?}", effects);
+        assert_eq!(state.active_program().loop_after_beats(), None);
+    }
+
+    #[test]
+    fn holding_loop_is_refused_on_a_keys_program_and_outside_select_and_keys() {
+        let mut state = annotation_state("#{keys}\nlead = fn(n, v) => (0, 0);", 0);
+        let effects = apply_with_empty_status(&mut state, Action::HoldLoop);
+        let refusal = "A:1 (lead) plays keys, so it can't loop";
+        assert_eq!(last_display(&effects), Some(("A:1 (lead)", refusal)));
+        assert_eq!(last_message(&effects), Some(refusal));
+        let effects = apply_with_empty_status(&mut state, Action::PickLoop(LoopPad::Beats(2)));
+        assert!(effects.is_empty(), "got {:?}", effects);
+        let effects = apply_with_empty_status(&mut state, Action::ReleaseLoop);
+        assert_eq!(last_message(&effects), Some(refusal));
+
+        let mut state = editing_state();
+        let effects = apply_with_empty_status(&mut state, Action::HoldLoop);
+        assert_eq!(
+            last_message(&effects),
+            Some("Loop changes only in Select and Keys modes")
+        );
+        apply_with_empty_status(&mut state, Action::PickLoop(LoopPad::Beats(2)));
+        apply_with_empty_status(&mut state, Action::ReleaseLoop);
+        assert_eq!(state.active_program().loop_after_beats(), None);
+    }
+
+    #[test]
+    fn a_pick_is_refused_on_release_when_the_file_went_stale() {
+        let mut state = annotation_state("#{level_db=0}\nkick = 1;", 0);
+        apply_with_empty_status(&mut state, Action::HoldLoop);
+        apply_with_empty_status(&mut state, Action::PickLoop(LoopPad::Beats(2)));
+        let effects = apply_with_stale_source(&mut state, Action::ReleaseLoop);
+        assert!(
+            last_message(&effects).is_some_and(|m| m.contains("changed on disk")),
             "got {:?}",
             effects
         );
