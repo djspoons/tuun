@@ -207,7 +207,7 @@ Any binding with at least one annotation is a UI program; use `skip_slots=N` to 
 * `level_db=D`
 * `sliders=[...]`
 * `keys` marks a keys instrument, whose binding evaluates to a note function rather than a waveform.
-* `loop_after_beats=N` makes the program loop, playing again every N beats. N is a positive whole number, such as `#{loop_after_beats=4}`. A binding can't have both `loop_after_beats` and `keys`.
+* `loop_after_beats=N` makes the program loop, playing again every N beats. N is a positive whole number, such as `#{loop_after_beats=4}`. A binding can't have both `loop_after_beats` and `keys`. Launches that start at the next measure (the bottom pads, Play, Enter in edit mode, and finishing a recording with Play) loop every N beats, counted from the measure where they start, without snapping back to the barline. Launches that start now (the top pads and Cmd + Enter) play once, even with the annotation. A program without it plays once.
 
 <!--
 

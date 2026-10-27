@@ -108,7 +108,6 @@ pub fn classify(
                     + *index,
             }]),
         },
-        Event::PadFunctionDown => Some(vec![Action::CycleRepeatAfterMeasures]),
         Event::LaunchDown => Some(vec![Action::ToggleLaunchMode]),
         Event::UndoDown => Some(vec![Action::Undo]),
         Event::RedoDown => Some(vec![Action::Redo]),
@@ -144,21 +143,6 @@ pub fn update_launchkey_state(
     launchkey: &mut launchkey::Launchkey,
 ) {
     // TODO update slider state
-
-    match state.repeat_after_measures {
-        None => {
-            launchkey.set_pad_function_color(launchkey::Color::BrightGreen);
-        }
-        Some(1) => {
-            launchkey.set_pad_function_color(launchkey::Color::YellowGreen);
-        }
-        Some(2) => {
-            launchkey.set_pad_function_color(launchkey::Color::GoldenOrange);
-        }
-        i => {
-            println!("unexpected repeat_after_measures: {:?}", i);
-        }
-    }
 
     launchkey.set_launch_color(match state.launch_mode {
         actions::LaunchMode::Trigger => launchkey::Color::White,

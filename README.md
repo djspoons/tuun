@@ -79,7 +79,7 @@ In "select" mode (when a solid triangle appears at the left-hand side):
 * Cmd + N, then D - move the current program, and every program after it, **down** one slot
 
 In "edit" mode (when the current program is rendered in white):
-* Enter - play the current program's waveform at the beginning of the next measure, repeating as the bottom pads do
+* Enter - play the current program's waveform at the beginning of the next measure, looping as its `loop_after_beats` annotation says
 * Cmd + Enter - play the current program's waveform once, now
 * Ctl + H - display the inferred type of the identifier at the cursor
 * Escape - switch to "select" mode
@@ -114,13 +114,12 @@ Tuun provides a limited MIDI integration, specifically for the Novation Launchke
   * "Clip launcher" mode
     * Top row pads play the given waveform immediately
       * "Scene" (`>`) button to the right toggles between "Toggle" (start or stop playback) and "Trigger" (always start playback)
-    * Bottom row pads play the given waveform at the start of the next measure and optionally repeat every measure or every _other_ measure afterward
-      * "Function" button to the right switches through different repeating behaviors.
+    * Bottom row pads play the given waveform at the start of the next measure, looping as its `loop_after_beats` annotation says (or playing once without it)
   * "Keys installer" mode: bottom row pads install the given program as a keys instrument (top row pads do nothing)
   * Sequencer mode: for sequenced programs (for example, those that use `on_beats`), each pad maps to a sixteenth note and controls playback of the waveform at that point in time
     * Arrow buttons to the left of the pads scroll from beats 1-4 to beats 5-8 and so on
 
-* "Play" button starts the current waveform at the beginning of the next measure with the same repeating behavior as the bottom pads in "clip launcher" mode
+* "Play" button starts the current waveform at the beginning of the next measure, looping as its `loop_after_beats` annotation says (or playing once without it)
 * "Record" button arms recording MIDI notes starting at the beginning of the next measure; notes are written into the current program at the end of recording
 * "Stop" button cancels any pending playback for the current program or cancels the current recording
 

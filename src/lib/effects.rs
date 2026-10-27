@@ -127,7 +127,6 @@ impl EffectRunner {
             environment: &self.environment,
             source_stale: state.programs.disk_changed(),
             tempo: self.player.tempo(),
-            beats_per_measure: self.player.beats_per_measure(),
         };
         let mut all_effects = Vec::new();
         for action in actions {
@@ -323,14 +322,14 @@ impl EffectRunner {
             Effect::PlayProgram {
                 program_index,
                 start,
-                repeat_after_measures,
+                loop_after_beats,
             } => {
                 let message = self.player.play_program(
                     &state.programs,
                     program_index,
                     world.status,
                     start,
-                    repeat_after_measures,
+                    loop_after_beats,
                     &mut state.waveform_marks,
                 );
                 if let Some(message) = message
@@ -350,7 +349,6 @@ impl EffectRunner {
                     program_index,
                     sixteenth,
                     world.status,
-                    state.repeat_after_measures,
                     &mut state.waveform_marks,
                 ) {
                     state.message = message;
@@ -1001,7 +999,7 @@ mod tests {
                 on_success: vec![Effect::PlayProgram {
                     program_index: 0,
                     start: player::Start::Now,
-                    repeat_after_measures: None,
+                    loop_after_beats: None,
                 }],
                 on_failure: vec![],
             },
@@ -1138,7 +1136,7 @@ mod tests {
                 on_success: vec![Effect::PlayProgram {
                     program_index: 0,
                     start: player::Start::Now,
-                    repeat_after_measures: Some(1),
+                    loop_after_beats: Some(4),
                 }],
                 on_failure: vec![],
             },
@@ -1229,7 +1227,7 @@ mod tests {
         let play = || Effect::PlayProgram {
             program_index: 0,
             start: player::Start::Now,
-            repeat_after_measures: None,
+            loop_after_beats: None,
         };
         let played = |receiver: &mpsc::Receiver<tracker::Command<WaveformId, MarkId>>| {
             receiver
@@ -1844,7 +1842,7 @@ mod tests {
                 on_success: vec![Effect::PlayProgram {
                     program_index: 0,
                     start: player::Start::At(at),
-                    repeat_after_measures: Some(1),
+                    loop_after_beats: Some(4),
                 }],
                 on_failure: vec![],
             },
@@ -1905,7 +1903,7 @@ mod tests {
             Effect::PlayProgram {
                 program_index: 1,
                 start: player::Start::Now,
-                repeat_after_measures: None,
+                loop_after_beats: None,
             },
         );
 
