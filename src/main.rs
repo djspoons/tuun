@@ -391,6 +391,7 @@ pub fn main() {
     let mut next_render = Instant::now();
     loop {
         if state.should_quit {
+            echo_messages(&mut state);
             return;
         }
 

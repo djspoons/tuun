@@ -1,6 +1,6 @@
 # Proposal 1: Separate user output from trace on stdout
 
-**Status:** Implemented in `a9f9ff8` ("Route internal tracing through log/env_logger").
+**Status:** Implemented in `3b5207f` ("Route internal tracing through log/env_logger"), rebased onto the background-processing rewrite (see "After rebasing" below).
 
 ## Problem
 
@@ -43,6 +43,14 @@ A single flag would be all-or-nothing, or need its own per-component plumbing. `
 - Behaviour change: the tracker clock resync and unhandled-SDL-event lines no longer print by default.
 - Warn-level lines from the tracker and generator still print on the audio thread when they fire. They are rare anomalies, not per-buffer chatter.
 
+## After rebasing
+
+The rebase onto `main` (which moved evaluation and precompute to a processing thread, rewrote the tracker's command handling and the renderer's scope, and added an `EventSink` for controller events) needed these changes to keep the proposal whole:
+
+- New trace sites from `main` moved to `log`: the reply-without-a-job notices in `effects.rs` (`warn`), `EventSink::send` failures (`warn`), the precompute chunk loop (`debug`, and `warn` when it hits its sample cap), the tracker's per-Modify waveform dumps (`trace`), and FFT failures in the renderer (`warn`).
+- `Environment::check_program` no longer has a program index, so its timing line reads `Checked program in …s: N errors` without naming the program.
+- `main` removed the separate precompute thread, so its `precompute returned:` line is gone. Precompute now logs from `tuun::generator` on the processing thread.
+
 ## Result
 
-Measured in batch mode on `lib/v0/lessons/counterpoint/first.tuun`: default output dropped from 293 lines to 28, all user-facing. `RUST_LOG=tuun::tracker=debug` brings back only the tracker's lines. The README documents `RUST_LOG` and the useful targets.
+Measured in batch mode on `lib/v0/lessons/counterpoint/first.tuun`: default output dropped from 293 lines to 28, all user-facing. Re-measured after the rebase: still 28 lines by default, and 329 with `RUST_LOG=tuun::tracker=debug`. `RUST_LOG=tuun::tracker=debug` brings back only the tracker's lines. The README documents `RUST_LOG` and the useful targets.

@@ -1,6 +1,6 @@
 # Proposal 2: Give status messages a severity
 
-**Status:** Implemented in `cf17c26` ("Give status messages a severity and echo every post"), except for the slider-mode part noted under "Dropped".
+**Status:** Implemented in `df3a7d2` ("Give status messages a severity and echo every post") and `e4edda8` ("Echo each program's errors from a load"), except for the slider-mode part noted under "Dropped". Both were rebased onto the background-processing rewrite (see "After rebasing" below).
 
 ## Problem
 
@@ -15,7 +15,7 @@
 
 Replace the string with `messages::Messages` (`src/lib/messages.rs`), where each message has a severity: Info, Warning or Error.
 
-- **Batches.** `EffectRunner::dispatch` and `EffectRunner::run_all` each start a batch, so one user event is one batch. Within a batch, a post doesn't replace a more severe current message. A post in a later batch always replaces it. The ordering trick is no longer needed.
+- **Batches.** `EffectRunner::dispatch`, `EffectRunner::run_all` and `EffectRunner::finish` each start a batch, so one user event, or one reply from the processing thread, is one batch. Within a batch, a post doesn't replace a more severe current message. A post in a later batch always replaces it. The ordering trick is no longer needed.
 - **Echo.** Every post is queued. The main loop prints the queue each frame (`echo_messages` in `main.rs`), so each message reaches the terminal exactly once, with its full multi-line text. The renderer no longer prints.
 - **Status line.** It shows the first line of the current message, coloured by severity:
   - Info: cyan (the existing inactive colour). Fades after `INFO_LIFETIME`, 5 seconds.
@@ -28,6 +28,20 @@ Replace the string with `messages::Messages` (`src/lib/messages.rs`), where each
 - **Error:** something failed: evaluation, saving, reloading, applying a keys instrument, and the startup "Errors in …".
 - **Warning:** the user needs to act: type warnings, "File changed on disk", "Keys program hasn't evaluated", and a reload that came back with a warning.
 - **Info:** everything else, including refusals like "Nothing to undo". These should fade rather than linger.
+
+## After rebasing
+
+`main` moved evaluation to a processing thread, so a result now arrives in a later batch than the event that asked for it. `main` already kept confirmations from hiding errors by deferring them to `on_success` effects. The rebase changed these things:
+
+- **A reply is one batch.** `finish` posts the result's warnings or errors and runs `on_success`/`on_failure` in the same batch. Before, `main` set the warnings and then let `on_success` overwrite them (e.g. with "Playing A:1"), so they reached neither the status line nor the terminal. The test `a_warning_outranks_the_success_message_until_the_next_batch` covers this.
+- **Held messages.** `Messages::hold` shows a message without echoing it, and a held message doesn't fade. `Messages::restore` puts back a replaced message without echoing it again, and any post replaces the restored message, even in the same batch. "Processing…" uses both: it is held while a job is pending, and the message it replaced comes back when the reply arrives. `Effect::ShowProcessing` holds it for refusals during processing, which would otherwise echo "Processing…" on every refused keystroke. Prefix prompts ("Annotation? …", "Loop A:1? …") are also held, so they don't fade while the app waits for the next key.
+- **Load errors.** The startup sweep moved into `processing::load`, which kept only the failed programs' indexes. Their errors never reached the terminal, contrary to the claim above. `Loaded::failed` now carries each program's diagnostics. Each failure is echoed, prefixed with the program's name, before the "Errors in …" or "Reloaded … — failed: …" summary.
+- **New messages from `main`.** "Not saved: … changed on disk (reload first)" and the other stale-file refusals are Warnings. Selecting a slot whose selection message is empty clears the message rather than posting "". Everything else new is Info.
+
+### Still open
+
+- **Loop refusals lose their severity.** `loop_refusal` returns a plain `String` for three reasons: an empty slot, a stale file and a keys program. All are posted as Info, so the stale-file reason fades instead of staying as a Warning, as the other stale-file refusals do. Fixing it means returning the severity with the reason.
+- **Restored Info messages may have expired.** A restored message keeps its original post time. An Info message that was replaced by "Processing…" and restored more than 5 s later doesn't reappear. That seems right, but it's a change: `main` restored the text unconditionally.
 
 ## Dropped
 
@@ -45,6 +59,6 @@ Keeping errors visible there would need one of these. Both are trade-offs for th
 
 ## Verification
 
-Unit tests in `messages.rs` cover the outranking rule, later batches, clearing, expiry and `post_diagnostics`. An effects test runs a failing evaluation and a confirmation in one `run_all`, and checks that the error stays current until the next run.
+Unit tests in `messages.rs` cover the outranking rule, later batches, clearing, expiry, holding, restoring and `post_diagnostics`. An effects test applies a reply with a warning whose `on_success` posts a confirmation, and checks that the warning stays current until the next batch. It fails if `finish` runs `on_success` as a batch of its own. The startup-load test checks that a failed program's error is echoed ahead of the summary.
 
-The GUI was checked under Xvfb with simulated input: the startup error shows in yellow, a selected program's name shows in cyan and is gone after 5 s, and Move Sliders mode works as before.
+The GUI was checked under Xvfb with simulated input before the rebase: the startup error shows in yellow, a selected program's name shows in cyan and is gone after 5 s, and Move Sliders mode works as before. It hasn't been rechecked since the rebase.
