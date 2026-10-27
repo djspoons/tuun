@@ -77,6 +77,7 @@ In "select" mode (when a solid triangle appears at the left-hand side):
 * Cmd + N, then K - add the **keys** annotation to the current program, or remove it
 * Cmd + N, then U - move the current program, and every program after it, **up** one slot
 * Cmd + N, then D - move the current program, and every program after it, **down** one slot
+* Cmd + N, then L, then a digit - set the current program's **loop**: 1 to 9 loops it every that many beats, and 0 makes it play once (removing the loop).
 
 In "edit" mode (when the current program is rendered in white):
 * Enter - play the current program's waveform at the beginning of the next measure, looping as its `loop_after_beats` annotation says
@@ -92,7 +93,7 @@ In "slider" mode (slider marks at top and left turn green):
 In "keys" mode:
 * Bottom two rows of keys (Z to /, S to ;) behave as the keys on MIDI keyboard
 * Escape - return to "select" mode
-* Cmd + N, then K, U or D - change the current program's annotation, as in "select" mode
+* Cmd + N, then K, U, D or L - change the current program's annotation, as in "select" mode
 
 In every mode, Cmd + Q then Cmd + Q quits
 

@@ -134,14 +134,18 @@ pub enum PrefixKey {
     Quit,
     /// Changes the active program's annotation.
     Annotation,
+    /// Changes the active program's loop.
+    Loop,
 }
 
 impl PrefixKey {
-    /// Returns the prompt shown while this prefix key waits.
-    pub fn prompt(self) -> &'static str {
+    /// Returns the prompt shown while this prefix key waits on the program
+    /// named `program_name`.
+    pub fn prompt(self, program_name: &str) -> String {
         match self {
-            PrefixKey::Quit => "Quit?",
-            PrefixKey::Annotation => "Annotation? (k)eys (u)p (d)own",
+            PrefixKey::Quit => "Quit?".to_string(),
+            PrefixKey::Annotation => "Annotation? (k)eys (u)p (d)own (l)oop".to_string(),
+            PrefixKey::Loop => format!("Loop {}? (1-9) beats (0) once", program_name),
         }
     }
 }
@@ -494,6 +498,13 @@ pub enum Action {
     /// change and evaluating the program again. A program that loses `keys`
     /// while installed as the keys instrument is uninstalled.
     ToggleKeysAnnotation(usize),
+    /// Set the program's `loop_after_beats` annotation to `beats`, or remove it
+    /// when `beats` is `None`, saving the change. Whatever is already playing
+    /// keeps its period.
+    SetLoopAfterBeats {
+        program_index: usize,
+        beats: Option<u32>,
+    },
     /// Change the program's `skip_slots` by `delta`, which moves it and every
     /// later program by `delta` slots, then reload the file. The selection
     /// follows the program. Refused when it would move the program onto the
@@ -1002,14 +1013,24 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
         }
 
         Action::ToggleKeysAnnotation(i) => apply_toggle_keys_annotation(state, ctx, i),
+        Action::SetLoopAfterBeats {
+            program_index,
+            beats,
+        } => apply_set_loop_after_beats(state, ctx, program_index, beats),
         Action::ChangeSkipSlots {
             program_index,
             delta,
         } => apply_change_skip_slots(state, ctx, program_index, delta),
 
         Action::StartPrefix(prefix) => {
+            let i = state.active_program_index;
+            if prefix == PrefixKey::Loop
+                && let Some(refusal) = loop_refusal(state, ctx, i)
+            {
+                return vec![Effect::ShowMessage(refusal)];
+            }
             state.pending_prefix = Some(prefix);
-            state.message = prefix.prompt().to_string();
+            state.message = prefix.prompt(&state.programs.display_name(i));
             vec![]
         }
         Action::EndPrefix => {
@@ -1060,6 +1081,7 @@ pub fn refused_by_ownership(
         | Action::EnterEditMode
         | Action::ToggleSequencerStep { .. }
         | Action::ToggleKeysAnnotation(_)
+        | Action::SetLoopAfterBeats { .. }
         | Action::ChangeSkipSlots { .. } => true,
         // Refused only when it would install; uninstalling drops an
         // already-evaluated instrument.
@@ -1102,6 +1124,7 @@ fn refused_by_processing(state: &AppState, action: &Action) -> Option<Vec<Effect
                 | Action::Undo
                 | Action::Redo
                 | Action::ToggleKeysAnnotation(_)
+                | Action::SetLoopAfterBeats { .. }
                 | Action::ChangeSkipSlots { .. }
                 | Action::ReloadSource
         )
@@ -1591,6 +1614,9 @@ fn apply_toggle_keys_annotation(
     let Some(program) = state.programs.program_mut(program_index) else {
         return vec![];
     };
+    if program.loop_after_beats().is_some() {
+        return vec![Effect::ShowMessage(format!("Remove {}'s loop first", name))];
+    }
     let mut effects = vec![];
     let message = match program.kind() {
         programs::ProgramKind::Waveform => {
@@ -1621,6 +1647,60 @@ fn apply_toggle_keys_annotation(
         Effect::UpdateSource(program_index),
     ]);
     effects
+}
+
+/// Returns why the loop of the program at `program_index` can't be changed: the
+/// slot is empty, the backing file is stale, or the program plays keys. Returns
+/// `None` when it can be changed.
+pub fn loop_refusal(state: &AppState, ctx: &Context, program_index: usize) -> Option<String> {
+    let name = state.programs.display_name(program_index);
+    if state.programs.skip_slots(program_index).is_none() {
+        return Some(format!("{} is empty", name));
+    }
+    if ctx.source_stale {
+        return Some(state.programs.stale_message());
+    }
+    let program = state.programs.program(program_index)?;
+    (program.kind() == programs::ProgramKind::Keys)
+        .then(|| format!("{} plays keys, so it can't loop", name))
+}
+
+/// Returns the message for setting the loop of the program named `program_name`
+/// to `beats`, or to play once when `beats` is `None`.
+///
+/// While the program is `playing`, the message says the change waits for its
+/// next launch.
+fn loop_message(program_name: &str, beats: Option<u32>, playing: bool) -> String {
+    let setting = match beats {
+        Some(beats) => format!("loops every {} beats", beats),
+        None => "plays once".to_string(),
+    };
+    let when = if playing { " from its next launch" } else { "" };
+    format!("{} {}{}", program_name, setting, when)
+}
+
+/// Applies `Action::SetLoopAfterBeats`.
+fn apply_set_loop_after_beats(
+    state: &mut AppState,
+    ctx: &Context,
+    program_index: usize,
+    beats: Option<u32>,
+) -> Vec<Effect> {
+    if let Some(refusal) = loop_refusal(state, ctx, program_index) {
+        return vec![Effect::ShowMessage(refusal)];
+    }
+    let name = state.programs.display_name(program_index);
+    let Some(program) = state.programs.program_mut(program_index) else {
+        return vec![];
+    };
+    program.set_loop_after_beats(beats);
+    let playback = WaveformSelector::ProgramPlayback(program_index);
+    let playing =
+        ctx.status.has_active(ctx.now, &playback) || ctx.status.has_pending(ctx.now, &playback);
+    vec![
+        Effect::ShowMessage(loop_message(&name, beats, playing)),
+        Effect::UpdateSource(program_index),
+    ]
 }
 
 /// Applies `Action::ChangeSkipSlots`.
@@ -3678,7 +3758,7 @@ _ = saw(220);";
                     loop_after_beats: Some(8),
                 }
             ),
-            "expected a queued PlayProgram with the program's Loop, got {:?}",
+            "expected a queued PlayProgram with the program's loop, got {:?}",
             effects
         );
     }
@@ -4039,7 +4119,7 @@ _ = saw(220);";
                     loop_after_beats: Some(8),
                 }
             ),
-            "expected a queued PlayProgram with the program's Loop, got {:?}",
+            "expected a queued PlayProgram with the program's loop, got {:?}",
             effects
         );
     }
@@ -5066,7 +5146,7 @@ _ = saw(220);";
             apply_with_empty_status(&mut state, Action::StartPrefix(PrefixKey::Annotation));
         assert!(effects.is_empty());
         assert_eq!(state.pending_prefix, Some(PrefixKey::Annotation));
-        assert_eq!(state.message, "Annotation? (k)eys (u)p (d)own");
+        assert_eq!(state.message, "Annotation? (k)eys (u)p (d)own (l)oop");
         apply_with_empty_status(&mut state, Action::EndPrefix);
         assert_eq!(state.pending_prefix, None);
         assert!(state.message.is_empty());
@@ -5101,6 +5181,137 @@ _ = saw(220);";
             matches!(&effects[0], Effect::ShowMessage(m) if m == "Removed keys from A:1 (k)"),
             "got {:?}",
             effects
+        );
+    }
+
+    #[test]
+    fn the_loop_prefix_names_the_program() {
+        let mut state = annotation_state("#{level_db=0}\nkick = 1;", 0);
+        let effects = apply_with_empty_status(&mut state, Action::StartPrefix(PrefixKey::Loop));
+        assert!(effects.is_empty(), "got {:?}", effects);
+        assert_eq!(state.pending_prefix, Some(PrefixKey::Loop));
+        assert_eq!(state.message, "Loop A:1 (kick)? (1-9) beats (0) once");
+    }
+
+    #[test]
+    fn the_loop_prefix_is_refused_on_an_empty_slot_a_stale_file_or_keys() {
+        let mut state = annotation_state("#{keys}\nlead = fn(n, v) => (0, 0);", 1);
+        let effects = apply_with_empty_status(&mut state, Action::StartPrefix(PrefixKey::Loop));
+        assert!(
+            matches!(&effects[..], [Effect::ShowMessage(m)] if m == "A:2 is empty"),
+            "got {:?}",
+            effects
+        );
+        state.active_program_index = 0;
+        let effects = apply_with_stale_source(&mut state, Action::StartPrefix(PrefixKey::Loop));
+        assert!(
+            matches!(&effects[..], [Effect::ShowMessage(m)] if m.contains("changed on disk")),
+            "got {:?}",
+            effects
+        );
+        let effects = apply_with_empty_status(&mut state, Action::StartPrefix(PrefixKey::Loop));
+        assert!(
+            matches!(
+                &effects[..],
+                [Effect::ShowMessage(m)] if m == "A:1 (lead) plays keys, so it can't loop"
+            ),
+            "got {:?}",
+            effects
+        );
+        assert_eq!(state.pending_prefix, None);
+    }
+
+    #[test]
+    fn setting_a_loop_saves_it_and_says_so() {
+        let mut state = annotation_state("#{level_db=0}\nkick = 1;", 0);
+        let effects = apply_with_empty_status(
+            &mut state,
+            Action::SetLoopAfterBeats {
+                program_index: 0,
+                beats: Some(3),
+            },
+        );
+        assert_eq!(state.active_program().loop_after_beats(), Some(3));
+        assert!(
+            matches!(
+                &effects[..],
+                [Effect::ShowMessage(m), Effect::UpdateSource(0)]
+                    if m == "A:1 (kick) loops every 3 beats"
+            ),
+            "got {:?}",
+            effects
+        );
+        let effects = apply_with_empty_status(
+            &mut state,
+            Action::SetLoopAfterBeats {
+                program_index: 0,
+                beats: None,
+            },
+        );
+        assert_eq!(state.active_program().loop_after_beats(), None);
+        assert!(
+            matches!(&effects[0], Effect::ShowMessage(m) if m == "A:1 (kick) plays once"),
+            "got {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn setting_the_loop_of_a_playing_program_waits_for_its_next_launch() {
+        let mut state = annotation_state("#{level_db=0}\nkick = 1;", 0);
+        let now = Instant::now();
+        for start in [now - Duration::from_secs(1), now + Duration::from_secs(1)] {
+            let effects = apply_with_status(
+                &mut state,
+                &status_with_start(start),
+                now,
+                Action::SetLoopAfterBeats {
+                    program_index: 0,
+                    beats: Some(3),
+                },
+            );
+            assert!(
+                matches!(
+                    &effects[0],
+                    Effect::ShowMessage(m)
+                        if m == "A:1 (kick) loops every 3 beats from its next launch"
+                ),
+                "got {:?}",
+                effects
+            );
+        }
+    }
+
+    #[test]
+    fn setting_a_loop_is_refused_on_a_keys_program() {
+        let mut state = annotation_state("#{keys}\nlead = fn(n, v) => (0, 0);", 0);
+        let effects = apply_with_empty_status(
+            &mut state,
+            Action::SetLoopAfterBeats {
+                program_index: 0,
+                beats: Some(3),
+            },
+        );
+        assert!(
+            matches!(&effects[..], [Effect::ShowMessage(m)] if m.ends_with("so it can't loop")),
+            "got {:?}",
+            effects
+        );
+        assert_eq!(state.active_program().loop_after_beats(), None);
+    }
+
+    #[test]
+    fn adding_keys_is_refused_on_a_program_that_loops() {
+        let mut state = annotation_state("#{loop_after_beats=4}\nkick = 1;", 0);
+        let effects = apply_with_empty_status(&mut state, Action::ToggleKeysAnnotation(0));
+        assert!(
+            matches!(&effects[..], [Effect::ShowMessage(m)] if m == "Remove A:1 (kick)'s loop first"),
+            "got {:?}",
+            effects
+        );
+        assert_eq!(
+            state.active_program().kind(),
+            programs::ProgramKind::Waveform
         );
     }
 
@@ -5174,6 +5385,10 @@ _ = saw(220);";
         let mut state = editing_state();
         for action in [
             Action::ToggleKeysAnnotation(0),
+            Action::SetLoopAfterBeats {
+                program_index: 0,
+                beats: Some(4),
+            },
             Action::ChangeSkipSlots {
                 program_index: 0,
                 delta: 1,

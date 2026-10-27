@@ -39,6 +39,27 @@ fn scancode_to_midi_note(scancode: sdl2::keyboard::Scancode) -> Option<u8> {
     })
 }
 
+/// Returns the digit on `scancode`'s key in the row above the letters, or
+/// `None` for any other key.
+fn top_row_digit(scancode: sdl2::keyboard::Scancode) -> Option<u32> {
+    use sdl2::keyboard::Scancode;
+    [
+        Scancode::Num0,
+        Scancode::Num1,
+        Scancode::Num2,
+        Scancode::Num3,
+        Scancode::Num4,
+        Scancode::Num5,
+        Scancode::Num6,
+        Scancode::Num7,
+        Scancode::Num8,
+        Scancode::Num9,
+    ]
+    .iter()
+    .position(|&digit| digit == scancode)
+    .map(|digit| digit as u32)
+}
+
 /// Returns whether `scancode` is a modifier key, which neither completes nor
 /// cancels a prefix key.
 fn is_modifier(scancode: sdl2::keyboard::Scancode) -> bool {
@@ -190,6 +211,15 @@ impl InputHandler {
                     program_index: active_program_index,
                     delta: 1,
                 }),
+                (PrefixKey::Annotation, Some(Scancode::L)) => {
+                    Some(Action::StartPrefix(PrefixKey::Loop))
+                }
+                (PrefixKey::Loop, Some(sc)) => {
+                    top_row_digit(sc).map(|beats| Action::SetLoopAfterBeats {
+                        program_index: active_program_index,
+                        beats: (beats > 0).then_some(beats),
+                    })
+                }
                 _ => None,
             };
             return Some(std::iter::once(Action::EndPrefix).chain(command).collect());
@@ -706,6 +736,83 @@ mod tests {
             actions.as_deref(),
             Some([Action::ToggleMetronome])
         ));
+    }
+
+    #[test]
+    fn annotation_prefix_starts_the_loop_prefix_on_l() {
+        let handler = InputHandler::new(false, 800, 600);
+        let state = pending(test_state(Mode::Select), PrefixKey::Annotation);
+        let actions = handler.classify_keydown(Some(Scancode::L), Mod::NOMOD, false, &state);
+        assert!(
+            matches!(
+                actions.as_deref(),
+                Some([Action::EndPrefix, Action::StartPrefix(PrefixKey::Loop)])
+            ),
+            "got {:?}",
+            actions
+        );
+    }
+
+    #[test]
+    fn loop_prefix_completes_on_a_digit() {
+        let handler = InputHandler::new(false, 800, 600);
+        let state = pending(test_state(Mode::Select), PrefixKey::Loop);
+        let classify = |scancode| {
+            handler
+                .classify_keydown(Some(scancode), Mod::NOMOD, false, &state)
+                .expect("key press should be classified")
+        };
+        assert!(matches!(
+            classify(Scancode::Num3)[..],
+            [
+                Action::EndPrefix,
+                Action::SetLoopAfterBeats {
+                    program_index: 0,
+                    beats: Some(3)
+                }
+            ]
+        ));
+        assert!(matches!(
+            classify(Scancode::Num9)[..],
+            [
+                Action::EndPrefix,
+                Action::SetLoopAfterBeats {
+                    program_index: 0,
+                    beats: Some(9)
+                }
+            ]
+        ));
+        assert!(matches!(
+            classify(Scancode::Num0)[..],
+            [
+                Action::EndPrefix,
+                Action::SetLoopAfterBeats {
+                    program_index: 0,
+                    beats: None
+                }
+            ]
+        ));
+        assert!(matches!(classify(Scancode::L)[..], [Action::EndPrefix]));
+        // In Select mode a digit would select a program, but its text follows
+        // the press that completed the prefix.
+        let actions = handler.classify_text_input("3", &test_state(Mode::Select));
+        assert!(matches!(actions.as_deref(), Some([])), "{:?}", actions);
+    }
+
+    #[test]
+    fn loop_prefix_in_keys_mode_plays_no_note() {
+        let handler = InputHandler::new(false, 800, 600);
+        let state = pending(test_state(Mode::Keys), PrefixKey::Loop);
+        for scancode in [Scancode::Num2, Scancode::Z] {
+            let actions = handler
+                .classify_keydown(Some(scancode), Mod::NOMOD, false, &state)
+                .expect("key press should be classified");
+            assert!(
+                !actions.iter().any(|a| matches!(a, Action::NoteOn { .. })),
+                "got {:?}",
+                actions
+            );
+        }
     }
 
     #[test]
