@@ -122,8 +122,8 @@ Every launch either starts at the next measure and follows the program's Loop, o
   - If Track ◀ ▶ changes the selection, any picked value is dropped and the pads show the newly selected program.
   - Leaving the DAW pad layout (Shift + pads) while Loop is held drops the picked value and writes nothing.
 - **Loop button light.** It is bright (127) when the selected program has a Loop, and at its lowest level (0) when the program plays once. The brightness is set by CC 118 on channel 4, the way tuun drives Record's light.
-  - Verified on the hardware with `loop_hw_check`: the light is white only.
-  - Values from 0 to 127 run from lowest to bright. 0 doesn't turn it off: it stays at the same faint level as the Stop button next to it, so "plays once" looks dim, not dark.
+  - Verified on the hardware: the light is white only.
+  - Values from 0 to 127 run from lowest to bright. 0 doesn't turn it off: it stays at the same faint level as the Stop button next to it, so "plays once" looks dim, not dark. All the transport buttons, Undo and Metronome behave this way. Using the full scale from 0 to 127 is intended.
   - Values sent on channel 1 also change only its brightness.
 - **Function button** (CC 105) does nothing, and its light stays off.
 
@@ -150,7 +150,7 @@ Every launch either starts at the next measure and follows the program's Loop, o
   - Immediate (top pads and Cmd+Return): "Playing waveform kick", "Playing sequence kick", even for a program that has a Loop. "Playing voice of kick" goes away with `play_program_voice` ([ticket 07](tickets/07-keyboard-launch-periods.md)).
 - **While Loop is held on the Launchkey**, the status line mirrors the device screen, e.g. "Loop kick: 10 beats" or "Loop kick: once", and updates on every press. Releasing Loop replaces it with the write message. The gutter keeps showing the written annotation until the release.
 - **Units** are beats everywhere.
-- The renderer's font (Arial Unicode) has both `↻` (U+21BB) and `⌨` (U+2328). This was verified with `loop_hw_check`.
+- The renderer's font (Arial Unicode) has both `↻` (U+21BB) and `⌨` (U+2328). This was verified on the real font.
 
 ## 9. Documentation
 

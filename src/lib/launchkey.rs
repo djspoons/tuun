@@ -197,6 +197,9 @@ const RECORD_CC: u8 = 117;
 
 /// The channel (channel 4, 0-indexed) on which a monochrome LED's CC value is
 /// its brightness.
+///
+/// The transport buttons', Undo's and Metronome's LEDs never go dark: 0 is
+/// their faintest level, not off.
 const BRIGHTNESS_CHANNEL: u8 = 3;
 
 /// The Shift button, reported on `FEATURE_CONTROL_CHANNEL`.

@@ -26,11 +26,6 @@ required-features = ["clap"]
 name = "midi_test"
 path = "src/misc/midi_test.rs"
 
-[[bin]]
-name = "loop_hw_check"
-path = "src/misc/loop_hw_check.rs"
-required-features = ["sdl2"]
-
 [features]
 default = ["native"]
 native = ["sdl2", "clap", "rtrb"]
