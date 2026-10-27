@@ -169,6 +169,62 @@ Every launch either starts at the next measure and follows the program's Loop, o
 - **`docs/language-spec.md` § Annotations.** Add `loop_after_beats=N`: its range, that it can't be combined with `keys`, and which launches honour it.
 - **`agents/CONTEXT.md`.** The Loop, Gutter, DAW pad sub-mode and Trigger entries already match this spec, so they need no change.
 
+## Implementation phases
+
+The sections above are grouped by topic, not by change, so they don't work as phases on their own:
+
+- §1 removes the only source of a period before anything replaces it, so the `repeat_after_measures` plumbing would be deleted and then re-added in beats.
+- §3, §4, §5 and §8's launch messages all edit the same code (`play_program_effects`, `Player::play_waveform`, `Player::play_sequence`, `Player::play_step`, `play_waveform_message`). Done one section at a time, those lines would change three or four times.
+- §8 is two changes. The gutter and selection message need only §2, but the launch messages need §3.
+- §7 reuses §6's refusal checks and write-back.
+- §9's documentation should go with the phase that changes the behaviour it describes.
+
+Each phase below is one change that reads on its own. Phase 4 can go anywhere after phase 1. The other phases are in dependency order.
+
+### Phase 1: the annotation (§2)
+
+- Add the `loop_after_beats` `expr::Annotation` variant, with its parsing, range errors, the error for combining it with `keys`, and a `Display` that round-trips.
+- Expose it on `programs::Program` the way `keys` and `level_db` are exposed.
+- Nothing reads it yet.
+- Docs: `docs/language-spec.md` § Annotations, for the syntax, range and `keys` rule. Which launches honour it waits for phase 3.
+
+### Phase 2: immediate launches play once, now (§3's "now" row)
+
+After this phase, every launch either starts now and plays once, or starts at the next measure with the app-wide setting's period. Phase 3 then only has to change where the period comes from, in one place.
+
+- Trigger-mode top pads go through `play_program(…, Start::Now, None)`. Delete `Action::StartProgramVoice`, `Effect::PlayProgramVoice`, `Player::play_program_voice` and their tests. Move the useful test cases (layering, no stop) over to the new route.
+- Cmd+Return in Select and Edit modes plays once, now. Return in Edit mode makes a pending launch. Shift+Cmd+Return is removed, so the `if shift { 2 } else { 1 }` arms in `sdl2_input.rs` go.
+- `Action::PlayProgram` and `Action::EvaluateAndLeaveEditMode` replace their `repeat_after_measures` field with a pending-or-now choice. A pending launch reads `state.repeat_after_measures`, as the bottom pad does today. Check whether `start_at_next_measure` then says the same thing and can go.
+- Docs: README Keyboard Navigation (the Cmd+Enter and Enter lines, and removing Shift + Cmd + Enter), and removing the README's Trigger-mode "only plays one step" line.
+
+### Phase 3: per-program Loop replaces the app-wide setting (§1, §4, §5, §8's launch messages)
+
+- Remove `AppState.repeat_after_measures`, `Action::CycleRepeatAfterMeasures`, the Function pad colours in `midi_input.rs` and the `PadFunctionDown` mapping. If nothing else uses `Event::PadFunctionDown` or the Function light, remove them from `launchkey.rs` too, so the light stays off (§7).
+- A pending launch and `finish_take` read the slot's `loop_after_beats`.
+- `Player`'s period parameters become beats. Remove the `measures * beats_per_measure` conversions, and the `beats_per_measure` argument of `play_waveform_message` if nothing else needs it. Give the waveform and sequence launch messages one helper, so they word "every N beats" the same way. Today the sequence message formats N with `{:?}`.
+- `play_step`'s `default_repeat_measures` becomes the program's own `loop_after_beats`. Since `Player` already has the `ProgramSet`, it can read the annotation itself instead of taking an argument.
+- Add tests for drift (`loop_after_beats=3` in 4/4) and for a sequence that runs past beat N.
+- Docs: README Launchkey (remove the "optionally repeat" and Function bullets, and say that bottom pads and Play follow `loop_after_beats`), and the "which launches honour it" part of `docs/language-spec.md`.
+
+### Phase 4: the screen (§8's gutter and selection message)
+
+- Gutter glyphs `↻` and `⌨`.
+- The `ProgramSet` selection-message helper beside `display_name`, used wherever selection sets the status today.
+
+### Phase 5: `Cmd-N l` (§6)
+
+- `PrefixKey::Loop`, the prompts, and the finishing keys.
+- Put the refusal checks (empty slot, stale source, keys program) in one function that returns the refusal message, because phase 6 calls it again. Add the matching "Remove kick's Loop first" refusal to `k`.
+- Make the source write-back that `k` uses take any annotation, rather than copying it for `loop_after_beats`. This includes `annotation_edits` and the `level_db=…` stand-in in `programs.rs`.
+- Put the "loops every N beats" / "plays once" / " from its next launch" message in one function, because phase 6 shows the same message.
+- Docs: README "Cmd + N, then L".
+
+### Phase 6: holding Loop on the Launchkey (§7)
+
+- The CC 118 press and release events in `launchkey.rs`, the Loop pad sub-mode with its layout and lighting, the picked value, the device screen, the status-line mirror, and the Loop button light.
+- On press and on release, use phase 5's refusal function. On release, use phase 5's write-back and message.
+- Docs: README Launchkey, "holding Loop".
+
 ## Out of scope
 
 These are listed on the [map](map.md#out-of-scope):
