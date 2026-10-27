@@ -206,6 +206,8 @@ Any binding with at least one annotation is a UI program; use `skip_slots=N` to 
 * `color=rgb(N,N,N)`
 * `level_db=D`
 * `sliders=[...]`
+* `keys`
+* `loop_after_beats=N`
 
 <!--
 
