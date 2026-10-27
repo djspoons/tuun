@@ -553,6 +553,12 @@ impl Program {
         self.kind = kind;
     }
 
+    /// Sets the program's Loop: the number of beats after which a pending
+    /// launch plays it again, or `None` to play once.
+    pub fn set_loop_after_beats(&mut self, loop_after_beats: Option<u32>) {
+        self.loop_after_beats = loop_after_beats;
+    }
+
     /// Sets the slider at `slider_index` to `normalized` (clamped to
     /// 0.0..=1.0) and returns its label and new denormalized value, or
     /// `None` if there is no slider at that index.
@@ -1122,29 +1128,59 @@ const ANNOTATION_EPSILON: f32 = 1e-4;
 /// Returns annotation-persistence edits for `program` against its parsed
 /// `binding`.
 ///
-/// This includes one for `keys` if the program's kind has diverged from the
-/// binding's annotations, one for `level_db` if the runtime level has diverged
-/// from what the binding's last `Level` annotation encodes, and one for
-/// `sliders` if any slider's current normalized value has diverged from its
-/// parsed initial value. Returns an empty list when nothing has changed.
+/// This includes one each for `keys` and `loop_after_beats` if the program's
+/// kind or Loop has diverged from the binding's annotations, one for
+/// `level_db` if the runtime level has diverged from what the binding's last
+/// `Level` annotation encodes, and one for `sliders` if any slider's current
+/// normalized value has diverged from its parsed initial value. Returns an
+/// empty list when nothing has changed.
 fn annotation_edits(
     program: &Program,
     binding: &expr::SourceBinding<MarkId, Source>,
     source: &str,
 ) -> Vec<(Range<usize>, String)> {
+    let keys = (program.kind() == ProgramKind::Keys).then_some(expr::Annotation::Keys);
+    let loop_after_beats = program
+        .loop_after_beats()
+        .map(expr::Annotation::LoopAfterBeats);
+    let presence_edits = [
+        (
+            keys.is_none(),
+            annotation_edit(
+                binding,
+                |a| matches!(a, expr::Annotation::Keys),
+                keys.as_ref(),
+                program.level_db(),
+                source,
+            ),
+        ),
+        (
+            loop_after_beats.is_none(),
+            annotation_edit(
+                binding,
+                |a| matches!(a, expr::Annotation::LoopAfterBeats(_)),
+                loop_after_beats.as_ref(),
+                program.level_db(),
+                source,
+            ),
+        ),
+    ];
+    // Removing a lone annotation writes `level_db=…` in its place, so a level
+    // edit would write it twice.
+    let replaces_lone_annotation = binding.annotations.len() == 1
+        && presence_edits
+            .iter()
+            .any(|(removes, edit)| *removes && edit.is_some());
     let mut edits = Vec::new();
-    let keys = keys_edit(program, binding, source);
-    // Removing a lone `keys` annotation writes `level_db=…` in its place, so a
-    // level edit would write it twice.
-    let replaces_lone_keys =
-        keys.is_some() && program.kind() == ProgramKind::Waveform && binding.annotations.len() == 1;
-    edits.extend(keys);
-    if !replaces_lone_keys && let Some(edit) = level_edit(program, binding, source) {
+    if !replaces_lone_annotation && let Some(edit) = level_edit(program, binding, source) {
         edits.push(edit);
     }
     if let Some(edit) = sliders_edit(program, binding) {
         edits.push(edit);
     }
+    // Pushed last so that an annotation inserted at the start of another
+    // annotation's span is applied after that span's replacement.
+    edits.extend(presence_edits.into_iter().filter_map(|(_, edit)| edit));
     edits
 }
 
@@ -1177,34 +1213,30 @@ fn level_edit(
     }
 }
 
-/// Returns the edit that adds or removes the binding's `keys` annotation, or
-/// `None` if the program's kind matches what the binding encodes.
+/// Returns the edit that makes the binding's last annotation matched by
+/// `matches` read `wanted`, or `None` if it already does.
 ///
-/// Removing the binding's only annotation writes `level_db=…` in its place, so
-/// the binding stays a UI program.
-fn keys_edit(
-    program: &Program,
+/// A `wanted` of `None` removes the annotation. Removing the binding's only
+/// annotation writes `level_db=…` (at `level_db`) in its place, so the binding
+/// stays a UI program.
+fn annotation_edit(
     binding: &expr::SourceBinding<MarkId, Source>,
+    matches: impl Fn(&expr::Annotation) -> bool,
+    wanted: Option<&expr::Annotation>,
+    level_db: f32,
     source: &str,
 ) -> Option<(Range<usize>, String)> {
-    let parsed = last_annotation_of(binding, |a| match a {
-        expr::Annotation::Keys => Some(()),
-        _ => None,
-    });
-    match (program.kind(), parsed) {
-        (ProgramKind::Keys, None) => Some(insert_annotation_edit(
-            binding,
-            &format!("{}", expr::Annotation::Keys),
-            source,
-        )),
-        (ProgramKind::Waveform, Some((_, Some(span)))) if binding.annotations.len() == 1 => Some((
-            span,
-            format!("{}", expr::Annotation::Level(program.level_db())),
-        )),
-        // TODO a repeated `keys` annotation keeps all but the last.
-        (ProgramKind::Waveform, Some((_, Some(span)))) => {
-            Some(remove_annotation_edit(span, source))
+    let parsed = last_annotation_of(binding, |a| matches(a).then(|| a.to_string()));
+    match (wanted, parsed) {
+        (Some(wanted), None) => Some(insert_annotation_edit(binding, &wanted.to_string(), source)),
+        (Some(wanted), Some((parsed, Some(span)))) if parsed != wanted.to_string() => {
+            Some((span, wanted.to_string()))
         }
+        (None, Some((_, Some(span)))) if binding.annotations.len() == 1 => {
+            Some((span, expr::Annotation::Level(level_db).to_string()))
+        }
+        // TODO a repeated annotation keeps all but the last.
+        (None, Some((_, Some(span)))) => Some(remove_annotation_edit(span, source)),
         _ => None,
     }
 }
@@ -2336,6 +2368,52 @@ kick = pulse(60);"
         state.splice(0).unwrap();
         assert_eq!(state.source, "#{level_db=-2}\nk = 1;");
         assert_eq!(state.display_name(0), "A:1 (k)");
+    }
+
+    #[test]
+    fn gaining_a_loop_prepends_the_annotation() {
+        let mut state = state_from("#{level_db=-6}\nk = 1;");
+        state.program_mut(0).unwrap().set_loop_after_beats(Some(4));
+        state.splice(0).unwrap();
+        assert_eq!(state.source, "#{loop_after_beats=4, level_db=-6}\nk = 1;");
+        assert_eq!(state.programs()[0].loop_after_beats(), Some(4));
+    }
+
+    #[test]
+    fn gaining_a_loop_and_a_level_writes_both() {
+        let mut state = state_from("#{level_db=-6}\nk = 1;");
+        let program = state.program_mut(0).unwrap();
+        program.set_loop_after_beats(Some(4));
+        program.set_level_db(-3.0);
+        state.splice(0).unwrap();
+        assert_eq!(state.source, "#{loop_after_beats=4, level_db=-3}\nk = 1;");
+    }
+
+    #[test]
+    fn changing_a_loop_rewrites_the_annotation() {
+        let mut state = state_from("#{level_db=-6, loop_after_beats=4}\nk = 1;");
+        state.program_mut(0).unwrap().set_loop_after_beats(Some(12));
+        state.splice(0).unwrap();
+        assert_eq!(state.source, "#{level_db=-6, loop_after_beats=12}\nk = 1;");
+    }
+
+    #[test]
+    fn losing_a_loop_removes_the_annotation() {
+        let mut state = state_from("#{level_db=-6, loop_after_beats=4}\nk = 1;");
+        state.program_mut(0).unwrap().set_loop_after_beats(None);
+        state.splice(0).unwrap();
+        assert_eq!(state.source, "#{level_db=-6}\nk = 1;");
+    }
+
+    #[test]
+    fn losing_a_lone_loop_annotation_swaps_in_level_db() {
+        let mut state = state_from("#{loop_after_beats=4}\nk = 1;");
+        let program = state.program_mut(0).unwrap();
+        program.set_loop_after_beats(None);
+        program.set_level_db(-2.0);
+        state.splice(0).unwrap();
+        assert_eq!(state.source, "#{level_db=-2}\nk = 1;");
+        assert_eq!(state.programs()[0].loop_after_beats(), None);
     }
 
     #[test]
