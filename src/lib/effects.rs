@@ -339,15 +339,6 @@ impl EffectRunner {
                     state.message = message;
                 }
             }
-            Effect::PlayProgramVoice(program_index) => {
-                if let Some(message) = self.player.play_program_voice(
-                    &state.programs,
-                    program_index,
-                    &mut state.waveform_marks,
-                ) {
-                    state.message = message;
-                }
-            }
             Effect::PlaySequencerStep {
                 program_index,
                 sixteenth,
@@ -934,8 +925,7 @@ mod tests {
             &mut world,
             vec![actions::Action::EvaluateAndLeaveEditMode {
                 mode_on_failure: actions::Mode::Select,
-                play: false,
-                repeat_after_measures: None,
+                play: None,
             }],
         );
         assert!(matches!(state.mode, actions::Mode::Edit { .. }));

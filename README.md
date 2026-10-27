@@ -59,8 +59,7 @@ Once Tuun has started, use the following keys to navigate and edit.
 
 In "select" mode (when a solid triangle appears at the left-hand side):
 * Enter - switch to "edit" mode for the current program
-* Cmd + Enter - play the current program's waveform at the beginning of the next measure and every measure afterward
-* Shift + Cmd + Enter - play the current program's waveform at the beginning of the next measure and every _other_ measure afterward
+* Cmd + Enter - play the current program's waveform once, now
 * Escape - stop playback of future iterations of the current waveform
 * Cmd + Escape - immediately stop playback of the current waveform
 * (hold) Option - switch to "slider" mode
@@ -80,9 +79,8 @@ In "select" mode (when a solid triangle appears at the left-hand side):
 * Cmd + N, then D - move the current program, and every program after it, **down** one slot
 
 In "edit" mode (when the current program is rendered in white):
-* Enter - play the current program's waveform at the beginning of the next measure
-* Cmd + Enter - play the current program's waveform at the beginning of the next measure and every measure afterward
-* Shift + Cmd + Enter - play the current program's waveform at the beginning of the next measure and every _other_ measure afterward
+* Enter - play the current program's waveform at the beginning of the next measure, repeating as the bottom pads do
+* Cmd + Enter - play the current program's waveform once, now
 * Ctl + H - display the inferred type of the identifier at the cursor
 * Escape - switch to "select" mode
 
@@ -116,7 +114,6 @@ Tuun provides a limited MIDI integration, specifically for the Novation Launchke
   * "Clip launcher" mode
     * Top row pads play the given waveform immediately
       * "Scene" (`>`) button to the right toggles between "Toggle" (start or stop playback) and "Trigger" (always start playback)
-        * For sequenced waveforms, "Trigger" mode only plays one step instead of the whole sequence
     * Bottom row pads play the given waveform at the start of the next measure and optionally repeat every measure or every _other_ measure afterward
       * "Function" button to the right switches through different repeating behaviors.
   * "Keys installer" mode: bottom row pads install the given program as a keys instrument (top row pads do nothing)

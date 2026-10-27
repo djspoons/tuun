@@ -2,7 +2,7 @@ use std::cell::Cell;
 use std::time::Instant;
 
 use crate::actions;
-use crate::actions::{Mode, PrefixKey};
+use crate::actions::{Launch, Mode, PrefixKey};
 use crate::programs::{PROGRAMS_PER_BANK, Program};
 
 /// Maps a QWERTY scancode to a MIDI note number for Keys (piano) mode.
@@ -263,15 +263,17 @@ impl InputHandler {
                     Some(vec![Action::RemovePendingProgram(active_program_index)])
                 }
             }
+            // Shift+Cmd+Return does nothing.
+            (Mode::Select | Mode::Edit { .. }, Some(Scancode::Return)) if gui_mod && shift => {
+                Some(vec![])
+            }
             (Mode::Select, Some(Scancode::Return)) => {
                 if gui_mod {
-                    // Cmd+Return: play with repeat (Shift=2, otherwise 1).
-                    let measures = if shift { 2 } else { 1 };
+                    // Cmd+Return: play once, now.
                     if programs[active_program_index].is_playable() {
                         Some(vec![Action::PlayProgram {
                             program_index: active_program_index,
-                            start_at_next_measure: true,
-                            repeat_after_measures: Some(measures),
+                            launch: Launch::Now,
                         }])
                     } else {
                         Some(vec![Action::ShowMessage(format!(
@@ -292,26 +294,24 @@ impl InputHandler {
                     // Plain Escape returns to Select mode.
                     Some(vec![Action::EvaluateAndLeaveEditMode {
                         mode_on_failure: Mode::Select,
-                        play: false,
-                        repeat_after_measures: None,
+                        play: None,
                     }])
                 }
             }
             (mode @ Mode::Edit { .. }, Some(Scancode::Return)) => {
-                // Cmd+Return: play with repeat (Shift=2, otherwise 1).
-                // Plain Return: play once, no repeat.
-                let repeat = if gui_mod {
-                    if shift { Some(2) } else { Some(1) }
+                // Cmd+Return: play once, now.
+                // Plain Return: play from the next measure.
+                let launch = if gui_mod {
+                    Launch::Now
                 } else {
-                    None
+                    Launch::Pending
                 };
                 // Either way, ask the runner to drop us into Select on
                 // success or stay in Edit with the error on parse
                 // failure.
                 Some(vec![Action::EvaluateAndLeaveEditMode {
                     mode_on_failure: mode.clone(),
-                    play: true,
-                    repeat_after_measures: repeat,
+                    play: Some(launch),
                 }])
             }
             // Char- and line-level ops on Ctrl, word-level ops on Cmd
@@ -937,8 +937,8 @@ mod tests {
 
     #[test]
     fn edit_mode_return_asks_runner_to_return_to_select_on_success() {
-        // Return in Edit mode leaves Edit mode and plays, once, in a single
-        // action.
+        // Return in Edit mode leaves Edit mode and makes a pending launch, in
+        // a single action.
         let handler = InputHandler::new(false, 800, 600);
         let state = test_state(Mode::Edit {
             cursor_position: 4,
@@ -953,13 +953,60 @@ mod tests {
             matches!(
                 actions[0],
                 Action::EvaluateAndLeaveEditMode {
-                    play: true,
-                    repeat_after_measures: None,
+                    play: Some(Launch::Pending),
                     ..
                 }
             ),
             "expected EvaluateAndLeaveEditMode with play, got {:?}",
             actions[0]
         );
+    }
+
+    #[test]
+    fn edit_mode_cmd_return_plays_now() {
+        let handler = InputHandler::new(false, 800, 600);
+        let state = test_state(Mode::Edit {
+            cursor_position: 4,
+            errors: vec![],
+            completion: None,
+        });
+        let actions = handler
+            .classify_keydown(Some(Scancode::Return), Mod::LGUIMOD, false, &state)
+            .expect("Cmd+Return in Edit mode should produce actions");
+        assert!(
+            matches!(
+                &actions[..],
+                [Action::EvaluateAndLeaveEditMode {
+                    play: Some(Launch::Now),
+                    ..
+                }]
+            ),
+            "expected EvaluateAndLeaveEditMode playing now, got {:?}",
+            actions
+        );
+    }
+
+    #[test]
+    fn shift_cmd_return_does_nothing() {
+        let handler = InputHandler::new(false, 800, 600);
+        for mode in [
+            Mode::Select,
+            Mode::Edit {
+                cursor_position: 4,
+                errors: vec![],
+                completion: None,
+            },
+        ] {
+            let state = test_state(mode);
+            let actions = handler
+                .classify_keydown(
+                    Some(Scancode::Return),
+                    Mod::LGUIMOD | Mod::LSHIFTMOD,
+                    false,
+                    &state,
+                )
+                .expect("Shift+Cmd+Return should be recognized");
+            assert!(actions.is_empty(), "expected no actions, got {:?}", actions);
+        }
     }
 }

@@ -281,49 +281,6 @@ impl Player {
         Some(message)
     }
 
-    /// Plays a single voice of the program at `program_index` immediately,
-    /// once, under `WaveformId::Program(program_index)`, so that repeated
-    /// calls layer independent voices. Returns the user-visible message, or
-    /// `None` when the program's text didn't evaluate to a waveform (or the
-    /// index is out of range) and nothing was played.
-    ///
-    /// A sequence's voice is its step waveform — one hit, not the pattern;
-    /// a waveform program's voice is its whole waveform.
-    ///
-    /// # Example
-    ///
-    /// A program reading `[1, 2, 3, 4] | on_beats(kick)` plays `kick` once,
-    /// where [`Player::play_program`] would play all four steps.
-    ///
-    /// Records the waveform's marks in `waveform_marks`.
-    pub fn play_program_voice(
-        &self,
-        set: &ProgramSet,
-        program_index: usize,
-        waveform_marks: &mut HashMap<WaveformId, PlayedMarks>,
-    ) -> Option<String> {
-        let program = set.program(program_index)?;
-        let display_name = set.display_name(program_index);
-        let (waveform, marks) = match program.evaluated()? {
-            Evaluated::Waveform(waveform, marks) => (waveform, marks),
-            Evaluated::Sequence(sequence) => (&sequence.step_waveform, &sequence.step_marks),
-            Evaluated::KeysInstrument(_) => return None,
-        };
-        let mut waveform = waveform.clone();
-        substitute_current_slider_values(&mut waveform, set);
-        let id = WaveformId::Program(program_index);
-        self.sender
-            .send(tracker::Command::Play {
-                id: id.clone(),
-                waveform: build_leveled_waveform(waveform, program.level_db()),
-                start: None,
-                repeat_every: None,
-            })
-            .unwrap();
-        waveform_marks.insert(id, played_marks(program_index, program, marks, vec![]));
-        Some(format!("Playing voice of {}", display_name))
-    }
-
     /// Plays the sequence of the program at `program_index` as described by
     /// [`Player::play_program`].
     fn play_sequence(
@@ -997,70 +954,6 @@ mod tests {
             assert_eq!(marks.text, *set.program(0).unwrap().evaluated_text());
         }
         assert_eq!(waveform_marks.len(), 2);
-    }
-
-    /// A sequence's voice is one hit, not the pattern — where `play_program`
-    /// sends one entry per listed step plus an anchor.
-    #[test]
-    fn play_program_voice_plays_one_hit_of_a_sequenceable_program() {
-        let set = sequenced_set();
-        let (player, receiver) = test_player();
-
-        let message = player.play_program_voice(&set, 0, &mut HashMap::new());
-        assert!(message.is_some());
-
-        let commands: Vec<_> = receiver.try_iter().collect();
-        assert_eq!(commands.len(), 1, "a voice is one entry, not a pattern");
-        let tracker::Command::Play {
-            id,
-            waveform,
-            start,
-            repeat_every,
-        } = &commands[0]
-        else {
-            panic!("expected a Play command");
-        };
-        // Under the program's own id, so it can't collide with the grid
-        // steps a launched pattern uses.
-        assert_eq!(*id, WaveformId::Program(0));
-        assert_eq!(*start, None, "a voice starts immediately");
-        assert_eq!(*repeat_every, None, "a voice plays once");
-        assert!(format!("{}", waveform).contains("terminator"));
-    }
-
-    #[test]
-    fn play_program_voice_plays_the_whole_waveform_when_not_sequenceable() {
-        let source = "#{level_db=0}\n_ = 1 | fin(time - 1);\n";
-        let (mut set, message) =
-            ProgramSet::from_source(source.to_string(), std::path::PathBuf::new())
-                .expect("test source should parse");
-        assert!(message.is_empty(), "{}", message);
-        let environment = Environment::new(8000, 90, std::path::PathBuf::new());
-        let input = set.evaluation_input(0);
-        let evaluated = environment
-            .evaluate_program(&input)
-            .expect("test program should evaluate");
-        set.record(0, input.text.into(), Ok((Some(evaluated), Vec::new())))
-            .expect("a success records");
-        assert!(set.program(0).unwrap().sequence().is_none());
-
-        let (player, receiver) = test_player();
-        assert!(
-            player
-                .play_program_voice(&set, 0, &mut HashMap::new())
-                .is_some()
-        );
-
-        let commands: Vec<_> = receiver.try_iter().collect();
-        assert_eq!(commands.len(), 1);
-        let tracker::Command::Play {
-            id, repeat_every, ..
-        } = &commands[0]
-        else {
-            panic!("expected a Play command");
-        };
-        assert_eq!(*id, WaveformId::Program(0));
-        assert_eq!(*repeat_every, None);
     }
 
     #[test]
