@@ -130,29 +130,23 @@ pub enum Start {
     At(time::Instant),
 }
 
-/// Returns the status text for playing the waveform of the program named
-/// `display_name`, repeating every `repeat_after_measures` measures if given.
-///
-/// # Example
-///
-/// ```
-/// use tuun::player::play_waveform_message;
-///
-/// assert_eq!(play_waveform_message("B:3", Some(1), 4), "Looping waveform B:3 every 4 beats");
-/// assert_eq!(play_waveform_message("B:3", None, 4), "Playing waveform B:3");
-/// ```
-pub fn play_waveform_message(
-    display_name: &str,
-    repeat_after_measures: Option<u32>,
-    beats_per_measure: u32,
-) -> String {
-    match repeat_after_measures {
-        Some(measures) => format!(
-            "Looping waveform {} every {} beats",
-            display_name,
-            measures * beats_per_measure
-        ),
-        None => format!("Playing waveform {}", display_name),
+/// What a launch plays, as its status text names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Played {
+    Waveform,
+    Sequence,
+}
+
+/// Returns the status text for playing the `played` of the program named
+/// `display_name`, repeating every `loop_after_beats` beats if given.
+pub fn play_message(played: Played, display_name: &str, loop_after_beats: Option<u32>) -> String {
+    let noun = match played {
+        Played::Waveform => "waveform",
+        Played::Sequence => "sequence",
+    };
+    match loop_after_beats {
+        Some(beats) => format!("Looping {} {} every {} beats", noun, display_name, beats),
+        None => format!("Playing {} {}", noun, display_name),
     }
 }
 
@@ -180,11 +174,6 @@ impl Player {
         self.tempo
     }
 
-    /// Returns the number of beats in a measure.
-    pub fn beats_per_measure(&self) -> u32 {
-        self.beats_per_measure
-    }
-
     /// Plays the program at `program_index`, substituting its current slider
     /// values. Returns the user-visible message, or `None` when the program's
     /// text didn't evaluate to a waveform or a sequence (or the index is out of
@@ -194,7 +183,7 @@ impl Player {
     /// `WaveformId::Program(program_index)`. A sequence plays decomposed: one
     /// scheduled, independently repeating `WaveformId::Step` per listed step,
     /// plus a silent anchor step that spans each pass. Either starts where
-    /// `start` says, repeating every `repeat_after_measures` measures if given.
+    /// `start` says, repeating every `loop_after_beats` beats if given.
     ///
     /// Records the marks of each waveform played in `waveform_marks`, by the id
     /// it plays under.
@@ -204,7 +193,7 @@ impl Player {
         program_index: usize,
         status: &tracker::Status<WaveformId>,
         start: Start,
-        repeat_after_measures: Option<u32>,
+        loop_after_beats: Option<u32>,
         waveform_marks: &mut HashMap<WaveformId, PlayedMarks>,
     ) -> Option<String> {
         // A sequence always plays decomposed, so the sequencer can edit its
@@ -215,7 +204,7 @@ impl Player {
                 program_index,
                 status,
                 start,
-                repeat_after_measures,
+                loop_after_beats,
                 waveform_marks,
             )
         } else {
@@ -224,7 +213,7 @@ impl Player {
                 program_index,
                 status,
                 start,
-                repeat_after_measures,
+                loop_after_beats,
                 waveform_marks,
             )
         }
@@ -238,21 +227,20 @@ impl Player {
         program_index: usize,
         status: &tracker::Status<WaveformId>,
         start: Start,
-        repeat_after_measures: Option<u32>,
+        loop_after_beats: Option<u32>,
         waveform_marks: &mut HashMap<WaveformId, PlayedMarks>,
     ) -> Option<String> {
         let program = set.program(program_index)?;
         let Some(Evaluated::Waveform(waveform, marks)) = program.evaluated() else {
             return None;
         };
-        let message = play_waveform_message(
+        let message = play_message(
+            Played::Waveform,
             &set.display_name(program_index),
-            repeat_after_measures,
-            self.beats_per_measure,
+            loop_after_beats,
         );
-        let repeat_every = repeat_after_measures.map(|measures| {
-            duration_from_beats(self.tempo, (measures * self.beats_per_measure) as u64)
-        });
+        let repeat_every =
+            loop_after_beats.map(|beats| duration_from_beats(self.tempo, beats.into()));
         let now = time::Instant::now();
         let start_instant = match start {
             Start::Now => None,
@@ -289,22 +277,18 @@ impl Player {
         program_index: usize,
         status: &tracker::Status<WaveformId>,
         start: Start,
-        repeat_after_measures: Option<u32>,
+        loop_after_beats: Option<u32>,
         waveform_marks: &mut HashMap<WaveformId, PlayedMarks>,
     ) -> Option<String> {
         let program = set.program(program_index)?;
         let sequence = program.sequence()?;
-        let display_name = set.display_name(program_index);
-        let message;
-        let repeat_every;
-        if let Some(measures) = repeat_after_measures {
-            let beats = (measures * self.beats_per_measure) as u64;
-            message = format!("Looping sequence {} every {:?} beats", display_name, beats);
-            repeat_every = Some(duration_from_beats(self.tempo, beats));
-        } else {
-            message = format!("Playing sequence {}", display_name);
-            repeat_every = None;
-        }
+        let message = play_message(
+            Played::Sequence,
+            &set.display_name(program_index),
+            loop_after_beats,
+        );
+        let repeat_every =
+            loop_after_beats.map(|beats| duration_from_beats(self.tempo, beats.into()));
         let now = time::Instant::now();
         let base = match start {
             Start::Now => now,
@@ -367,8 +351,8 @@ impl Player {
     /// ahead, otherwise the next cycle.
     ///
     /// The cycle phase and period are read from the anchor step's starts in
-    /// `status`; `default_repeat_measures` supplies the period when only a
-    /// queued (pending) anchor is visible. Returns a user-visible warning
+    /// `status`; the program's `loop_after_beats` supplies the period when
+    /// only a queued (pending) anchor is visible. Returns a user-visible warning
     /// when the step can't sound (no upcoming occurrence), and `None`
     /// otherwise. Records the step's marks in `waveform_marks` when it plays.
     pub fn play_step(
@@ -377,7 +361,6 @@ impl Player {
         program_index: usize,
         sixteenth: u8,
         status: &tracker::Status<WaveformId>,
-        default_repeat_measures: Option<u32>,
         waveform_marks: &mut HashMap<WaveformId, PlayedMarks>,
     ) -> Option<String> {
         let program = set.program(program_index)?;
@@ -414,9 +397,9 @@ impl Player {
             // A running anchor with nothing queued behind it is a one-shot
             // family; the step must not outlive it.
             (Some(_), None) => None,
-            _ => default_repeat_measures.map(|measures| {
-                duration_from_beats(self.tempo, (measures * self.beats_per_measure) as u64)
-            }),
+            _ => program
+                .loop_after_beats()
+                .map(|beats| duration_from_beats(self.tempo, beats.into())),
         };
         let mut step = sequence.step_waveform.clone();
         substitute_current_slider_values(&mut step, set);
@@ -843,12 +826,28 @@ mod tests {
     /// Builds a program set whose program 0 is a sequence with steps on beats
     /// [1, 2.5], evaluated so its sequence is available.
     fn sequenced_set() -> ProgramSet {
-        let source = "on_beats = fn(w) => fn(bs) => w;\n\
-                      #{level_db=0}\n\
-                      _ = [1, 2.5] | on_beats(1 | fin(time - 1));\n";
-        let (mut set, message) =
-            ProgramSet::from_source(source.to_string(), std::path::PathBuf::new())
-                .expect("test source should parse");
+        sequenced_set_of("level_db=0", "[1, 2.5]")
+    }
+
+    /// Builds a program set whose program 0 is a sequence with steps on
+    /// `beats` and the given annotation, evaluated so its sequence is
+    /// available.
+    fn sequenced_set_of(annotation: &str, beats: &str) -> ProgramSet {
+        let source = format!(
+            "on_beats = fn(w) => fn(bs) => w;\n\
+             #{{{}}}\n\
+             _ = {} | on_beats(1 | fin(time - 1));\n",
+            annotation, beats
+        );
+        let set = evaluated_set(source);
+        assert!(set.program(0).unwrap().sequence().is_some());
+        set
+    }
+
+    /// Builds a program set from `source` with program 0 evaluated.
+    fn evaluated_set(source: String) -> ProgramSet {
+        let (mut set, message) = ProgramSet::from_source(source, std::path::PathBuf::new())
+            .expect("test source should parse");
         assert!(message.is_empty(), "{}", message);
         let environment = Environment::new(8000, 90, std::path::PathBuf::new());
         let input = set.evaluation_input(0);
@@ -857,7 +856,6 @@ mod tests {
             .expect("test program should evaluate");
         set.record(0, input.text.into(), Ok((Some(evaluated), Vec::new())))
             .expect("a success records");
-        assert!(set.program(0).unwrap().sequence().is_some());
         set
     }
 
@@ -891,7 +889,7 @@ mod tests {
             0,
             &empty_status(),
             Start::Now,
-            Some(1),
+            Some(4),
             &mut waveform_marks,
         );
         assert!(message.is_some());
@@ -968,7 +966,7 @@ mod tests {
         status.start_times = vec![anchor_start(0, cycle), anchor_start(0, next_cycle)];
 
         // Sixteenth 8 is beat 3, two beats into the cycle — still ahead.
-        let message = player.play_step(&set, 0, 8, &status, None, &mut HashMap::new());
+        let message = player.play_step(&set, 0, 8, &status, &mut HashMap::new());
         assert!(message.is_none());
 
         let commands: Vec<_> = receiver.try_iter().collect();
@@ -1005,7 +1003,7 @@ mod tests {
         status.start_times = vec![anchor_start(0, cycle), anchor_start(0, next_cycle)];
 
         // Sixteenth 0 is beat 1, which started the cycle — already passed.
-        let message = player.play_step(&set, 0, 0, &status, None, &mut HashMap::new());
+        let message = player.play_step(&set, 0, 0, &status, &mut HashMap::new());
         assert!(message.is_none());
 
         let commands: Vec<_> = receiver.try_iter().collect();
@@ -1025,17 +1023,17 @@ mod tests {
         let mut status = empty_status();
         status.start_times = vec![anchor_start(0, now - Duration::from_secs(1))];
 
-        let message = player.play_step(&set, 0, 0, &status, None, &mut HashMap::new());
+        let message = player.play_step(&set, 0, 0, &status, &mut HashMap::new());
         assert!(message.unwrap().contains("passed"));
         assert!(receiver.try_iter().next().is_none());
     }
 
     /// An anchor that is running with nothing queued behind it is a one-shot
-    /// family, so the step must not outlive it — not even when the app-wide
-    /// default repeat is set.
+    /// family, so the step must not outlive it — not even when the program
+    /// has a Loop.
     #[test]
     fn play_step_does_not_repeat_into_a_one_shot_family() {
-        let set = sequenced_set();
+        let set = sequenced_set_of("loop_after_beats=4", "[1, 2.5]");
         let (player, receiver) = test_player();
 
         let now = Instant::now();
@@ -1045,7 +1043,7 @@ mod tests {
 
         // Sixteenth 8 is beat 3, two beats into the cycle — still ahead, so
         // the step does sound; only its repeat is at issue.
-        let message = player.play_step(&set, 0, 8, &status, Some(1), &mut HashMap::new());
+        let message = player.play_step(&set, 0, 8, &status, &mut HashMap::new());
         assert!(message.is_none());
 
         let commands: Vec<_> = receiver.try_iter().collect();
@@ -1062,6 +1060,85 @@ mod tests {
         assert_eq!(
             *repeat_every, None,
             "the step outlived the one-shot family it was scheduled into"
+        );
+    }
+
+    /// Before the first pass starts, a newly enabled step takes the period
+    /// of the program's own loop.
+    #[test]
+    fn play_step_takes_the_programs_loop_before_the_first_pass() {
+        let set = sequenced_set_of("loop_after_beats=3", "[1, 2.5]");
+        let (player, receiver) = test_player();
+
+        let mut status = empty_status();
+        status.start_times = vec![anchor_start(0, Instant::now() + Duration::from_secs(1))];
+
+        let message = player.play_step(&set, 0, 8, &status, &mut HashMap::new());
+        assert!(message.is_none());
+
+        let commands: Vec<_> = receiver.try_iter().collect();
+        assert_eq!(commands.len(), 1);
+        let tracker::Command::Play { repeat_every, .. } = &commands[0] else {
+            panic!("expected a Play command");
+        };
+        assert_eq!(*repeat_every, Some(duration_from_beats(90, 3)));
+    }
+
+    /// Returns the period of every Play command in `receiver`.
+    fn repeat_periods(receiver: &CommandReceiver) -> Vec<Option<Duration>> {
+        receiver
+            .try_iter()
+            .map(|c| match c {
+                tracker::Command::Play { repeat_every, .. } => repeat_every,
+                _ => panic!("expected only Play commands"),
+            })
+            .collect()
+    }
+
+    /// A loop that isn't a whole number of measures isn't rounded to one, so
+    /// in 4/4 a waveform with a 3-beat Loop drifts across the measure start.
+    #[test]
+    fn play_program_loops_a_waveform_every_n_beats_off_the_measure() {
+        let set = evaluated_set("#{loop_after_beats=3}\n_ = 1 | fin(time - 1);\n".to_string());
+        let (player, receiver) = test_player();
+
+        let message = player.play_program(
+            &set,
+            0,
+            &empty_status(),
+            Start::Now,
+            Some(3),
+            &mut HashMap::new(),
+        );
+
+        assert_eq!(message.unwrap(), "Looping waveform A:1 every 3 beats");
+        assert_eq!(
+            repeat_periods(&receiver),
+            vec![Some(duration_from_beats(90, 3))]
+        );
+    }
+
+    /// Every pass of a sequence plays all of its steps, even those past beat
+    /// N, so passes overlap rather than dropping steps.
+    #[test]
+    fn play_program_plays_every_step_of_a_sequence_longer_than_its_loop() {
+        let set = sequenced_set_of("loop_after_beats=3", "[1, 5]");
+        let (player, receiver) = test_player();
+
+        let message = player.play_program(
+            &set,
+            0,
+            &empty_status(),
+            Start::Now,
+            Some(3),
+            &mut HashMap::new(),
+        );
+
+        assert_eq!(message.unwrap(), "Looping sequence A:1 every 3 beats");
+        // Two steps and the anchor, all repeating every 3 beats.
+        assert_eq!(
+            repeat_periods(&receiver),
+            vec![Some(duration_from_beats(90, 3)); 3]
         );
     }
 }

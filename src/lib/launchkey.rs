@@ -135,7 +135,6 @@ pub enum Event {
         current: PadMode,
     },
 
-    PadFunctionDown,
     /// The button marked ">" beside the top row of pads.
     LaunchDown,
     /// The Undo button, pressed without Shift.
@@ -185,10 +184,8 @@ const PAD_MODE_CC: u8 = 29; // 0x1D
 // Pad-mode CC value for the DAW pad layout (page 10 of the MK4 reference).
 const PAD_MODE_DAW_VALUE: u8 = 2;
 
-const PAD_FUNCTION_OFFSET: u8 = 105;
-
 /// The button marked ">" beside the top row of pads. Its LED is set by sending
-/// the same CC back on channel 0, as for `PAD_FUNCTION_OFFSET`.
+/// the same CC back on channel 0.
 const LAUNCH_CC: u8 = 104;
 
 /// The Record button. Its monochrome LED's brightness is set by sending the
@@ -369,16 +366,6 @@ impl Launchkey {
         buf.push(green.min(127));
         buf.push(blue.min(127));
         self.send_sys_ex(&buf);
-    }
-
-    pub fn set_pad_function_color(&mut self, color: Color) {
-        self.send_event(LiveEvent::Midi {
-            channel: 0.into(),
-            message: MidiMessage::Controller {
-                controller: PAD_FUNCTION_OFFSET.into(),
-                value: (color as u8).into(),
-            },
-        });
     }
 
     pub fn set_launch_color(&mut self, color: Color) {
@@ -604,8 +591,6 @@ impl DAWState {
                         }
 
                         // Other buttons
-                        (PAD_FUNCTION_OFFSET, 127) => Some(Event::PadFunctionDown),
-                        (PAD_FUNCTION_OFFSET, 0) => None,
                         (LAUNCH_CC, 127) => Some(Event::LaunchDown),
                         (LAUNCH_CC, 0) => None,
                         (UNDO_CC, 127) if self.shift_held => Some(Event::RedoDown),

@@ -187,7 +187,6 @@ pub struct AppState {
     pub active_program_index: usize,
     pub mode: Mode,
     pub keys: Option<keys::Keys>,
-    pub repeat_after_measures: Option<u32>,
     /// How a clip-launcher top pad press relates to playback. Kept across
     /// changes of `daw_pad_mode`.
     pub launch_mode: LaunchMode,
@@ -233,7 +232,6 @@ impl AppState {
             active_program_index: 0,
             mode: Mode::Select,
             keys: None,
-            repeat_after_measures: None,
             launch_mode: LaunchMode::Toggle,
             daw_pad_mode: DawPadMode::ClipLauncher,
             sequencer_page: 0,
@@ -299,8 +297,6 @@ pub struct Context<'a> {
     pub source_stale: bool,
     /// The tempo in beats per minute.
     pub tempo: u32,
-    /// The number of beats in a measure.
-    pub beats_per_measure: u32,
 }
 
 /// A transport buttons on the controller.
@@ -314,8 +310,8 @@ pub enum Transport {
 /// When a launch starts, which also decides whether it repeats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Launch {
-    /// At the beginning of the next measure, repeating per the app-wide
-    /// default.
+    /// At the beginning of the next measure, repeating as the program's
+    /// `loop_after_beats` says.
     Pending,
     /// Immediately, playing once.
     Now,
@@ -342,8 +338,8 @@ pub enum Action {
     /// nothing if the program isn't a waveform.
     ToggleProgramPlayback(usize),
     /// Remove the program's pending playback if there is one; otherwise queue
-    /// it to play at the beginning of next measure (repeating per the app-wide
-    /// default). Does nothing if the program isn't a waveform.
+    /// it to play at the beginning of next measure (repeating as the program's
+    /// `loop_after_beats` says). Does nothing if the program isn't a waveform.
     ToggleProgramPendingPlayback(usize),
     /// Press a transport button.
     ///
@@ -351,8 +347,8 @@ pub enum Action {
     /// at the press's measure boundary (or disarm it before it starts), and
     /// Stop discards it. Otherwise, Record arms a take on the active program
     /// if every precondition for recording holds, Play queues the active
-    /// program to play at the beginning of the next measure (repeating per
-    /// the app-wide default) unless its playback is already pending, and Stop
+    /// program to play at the beginning of the next measure (repeating as its
+    /// `loop_after_beats` says) unless its playback is already pending, and Stop
     /// removes the active program's pending playback.
     Transport(Transport),
     /// Advance the take in Record mode to now: start recording at its start
@@ -484,8 +480,6 @@ pub enum Action {
         previous: launchkey::PadMode,
         current: launchkey::PadMode,
     },
-    /// Toggle the default repeat (cycle None -> Some(1) -> Some(2) -> None).
-    CycleRepeatAfterMeasures,
     /// Switch the clip launcher's top pads between `LaunchMode::Toggle` and
     /// `LaunchMode::Trigger`.
     ToggleLaunchMode,
@@ -535,7 +529,7 @@ pub enum Effect {
     PlayProgram {
         program_index: usize,
         start: player::Start,
-        repeat_after_measures: Option<u32>,
+        loop_after_beats: Option<u32>,
     },
     /// Send a "stop" ramp for the program waveform.
     StopProgram(usize),
@@ -977,22 +971,6 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             effects
         }
 
-        Action::CycleRepeatAfterMeasures => {
-            let effect;
-            (state.repeat_after_measures, effect) = match state.repeat_after_measures {
-                None => (
-                    Some(1),
-                    Effect::ShowMessage("Repeat after 1 measure".to_string()),
-                ),
-                Some(1) => (
-                    Some(2),
-                    Effect::ShowMessage("Repeat after 2 measures".to_string()),
-                ),
-                Some(_) => (None, Effect::ShowMessage("No repeats".to_string())),
-            };
-            vec![effect]
-        }
-
         Action::ToggleLaunchMode => {
             state.launch_mode = match state.launch_mode {
                 LaunchMode::Toggle => LaunchMode::Trigger,
@@ -1274,10 +1252,13 @@ fn apply_take_transport(state: &mut AppState, ctx: &Context, transport: Transpor
         // The phrase isn't queued until the write, so the text a queue or an
         // un-queue would post is posted here.
         Response::Finishing { previous } => match (finish, previous) {
-            (Finish::Play, _) => vec![Effect::ShowMessage(player::play_waveform_message(
+            (Finish::Play, _) => vec![Effect::ShowMessage(player::play_message(
+                player::Played::Waveform,
                 &display_name,
-                state.repeat_after_measures,
-                ctx.beats_per_measure,
+                state
+                    .programs
+                    .program(state.active_program_index)
+                    .and_then(|p| p.loop_after_beats()),
             ))],
             (Finish::Silent, Some(Finish::Play)) => vec![Effect::ShowMessage(format!(
                 "Removed pending waveform for program {}",
@@ -1356,7 +1337,7 @@ fn write_take(
         on_success.push(Effect::PlayProgram {
             program_index: i,
             start: player::Start::At(closed.end),
-            repeat_after_measures: state.repeat_after_measures,
+            loop_after_beats: state.programs.program(i).and_then(|p| p.loop_after_beats()),
         });
     }
     vec![
@@ -1389,14 +1370,20 @@ fn note_count(n: usize) -> String {
 /// Returns the effect that plays the given program as `launch` says.
 // TODO do we need this and launch_effects?
 fn launch_effect(state: &AppState, program_index: usize, launch: Launch) -> Effect {
-    let (start, repeat_after_measures) = match launch {
-        Launch::Pending => (player::Start::NextMeasure, state.repeat_after_measures),
+    let (start, loop_after_beats) = match launch {
+        Launch::Pending => (
+            player::Start::NextMeasure,
+            state
+                .programs
+                .program(program_index)
+                .and_then(|p| p.loop_after_beats()),
+        ),
         Launch::Now => (player::Start::Now, None),
     };
     Effect::PlayProgram {
         program_index,
         start,
-        repeat_after_measures,
+        loop_after_beats,
     }
 }
 
@@ -2452,7 +2439,6 @@ mod tests {
             environment: &environment,
             source_stale: false,
             tempo: 60,
-            beats_per_measure: 4,
         };
         apply(state, &ctx, action)
     }
@@ -2473,7 +2459,6 @@ mod tests {
             environment: &environment,
             source_stale: true,
             tempo: 60,
-            beats_per_measure: 4,
         };
         apply(state, &ctx, action)
     }
@@ -2484,6 +2469,15 @@ mod tests {
     fn test_state() -> AppState {
         AppState::from_source(
             "#{level_db=0}\n_ = test;".to_string(),
+            std::path::PathBuf::new(),
+        )
+        .expect("test source should parse")
+    }
+
+    /// Returns a state whose one program loops every 8 beats.
+    fn looping_state() -> AppState {
+        AppState::from_source(
+            "#{loop_after_beats=8}\n_ = test;".to_string(),
             std::path::PathBuf::new(),
         )
         .expect("test source should parse")
@@ -3029,7 +3023,6 @@ mod tests {
             environment: &environment,
             source_stale: false,
             tempo: 60,
-            beats_per_measure: 4,
         };
         apply(state, &ctx, action)
     }
@@ -3506,8 +3499,7 @@ _ = saw(220);";
     /// play, once, without stopping the one already sounding.
     #[test]
     fn play_program_now_layers_when_already_active() {
-        let mut state = test_state();
-        state.repeat_after_measures = Some(2);
+        let mut state = looping_state();
         let now = Instant::now();
         let status = status_with_start(now - Duration::from_secs(1));
         let effects = apply_with_status(
@@ -3526,7 +3518,7 @@ _ = saw(220);";
                     Effect::PlayProgram {
                         program_index: 0,
                         start: player::Start::Now,
-                        repeat_after_measures: None,
+                        loop_after_beats: None,
                     },
                     Effect::UpdateSource(0),
                 ]
@@ -3536,11 +3528,10 @@ _ = saw(220);";
         );
     }
 
-    /// A pending launch repeats per the app-wide default.
+    /// A pending launch loops as the program's `loop_after_beats` says.
     #[test]
-    fn play_program_pending_repeats_per_the_default() {
-        let mut state = test_state();
-        state.repeat_after_measures = Some(2);
+    fn play_program_pending_loops_per_the_annotation() {
+        let mut state = looping_state();
         let effects = apply_with_empty_status(
             &mut state,
             Action::PlayProgram {
@@ -3554,7 +3545,7 @@ _ = saw(220);";
                 Effect::PlayProgram {
                     program_index: 0,
                     start: player::Start::NextMeasure,
-                    repeat_after_measures: Some(2),
+                    loop_after_beats: Some(8),
                 }
             ),
             "expected a pending PlayProgram, got {:?}",
@@ -3636,7 +3627,7 @@ _ = saw(220);";
                 Effect::PlayProgram {
                     program_index: 0,
                     start: player::Start::Now,
-                    repeat_after_measures: None,
+                    loop_after_beats: None,
                 }
             ),
             "expected an immediate PlayProgram, got {:?}",
@@ -3675,9 +3666,8 @@ _ = saw(220);";
     }
 
     #[test]
-    fn toggle_queued_program_queues_with_default_repeat_when_idle() {
-        let mut state = test_state();
-        state.repeat_after_measures = Some(2);
+    fn toggle_queued_program_queues_with_the_programs_loop_when_idle() {
+        let mut state = looping_state();
         let effects = apply_with_empty_status(&mut state, Action::ToggleProgramPendingPlayback(0));
         assert!(
             matches!(
@@ -3685,10 +3675,10 @@ _ = saw(220);";
                 Effect::PlayProgram {
                     program_index: 0,
                     start: player::Start::NextMeasure,
-                    repeat_after_measures: Some(2),
+                    loop_after_beats: Some(8),
                 }
             ),
-            "expected a queued PlayProgram with the default repeat, got {:?}",
+            "expected a queued PlayProgram with the program's Loop, got {:?}",
             effects
         );
     }
@@ -4038,8 +4028,7 @@ _ = saw(220);";
 
     #[test]
     fn transport_play_queues_active_program_at_next_measure() {
-        let mut state = test_state();
-        state.repeat_after_measures = Some(2);
+        let mut state = looping_state();
         let effects = apply_with_empty_status(&mut state, Action::Transport(Transport::Play));
         assert!(
             matches!(
@@ -4047,10 +4036,10 @@ _ = saw(220);";
                 Effect::PlayProgram {
                     program_index: 0,
                     start: player::Start::NextMeasure,
-                    repeat_after_measures: Some(2),
+                    loop_after_beats: Some(8),
                 }
             ),
-            "expected a queued PlayProgram with the app-wide repeat, got {:?}",
+            "expected a queued PlayProgram with the program's Loop, got {:?}",
             effects
         );
     }
@@ -4203,11 +4192,14 @@ _ = saw(220);";
     /// Builds a state with two programs, `a` in slot 1 and `b` in slot 2,
     /// editing slot 1.
     fn editing_state() -> AppState {
-        let mut state = AppState::from_source(
-            "#{level_db=0}\na = sine(440);\n#{level_db=0}\nb = sine(220);\n".to_string(),
-            std::path::PathBuf::new(),
-        )
-        .expect("test source should parse");
+        editing_state_of("#{level_db=0}\na = sine(440);\n#{level_db=0}\nb = sine(220);\n")
+    }
+
+    /// Returns an Edit-mode state over `source`, with the cursor at the end of
+    /// program 0.
+    fn editing_state_of(source: &str) -> AppState {
+        let mut state = AppState::from_source(source.to_string(), std::path::PathBuf::new())
+            .expect("test source should parse");
         state.mode = Mode::Edit {
             cursor_position: state.active_program().text().len(),
             errors: vec![],
@@ -4340,8 +4332,7 @@ _ = saw(220);";
 
     #[test]
     fn leaving_edit_mode_can_play_the_owned_program() {
-        let mut state = editing_state();
-        state.repeat_after_measures = Some(2);
+        let mut state = editing_state_of("#{loop_after_beats=8}\na = sine(440);\n");
         let effects = apply_with_empty_status(
             &mut state,
             Action::EvaluateAndLeaveEditMode {
@@ -4369,7 +4360,7 @@ _ = saw(220);";
                         Effect::PlayProgram {
                             program_index: 0,
                             start: player::Start::NextMeasure,
-                            repeat_after_measures: Some(2),
+                            loop_after_beats: Some(8),
                         },
                     ]
                 ) && matches!(&on_failure[..], [Effect::SetMode(Mode::Select)])
@@ -4864,15 +4855,15 @@ _ = saw(220);";
     #[test]
     fn play_while_recording_plays_the_phrase_from_the_end_boundary() {
         let t0 = Instant::now();
-        let mut state = record_state(RECORD_SOURCE, 1);
-        state.repeat_after_measures = Some(1);
+        let source = RECORD_SOURCE.replace("level_db=0", "loop_after_beats=6");
+        let mut state = record_state(&source, 1);
         apply_at(&mut state, t0, 4.0, record());
         apply_at(&mut state, t0, 4.5, note_on(t0, 4.5));
         let effects = apply_at(&mut state, t0, 6.0, Action::Transport(Transport::Play));
         assert_eq!(take_phase(&state), Phase::Finishing(Finish::Play));
         assert_eq!(
             messages(&effects),
-            vec!["Looping waveform A:2 every 4 beats"]
+            vec!["Looping waveform A:2 every 6 beats"]
         );
         assert!(play_starts(&effects).is_empty());
 
@@ -4894,7 +4885,7 @@ _ = saw(220);";
                     &on_success[..],
                     [Effect::PlayProgram {
                         program_index: 1,
-                        repeat_after_measures: Some(1),
+                        loop_after_beats: Some(6),
                         ..
                     }]
                 )
