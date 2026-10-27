@@ -206,6 +206,8 @@ Any binding with at least one annotation is a UI program; use `skip_slots=N` to 
 * `color=rgb(N,N,N)`
 * `level_db=D`
 * `sliders=[...]`
+* `keys` marks a keys instrument, whose binding evaluates to a note function rather than a waveform.
+* `loop_after_beats=N` makes the program loop, playing again every N beats. N is a positive whole number, such as `#{loop_after_beats=4}`. A binding can't have both `loop_after_beats` and `keys`.
 
 <!--
 

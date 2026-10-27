@@ -399,11 +399,28 @@ fn parse_binding<M>(input: Input) -> IResult<SourceBinding<M>> {
             trivia0
         ).parse(input)?;
     let end = rest.location_offset();
+    let mut annotations: Vec<SourceAnnotation> = annos.into_iter().flatten().collect();
+    // A keys program can't loop: report each `loop_after_beats` and drop it.
+    if annotations
+        .iter()
+        .any(|sa| matches!(sa.annotation, Annotation::Keys))
+    {
+        annotations.retain(|sa| {
+            if !matches!(sa.annotation, Annotation::LoopAfterBeats(_)) {
+                return true;
+            }
+            rest.extra.report_error(Error::parse(
+                "loop_after_beats can't be combined with keys".to_string(),
+                sa.span.clone(),
+            ));
+            false
+        });
+    }
     Ok((
         rest,
         SourceBinding {
             binding,
-            annotations: annos.into_iter().flatten().collect(),
+            annotations,
             span: Some(Span::unstamped(start..end)),
         },
     ))
@@ -1113,26 +1130,54 @@ fn parse_skip_slots(input: Input) -> IResult<u32> {
     Ok((rest, value))
 }
 
+/// Parses `loop_after_beats=<positive integer>` (e.g., `loop_after_beats=4`).
+///
+/// Any other value is reported as a recoverable error, and yields `None`.
+fn parse_loop_after_beats(input: Input) -> IResult<Option<u32>> {
+    let (rest, _) = tag("loop_after_beats=").parse(input)?;
+    let (rest, value) = take_while(|c: char| c != ',' && c != '}' && !c.is_whitespace())(rest)?;
+    match value.fragment().parse::<u32>() {
+        Ok(n) if n > 0 => Ok((rest, Some(n))),
+        _ => {
+            let message = format!(
+                "loop_after_beats must be a positive whole number of beats, not `{}`",
+                value.fragment()
+            );
+            value.extra.report_error(Error::parse(
+                message,
+                Some(Span::unstamped(value.to_range())),
+            ));
+            Ok((rest, None))
+        }
+    }
+}
+
 /// Parses a single annotation variant (one element from inside `#{ ... }`).
-fn parse_annotation(input: Input) -> IResult<SourceAnnotation> {
+///
+/// Returns `None` for an annotation whose error has been reported.
+fn parse_annotation(input: Input) -> IResult<Option<SourceAnnotation>> {
     // TODO can we capture this start/end+wrap pattern as a combinator here and
     // elsewhere?
     let start = input.location_offset();
     let (rest, annotation) = alt((
-        parse_sliders_internal.map(Annotation::Sliders),
-        parse_color.map(|(r, g, b)| Annotation::Color(r, g, b)),
-        parse_level.map(Annotation::Level),
-        parse_skip_slots.map(Annotation::SkipSlots),
-        tag("keys").map(|_| Annotation::Keys),
+        parse_loop_after_beats.map(|n| n.map(Annotation::LoopAfterBeats)),
+        alt((
+            parse_sliders_internal.map(Annotation::Sliders),
+            parse_color.map(|(r, g, b)| Annotation::Color(r, g, b)),
+            parse_level.map(Annotation::Level),
+            parse_skip_slots.map(Annotation::SkipSlots),
+            tag("keys").map(|_| Annotation::Keys),
+        ))
+        .map(Some),
     ))
     .parse(input)?;
     let end = rest.location_offset();
     Ok((
         rest,
-        SourceAnnotation {
+        annotation.map(|annotation| SourceAnnotation {
             annotation,
             span: Some(Span::unstamped(start..end)),
-        },
+        }),
     ))
 }
 
@@ -1145,7 +1190,7 @@ fn parse_annotation_set(input: Input) -> IResult<Vec<SourceAnnotation>> {
     let (rest, annos) = separated_list0(ws(char(',')), parse_annotation).parse(rest)?;
     let (rest, _) = trivia0(rest)?;
     let (rest, _) = char('}').parse(rest)?;
-    Ok((rest, annos))
+    Ok((rest, annos.into_iter().flatten().collect()))
 }
 /// Replaces `source[target_range]` with `new_text`, re-parse the resulting
 /// source, and atomically update both `source` and `root` on success. On parse
@@ -2116,5 +2161,50 @@ synth = saw(220);";
         assert!(matches!(annos[0], Annotation::Keys));
         let annos = parse_one_annotation_set("#{level_db=0, keys}").unwrap();
         assert!(matches!(annos[1], Annotation::Keys));
+
+        // Loop, alone and combined.
+        let annos = parse_one_annotation_set("#{loop_after_beats=4}").unwrap();
+        assert!(matches!(annos[0], Annotation::LoopAfterBeats(4)));
+        let annos = parse_one_annotation_set("#{color=rgb(1,2,3), loop_after_beats=12}").unwrap();
+        assert!(matches!(annos[1], Annotation::LoopAfterBeats(12)));
+    }
+
+    #[test]
+    fn test_loop_after_beats_rejects_values_that_are_not_positive_integers() {
+        for value in ["0", "-1", "1.5", "four", ""] {
+            let errors = parse_one_annotation_set(&format!("#{{loop_after_beats={}}}", value))
+                .expect_err(value);
+            assert_eq!(
+                errors[0].message(),
+                format!(
+                    "loop_after_beats must be a positive whole number of beats, not `{}`",
+                    value
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn test_loop_after_beats_display_round_trips() {
+        let annos = parse_one_annotation_set("#{loop_after_beats=7}").unwrap();
+        assert_eq!(format!("{}", annos[0]), "loop_after_beats=7");
+    }
+
+    #[test]
+    fn test_loop_after_beats_with_keys_is_a_recoverable_error() {
+        let (bindings, errors) =
+            parse_module_unstamped::<u32>("#{keys, loop_after_beats=4}\nlead = 1;").unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0].message(),
+            "loop_after_beats can't be combined with keys"
+        );
+        // The loop is dropped and keys is kept.
+        let annos: Vec<&Annotation> = bindings[0]
+            .annotations
+            .iter()
+            .map(|sa| &sa.annotation)
+            .collect();
+        assert!(matches!(annos[..], [Annotation::Keys]));
     }
 }

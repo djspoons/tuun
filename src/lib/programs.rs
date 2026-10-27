@@ -254,6 +254,8 @@ pub struct Program {
     level_db: f32,
     /// The declared kind, from a `#{keys}` annotation (or its absence).
     kind: ProgramKind,
+    /// From a `#{loop_after_beats=N}` annotation.
+    loop_after_beats: Option<u32>,
     /// Result of the last evaluation recorded, which may be of an earlier text;
     /// `None` when never evaluated, when the last evaluation failed, or when it
     /// was of an empty text.
@@ -278,6 +280,7 @@ impl Program {
             color: None,
             level_db: 0.0,
             kind: ProgramKind::Waveform,
+            loop_after_beats: None,
             evaluated: None,
             evaluated_text: Arc::default(),
             history: EditHistory::default(),
@@ -302,6 +305,7 @@ impl Program {
         let mut color: Option<(u8, u8, u8)> = None;
         let mut level_db: f32 = 0.0;
         let mut kind = ProgramKind::Waveform;
+        let mut loop_after_beats: Option<u32> = None;
         for sa in &sb.annotations {
             match &sa.annotation {
                 expr::Annotation::Sliders(configs) => {
@@ -319,6 +323,9 @@ impl Program {
                 expr::Annotation::Keys => {
                     kind = ProgramKind::Keys;
                 }
+                expr::Annotation::LoopAfterBeats(n) => {
+                    loop_after_beats = Some(*n);
+                }
             }
         }
         if let expr::Binding::Definition(_, expr) = &sb.binding {
@@ -335,6 +342,7 @@ impl Program {
                     color,
                     level_db,
                     kind,
+                    loop_after_beats,
                     evaluated: None,
                     evaluated_text: Arc::default(),
                     history: EditHistory::default(),
@@ -371,6 +379,12 @@ impl Program {
     /// Returns the program's declared kind.
     pub fn kind(&self) -> ProgramKind {
         self.kind
+    }
+
+    /// Returns the number of beats after which a pending launch plays the
+    /// program again, or `None` when it plays once.
+    pub fn loop_after_beats(&self) -> Option<u32> {
+        self.loop_after_beats
     }
 
     /// Returns the program's output level in dB.
@@ -2451,6 +2465,18 @@ tone = saw(220);";
         let set = state_from(source);
         assert_eq!(set.programs()[0].text(), "saw(220)");
         assert!(set.programs()[1].is_empty());
+    }
+
+    #[test]
+    fn loop_after_beats_is_read_from_the_annotation() {
+        let source = "\
+#{loop_after_beats=3}
+kick = saw(60);
+#{level_db=0}
+tone = saw(220);";
+        let set = state_from(source);
+        assert_eq!(set.programs()[0].loop_after_beats(), Some(3));
+        assert_eq!(set.programs()[1].loop_after_beats(), None);
     }
 
     #[test]

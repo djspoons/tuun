@@ -737,6 +737,9 @@ pub enum Annotation {
     /// Marks the program as a keys instrument: its text must evaluate to a
     /// note function rather than a waveform.
     Keys,
+    /// Number of beats after which a pending launch of the program plays it
+    /// again. Always positive.
+    LoopAfterBeats(u32),
 }
 
 /// Renders a parameter value (`level_db`, slider `initial`/`min`/`max`, slider
@@ -783,6 +786,7 @@ impl Display for Annotation {
             Annotation::Level(v) => write!(f, "level_db={}", format_param(*v)),
             Annotation::SkipSlots(n) => write!(f, "skip_slots={}", n),
             Annotation::Keys => write!(f, "keys"),
+            Annotation::LoopAfterBeats(n) => write!(f, "loop_after_beats={}", n),
             Annotation::Sliders(sliders) => {
                 write!(f, "sliders=[")?;
                 for (i, s) in sliders.iter().enumerate() {
