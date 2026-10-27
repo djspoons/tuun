@@ -74,6 +74,7 @@ pub struct Renderer<'ttf> {
     font: Font<'ttf, 'static>,
     circle_font: Font<'ttf, 'static>,
     beat_font: Font<'ttf, 'static>,
+    glyph_font: Font<'ttf, 'static>,
 
     tempo: u32,
     beats_per_measure: u32,
@@ -81,7 +82,8 @@ pub struct Renderer<'ttf> {
 
     pub width: u32,
     pub height: u32,
-    prompt_width: u32,
+    // The space left of the slot numbers, for the prompt and gutter glyphs.
+    gutter_width: u32,
     line_height: u32,
     nav_width: u32,
 
@@ -108,6 +110,9 @@ pub struct Metrics {
 pub const FRAME_BUDGET: Duration = Duration::from_nanos(1_000_000_000 / 60);
 
 const FONT_PATH: &str = "/Library/Fonts/Arial Unicode.ttf";
+
+/// Extra gutter width beyond the prompt, for the gutter glyphs left of it.
+const GUTTER_PADDING: u32 = 24;
 
 impl<'ttf> Renderer<'ttf> {
     pub fn new(
@@ -141,6 +146,7 @@ impl<'ttf> Renderer<'ttf> {
         let font = ttf_context.load_font(FONT_PATH, 48).unwrap();
         let circle_font = ttf_context.load_font(FONT_PATH, 108).unwrap();
         let beat_font = ttf_context.load_font(FONT_PATH, 64).unwrap();
+        let glyph_font = ttf_context.load_font(FONT_PATH, 36).unwrap();
 
         let prompt_texture = make_texture(&font, INACTIVE_COLOR, &texture_creator, " ▸ ");
         let TextureQuery {
@@ -148,12 +154,13 @@ impl<'ttf> Renderer<'ttf> {
             height: line_height,
             ..
         } = prompt_texture.query();
+        let gutter_width = prompt_width + GUTTER_PADDING;
         let number_texture = make_texture(&font, INACTIVE_COLOR, &texture_creator, "① ");
         let TextureQuery {
             width: number_width,
             ..
         } = number_texture.query();
-        let nav_width = prompt_width + number_width;
+        let nav_width = gutter_width + number_width;
 
         Renderer {
             video_subsystem,
@@ -161,12 +168,13 @@ impl<'ttf> Renderer<'ttf> {
             font,
             circle_font,
             beat_font,
+            glyph_font,
             tempo,
             beats_per_measure,
             sample_rate,
             width,
             height,
-            prompt_width,
+            gutter_width,
             line_height,
             nav_width,
             last_message: String::new(),
@@ -268,7 +276,7 @@ impl<'ttf> Renderer<'ttf> {
                     &number_texture,
                     None,
                     Some(sdl2::rect::Rect::new(
-                        self.prompt_width as i32,
+                        self.gutter_width as i32,
                         y,
                         number_width,
                         self.line_height,
@@ -284,7 +292,15 @@ impl<'ttf> Renderer<'ttf> {
                 None => status
                     .has_pending(now, &WaveformSelector::ProgramPlayback(index))
                     .then_some((ACTIVE_COLOR, u8::MAX)),
-            };
+            }
+            // The installed keys instrument pulses in its own color.
+            .or_else(|| {
+                state
+                    .keys
+                    .as_ref()
+                    .is_some_and(|k| k.id == index)
+                    .then_some((program_color, beat_fade))
+            });
             if let Some((circle_color, circle_alpha)) = circle {
                 self.draw_circle(&texture_creator, circle_color, circle_alpha, y);
             }
@@ -302,25 +318,8 @@ impl<'ttf> Renderer<'ttf> {
                 self.draw_highlights(program.text(), &lit, program_color, y);
             }
 
-            // The active program's prompt is drawn below, per mode.
-            if active_program_index != index
-                && let Some(glyph) = gutter_glyph(program)
-            {
-                // TODO this isn't the right size
-                let glyph_texture =
-                    make_texture(&self.font, program_color, &texture_creator, glyph);
-                let TextureQuery {
-                    width: glyph_width,
-                    height: glyph_height,
-                    ..
-                } = glyph_texture.query();
-                self.canvas
-                    .copy(
-                        &glyph_texture,
-                        None,
-                        Some(sdl2::rect::Rect::new(0, y, glyph_width, glyph_height)),
-                    )
-                    .unwrap();
+            if let Some(glyph) = gutter_glyph(program) {
+                self.draw_gutter_glyph(&texture_creator, glyph, program_color, y);
             }
 
             match *mode {
@@ -421,14 +420,19 @@ impl<'ttf> Renderer<'ttf> {
                         };
                         let prompt_texture =
                             make_texture(&self.font, color, &texture_creator, " ▸ ");
+                        let TextureQuery {
+                            width: prompt_width,
+                            ..
+                        } = prompt_texture.query();
+                        // The prompt sits against the slot number.
                         self.canvas
                             .copy(
                                 &prompt_texture,
                                 None,
                                 Some(sdl2::rect::Rect::new(
-                                    0,
+                                    (self.gutter_width - prompt_width) as i32,
                                     y,
-                                    self.prompt_width,
+                                    prompt_width,
                                     self.line_height,
                                 )),
                             )
@@ -942,10 +946,49 @@ impl<'ttf> Renderer<'ttf> {
                 &circle_texture,
                 None,
                 Some(sdl2::rect::Rect::new(
-                    self.prompt_width as i32 - 20,
+                    self.gutter_width as i32 - 20,
                     y - 38,
                     circle_width,
                     circle_height,
+                )),
+            )
+            .unwrap();
+    }
+
+    /// Draws `glyph` in the gutter of the row at `y`, left of where the prompt
+    /// would be.
+    fn draw_gutter_glyph(
+        &mut self,
+        texture_creator: &TextureCreator<WindowContext>,
+        glyph: char,
+        color: Color,
+        y: i32,
+    ) {
+        let Some(ink) = self.glyph_font.find_glyph_metrics(glyph) else {
+            return;
+        };
+        // Center the glyph's ink between the window's edge and the prompt's
+        // ink, and on the slot numbers' ink. The prompt is " ▸ " against the
+        // slot number.
+        let prompt_left = self.gutter_width as i32 - self.text_width("▸ ")
+            + self.font.find_glyph_metrics('▸').map_or(0, |m| m.minx);
+        let x = (prompt_left - (ink.maxx - ink.minx)) / 2 - ink.minx;
+        let number_middle = self
+            .font
+            .find_glyph_metrics('1')
+            .map_or(0, |m| self.font.ascent() - (m.maxy + m.miny) / 2);
+        let glyph_middle = self.glyph_font.ascent() - (ink.maxy + ink.miny) / 2;
+        let texture = make_texture(&self.glyph_font, color, texture_creator, &glyph.to_string());
+        let TextureQuery { width, height, .. } = texture.query();
+        self.canvas
+            .copy(
+                &texture,
+                None,
+                Some(sdl2::rect::Rect::new(
+                    x,
+                    y + number_middle - glyph_middle,
+                    width,
+                    height,
                 )),
             )
             .unwrap();
@@ -1199,18 +1242,20 @@ pub fn strip_marks(
     strip
 }
 
-/// Returns whether the row of the program at `index` draws mark highlights in
-/// `mode` when the active program is at `active_program_index`.
-pub fn gutter_glyph(program: &Program) -> Option<&'static str> {
+/// Returns the glyph that marks `program`'s playback annotation in the gutter,
+/// if it has one.
+pub fn gutter_glyph(program: &Program) -> Option<char> {
     if program.loop_after_beats().is_some() {
-        Some(" ↻ ")
+        Some('↻')
     } else if program.kind() == ProgramKind::Keys {
-        Some(" ⌨ ")
+        Some('♫')
     } else {
         None
     }
 }
 
+/// Returns whether the row of the program at `index` draws mark highlights in
+/// `mode` when the active program is at `active_program_index`.
 pub fn highlights_row(mode: &Mode, active_program_index: usize, index: usize) -> bool {
     !(matches!(mode, Mode::Edit { .. }) && index == active_program_index)
 }
@@ -1643,7 +1688,7 @@ mod tests {
         )
         .expect("the fixture parses");
         let glyphs: Vec<_> = set.programs()[..3].iter().map(gutter_glyph).collect();
-        assert_eq!(glyphs, vec![Some(" ↻ "), Some(" ⌨ "), None]);
+        assert_eq!(glyphs, vec![Some('↻'), Some('♫'), None]);
     }
 
     #[test]
