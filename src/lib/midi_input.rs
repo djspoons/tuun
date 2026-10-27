@@ -77,7 +77,10 @@ pub fn classify(
                 programs.get(program_index)?;
                 Some(vec![match state.launch_mode {
                     actions::LaunchMode::Toggle => Action::ToggleProgramPlayback(program_index),
-                    actions::LaunchMode::Trigger => Action::StartProgramVoice(program_index),
+                    actions::LaunchMode::Trigger => Action::PlayProgram {
+                        program_index,
+                        launch: actions::Launch::Now,
+                    },
                 }])
             }
             // Top row does nothing in the keys-installer mode.
@@ -518,14 +521,20 @@ mod tests {
     }
 
     #[test]
-    fn classify_clip_launcher_top_pad_starts_a_voice_in_trigger_mode() {
+    fn classify_clip_launcher_top_pad_plays_now_in_trigger_mode() {
         let mut state = test_state(DawPadMode::ClipLauncher);
         state.launch_mode = actions::LaunchMode::Trigger;
         let actions = classify(&launchkey::Event::DAWTopPadDown { index: 0 }, &state)
             .expect("top pads classify in the clip launcher");
         assert!(
-            matches!(actions[0], Action::StartProgramVoice(0)),
-            "expected StartProgramVoice, got {:?}",
+            matches!(
+                actions[0],
+                Action::PlayProgram {
+                    program_index: 0,
+                    launch: actions::Launch::Now,
+                }
+            ),
+            "expected PlayProgram now, got {:?}",
             actions
         );
     }

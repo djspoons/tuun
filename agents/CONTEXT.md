@@ -31,8 +31,12 @@ A function from a key and a velocity to a pair of waveforms: the note-on that so
 _Avoid_: synth, patch, instrument
 
 **Voice**:
-One sounding instance of a program's waveform. A single program may have several voices sounding at once. A sequenceable program's voice is one hit of the waveform its pattern is built from, not the pattern — launching the pattern plays a voice per listed step.
+One sounding instance of a program's waveform. A single program may have several voices sounding at once. Launching a sequence plays one voice per listed step.
 _Avoid_: instance, playback, note
+
+**Pass**:
+One repetition of a launched program, from one start to the end of its pattern: a voice of its waveform, or for a sequence, a voice of each listed step and of the silent anchor that spans them. A looping program starts a pass every N beats, and passes may overlap.
+_Avoid_: play (as a noun), repetition, cycle
 
 **Step**:
 One element of a sequenceable program's `on_beats` list. Its value is the beat of the measure it plays on, so `[1, 2.5] | on_beats(w)` has two steps, not two beats.
@@ -114,9 +118,9 @@ _Avoid_: note, pad
 Playback scheduled to begin at a future moment in time (often a measure boundary), not yet sounding. Not armed, which is the recorder waiting for its start boundary.
 _Avoid_: queued, armed, scheduled, cued
 
-**Repeat**:
-The app-wide setting for whether a launched program plays again after one measure, after two, or not at all.
-_Avoid_: loop, looping, cycle
+**Loop**:
+A program's own setting, written as an annotation, for whether it plays again a given number of beats after it is launched, and keeps doing so until stopped. The count runs from the launch, not the measure start, so a loop may drift across measures; a pass still sounding when the next begins keeps sounding. A change to it takes hold at the program's next launch. A program without one plays once.
+_Avoid_: repeat, cycle
 
 **Installed keys instrument**:
 The one keys instrument that sounds when MIDI note-on and note-off events arrive, one voice per held key. Taken from a keys program; at most one is installed at a time.

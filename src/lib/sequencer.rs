@@ -50,7 +50,7 @@ impl Sequence {
         self.steps.iter().map(|(beat, _)| *beat)
     }
 
-    /// Returns the marks the step voice at `sixteenth` adds to
+    /// Returns the marks the step at `sixteenth` adds to
     /// [`Sequence::step_marks`]: the literal of each listed step in that
     /// sixteenth, current during every segment of the step waveform.
     pub fn step_literal_marks(&self, sixteenth: u8) -> Vec<trace_walk::Mark> {

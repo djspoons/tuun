@@ -111,8 +111,8 @@ pub enum LaunchMode {
     /// A press starts the program when it is silent and stops it when it is
     /// sounding.
     Toggle,
-    /// A press always starts another voice and never stops one, so repeated
-    /// presses layer.
+    /// A press always plays the program again, once, and never stops it, so
+    /// repeated presses layer.
     Trigger,
 }
 
@@ -311,18 +311,26 @@ pub enum Transport {
     Stop,
 }
 
+/// When a launch starts, which also decides whether it repeats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Launch {
+    /// At the beginning of the next measure, repeating per the app-wide
+    /// default.
+    Pending,
+    /// Immediately, playing once.
+    Now,
+}
+
 /// Things that can happen, emitted by handlers as pure data.
 #[derive(Debug)]
 pub enum Action {
     // --- playback ---
-    /// Play the program at `program_index` if it evaluates to a waveform.
-    /// Otherwise, do nothing.
-    ///
-    /// If `start_at_next_measure` is false, then play immediately.
+    /// Play the program at `program_index` as `launch` says, whether or not
+    /// it is already sounding. Does nothing if the program is the installed
+    /// keys instrument or isn't a waveform.
     PlayProgram {
         program_index: usize,
-        start_at_next_measure: bool,
-        repeat_after_measures: Option<u32>,
+        launch: Launch,
     },
     /// Immediately stop playback of the program waveform if it's playing.
     /// Otherwise, do nothing.
@@ -333,11 +341,6 @@ pub enum Action {
     /// Stop the program if it's playing; otherwise play it immediately. Does
     /// nothing if the program isn't a waveform.
     ToggleProgramPlayback(usize),
-    /// Start another voice of the program immediately, whether or not it is
-    /// already sounding. A sequenceable program's voice is one hit of the
-    /// waveform its pattern is built from, not the pattern. Does nothing if
-    /// the program is the installed keys instrument or isn't a waveform.
-    StartProgramVoice(usize),
     /// Remove the program's pending playback if there is one; otherwise queue
     /// it to play at the beginning of next measure (repeating per the app-wide
     /// default). Does nothing if the program isn't a waveform.
@@ -392,12 +395,11 @@ pub enum Action {
     EnterEditMode,
     /// Parse and evaluate the current program, updating its state and the
     /// source file. On success, return to Select mode; otherwise set the mode
-    /// to `mode_on_failure`. With `play`, then play the program from the next
-    /// measure, repeating every `repeat_after_measures` if given.
+    /// to `mode_on_failure`. With `play`, then play the program as that
+    /// launch says.
     EvaluateAndLeaveEditMode {
         mode_on_failure: Mode,
-        play: bool,
-        repeat_after_measures: Option<u32>,
+        play: Option<Launch>,
     },
     EnterSelectMode,
     EnterMoveSlidersMode,
@@ -535,10 +537,6 @@ pub enum Effect {
         start: player::Start,
         repeat_after_measures: Option<u32>,
     },
-    /// Send a Play command for one immediate, non-repeating voice of the
-    /// program at `program_index` — one hit of a sequenceable program's
-    /// pattern waveform, or any other program's whole waveform.
-    PlayProgramVoice(usize),
     /// Send a "stop" ramp for the program waveform.
     StopProgram(usize),
     /// Cancel the program's queued playback from the next cycle boundary
@@ -663,17 +661,14 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
     match action {
         Action::PlayProgram {
             program_index,
-            start_at_next_measure,
-            repeat_after_measures,
-        } => play_program_effects(
-            program_index,
-            if start_at_next_measure {
-                player::Start::NextMeasure
+            launch,
+        } => {
+            if state.keys.as_ref().is_some_and(|k| k.id == program_index) {
+                vec![]
             } else {
-                player::Start::Now
-            },
-            repeat_after_measures,
-        ),
+                launch_effects(state, program_index, launch)
+            }
+        }
         Action::StopProgram(i) => stop_program_effects(state, ctx, i),
         Action::RemovePendingProgram(i) => remove_pending_effects(state, ctx, i),
         Action::ToggleProgramPlayback(i) => {
@@ -685,14 +680,7 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             } else if state.keys.as_ref().is_some_and(|k| k.id == i) {
                 vec![]
             } else {
-                play_program_effects(i, player::Start::Now, None)
-            }
-        }
-        Action::StartProgramVoice(i) => {
-            if state.keys.as_ref().is_some_and(|k| k.id == i) {
-                vec![]
-            } else {
-                vec![Effect::PlayProgramVoice(i), Effect::UpdateSource(i)]
+                launch_effects(state, i, Launch::Now)
             }
         }
         Action::ToggleProgramPendingPlayback(i) => {
@@ -704,7 +692,7 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             } else if state.keys.as_ref().is_some_and(|k| k.id == i) {
                 vec![]
             } else {
-                play_program_effects(i, player::Start::NextMeasure, state.repeat_after_measures)
+                launch_effects(state, i, Launch::Pending)
             }
         }
 
@@ -804,18 +792,13 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
         Action::EvaluateAndLeaveEditMode {
             mode_on_failure,
             play,
-            repeat_after_measures,
         } => {
             let i = state.active_program_index;
             // The play reads the result, so it waits for it; the save does not,
             // so it runs now.
             let mut on_success = vec![Effect::SetMode(Mode::Select)];
-            if play {
-                on_success.push(Effect::PlayProgram {
-                    program_index: i,
-                    start: player::Start::NextMeasure,
-                    repeat_after_measures,
-                });
+            if let Some(launch) = play {
+                on_success.push(launch_effect(state, i, launch));
             }
             vec![
                 Effect::EvaluateProgram {
@@ -1106,7 +1089,6 @@ pub fn refused_by_ownership(
             i == owned && !state.keys.as_ref().is_some_and(|k| k.id == owned)
         }
         Action::PlayProgram { program_index, .. } => program_index == owned,
-        Action::StartProgramVoice(i) => i == owned,
         Action::Transport(Transport::Play) => true,
         // The toggles are refused only when they would start or queue.
         Action::ToggleProgramPlayback(i) => i == owned && !status.has_active(now, &playback),
@@ -1188,7 +1170,7 @@ fn transport_play_effects(state: &AppState, ctx: &Context) -> Vec<Effect> {
     {
         vec![]
     } else {
-        play_program_effects(i, player::Start::NextMeasure, state.repeat_after_measures)
+        launch_effects(state, i, Launch::Pending)
     }
 }
 
@@ -1404,18 +1386,25 @@ fn note_count(n: usize) -> String {
     }
 }
 
-/// Returns the effects that play the given program and persist its source.
-fn play_program_effects(
-    program_index: usize,
-    start: player::Start,
-    repeat_after_measures: Option<u32>,
-) -> Vec<Effect> {
+/// Returns the effect that plays the given program as `launch` says.
+// TODO do we need this and launch_effects?
+fn launch_effect(state: &AppState, program_index: usize, launch: Launch) -> Effect {
+    let (start, repeat_after_measures) = match launch {
+        Launch::Pending => (player::Start::NextMeasure, state.repeat_after_measures),
+        Launch::Now => (player::Start::Now, None),
+    };
+    Effect::PlayProgram {
+        program_index,
+        start,
+        repeat_after_measures,
+    }
+}
+
+/// Returns the effects that play the given program as `launch` says and
+/// persist its source.
+fn launch_effects(state: &AppState, program_index: usize, launch: Launch) -> Vec<Effect> {
     vec![
-        Effect::PlayProgram {
-            program_index,
-            start,
-            repeat_after_measures,
-        },
+        launch_effect(state, program_index, launch),
         Effect::UpdateSource(program_index),
     ]
 }
@@ -3513,45 +3502,84 @@ _ = saw(220);";
         );
     }
 
-    /// Where `ToggleProgramPlayback` would stop, `StartProgramVoice` layers.
+    /// Where `ToggleProgramPlayback` would stop, playing now layers another
+    /// play, once, without stopping the one already sounding.
     #[test]
-    fn start_program_voice_plays_even_when_already_active() {
+    fn play_program_now_layers_when_already_active() {
         let mut state = test_state();
+        state.repeat_after_measures = Some(2);
         let now = Instant::now();
         let status = status_with_start(now - Duration::from_secs(1));
-        let effects = apply_with_status(&mut state, &status, now, Action::StartProgramVoice(0));
+        let effects = apply_with_status(
+            &mut state,
+            &status,
+            now,
+            Action::PlayProgram {
+                program_index: 0,
+                launch: Launch::Now,
+            },
+        );
         assert!(
-            matches!(effects[0], Effect::PlayProgramVoice(0)),
-            "expected PlayProgramVoice, got {:?}",
+            matches!(
+                &effects[..],
+                [
+                    Effect::PlayProgram {
+                        program_index: 0,
+                        start: player::Start::Now,
+                        repeat_after_measures: None,
+                    },
+                    Effect::UpdateSource(0),
+                ]
+            ),
+            "expected one immediate PlayProgram, got {:?}",
             effects
         );
     }
 
-    /// A trigger launches one voice, never the decomposed pattern that
-    /// `PlayProgram` would launch for a sequenceable program.
+    /// A pending launch repeats per the app-wide default.
     #[test]
-    fn start_program_voice_never_launches_a_pattern() {
+    fn play_program_pending_repeats_per_the_default() {
         let mut state = test_state();
-        let effects = apply_with_empty_status(&mut state, Action::StartProgramVoice(0));
+        state.repeat_after_measures = Some(2);
+        let effects = apply_with_empty_status(
+            &mut state,
+            Action::PlayProgram {
+                program_index: 0,
+                launch: Launch::Pending,
+            },
+        );
         assert!(
-            !effects
-                .iter()
-                .any(|e| matches!(e, Effect::PlayProgram { .. })),
-            "expected no PlayProgram, got {:?}",
+            matches!(
+                effects[0],
+                Effect::PlayProgram {
+                    program_index: 0,
+                    start: player::Start::NextMeasure,
+                    repeat_after_measures: Some(2),
+                }
+            ),
+            "expected a pending PlayProgram, got {:?}",
             effects
         );
     }
 
     #[test]
-    fn start_program_voice_leaves_the_keys_instrument_alone() {
+    fn play_program_leaves_the_keys_instrument_alone() {
         let mut state = test_state();
         install_test_keys(&mut state);
-        let effects = apply_with_empty_status(&mut state, Action::StartProgramVoice(0));
-        assert!(
-            effects.is_empty(),
-            "expected no effects for the keys instrument, got {:?}",
-            effects
-        );
+        for launch in [Launch::Now, Launch::Pending] {
+            let effects = apply_with_empty_status(
+                &mut state,
+                Action::PlayProgram {
+                    program_index: 0,
+                    launch,
+                },
+            );
+            assert!(
+                effects.is_empty(),
+                "expected no effects for the keys instrument, got {:?}",
+                effects
+            );
+        }
     }
 
     #[test]
@@ -4204,10 +4232,12 @@ _ = saw(220);";
         for action in [
             Action::PlayProgram {
                 program_index: 0,
-                start_at_next_measure: true,
-                repeat_after_measures: None,
+                launch: Launch::Pending,
             },
-            Action::StartProgramVoice(0),
+            Action::PlayProgram {
+                program_index: 0,
+                launch: Launch::Now,
+            },
             Action::Transport(Transport::Play),
             Action::ToggleProgramPlayback(0),
             Action::ToggleProgramPendingPlayback(0),
@@ -4251,8 +4281,11 @@ _ = saw(220);";
         for action in [
             Action::PlayProgram {
                 program_index: 1,
-                start_at_next_measure: true,
-                repeat_after_measures: None,
+                launch: Launch::Pending,
+            },
+            Action::PlayProgram {
+                program_index: 1,
+                launch: Launch::Now,
             },
             Action::ToggleProgramPlayback(1),
         ] {
@@ -4269,12 +4302,6 @@ _ = saw(220);";
                 effects
             );
         }
-        let effects = apply_with_empty_status(&mut state, Action::StartProgramVoice(1));
-        assert!(
-            matches!(effects[0], Effect::PlayProgramVoice(1)),
-            "expected PlayProgramVoice, got {:?}",
-            effects
-        );
     }
 
     #[test]
@@ -4314,12 +4341,12 @@ _ = saw(220);";
     #[test]
     fn leaving_edit_mode_can_play_the_owned_program() {
         let mut state = editing_state();
+        state.repeat_after_measures = Some(2);
         let effects = apply_with_empty_status(
             &mut state,
             Action::EvaluateAndLeaveEditMode {
                 mode_on_failure: Mode::Select,
-                play: true,
-                repeat_after_measures: Some(2),
+                play: Some(Launch::Pending),
             },
         );
         // The mode stays Edit until the result arrives, and the play waits
@@ -4391,8 +4418,7 @@ _ = saw(220);";
             Action::Redo,
             Action::EvaluateAndLeaveEditMode {
                 mode_on_failure: Mode::Select,
-                play: true,
-                repeat_after_measures: None,
+                play: Some(Launch::Now),
             },
         ] {
             let effects = apply_with_empty_status(&mut state, action);
@@ -4477,9 +4503,24 @@ _ = saw(220);";
         }
         assert!(matches!(state.mode, Mode::Select));
 
-        let effects = apply_with_empty_status(&mut state, Action::StartProgramVoice(0));
+        let effects = apply_with_empty_status(
+            &mut state,
+            Action::PlayProgram {
+                program_index: 0,
+                launch: Launch::Now,
+            },
+        );
         assert!(
-            matches!(&effects[..], [Effect::PlayProgramVoice(0), ..]),
+            matches!(
+                &effects[..],
+                [
+                    Effect::PlayProgram {
+                        program_index: 0,
+                        ..
+                    },
+                    ..
+                ]
+            ),
             "got {:?}",
             effects
         );
@@ -5008,8 +5049,7 @@ _ = saw(220);";
             Action::EnterEditMode,
             Action::PlayProgram {
                 program_index: 1,
-                start_at_next_measure: false,
-                repeat_after_measures: None,
+                launch: Launch::Now,
             },
         ] {
             let effects = apply_at(&mut state, t0, 2.0, action);
