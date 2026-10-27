@@ -111,8 +111,8 @@ pub enum LaunchMode {
     /// A press starts the program when it is silent and stops it when it is
     /// sounding.
     Toggle,
-    /// A press always starts another voice and never stops one, so repeated
-    /// presses layer.
+    /// A press always plays the program again, once, and never stops it, so
+    /// repeated presses layer.
     Trigger,
 }
 

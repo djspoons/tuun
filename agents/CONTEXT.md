@@ -31,7 +31,7 @@ A function from a key and a velocity to a pair of waveforms: the note-on that so
 _Avoid_: synth, patch, instrument
 
 **Voice**:
-One sounding instance of a program's waveform. A single program may have several voices sounding at once. A sequenceable program's voice is one hit of the waveform its pattern is built from, not the pattern — launching the pattern plays a voice per listed step.
+One sounding instance of a program's waveform. A single program may have several voices sounding at once. Launching a sequence plays one voice per listed step.
 _Avoid_: instance, playback, note
 
 **Step**:
