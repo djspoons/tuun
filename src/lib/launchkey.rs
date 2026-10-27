@@ -101,6 +101,10 @@ pub enum Event {
     StopDown,
     /// The transport "record" button.
     RecordDown,
+    /// The transport "loop" button, pressed.
+    LoopDown,
+    /// The transport "loop" button, released.
+    LoopUp,
     /// The pad-navigation up arrow (left of the pads).
     PadPageUpDown,
     /// The pad-navigation down arrow (left of the pads).
@@ -191,6 +195,11 @@ const LAUNCH_CC: u8 = 104;
 /// The Record button. Its monochrome LED's brightness is set by sending the
 /// same CC back on `BRIGHTNESS_CHANNEL`.
 const RECORD_CC: u8 = 117;
+
+/// The Loop button. It sends 127 when pressed and 0 when released, and its
+/// white LED's brightness is set by sending the same CC back on
+/// `BRIGHTNESS_CHANNEL`.
+const LOOP_CC: u8 = 118;
 
 /// The channel (channel 4, 0-indexed) on which a monochrome LED's CC value is
 /// its brightness.
@@ -383,6 +392,11 @@ impl Launchkey {
         self.set_brightness(RECORD_CC, brightness);
     }
 
+    /// Sets the brightness of the Loop button's LED, from 0 (dim) to 127.
+    pub fn set_loop_brightness(&mut self, brightness: u8) {
+        self.set_brightness(LOOP_CC, brightness);
+    }
+
     /// Sets the brightness of the Metronome button's LED, from 0 (dim) to 127.
     pub fn set_metronome_brightness(&mut self, brightness: u8) {
         self.set_brightness(METRONOME_CC, brightness);
@@ -400,7 +414,8 @@ impl Launchkey {
         });
     }
 
-    pub fn set_daw_mode_display(&mut self, name: &str) {
+    /// Shows `name` above `text` on the device screen.
+    pub fn set_daw_mode_display(&mut self, name: &str, text: &str) {
         let mut buf = Vec::new();
         buf.extend(&STANDARD_SKU_PREFIX);
         buf.extend(&CONFIGURE_DISPLAY);
@@ -408,14 +423,15 @@ impl Launchkey {
         buf.push(DisplayArrangement::NameAndText as u8);
         self.send_sys_ex(&buf);
 
-        // Set field 0 (the name) to `name`.
-        buf.clear();
-        buf.extend(&STANDARD_SKU_PREFIX);
-        buf.extend(&SET_DISPLAY_TEXT_FIELD);
-        buf.push(DAW_MODE_DISPLAY_TARGET);
-        buf.push(0); // field
-        buf.extend(string_to_ascii(name));
-        self.send_sys_ex(&buf);
+        for (field, value) in [name, text].into_iter().enumerate() {
+            buf.clear();
+            buf.extend(&STANDARD_SKU_PREFIX);
+            buf.extend(&SET_DISPLAY_TEXT_FIELD);
+            buf.push(DAW_MODE_DISPLAY_TARGET);
+            buf.push(field as u8);
+            buf.extend(string_to_ascii(value));
+            self.send_sys_ex(&buf);
+        }
 
         // Trigger a redraw: setting the text above only stores it.
         buf.clear();
@@ -567,6 +583,8 @@ impl DAWState {
                         (116, 0) => None,
                         (RECORD_CC, 127) => Some(Event::RecordDown),
                         (RECORD_CC, 0) => None,
+                        (LOOP_CC, 127) => Some(Event::LoopDown),
+                        (LOOP_CC, 0) => Some(Event::LoopUp),
 
                         // Encoders in Relative output mode: each event
                         // on CC 55h-5Ch (85-92) carries `64 + delta`
@@ -1330,6 +1348,16 @@ mod tests {
             Some(Event::RecordDown)
         ));
         assert!(state.decode(&[0xB0, 117, 0]).is_none());
+    }
+
+    #[test]
+    fn loop_button_press_and_release_both_decode() {
+        let mut state = daw_state();
+        assert!(matches!(
+            state.decode(&[0xB0, 118, 127]),
+            Some(Event::LoopDown)
+        ));
+        assert!(matches!(state.decode(&[0xB0, 118, 0]), Some(Event::LoopUp)));
     }
 
     #[test]

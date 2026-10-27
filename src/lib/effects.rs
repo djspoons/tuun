@@ -127,6 +127,7 @@ impl EffectRunner {
             environment: &self.environment,
             source_stale: state.programs.disk_changed(),
             tempo: self.player.tempo(),
+            beats_per_measure: self.player.beats_per_measure(),
         };
         let mut all_effects = Vec::new();
         for action in actions {
@@ -603,9 +604,9 @@ impl EffectRunner {
                     lk.pad_mode = new_mode;
                 }
             }
-            Effect::SetDawModeDisplay(label) => {
+            Effect::SetDawModeDisplay { name, text } => {
                 if let Some(lk) = world.launchkey.as_deref_mut() {
-                    lk.set_daw_mode_display(&label);
+                    lk.set_daw_mode_display(&name, &text);
                 }
             }
 

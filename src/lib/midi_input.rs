@@ -60,6 +60,8 @@ pub fn classify(
         Event::RecordDown => Some(vec![Action::Transport(actions::Transport::Record)]),
         Event::PlayDown => Some(vec![Action::Transport(actions::Transport::Play)]),
         Event::StopDown => Some(vec![Action::Transport(actions::Transport::Stop)]),
+        Event::LoopDown => Some(vec![Action::HoldLoop]),
+        Event::LoopUp => Some(vec![Action::ReleaseLoop]),
 
         // The pad-navigation arrows page the sequencer grid through the
         // pattern's measures: down moves toward later beats.
@@ -71,6 +73,18 @@ pub fn classify(
             actions::DawPadMode::Sequencer => Some(vec![Action::ChangeSequencerPage(1)]),
             _ => Some(vec![]),
         },
+        // While Loop is held, the top row picks 1-8 beats and the bottom row
+        // 1-8 measures, whatever the sub-mode.
+        Event::DAWTopPadDown { index } if state.loop_hold.is_some() => {
+            Some(vec![Action::PickLoop(actions::LoopPad::Beats(
+                *index as u32 + 1,
+            ))])
+        }
+        Event::DAWBottomPadDown { index } if state.loop_hold.is_some() => {
+            Some(vec![Action::PickLoop(actions::LoopPad::Measures(
+                *index as u32 + 1,
+            ))])
+        }
         Event::DAWTopPadDown { index } => match state.daw_pad_mode {
             actions::DawPadMode::ClipLauncher => {
                 let program_index = bank_start + *index as usize;
@@ -158,11 +172,20 @@ pub fn update_launchkey_state(
         _ => 0,
     });
     launchkey.set_metronome_brightness(if state.metronome { U7_MAX } else { 0 });
+    launchkey.set_loop_brightness(if state.active_program().loop_after_beats().is_some() {
+        U7_MAX
+    } else {
+        0
+    });
 
     let bank_start = state.bank_start();
     if launchkey.pad_mode != launchkey::PadMode::DAW {
         // Some other pad layout (Drum, Custom, etc.) owns the pads —
         // leave the LEDs alone so we don't fight it.
+        return;
+    }
+    if state.loop_hold.is_some() {
+        update_pads_loop(state, launchkey, beats_per_measure);
         return;
     }
     match state.daw_pad_mode {
@@ -389,6 +412,36 @@ fn update_pads_keys_installer(
                 launchkey.set_daw_bottom_pad_color(i as u8, 0, 0, 0);
             }
         }
+    }
+}
+
+/// Updates the pads for the loop editor shown while Loop is held.
+///
+/// The top row is 1-8 beats and the bottom row 1-8 measures. Pads whose loop is
+/// the one shown are white, and the others are dim in the program's color. All
+/// pads are dark when the active program's loop can't be changed.
+fn update_pads_loop(
+    state: &actions::AppState,
+    launchkey: &mut launchkey::Launchkey,
+    beats_per_measure: u32,
+) {
+    let refused = actions::held_loop_refusal(state, state.programs.disk_changed()).is_some();
+    let shown = state.held_loop().flatten();
+    let (r, g, b) = program_pad_color(state.active_program());
+    let color = |pad: actions::LoopPad| {
+        if refused {
+            (0, 0, 0)
+        } else if shown == Some(pad.beats(beats_per_measure)) {
+            (U7_MAX, U7_MAX, U7_MAX)
+        } else {
+            (r / 4, g / 4, b / 4)
+        }
+    };
+    for index in 0..PROGRAMS_PER_BANK as u8 {
+        let (r, g, b) = color(actions::LoopPad::Beats(index as u32 + 1));
+        launchkey.set_daw_top_pad_color(index, r, g, b);
+        let (r, g, b) = color(actions::LoopPad::Measures(index as u32 + 1));
+        launchkey.set_daw_bottom_pad_color(index, r, g, b);
     }
 }
 
@@ -635,6 +688,38 @@ mod tests {
             assert!(matches!(actions[..], [Action::Undo]));
             let actions = classify(&launchkey::Event::RedoDown, &state).unwrap();
             assert!(matches!(actions[..], [Action::Redo]));
+        }
+    }
+
+    #[test]
+    fn pads_pick_a_loop_while_loop_is_held_in_every_sub_mode() {
+        for daw_pad_mode in [
+            DawPadMode::ClipLauncher,
+            DawPadMode::KeysInstaller,
+            DawPadMode::Sequencer,
+        ] {
+            let mut state = test_state(daw_pad_mode);
+            let actions = classify(&launchkey::Event::LoopDown, &state).unwrap();
+            assert!(matches!(actions[..], [Action::HoldLoop]));
+            state.loop_hold = Some(actions::LoopHold::default());
+            let actions = classify(&launchkey::Event::DAWTopPadDown { index: 2 }, &state).unwrap();
+            assert!(
+                matches!(actions[..], [Action::PickLoop(actions::LoopPad::Beats(3))]),
+                "got {:?}",
+                actions
+            );
+            let actions =
+                classify(&launchkey::Event::DAWBottomPadDown { index: 0 }, &state).unwrap();
+            assert!(
+                matches!(
+                    actions[..],
+                    [Action::PickLoop(actions::LoopPad::Measures(1))]
+                ),
+                "got {:?}",
+                actions
+            );
+            let actions = classify(&launchkey::Event::LoopUp, &state).unwrap();
+            assert!(matches!(actions[..], [Action::ReleaseLoop]));
         }
     }
 
