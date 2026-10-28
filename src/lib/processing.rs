@@ -7,7 +7,7 @@ use std::path;
 use std::sync::mpsc;
 use std::thread;
 
-use crate::diagnostics::Severity;
+use crate::diagnostics::{Diagnostic, Severity};
 use crate::environment::{CheckMode, Environment, ModuleTable};
 use crate::generator::Generator;
 use crate::programs::{Evaluated, EvaluationInput, Outcome, ProgramSet};
@@ -85,8 +85,9 @@ pub struct Loaded {
     /// The warning for recoverable parse errors (empty when the parse was
     /// clean).
     pub warning: String,
-    /// The indexes of the programs whose evaluation failed, in slot order.
-    pub failed: Vec<usize>,
+    /// The indexes of the programs whose evaluation failed, with their
+    /// diagnostics, in slot order.
+    pub failed: Vec<(usize, Vec<Diagnostic>)>,
 }
 
 /// Checks and evaluates the program `input` describes.
@@ -164,8 +165,8 @@ pub fn load(
         }
         let input = set.evaluation_input(index);
         let outcome = process(environment, &input, precompute);
-        if set.record(index, input.text.into(), outcome).is_err() {
-            failed.push(index);
+        if let Err(diagnostics) = set.record(index, input.text.into(), outcome) {
+            failed.push((index, diagnostics));
         }
     }
     Ok(Loaded {
@@ -454,7 +455,9 @@ mod tests {
         .expect("the source parses");
         assert_eq!(loaded.warning, "");
         // `bad` sits in slot 3, after the skipped slot.
-        assert_eq!(loaded.failed, vec![3]);
+        let failed: Vec<usize> = loaded.failed.iter().map(|(index, _)| *index).collect();
+        assert_eq!(failed, vec![3]);
+        assert!(!loaded.failed[0].1.is_empty());
         let programs = loaded.set.programs();
         assert!(programs[0].waveform().is_some());
         assert!(programs[1].keys_instrument().is_some());

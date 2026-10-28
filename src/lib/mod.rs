@@ -30,6 +30,8 @@ pub mod keys;
 #[cfg(feature = "native")]
 pub mod launchkey;
 #[cfg(feature = "native")]
+pub mod messages;
+#[cfg(feature = "native")]
 pub mod midi_input;
 #[cfg(feature = "native")]
 pub mod player;

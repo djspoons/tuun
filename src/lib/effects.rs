@@ -4,7 +4,6 @@
 //! controller). Keeping it separate from `actions.rs` means the reducer
 //! stays pure and easy to test.
 
-use std::mem;
 use std::sync::mpsc;
 use std::time::Instant;
 
@@ -17,6 +16,7 @@ use crate::expr;
 use crate::ids::{MarkId, WaveformId, WaveformSelector};
 use crate::keys::Keys;
 use crate::launchkey;
+use crate::messages::Severity;
 use crate::player;
 use crate::processing;
 use crate::programs::{self, PROGRAMS_PER_BANK};
@@ -104,8 +104,14 @@ impl EffectRunner {
         }
     }
 
-    /// Runs every effect against `state` and `world` in order.
+    /// Runs every effect against `state` and `world` in order, as one batch
+    /// of messages.
     pub fn run_all(&mut self, state: &mut AppState, world: &mut World, effects: Vec<Effect>) {
+        state.messages.begin_batch();
+        self.run_effects(state, world, effects);
+    }
+
+    fn run_effects(&mut self, state: &mut AppState, world: &mut World, effects: Vec<Effect>) {
         for effect in effects {
             self.run_one(state, world, effect);
         }
@@ -113,7 +119,7 @@ impl EffectRunner {
 
     /// Runs the full "actions → effects" cycle for one event: applies each
     /// action through the reducer (collecting effects) and then runs all
-    /// resulting effects in order.
+    /// resulting effects in order, all as one batch of messages.
     pub fn dispatch(
         &mut self,
         state: &mut AppState,
@@ -121,6 +127,7 @@ impl EffectRunner {
         actions: Vec<actions::Action>,
     ) {
         //println!("dispatch: actions = {:?}", actions);
+        state.messages.begin_batch();
         let ctx = actions::Context {
             status: world.status,
             now: Instant::now(),
@@ -134,7 +141,7 @@ impl EffectRunner {
             all_effects.extend(actions::apply(state, &ctx, action));
         }
         //println!("  -> effects = {:?}", all_effects);
-        self.run_all(state, world, all_effects);
+        self.run_effects(state, world, all_effects);
     }
 
     /// Applies `reply`, the processing thread's answer to the oldest job in
@@ -146,7 +153,10 @@ impl EffectRunner {
     /// gone and the whole reply is dropped.
     ///
     /// A loaded program set is installed (see [`EffectRunner::load`]).
+    ///
+    /// Messages posted while applying `reply` form one batch.
     pub fn finish(&mut self, state: &mut AppState, world: &mut World, reply: processing::Reply) {
+        state.messages.begin_batch();
         let outcome = match reply {
             processing::Reply::Program(outcome) => outcome,
             processing::Reply::Loaded(loaded) => {
@@ -172,8 +182,13 @@ impl EffectRunner {
             return;
         };
         // A pending load still owns the status line.
-        if state.message == actions::PROCESSING_MESSAGE && !state.is_loading() {
-            state.message = message;
+        if state
+            .messages
+            .current()
+            .is_some_and(|m| m.text == actions::PROCESSING_MESSAGE)
+            && !state.is_loading()
+        {
+            state.messages.restore(message);
         }
         // An older job's result still applies while a newer job for the same
         // text is on its way, so that each sequencer toggle schedules its
@@ -203,14 +218,12 @@ impl EffectRunner {
             Ok(warnings) => {
                 // Warnings are informational: the program plays regardless, and
                 // only the status line reports them.
-                if !warnings.is_empty() {
-                    state.message = diagnostics::error_message(&warnings);
-                }
-                self.run_all(state, world, on_success);
+                state.messages.post_diagnostics(&warnings);
+                self.run_effects(state, world, on_success);
             }
             Err(diagnostics) => {
-                state.message = diagnostics::error_message(&diagnostics);
-                self.run_all(state, world, on_failure);
+                state.messages.post_diagnostics(&diagnostics);
+                self.run_effects(state, world, on_failure);
                 // Hand the diagnostics to the editor, in whichever mode
                 // `on_failure` left, so evaluation errors highlight.
                 if let actions::Mode::Edit { errors, .. } = &mut state.mode {
@@ -241,10 +254,12 @@ impl EffectRunner {
             input_path: state.programs.input_path().to_path_buf(),
         };
         if self.jobs.send(job).is_err() {
-            state.message = "The processing thread has stopped".to_string();
+            state
+                .messages
+                .post(Severity::Error, "The processing thread has stopped");
             return;
         }
-        state.message = actions::PROCESSING_MESSAGE.to_string();
+        state.messages.hold(actions::PROCESSING_MESSAGE);
         state
             .processing
             .push_back(PendingJob::Load { startup, select });
@@ -266,7 +281,7 @@ impl EffectRunner {
         } = match loaded {
             Ok(loaded) => loaded,
             Err(message) => {
-                state.message = message;
+                state.messages.post(Severity::Error, message);
                 return;
             }
         };
@@ -293,29 +308,43 @@ impl EffectRunner {
         let _ = self
             .slider_sender
             .send(SliderEvent::SetBaselines(slider_values(&state.programs)));
+        // Each failure's full diagnostics go to the terminal; the summary
+        // posted last names the programs on the status line.
         let failed: Vec<String> = failed
             .into_iter()
-            .map(|i| state.programs.display_name(i))
+            .map(|(i, diagnostics)| {
+                let name = state.programs.display_name(i);
+                state.messages.post(
+                    Severity::Error,
+                    format!("{}: {}", name, diagnostics::error_message(&diagnostics)),
+                );
+                name
+            })
             .collect();
-        state.message = if startup {
+        if startup {
             // The parse warning would sit in the status line with nothing
             // saying which program it came from; each error resurfaces when
             // its program is evaluated interactively.
             if failed.is_empty() {
-                String::new()
+                state.messages.clear();
             } else {
-                format!("Errors in {}", failed.join(", "))
+                state
+                    .messages
+                    .post(Severity::Error, format!("Errors in {}", failed.join(", ")));
             }
         } else {
             let mut message = format!("Reloaded {}", state.programs.display_path());
+            let mut severity = Severity::Info;
             if !warning.is_empty() {
                 message = format!("{} — {}", message, warning);
+                severity = Severity::Warning;
             }
             if !failed.is_empty() {
                 message = format!("{} — failed: {}", message, failed.join(", "));
+                severity = Severity::Error;
             }
-            message
-        };
+            state.messages.post(severity, message);
+        }
     }
 
     fn run_one(&mut self, state: &mut AppState, world: &mut World, effect: Effect) {
@@ -336,7 +365,7 @@ impl EffectRunner {
                 if let Some(message) = message
                     && !matches!(start, player::Start::At(_))
                 {
-                    state.message = message;
+                    state.messages.post(Severity::Info, message);
                 }
             }
             Effect::PlaySequencerStep {
@@ -352,7 +381,7 @@ impl EffectRunner {
                     world.status,
                     &mut state.waveform_marks,
                 ) {
-                    state.message = message;
+                    state.messages.post(Severity::Info, message);
                 }
             }
             Effect::RemovePendingSequencerStep {
@@ -428,11 +457,12 @@ impl EffectRunner {
                 let input = state.programs.evaluation_input(program_index);
                 let text = input.text.as_str().into();
                 if self.jobs.send(processing::Job::Program(input)).is_err() {
-                    state.message = "The processing thread has stopped".to_string();
+                    state
+                        .messages
+                        .post(Severity::Error, "The processing thread has stopped");
                     return;
                 }
-                let message =
-                    mem::replace(&mut state.message, actions::PROCESSING_MESSAGE.to_string());
+                let message = state.messages.hold(actions::PROCESSING_MESSAGE);
                 state.processing.push_back(PendingJob::Program {
                     index: program_index,
                     generation,
@@ -449,7 +479,7 @@ impl EffectRunner {
                     return;
                 }
                 if let Err(message) = state.programs.splice(program_index) {
-                    state.message = message;
+                    state.messages.post(Severity::Error, message);
                 }
             }
 
@@ -459,12 +489,12 @@ impl EffectRunner {
                 select,
             } => match state.programs.write_skip_slots(program_index, skip_slots) {
                 Ok(source) => self.load(state, source, false, Some(select)),
-                Err(message) => state.message = message,
+                Err(message) => state.messages.post(Severity::Error, message),
             },
 
             Effect::ReloadSource => match state.programs.read_backing_file() {
                 Ok(source) => self.load(state, source, false, None),
-                Err(message) => state.message = message,
+                Err(message) => state.messages.post(Severity::Error, message),
             },
 
             Effect::InstallKeys(program_index) => {
@@ -477,19 +507,23 @@ impl EffectRunner {
                         note_off_waveforms: HashMap::new(),
                     };
                     state.keys = Some(new_keys);
-                    state.message = format!(
+                    let message = format!(
                         "Installed keys from program {}",
                         state.programs.display_name(program_index)
                     );
+                    state.messages.post(Severity::Info, message);
                 } else {
-                    state.message = match program.kind() {
-                        programs::ProgramKind::Waveform => {
-                            "Not a keys program (annotate it with #{keys})".to_string()
-                        }
-                        programs::ProgramKind::Keys => {
-                            "Keys program hasn't evaluated; fix its errors first".to_string()
-                        }
+                    let (severity, message) = match program.kind() {
+                        programs::ProgramKind::Waveform => (
+                            Severity::Info,
+                            "Not a keys program (annotate it with #{keys})",
+                        ),
+                        programs::ProgramKind::Keys => (
+                            Severity::Warning,
+                            "Keys program hasn't evaluated; fix its errors first",
+                        ),
                     };
+                    state.messages.post(severity, message);
                 }
             }
 
@@ -535,7 +569,7 @@ impl EffectRunner {
                             program.text(),
                             state.programs.source(),
                         );
-                        state.message = diagnostics::error_message(&[diagnostic]);
+                        state.messages.post_diagnostics(&[diagnostic]);
                     }
                 }
             }
@@ -572,8 +606,14 @@ impl EffectRunner {
             }
 
             Effect::SetMode(mode) => state.mode = mode,
-            Effect::ShowMessage(msg) => {
-                state.message = msg;
+            Effect::ShowMessage(severity, text) => {
+                state.messages.post(severity, text);
+            }
+            Effect::ClearMessage => {
+                state.messages.clear();
+            }
+            Effect::ShowProcessing => {
+                state.messages.hold(actions::PROCESSING_MESSAGE);
             }
 
             Effect::SetEncoderDisplay { index, name, value } => {
@@ -639,8 +679,10 @@ impl EffectRunner {
                                 );
                                 println!("note on: {:#?}", note_on);
                                 println!("note off: {:#?}", note_off);
-                                state.message =
-                                    format!("Printed program {} to console", display_name);
+                                state.messages.post(
+                                    Severity::Info,
+                                    format!("Printed program {} to console", display_name),
+                                );
                             }
                             Err(error) => {
                                 println!("Keys instrument of program {}:", display_name);
@@ -650,20 +692,24 @@ impl EffectRunner {
                                     state.programs.programs()[program_index].text(),
                                     state.programs.source(),
                                 );
-                                let message = diagnostics::error_message(&[diagnostic]);
-                                println!("Applying it at a sample note failed: {}", message);
-                                state.message = message;
+                                println!("Applying it at a sample note failed:");
+                                state.messages.post_diagnostics(&[diagnostic]);
                             }
                         }
                     }
                     Some(evaluated) => {
                         println!("Evaluated form of program {}:", display_name);
                         println!("{:#?}", evaluated);
-                        state.message = format!("Printed program {} to console", display_name);
+                        state.messages.post(
+                            Severity::Info,
+                            format!("Printed program {} to console", display_name),
+                        );
                     }
                     None => {
-                        println!("Program {} has no evaluated form", display_name);
-                        state.message = format!("Program {} has no evaluated form", display_name);
+                        state.messages.post(
+                            Severity::Info,
+                            format!("Program {} has no evaluated form", display_name),
+                        );
                     }
                 }
             }
@@ -725,6 +771,11 @@ mod tests {
     use crate::waveform;
 
     use super::*;
+
+    /// Returns the text of `state`'s current message, or "" when there is none.
+    fn current_message(state: &AppState) -> &str {
+        state.messages.current().map_or("", |m| m.text.as_str())
+    }
 
     /// Stands in for the processing thread: evaluates each job sent to
     /// `jobs`, including those the replies' effects send, and hands its reply
@@ -836,7 +887,7 @@ mod tests {
         assert!(
             state.keys.is_some(),
             "keys should install: {}",
-            state.message
+            current_message(&state)
         );
 
         runner.run_one(
@@ -913,7 +964,7 @@ mod tests {
             errors: vec![],
             completion: None,
         };
-        state.message = "before".to_string();
+        state.messages.post(Severity::Info, "before");
         let status = empty_status();
         let mut world = World {
             launchkey: None,
@@ -928,12 +979,12 @@ mod tests {
             }],
         );
         assert!(matches!(state.mode, actions::Mode::Edit { .. }));
-        assert_eq!(state.message, actions::PROCESSING_MESSAGE);
+        assert_eq!(current_message(&state), actions::PROCESSING_MESSAGE);
         assert!(state.is_processing(0));
 
         process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
         assert!(matches!(state.mode, actions::Mode::Select));
-        assert_eq!(state.message, "before");
+        assert_eq!(current_message(&state), "before");
         assert!(state.processing.is_empty());
         assert!(state.programs.programs()[0].waveform().is_some());
     }
@@ -976,9 +1027,9 @@ mod tests {
             state.mode
         );
         assert!(
-            state.message.contains("expected waveform"),
+            current_message(&state).contains("expected waveform"),
             "got: {}",
-            state.message
+            current_message(&state)
         );
     }
 
@@ -1037,17 +1088,71 @@ mod tests {
             &mut world,
             Effect::EvaluateProgram {
                 program_index: 0,
-                on_success: vec![Effect::ShowMessage("on_success ran".to_string())],
+                on_success: vec![Effect::ShowMessage(
+                    Severity::Info,
+                    "on_success ran".to_string(),
+                )],
                 on_failure: vec![Effect::SetMode(actions::Mode::MoveSliders)],
             },
         );
         process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
         assert!(matches!(state.mode, actions::Mode::MoveSliders));
         assert!(
-            state.message.contains("expected waveform"),
+            current_message(&state).contains("expected waveform"),
             "got: {}",
-            state.message
+            current_message(&state)
         );
+    }
+
+    /// A result's warning outranks the confirmation its `on_success` posts,
+    /// until the next batch. Every message is queued for echoing.
+    #[test]
+    fn a_warning_outranks_the_success_message_until_the_next_batch() {
+        let (mut runner, _command_receiver, job_receiver) = runner_with_jobs();
+        let mut state = AppState::from_source(
+            "#{level_db=0}\nw = let f = fn(x) => nth(2.5, [1, 2]) in time;\n".to_string(),
+            std::path::PathBuf::new(),
+        )
+        .expect("test source should parse");
+        let status = empty_status();
+        let mut world = World {
+            launchkey: None,
+            status: &status,
+        };
+        runner.run_one(
+            &mut state,
+            &mut world,
+            Effect::EvaluateProgram {
+                program_index: 0,
+                on_success: vec![Effect::ShowMessage(Severity::Info, "Playing".to_string())],
+                on_failure: vec![],
+            },
+        );
+        let mut environment = environment::Environment::new(44100, 90, std::path::PathBuf::new());
+        environment.set_check_mode(environment::CheckMode::Warnings);
+        let job = job_receiver.try_recv().expect("a job was sent");
+        runner.finish(&mut state, &mut world, reply_to(&environment, job));
+        assert_eq!(
+            state.messages.current().map(|m| m.severity),
+            Some(Severity::Warning),
+            "got: {}",
+            current_message(&state)
+        );
+
+        runner.run_all(
+            &mut state,
+            &mut world,
+            vec![Effect::ShowMessage(Severity::Info, "Done".to_string())],
+        );
+        assert_eq!(current_message(&state), "Done");
+        let echoed: Vec<String> = state
+            .messages
+            .take_unechoed()
+            .into_iter()
+            .map(|m| m.text)
+            .collect();
+        assert_eq!(echoed.len(), 3, "got {:?}", echoed);
+        assert_eq!(&echoed[1..], ["Playing", "Done"]);
     }
 
     /// A sequencer toggle whose evaluation fails leaves the error on the
@@ -1073,12 +1178,12 @@ mod tests {
             &mut world,
             vec![actions::Action::ToggleSequencerStep { sixteenth: 8 }],
         );
-        assert!(state.is_processing(0), "got: {}", state.message);
+        assert!(state.is_processing(0), "got: {}", current_message(&state));
         process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
         assert!(
-            state.message.contains("expected waveform"),
+            current_message(&state).contains("expected waveform"),
             "got: {}",
-            state.message
+            current_message(&state)
         );
     }
 
@@ -1182,7 +1287,7 @@ mod tests {
     fn a_result_for_replaced_text_is_dropped() {
         let (mut runner, _command_receiver, job_receiver) = runner_with_jobs();
         let mut state = tone_state();
-        state.message = "before".to_string();
+        state.messages.post(Severity::Info, "before");
         let status = empty_status();
         let mut world = World {
             launchkey: None,
@@ -1193,7 +1298,10 @@ mod tests {
             &mut world,
             Effect::EvaluateProgram {
                 program_index: 0,
-                on_success: vec![Effect::ShowMessage("on_success ran".to_string())],
+                on_success: vec![Effect::ShowMessage(
+                    Severity::Info,
+                    "on_success ran".to_string(),
+                )],
                 on_failure: vec![],
             },
         );
@@ -1206,7 +1314,7 @@ mod tests {
         process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
         assert!(state.processing.is_empty());
         assert!(state.programs.programs()[0].evaluated().is_none());
-        assert_eq!(state.message, "before");
+        assert_eq!(current_message(&state), "before");
     }
 
     /// An edit keeps the program playing its last result until the edit's
@@ -1283,7 +1391,7 @@ mod tests {
                 &mut world,
                 Effect::EvaluateProgram {
                     program_index: 0,
-                    on_success: vec![Effect::ShowMessage(message.to_string())],
+                    on_success: vec![Effect::ShowMessage(Severity::Info, message.to_string())],
                     on_failure: vec![],
                 },
             );
@@ -1296,7 +1404,7 @@ mod tests {
             };
             let outcome = processing::process(&environment, &input, false);
             runner.finish(&mut state, &mut world, processing::Reply::Program(outcome));
-            assert_eq!(state.message, message);
+            assert_eq!(current_message(&state), message);
             assert!(state.programs.programs()[0].waveform().is_some());
         }
         assert!(state.processing.is_empty());
@@ -1343,7 +1451,7 @@ mod tests {
         assert!(command_receiver.try_recv().is_err());
         assert!(state.keys.is_some());
         assert_eq!(state.programs.display_name(0), "A:1 (tone)");
-        assert_eq!(state.message, actions::PROCESSING_MESSAGE);
+        assert_eq!(current_message(&state), actions::PROCESSING_MESSAGE);
         assert!(state.is_loading());
 
         process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
@@ -1382,9 +1490,9 @@ mod tests {
         // The sweep evaluated the reloaded program.
         assert!(state.programs.programs()[0].waveform().is_some());
         assert!(
-            state.message.starts_with("Reloaded"),
+            current_message(&state).starts_with("Reloaded"),
             "got: {}",
-            state.message
+            current_message(&state)
         );
     }
 
@@ -1474,14 +1582,14 @@ mod tests {
         assert!(
             state.programs.programs()[0].keys_instrument().is_some(),
             "program should evaluate to a keys instrument: {}",
-            state.message
+            current_message(&state)
         );
 
         runner.run_one(&mut state, &mut world, Effect::PrintEvaluatedProgram(0));
         assert!(
-            state.message.starts_with("Printed program"),
+            current_message(&state).starts_with("Printed program"),
             "the sample note application should succeed, got: {}",
-            state.message
+            current_message(&state)
         );
     }
 
@@ -1512,7 +1620,7 @@ mod tests {
         assert!(job_receiver.try_recv().is_err());
         assert!(!state.is_loading());
         assert_eq!(state.programs.display_name(0), "A:1 (tone)");
-        assert!(!state.message.is_empty());
+        assert!(!current_message(&state).is_empty());
     }
 
     /// Returns a state over `source`, backed by a fresh temporary file named
@@ -1553,9 +1661,9 @@ mod tests {
         assert!(state.keys.is_some());
         assert_eq!(state.programs.display_name(0), "A:1 (tone)");
         assert!(
-            state.message.starts_with("Parse error"),
+            current_message(&state).starts_with("Parse error"),
             "got: {}",
-            state.message
+            current_message(&state)
         );
     }
 
@@ -1596,7 +1704,7 @@ mod tests {
         assert!(state.programs.programs()[0].waveform().is_some());
         assert!(command_receiver.try_recv().is_err(), "nothing stops yet");
         // The load still owns the status line.
-        assert_eq!(state.message, actions::PROCESSING_MESSAGE);
+        assert_eq!(current_message(&state), actions::PROCESSING_MESSAGE);
         assert!(state.is_loading());
 
         let job = job_receiver.try_recv().expect("the load's job");
@@ -1605,9 +1713,9 @@ mod tests {
         assert!(state.processing.is_empty());
         assert_eq!(state.programs.display_name(0), "A:1 (renamed)");
         assert!(
-            state.message.starts_with("Reloaded"),
+            current_message(&state).starts_with("Reloaded"),
             "got: {}",
-            state.message
+            current_message(&state)
         );
     }
 
@@ -1635,7 +1743,8 @@ mod tests {
         assert_eq!(on_disk, source);
     }
 
-    /// The load at startup reports only the programs that failed.
+    /// The load at startup names the failed programs on the status line and
+    /// echoes each one's errors.
     #[test]
     fn the_startup_load_names_the_failed_programs() {
         let (mut runner, _command_receiver, job_receiver) = runner_with_jobs();
@@ -1649,16 +1758,29 @@ mod tests {
             status: &status,
         };
         runner.load(&mut state, source.to_string(), true, None);
-        assert_eq!(state.message, actions::PROCESSING_MESSAGE);
+        assert_eq!(current_message(&state), actions::PROCESSING_MESSAGE);
         process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
-        assert_eq!(state.message, "Errors in A:2 (bad)");
+        assert_eq!(current_message(&state), "Errors in A:2 (bad)");
         assert!(state.programs.programs()[0].waveform().is_some());
+        // The failure's own error is echoed ahead of the summary.
+        let echoed: Vec<String> = state
+            .messages
+            .take_unechoed()
+            .into_iter()
+            .map(|m| m.text)
+            .collect();
+        assert!(
+            matches!(&echoed[..], [error, summary]
+                if error.starts_with("A:2 (bad): Error:") && summary == "Errors in A:2 (bad)"),
+            "got {:?}",
+            echoed
+        );
 
         // A clean set clears the status line.
         let clean = "#{level_db=0}\ngood = 1 | fin(time - 1);\n";
         runner.load(&mut state, clean.to_string(), true, None);
         process_jobs(&mut runner, &mut state, &mut world, &job_receiver);
-        assert_eq!(state.message, "");
+        assert_eq!(current_message(&state), "");
     }
 
     #[test]
@@ -1828,7 +1950,9 @@ mod tests {
             std::path::PathBuf::new(),
         )
         .expect("test source should parse");
-        state.message = "Recorded 1 note into A:1".to_string();
+        state
+            .messages
+            .post(Severity::Info, "Recorded 1 note into A:1");
         let status = empty_status();
         let mut world = World {
             launchkey: None,
@@ -1861,7 +1985,7 @@ mod tests {
         };
         assert_eq!(start, Some(at));
         assert_eq!(repeat_every, Some(std::time::Duration::from_secs(4)));
-        assert_eq!(state.message, "Recorded 1 note into A:1");
+        assert_eq!(current_message(&state), "Recorded 1 note into A:1");
     }
 
     /// A slider declared on one binding reaches a sounding voice of another

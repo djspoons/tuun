@@ -9,12 +9,13 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::diagnostics::{self, Diagnostic, Source};
+use crate::diagnostics::{Diagnostic, Source};
 use crate::environment;
 use crate::expr;
 use crate::ids::{ANCHOR_SIXTEENTH, MarkId, WaveformId, WaveformSelector};
 use crate::keys;
 use crate::launchkey;
+use crate::messages::{self, Severity};
 use crate::player;
 use crate::programs::{self, BoundTo, PROGRAMS_PER_BANK, Program};
 use crate::recorder::{self, Closed, Finish, Phase, Response, Take, Tick};
@@ -200,7 +201,7 @@ pub enum PendingJob {
         on_failure: Vec<Effect>,
         /// The status message replaced by [`PROCESSING_MESSAGE`] when the job
         /// was sent.
-        message: String,
+        message: Option<messages::Message>,
     },
     /// The load of a whole program set (`Effect::ReloadSource`, or startup).
     Load {
@@ -236,14 +237,9 @@ pub struct AppState {
     pub pending_prefix: Option<PrefixKey>,
     /// Set by `Effect::Quit`; `main` checks at top of loop and breaks.
     pub should_quit: bool,
-    /// Last user-visible status message. Set by `Effect::ShowMessage` (and
-    /// a few direct writes from the reducer / runner). Persists across
-    /// mode transitions; cleared explicitly by navigation actions.
-    ///
-    /// May be multi-line (e.g. an error followed by its source snippet):
-    /// the first line is the status-line summary, and single-line display
-    /// sites should show only that line.
-    pub message: String,
+    /// User-visible status messages. Navigation actions clear the current
+    /// message.
+    pub messages: messages::Messages,
     /// The jobs sent to the processing thread whose replies haven't been
     /// applied, in the order they were sent (the order replies arrive in).
     pub processing: VecDeque<PendingJob>,
@@ -262,7 +258,11 @@ impl AppState {
         source: String,
         input_path: std::path::PathBuf,
     ) -> Result<AppState, Vec<expr::Error<Source>>> {
-        let (programs, message) = programs::ProgramSet::from_source(source, input_path)?;
+        let (programs, warning) = programs::ProgramSet::from_source(source, input_path)?;
+        let mut messages = messages::Messages::default();
+        if !warning.is_empty() {
+            messages.post(Severity::Warning, warning);
+        }
         Ok(AppState {
             programs,
             active_program_index: 0,
@@ -275,7 +275,7 @@ impl AppState {
             scope_view: scope::ScopeView::Snapshot,
             pending_prefix: None,
             should_quit: false,
-            message,
+            messages,
             processing: VecDeque::new(),
             waveform_marks: HashMap::new(),
             loop_hold: None,
@@ -693,8 +693,13 @@ pub enum Effect {
     /// effect's outcome (see `EvaluateProgram`); otherwise the reducer sets
     /// `state.mode` itself.
     SetMode(Mode),
-    /// User-visible status message.
-    ShowMessage(String),
+    /// Post a user-visible status message.
+    ShowMessage(Severity, String),
+    /// Clear the current status message.
+    ClearMessage,
+    /// Show [`PROCESSING_MESSAGE`] until the next status message, without
+    /// echoing it.
+    ShowProcessing,
     /// Print the evaluated waveform of the program at the given index to
     /// stdout.
     ///
@@ -783,11 +788,10 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             state.sequencer_page = (state.sequencer_page as i16 + delta as i16)
                 .clamp(0, sequencer::MAX_PAGE as i16) as u8;
             let first_beat = state.sequencer_page as u32 * 4 + 1;
-            vec![Effect::ShowMessage(format!(
-                "Sequencer beats {}–{}",
-                first_beat,
-                first_beat + 3
-            ))]
+            vec![Effect::ShowMessage(
+                Severity::Info,
+                format!("Sequencer beats {}–{}", first_beat, first_beat + 3),
+            )]
         }
 
         Action::ToggleInstalledKeys(i) => apply_install_keys(state, i),
@@ -817,6 +821,7 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             // splice guard then has to refuse; reload first instead.
             if ctx.source_stale {
                 return vec![Effect::ShowMessage(
+                    Severity::Error,
                     "File changed on disk (reload before editing)".to_string(),
                 )];
             }
@@ -832,19 +837,20 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             let program = state.active_program();
             let cursor = program.text().len();
             let errors = parse_program_errors(program.text());
-            state.message = if !errors.is_empty() {
-                diagnostics::error_message(&errors)
-            } else if !program.sliders().configs().is_empty() {
-                program
-                    .sliders()
-                    .slider_display()
-                    .iter()
-                    .map(|s| format!("{}", s))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+            let sliders = program
+                .sliders()
+                .slider_display()
+                .iter()
+                .map(|s| format!("{}", s))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if !errors.is_empty() {
+                state.messages.post_diagnostics(&errors);
+            } else if !sliders.is_empty() {
+                state.messages.post(Severity::Info, sliders);
             } else {
-                String::new()
-            };
+                state.messages.clear();
+            }
             state.mode = Mode::Edit {
                 cursor_position: cursor,
                 errors,
@@ -874,7 +880,7 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
         }
         Action::EnterSelectMode => {
             state.mode = Mode::Select;
-            state.message.clear();
+            state.messages.clear();
             vec![]
         }
         Action::EnterMoveSlidersMode => {
@@ -884,11 +890,15 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
         Action::EnterKeysMode => {
             if state.keys.is_none() {
                 return vec![Effect::ShowMessage(
+                    Severity::Info,
                     "No keys instrument installed".to_string(),
                 )];
             }
             state.mode = Mode::Keys;
-            vec![Effect::ShowMessage("Piano keys enabled".to_string())]
+            vec![Effect::ShowMessage(
+                Severity::Info,
+                "Piano keys enabled".to_string(),
+            )]
         }
 
         Action::SelectProgram(i) => apply_select_program(state, ctx, i),
@@ -1043,7 +1053,7 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
                 } else {
                     label
                 };
-                effects.push(Effect::ShowMessage(message));
+                effects.push(Effect::ShowMessage(Severity::Info, message));
             }
             effects
         }
@@ -1053,28 +1063,28 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
                 LaunchMode::Toggle => LaunchMode::Trigger,
                 LaunchMode::Trigger => LaunchMode::Toggle,
             };
-            vec![Effect::ShowMessage(format!(
-                "Launch mode: {}",
-                state.launch_mode.display_name()
-            ))]
+            vec![Effect::ShowMessage(
+                Severity::Info,
+                format!("Launch mode: {}", state.launch_mode.display_name()),
+            )]
         }
 
         Action::ToggleScopeView => {
             state.scope_view = state.scope_view.toggled();
-            vec![Effect::ShowMessage(format!(
-                "Scope view: {}",
-                state.scope_view.display_name()
-            ))]
+            vec![Effect::ShowMessage(
+                Severity::Info,
+                format!("Scope view: {}", state.scope_view.display_name()),
+            )]
         }
 
         Action::ToggleMetronome => {
             state.metronome = !state.metronome;
             vec![
                 Effect::SetMetronome(state.metronome),
-                Effect::ShowMessage(format!(
-                    "Metronome {}",
-                    if state.metronome { "on" } else { "off" }
-                )),
+                Effect::ShowMessage(
+                    Severity::Info,
+                    format!("Metronome {}", if state.metronome { "on" } else { "off" }),
+                ),
             ]
         }
 
@@ -1103,19 +1113,21 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             if prefix == PrefixKey::Loop
                 && let Some(refusal) = loop_refusal(state, ctx.source_stale, i)
             {
-                return vec![Effect::ShowMessage(refusal)];
+                return vec![Effect::ShowMessage(Severity::Warning, refusal)];
             }
             state.pending_prefix = Some(prefix);
-            state.message = prefix.prompt(&state.programs.display_name(i));
+            state
+                .messages
+                .hold(prefix.prompt(&state.programs.display_name(i)));
             vec![]
         }
         Action::EndPrefix => {
             state.pending_prefix = None;
-            state.message.clear();
+            state.messages.clear();
             vec![]
         }
 
-        Action::ShowMessage(message) => vec![Effect::ShowMessage(message)],
+        Action::ShowMessage(message) => vec![Effect::ShowMessage(Severity::Info, message)],
         Action::PrintEvaluatedProgram(program_index) => {
             vec![Effect::PrintEvaluatedProgram(program_index)]
         }
@@ -1205,13 +1217,13 @@ fn refused_by_processing(state: &AppState, action: &Action) -> Option<Vec<Effect
                 | Action::ReloadSource
         )
     {
-        return Some(vec![Effect::ShowMessage(PROCESSING_MESSAGE.to_string())]);
+        return Some(vec![Effect::ShowProcessing]);
     }
     if !state.is_processing(state.active_program_index) {
         return None;
     }
     match action {
-        Action::EnterEditMode => Some(vec![Effect::ShowMessage(PROCESSING_MESSAGE.to_string())]),
+        Action::EnterEditMode => Some(vec![Effect::ShowProcessing]),
         Action::InsertText(_)
         | Action::DeleteCharBeforeCursor
         | Action::DeleteCharAfterCursor
@@ -1272,7 +1284,7 @@ fn apply_arm(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
     if !matches!(state.mode, Mode::Select) {
         return vec![];
     }
-    let refuse = |message: String| vec![Effect::ShowMessage(message)];
+    let refuse = |message: String| vec![Effect::ShowMessage(Severity::Warning, message)];
     let i = state.active_program_index;
     let Some(keys_program) = state.keys.as_ref().map(|k| k.id) else {
         return refuse("No keys instrument installed".to_string());
@@ -1300,7 +1312,10 @@ fn apply_arm(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
         ));
     }
     if ctx.source_stale {
-        return refuse("File changed on disk (reload before recording)".to_string());
+        return vec![Effect::ShowMessage(
+            Severity::Error,
+            "File changed on disk (reload before recording)".to_string(),
+        )];
     }
     let Some(start) = press_boundary(ctx) else {
         return vec![];
@@ -1313,7 +1328,7 @@ fn apply_arm(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
     // A queued playback would keep playing the old text through the take and
     // after the write.
     let mut effects = remove_pending_effects(state, ctx, i);
-    effects.push(Effect::ShowMessage(message));
+    effects.push(Effect::ShowMessage(Severity::Info, message));
     state.mode = Mode::Record { take, keys_program };
     effects
 }
@@ -1345,33 +1360,36 @@ fn apply_take_transport(state: &mut AppState, ctx: &Context, transport: Transpor
             if play {
                 transport_play_effects(state, ctx)
             } else {
-                vec![Effect::ShowMessage("Disarmed".to_string())]
+                vec![Effect::ShowMessage(Severity::Info, "Disarmed".to_string())]
             }
         }
         // The phrase isn't queued until the write, so the text a queue or an
         // un-queue would post is posted here.
         Response::Finishing { previous } => match (finish, previous) {
-            (Finish::Play, _) => vec![Effect::ShowMessage(player::play_message(
-                player::Played::Waveform,
-                &display_name,
-                state
-                    .programs
-                    .program(state.active_program_index)
-                    .and_then(|p| p.loop_after_beats()),
-            ))],
-            (Finish::Silent, Some(Finish::Play)) => vec![Effect::ShowMessage(format!(
-                "Removed pending waveform for program {}",
-                display_name
-            ))],
+            (Finish::Play, _) => vec![Effect::ShowMessage(
+                Severity::Info,
+                player::play_message(
+                    player::Played::Waveform,
+                    &display_name,
+                    state
+                        .programs
+                        .program(state.active_program_index)
+                        .and_then(|p| p.loop_after_beats()),
+                ),
+            )],
+            (Finish::Silent, Some(Finish::Play)) => vec![Effect::ShowMessage(
+                Severity::Info,
+                format!("Removed pending waveform for program {}", display_name),
+            )],
             (Finish::Silent, _) => vec![],
         },
         Response::Closed(closed) => write_take(state, ctx, keys_program, closed),
         Response::Discarded { notes } => {
             state.mode = Mode::Select;
-            vec![Effect::ShowMessage(format!(
-                "Discarded take ({})",
-                note_count(notes)
-            ))]
+            vec![Effect::ShowMessage(
+                Severity::Info,
+                format!("Discarded take ({})", note_count(notes)),
+            )]
         }
     }
 }
@@ -1384,11 +1402,14 @@ fn apply_take_tick(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
     let keys_program = *keys_program;
     match take.tick(ctx.now) {
         Tick::Waiting => vec![],
-        Tick::Started => vec![Effect::ShowMessage(format!(
-            "Recording {} into {}",
-            take.keys_name(),
-            state.programs.display_name(state.active_program_index)
-        ))],
+        Tick::Started => vec![Effect::ShowMessage(
+            Severity::Info,
+            format!(
+                "Recording {} into {}",
+                take.keys_name(),
+                state.programs.display_name(state.active_program_index)
+            ),
+        )],
         Tick::Closed(closed) => write_take(state, ctx, keys_program, closed),
     }
 }
@@ -1411,7 +1432,10 @@ fn write_take(
     // program as it would outside a take.
     state.mode = Mode::Select;
     if closed.notes == 0 {
-        let mut effects = vec![Effect::ShowMessage("Nothing recorded".to_string())];
+        let mut effects = vec![Effect::ShowMessage(
+            Severity::Info,
+            "Nothing recorded".to_string(),
+        )];
         if closed.finish == Finish::Play {
             effects.extend(transport_play_effects(state, ctx));
         }
@@ -1443,11 +1467,14 @@ fn write_take(
         // Posted first so that an evaluation error or a refused save, which
         // set their own message, stay on screen. A play from an instant
         // posts nothing, so this is still the last message on success.
-        Effect::ShowMessage(format!(
-            "Recorded {} into {}",
-            note_count(closed.notes),
-            display_name
-        )),
+        Effect::ShowMessage(
+            Severity::Info,
+            format!(
+                "Recorded {} into {}",
+                note_count(closed.notes),
+                display_name
+            ),
+        ),
         Effect::EvaluateProgram {
             program_index: i,
             on_success,
@@ -1509,10 +1536,10 @@ fn stop_program_effects(state: &AppState, ctx: &Context, i: usize) -> Vec<Effect
     }
     vec![
         Effect::StopProgram(i),
-        Effect::ShowMessage(format!(
-            "Stopped program {}",
-            state.programs.display_name(i)
-        )),
+        Effect::ShowMessage(
+            Severity::Info,
+            format!("Stopped program {}", state.programs.display_name(i)),
+        ),
         Effect::UpdateSource(i),
     ]
 }
@@ -1531,10 +1558,13 @@ fn remove_pending_effects(state: &AppState, ctx: &Context, i: usize) -> Vec<Effe
     }
     vec![
         Effect::RemovePendingProgram(i),
-        Effect::ShowMessage(format!(
-            "Removed pending waveform for program {}",
-            state.programs.display_name(i)
-        )),
+        Effect::ShowMessage(
+            Severity::Info,
+            format!(
+                "Removed pending waveform for program {}",
+                state.programs.display_name(i)
+            ),
+        ),
         Effect::UpdateSource(i),
     ]
 }
@@ -1548,7 +1578,7 @@ fn apply_select_program(state: &mut AppState, ctx: &Context, i: usize) -> Vec<Ef
     // Replace the previous status with the newly-selected program's
     // selection message. Navigation represents a fresh context, so any prior
     // "Removed pending..." / "Playing..." etc. shouldn't carry over.
-    let mut effects = vec![Effect::ShowMessage(state.programs.selection_message(i))];
+    let mut effects = vec![selection_effect(state, i)];
     if changed {
         effects.push(Effect::SyncEncoders);
         // While Loop is held, the pads move on to the new program and drop
@@ -1572,6 +1602,7 @@ fn apply_toggle_sequencer_step(state: &mut AppState, ctx: &Context, sixteenth: u
     // A toggle both edits and persists; refuse on top of external changes.
     if ctx.source_stale {
         return vec![Effect::ShowMessage(
+            Severity::Error,
             "File changed on disk (reload before editing)".to_string(),
         )];
     }
@@ -1581,10 +1612,13 @@ fn apply_toggle_sequencer_step(state: &mut AppState, ctx: &Context, sixteenth: u
         return vec![];
     };
     let Some(shape) = sequencer::analyze(program.text()) else {
-        return vec![Effect::ShowMessage(format!(
-            "{} is not sequenceable (expected [steps] | on_beats(w))",
-            display_name
-        ))];
+        return vec![Effect::ShowMessage(
+            Severity::Info,
+            format!(
+                "{} is not sequenceable (expected [steps] | on_beats(w))",
+                display_name
+            ),
+        )];
     };
     let edit = sequencer::toggle_sixteenth_text(program.text(), &shape, sixteenth);
 
@@ -1600,12 +1634,15 @@ fn apply_toggle_sequencer_step(state: &mut AppState, ctx: &Context, sixteenth: u
     // The message waits for success so that a failure's error stays on screen,
     // and the play because it reads the result. A removal reads nothing, so it
     // runs either way.
-    let mut on_success = vec![Effect::ShowMessage(format!(
-        "{} beat {} {}",
-        display_name,
-        edit.beat,
-        if edit.turned_on { "on" } else { "off" }
-    ))];
+    let mut on_success = vec![Effect::ShowMessage(
+        Severity::Info,
+        format!(
+            "{} beat {} {}",
+            display_name,
+            edit.beat,
+            if edit.turned_on { "on" } else { "off" }
+        ),
+    )];
     let mut on_failure = Vec::new();
     if live {
         // Steps already playing keep repeating without another Play, so their
@@ -1674,7 +1711,7 @@ fn apply_install_keys(state: &mut AppState, program_index: usize) -> Vec<Effect>
                 mark_id: MarkId::Terminator,
                 waveform: player::stop_ramp(),
             },
-            Effect::ShowMessage("Uninstalled keys".to_string()),
+            Effect::ShowMessage(Severity::Info, "Uninstalled keys".to_string()),
         ];
     }
     vec![Effect::InstallKeys(program_index)]
@@ -1688,16 +1725,25 @@ fn apply_toggle_keys_annotation(
 ) -> Vec<Effect> {
     let name = state.programs.display_name(program_index);
     if state.programs.skip_slots(program_index).is_none() {
-        return vec![Effect::ShowMessage(format!("{} is empty", name))];
+        return vec![Effect::ShowMessage(
+            Severity::Info,
+            format!("{} is empty", name),
+        )];
     }
     if ctx.source_stale {
-        return vec![Effect::ShowMessage(state.programs.stale_message())];
+        return vec![Effect::ShowMessage(
+            Severity::Warning,
+            state.programs.stale_message(),
+        )];
     }
     let Some(program) = state.programs.program_mut(program_index) else {
         return vec![];
     };
     if program.loop_after_beats().is_some() {
-        return vec![Effect::ShowMessage(format!("Remove {}'s loop first", name))];
+        return vec![Effect::ShowMessage(
+            Severity::Info,
+            format!("Remove {}'s loop first", name),
+        )];
     }
     let mut effects = vec![];
     let message = match program.kind() {
@@ -1720,7 +1766,7 @@ fn apply_toggle_keys_annotation(
         }
     };
     effects.extend([
-        Effect::ShowMessage(message),
+        Effect::ShowMessage(Severity::Info, message),
         Effect::EvaluateProgram {
             program_index,
             on_success: vec![],
@@ -1729,6 +1775,17 @@ fn apply_toggle_keys_annotation(
         Effect::UpdateSource(program_index),
     ]);
     effects
+}
+
+/// Returns the effect that shows the selection message of the program at
+/// `index`, or clears the message when it has none.
+fn selection_effect(state: &AppState, index: usize) -> Effect {
+    let message = state.programs.selection_message(index);
+    if message.is_empty() {
+        Effect::ClearMessage
+    } else {
+        Effect::ShowMessage(Severity::Info, message)
+    }
 }
 
 /// Returns why the loop of the program at `program_index` can't be changed: the
@@ -1769,7 +1826,7 @@ fn apply_set_loop_after_beats(
     beats: Option<u32>,
 ) -> Vec<Effect> {
     if let Some(refusal) = loop_refusal(state, ctx.source_stale, program_index) {
-        return vec![Effect::ShowMessage(refusal)];
+        return vec![Effect::ShowMessage(Severity::Info, refusal)];
     }
     let name = state.programs.display_name(program_index);
     let Some(program) = state.programs.program_mut(program_index) else {
@@ -1780,7 +1837,7 @@ fn apply_set_loop_after_beats(
     let playing =
         ctx.status.has_active(ctx.now, &playback) || ctx.status.has_pending(ctx.now, &playback);
     vec![
-        Effect::ShowMessage(loop_message(&name, beats, playing)),
+        Effect::ShowMessage(Severity::Info, loop_message(&name, beats, playing)),
         Effect::UpdateSource(program_index),
     ]
 }
@@ -1814,7 +1871,7 @@ fn held_loop_effects(state: &AppState, source_stale: bool) -> Vec<Effect> {
     };
     vec![
         Effect::SetDawModeDisplay { name, text },
-        Effect::ShowMessage(message),
+        Effect::ShowMessage(Severity::Info, message),
     ]
 }
 
@@ -1843,17 +1900,17 @@ fn apply_release_loop(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
     }];
     let i = state.active_program_index;
     if let Some(refusal) = held_loop_refusal(state, ctx.source_stale) {
-        effects.push(Effect::ShowMessage(refusal));
+        effects.push(Effect::ShowMessage(Severity::Info, refusal));
         return effects;
     }
     match hold.picked {
         Some(_) if state.is_loading() => {
-            effects.push(Effect::ShowMessage(PROCESSING_MESSAGE.to_string()));
+            effects.push(Effect::ShowProcessing);
         }
         Some(beats) if hold.program_index == i => {
             effects.extend(apply_set_loop_after_beats(state, ctx, i, beats));
         }
-        _ => effects.push(Effect::ShowMessage(state.programs.selection_message(i))),
+        _ => effects.push(selection_effect(state, i)),
     }
     effects
 }
@@ -1867,23 +1924,32 @@ fn apply_change_skip_slots(
 ) -> Vec<Effect> {
     let name = state.programs.display_name(program_index);
     let Some(skip_slots) = state.programs.skip_slots(program_index) else {
-        return vec![Effect::ShowMessage(format!("{} is empty", name))];
+        return vec![Effect::ShowMessage(
+            Severity::Info,
+            format!("{} is empty", name),
+        )];
     };
     if ctx.source_stale {
-        return vec![Effect::ShowMessage(state.programs.stale_message())];
+        return vec![Effect::ShowMessage(
+            Severity::Warning,
+            state.programs.stale_message(),
+        )];
     }
     let Some(new_skip_slots) = skip_slots.checked_add_signed(delta) else {
-        return vec![Effect::ShowMessage(format!(
-            "Can't move {} up: no empty slot above it",
-            name
-        ))];
+        return vec![Effect::ShowMessage(
+            Severity::Info,
+            format!("Can't move {} up: no empty slot above it", name),
+        )];
     };
     let last_slot = state.programs.last_slot().unwrap_or(program_index);
     if last_slot as i64 + delta as i64 >= state.programs.programs().len() as i64 {
-        return vec![Effect::ShowMessage(format!(
-            "Can't move {} down: a program would pass the last slot",
-            name
-        ))];
+        return vec![Effect::ShowMessage(
+            Severity::Info,
+            format!(
+                "Can't move {} down: a program would pass the last slot",
+                name
+            ),
+        )];
     }
     vec![Effect::MoveProgram {
         program_index,
@@ -1965,6 +2031,7 @@ fn apply_complete(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
             return apply_parameter_hint(state, ctx, cursor);
         }
         return vec![Effect::ShowMessage(
+            Severity::Info,
             "Nothing to complete (the cursor must follow an identifier or \"(\")".to_string(),
         )];
     }
@@ -1977,7 +2044,12 @@ fn apply_complete(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
         .program_context(&state.programs, state.active_program_index)
     {
         Ok(context) => context,
-        Err(error) => return vec![Effect::ShowMessage(format!("Can't complete: {}", error))],
+        Err(error) => {
+            return vec![Effect::ShowMessage(
+                Severity::Info,
+                format!("Can't complete: {}", error),
+            )];
+        }
     };
     // A fragment after a `.` is a projection name and completes only among
     // the qualifying module's bindings — when the qualifier doesn't resolve
@@ -1994,14 +2066,15 @@ fn apply_complete(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
                 .collect(),
             None if path.is_empty() => {
                 return vec![Effect::ShowMessage(
+                    Severity::Info,
                     "Nothing to complete (no module name before '.')".to_string(),
                 )];
             }
             None => {
-                return vec![Effect::ShowMessage(format!(
-                    "\"{}\" is not a module",
-                    path.join(".")
-                ))];
+                return vec![Effect::ShowMessage(
+                    Severity::Info,
+                    format!("\"{}\" is not a module", path.join(".")),
+                )];
             }
         },
         None => {
@@ -2026,7 +2099,7 @@ fn apply_complete(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
             ),
             None => format!("No completions for \"{}\"", fragment),
         };
-        return vec![Effect::ShowMessage(message)];
+        return vec![Effect::ShowMessage(Severity::Info, message)];
     }
 
     let replacement = candidates[0].clone();
@@ -2087,6 +2160,7 @@ fn apply_show_type(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
     let text = state.active_program().text();
     let Some(token) = token_at(text, cursor) else {
         return vec![Effect::ShowMessage(
+            Severity::Info,
             "No name or operator under the cursor".to_string(),
         )];
     };
@@ -2095,8 +2169,14 @@ fn apply_show_type(state: &mut AppState, ctx: &Context) -> Vec<Effect> {
         .environment
         .type_at(&state.programs, state.active_program_index, token.start)
     {
-        Some(ty) => vec![Effect::ShowMessage(format!("{} : {}", name, ty))],
-        None => vec![Effect::ShowMessage(format!("No type for \"{}\"", name))],
+        Some(ty) => vec![Effect::ShowMessage(
+            Severity::Info,
+            format!("{} : {}", name, ty),
+        )],
+        None => vec![Effect::ShowMessage(
+            Severity::Info,
+            format!("No type for \"{}\"", name),
+        )],
     }
 }
 
@@ -2111,7 +2191,10 @@ fn apply_parameter_hint(state: &mut AppState, ctx: &Context, cursor: usize) -> V
     let name_start = head.trim_end_matches(is_word_char).len();
     let name = head[name_start..].to_string();
     if name.is_empty() {
-        return vec![Effect::ShowMessage("Nothing to complete".to_string())];
+        return vec![Effect::ShowMessage(
+            Severity::Info,
+            "Nothing to complete".to_string(),
+        )];
     }
     let qualifier = projection_qualifier(head, name_start);
     let context = match ctx
@@ -2119,7 +2202,12 @@ fn apply_parameter_hint(state: &mut AppState, ctx: &Context, cursor: usize) -> V
         .program_context(&state.programs, state.active_program_index)
     {
         Ok(context) => context,
-        Err(error) => return vec![Effect::ShowMessage(format!("Can't complete: {}", error))],
+        Err(error) => {
+            return vec![Effect::ShowMessage(
+                Severity::Info,
+                format!("Can't complete: {}", error),
+            )];
+        }
     };
     // A name qualified by a projection (`pm.osc(`) is looked up in that
     // module's bindings — a `.` whose qualifier doesn't resolve to a module
@@ -2132,28 +2220,34 @@ fn apply_parameter_hint(state: &mut AppState, ctx: &Context, cursor: usize) -> V
                 match entries.iter().find(|(n, _)| *n == name) {
                     Some((_, value)) => (display, value),
                     None => {
-                        return vec![Effect::ShowMessage(format!(
-                            "\"{}\" is not defined",
-                            display
-                        ))];
+                        return vec![Effect::ShowMessage(
+                            Severity::Info,
+                            format!("\"{}\" is not defined", display),
+                        )];
                     }
                 }
             }
             None if path.is_empty() => {
                 return vec![Effect::ShowMessage(
+                    Severity::Info,
                     "Nothing to complete (no module name before '.')".to_string(),
                 )];
             }
             None => {
-                return vec![Effect::ShowMessage(format!(
-                    "\"{}\" is not a module",
-                    path.join(".")
-                ))];
+                return vec![Effect::ShowMessage(
+                    Severity::Info,
+                    format!("\"{}\" is not a module", path.join(".")),
+                )];
             }
         },
         None => match context.iter().rev().find(|(n, _)| *n == name) {
             Some((_, value)) => (name.clone(), value),
-            None => return vec![Effect::ShowMessage(format!("\"{}\" is not defined", name))],
+            None => {
+                return vec![Effect::ShowMessage(
+                    Severity::Info,
+                    format!("\"{}\" is not defined", name),
+                )];
+            }
         },
     };
     match &value.expr {
@@ -2179,14 +2273,14 @@ fn apply_parameter_hint(state: &mut AppState, ctx: &Context, cursor: usize) -> V
         }
         // TODO built-ins don't carry parameter names or arity; give BuiltIn
         // signature metadata so calls like `phase(` can be hinted too.
-        expr::Expr::BuiltIn { name, .. } => vec![Effect::ShowMessage(format!(
-            "No parameter hint for built-in \"{}\"",
-            name
-        ))],
-        _ => vec![Effect::ShowMessage(format!(
-            "\"{}\" is not a function",
-            display
-        ))],
+        expr::Expr::BuiltIn { name, .. } => vec![Effect::ShowMessage(
+            Severity::Info,
+            format!("No parameter hint for built-in \"{}\"", name),
+        )],
+        _ => vec![Effect::ShowMessage(
+            Severity::Info,
+            format!("\"{}\" is not a function", display),
+        )],
     }
 }
 
@@ -2218,7 +2312,10 @@ fn apply_history_restore(
         .program_mut(state.active_program_index)
         .unwrap();
     let Some(new_cursor) = restore(program, cursor) else {
-        return vec![Effect::ShowMessage(empty_message.to_string())];
+        return vec![Effect::ShowMessage(
+            Severity::Info,
+            empty_message.to_string(),
+        )];
     };
     if let Mode::Edit {
         cursor_position,
@@ -2230,7 +2327,7 @@ fn apply_history_restore(
         *completion = None;
     }
     refresh_edit_errors(state);
-    state.message.clear();
+    state.messages.clear();
     vec![]
 }
 
@@ -2251,6 +2348,7 @@ fn apply_committed_history_restore(
     // A restore both edits and persists; refuse on top of external changes.
     if ctx.source_stale {
         return vec![Effect::ShowMessage(
+            Severity::Error,
             "File changed on disk (reload before editing)".to_string(),
         )];
     }
@@ -2264,7 +2362,10 @@ fn apply_committed_history_restore(
     let cursor = program.text().len();
     let old_text = program.text().to_string();
     if restore(program, cursor).is_none() {
-        return vec![Effect::ShowMessage(empty_message.to_string())];
+        return vec![Effect::ShowMessage(
+            Severity::Info,
+            empty_message.to_string(),
+        )];
     }
     // Playing steps repeat independently of the text, so bring them in line
     // with the restored step list. A play reads the result, so it waits for
@@ -2295,7 +2396,10 @@ fn apply_committed_history_restore(
     vec![
         // Posted first so that an evaluation error or a refused save, which
         // set their own message, stay on screen.
-        Effect::ShowMessage(format!("{} change to {}", verb, display_name)),
+        Effect::ShowMessage(
+            Severity::Info,
+            format!("{} change to {}", verb, display_name),
+        ),
         Effect::EvaluateProgram {
             program_index: i,
             on_success,
@@ -2383,7 +2487,7 @@ fn edit_text_op(
             *completion = None;
         }
         refresh_edit_errors(state);
-        state.message.clear();
+        state.messages.clear();
     } else if let HistoryOp::Unit = history {
         program.close_insert_run();
     }
@@ -2555,10 +2659,10 @@ fn apply_slider(
         None => return vec![],
     };
     let Some(change) = program.set_slider_normalized(slider_index, normalized) else {
-        return vec![Effect::ShowMessage(format!(
-            "No slider with index {}",
-            slider_index
-        ))];
+        return vec![Effect::ShowMessage(
+            Severity::Info,
+            format!("No slider with index {}", slider_index),
+        )];
     };
     let label = change.label;
     let actual_value = change.value;
@@ -2582,10 +2686,10 @@ fn apply_slider(
         value: formatted_value.clone(),
     });
 
-    effects.push(Effect::ShowMessage(format!(
-        "{}({}) = {}",
-        label, slider_index, formatted_value,
-    )));
+    effects.push(Effect::ShowMessage(
+        Severity::Info,
+        format!("{}({}) = {}", label, slider_index, formatted_value,),
+    ));
     effects
 }
 
@@ -2627,11 +2731,14 @@ fn apply_level_db(state: &mut AppState, program_index: usize, level_db: f32) -> 
         name: "level".to_string(),
         value: formatted_level.clone(),
     });
-    effects.push(Effect::ShowMessage(format!(
-        "level({}) = {}",
-        state.programs.display_name(program_index),
-        formatted_level
-    )));
+    effects.push(Effect::ShowMessage(
+        Severity::Info,
+        format!(
+            "level({}) = {}",
+            state.programs.display_name(program_index),
+            formatted_level
+        ),
+    ));
     effects
 }
 
@@ -2639,6 +2746,11 @@ fn apply_level_db(state: &mut AppState, program_index: usize, level_db: f32) -> 
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// Returns the text of `state`'s current message, or "" when there is none.
+    fn current_message(state: &AppState) -> &str {
+        state.messages.current().map_or("", |m| m.text.as_str())
+    }
 
     /// A tracker status with no waveforms at all — nothing active, nothing pending.
     fn empty_status() -> tracker::Status<WaveformId> {
@@ -2785,7 +2897,7 @@ mod tests {
             effects
         );
         assert!(
-            matches!(&effects[1], Effect::ShowMessage(m) if m == "Uninstalled keys"),
+            matches!(&effects[1], Effect::ShowMessage(_, m) if m == "Uninstalled keys"),
             "expected the uninstall message second, got {:?}",
             effects
         );
@@ -3096,7 +3208,7 @@ mod tests {
         effects
             .into_iter()
             .find_map(|effect| match effect {
-                Effect::ShowMessage(message) => Some(message),
+                Effect::ShowMessage(_, message) => Some(message),
                 _ => None,
             })
             .expect("ShowType should report something")
@@ -3188,7 +3300,7 @@ mod tests {
         let effects = apply_with_empty_status(&mut state, Action::Complete);
         assert_eq!(edit_text_and_cursor(&state), ("not_baz".to_string(), 7));
         assert!(
-            matches!(&effects[0], Effect::ShowMessage(m) if m.contains("No completions")),
+            matches!(&effects[0], Effect::ShowMessage(_, m) if m.contains("No completions")),
             "expected a no-completions message, got {:?}",
             effects
         );
@@ -3216,7 +3328,7 @@ mod tests {
         let effects = apply_with_empty_status(&mut state, Action::Complete);
         assert_eq!(edit_text_and_cursor(&state), ("log(".to_string(), 4));
         assert!(
-            matches!(&effects[0], Effect::ShowMessage(m) if m.contains("built-in")),
+            matches!(&effects[0], Effect::ShowMessage(_, m) if m.contains("built-in")),
             "expected a built-in message, got {:?}",
             effects
         );
@@ -3317,7 +3429,7 @@ mod tests {
         let effects = apply_with_library_root(&mut state, root, Action::Complete);
         assert_eq!(edit_text_and_cursor(&state), ("pm.zzz".to_string(), 6));
         assert!(
-            matches!(&effects[0], Effect::ShowMessage(m)
+            matches!(&effects[0], Effect::ShowMessage(_, m)
                 if m == "No completions for \"zzz\" in module \"pm\""),
             "expected a no-completions message, got {:?}",
             effects
@@ -3333,7 +3445,7 @@ mod tests {
         let effects = apply_with_empty_status(&mut state, Action::Complete);
         assert_eq!(edit_text_and_cursor(&state), ("time.f".to_string(), 6));
         assert!(
-            matches!(&effects[0], Effect::ShowMessage(m) if m == "\"time\" is not a module"),
+            matches!(&effects[0], Effect::ShowMessage(_, m) if m == "\"time\" is not a module"),
             "expected a not-a-module message, got {:?}",
             effects
         );
@@ -3343,7 +3455,7 @@ mod tests {
         let effects = apply_with_empty_status(&mut state, Action::Complete);
         assert_eq!(edit_text_and_cursor(&state), ("x.sin".to_string(), 5));
         assert!(
-            matches!(&effects[0], Effect::ShowMessage(m) if m == "\"x\" is not a module"),
+            matches!(&effects[0], Effect::ShowMessage(_, m) if m == "\"x\" is not a module"),
             "expected a not-a-module message, got {:?}",
             effects
         );
@@ -3357,7 +3469,7 @@ mod tests {
         let effects = apply_with_empty_status(&mut state, Action::Complete);
         assert_eq!(edit_text_and_cursor(&state), ("_ = 0.".to_string(), 6));
         assert!(
-            matches!(&effects[0], Effect::ShowMessage(m) if m == "\"0\" is not a module"),
+            matches!(&effects[0], Effect::ShowMessage(_, m) if m == "\"0\" is not a module"),
             "expected a not-a-module message, got {:?}",
             effects
         );
@@ -3374,7 +3486,7 @@ mod tests {
             let effects = apply_with_empty_status(&mut state, Action::Complete);
             assert_eq!(edit_text_and_cursor(&state), (text.to_string(), cursor));
             assert!(
-                matches!(&effects[0], Effect::ShowMessage(m)
+                matches!(&effects[0], Effect::ShowMessage(_, m)
                     if m == "Nothing to complete (no module name before '.')"),
                 "for {:?}: expected a no-module-name message, got {:?}",
                 text,
@@ -3394,7 +3506,7 @@ mod tests {
             ("time.filter(".to_string(), 12)
         );
         assert!(
-            matches!(&effects[0], Effect::ShowMessage(m) if m == "\"time\" is not a module"),
+            matches!(&effects[0], Effect::ShowMessage(_, m) if m == "\"time\" is not a module"),
             "expected a not-a-module message, got {:?}",
             effects
         );
@@ -3418,7 +3530,7 @@ mod tests {
         let root = completion_library_root();
         let effects = apply_with_library_root(&mut state, root, Action::Complete);
         assert!(
-            matches!(&effects[0], Effect::ShowMessage(m) if m == "\"pm.nope\" is not defined"),
+            matches!(&effects[0], Effect::ShowMessage(_, m) if m == "\"pm.nope\" is not defined"),
             "expected a not-defined message, got {:?}",
             effects
         );
@@ -3457,7 +3569,7 @@ mod tests {
         assert_eq!(edit_text_and_cursor(&state), ("".to_string(), 0));
         let effects = apply_with_empty_status(&mut state, Action::Undo);
         assert!(
-            matches!(&effects[0], Effect::ShowMessage(m) if m == "Nothing to undo"),
+            matches!(&effects[0], Effect::ShowMessage(_, m) if m == "Nothing to undo"),
             "expected nothing-to-undo, got {:?}",
             effects
         );
@@ -3468,13 +3580,13 @@ mod tests {
         let mut state = edit_state("", "", 0);
         let effects = apply_with_empty_status(&mut state, Action::Undo);
         assert!(
-            matches!(&effects[0], Effect::ShowMessage(m) if m == "Nothing to undo"),
+            matches!(&effects[0], Effect::ShowMessage(_, m) if m == "Nothing to undo"),
             "expected nothing-to-undo, got {:?}",
             effects
         );
         let effects = apply_with_empty_status(&mut state, Action::Redo);
         assert!(
-            matches!(&effects[0], Effect::ShowMessage(m) if m == "Nothing to redo"),
+            matches!(&effects[0], Effect::ShowMessage(_, m) if m == "Nothing to redo"),
             "expected nothing-to-redo, got {:?}",
             effects
         );
@@ -3489,7 +3601,7 @@ mod tests {
         apply_with_empty_status(&mut state, Action::InsertText("cd".to_string()));
         let effects = apply_with_empty_status(&mut state, Action::Redo);
         assert!(
-            matches!(&effects[0], Effect::ShowMessage(m) if m == "Nothing to redo"),
+            matches!(&effects[0], Effect::ShowMessage(_, m) if m == "Nothing to redo"),
             "expected nothing-to-redo, got {:?}",
             effects
         );
@@ -3557,7 +3669,7 @@ mod tests {
         apply_with_empty_status(&mut state, Action::DeleteCharBeforeCursor);
         let effects = apply_with_empty_status(&mut state, Action::Undo);
         assert!(
-            matches!(&effects[0], Effect::ShowMessage(m) if m == "Nothing to undo"),
+            matches!(&effects[0], Effect::ShowMessage(_, m) if m == "Nothing to undo"),
             "expected nothing-to-undo, got {:?}",
             effects
         );
@@ -3604,7 +3716,7 @@ mod tests {
         assert!(
             effects
                 .iter()
-                .any(|e| matches!(e, Effect::ShowMessage(s) if s == "A:2")),
+                .any(|e| matches!(e, Effect::ShowMessage(_, s) if s == "A:2")),
             "expected a ShowMessage replacing the status, got {:?}",
             effects
         );
@@ -3628,7 +3740,7 @@ _ = saw(220);";
         let msg = effects
             .iter()
             .find_map(|e| match e {
-                Effect::ShowMessage(s) => Some(s.clone()),
+                Effect::ShowMessage(_, s) => Some(s.clone()),
                 _ => None,
             })
             .expect("expected a ShowMessage");
@@ -3639,22 +3751,19 @@ _ = saw(220);";
         let msg = effects
             .iter()
             .find_map(|e| match e {
-                Effect::ShowMessage(s) => Some(s.clone()),
+                Effect::ShowMessage(_, s) => Some(s.clone()),
                 _ => None,
             })
             .expect("expected a ShowMessage");
         assert_eq!(msg, "A:2");
 
-        // Slot 3: padding (no binding for this slot).
+        // Slot 3: padding (no binding for this slot) clears the message.
         let effects = apply_with_empty_status(&mut state, Action::SelectProgram(2));
-        let msg = effects
-            .iter()
-            .find_map(|e| match e {
-                Effect::ShowMessage(s) => Some(s.clone()),
-                _ => None,
-            })
-            .expect("expected a ShowMessage");
-        assert_eq!(msg, "");
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::ClearMessage)),
+            "got {:?}",
+            effects
+        );
     }
 
     #[test]
@@ -3828,14 +3937,14 @@ _ = saw(220);";
         let effects = apply_with_empty_status(&mut state, Action::ToggleScopeView);
         assert_eq!(state.scope_view, scope::ScopeView::Scan);
         assert!(
-            matches!(&effects[..], [Effect::ShowMessage(m)] if m == "Scope view: Scan"),
+            matches!(&effects[..], [Effect::ShowMessage(_, m)] if m == "Scope view: Scan"),
             "expected the Scan message, got {:?}",
             effects
         );
         let effects = apply_with_empty_status(&mut state, Action::ToggleScopeView);
         assert_eq!(state.scope_view, scope::ScopeView::Snapshot);
         assert!(
-            matches!(&effects[..], [Effect::ShowMessage(m)] if m == "Scope view: Snapshot"),
+            matches!(&effects[..], [Effect::ShowMessage(_, m)] if m == "Scope view: Snapshot"),
             "expected the Snapshot message, got {:?}",
             effects
         );
@@ -3848,11 +3957,11 @@ _ = saw(220);";
         let effects = apply_with_empty_status(&mut state, Action::ToggleMetronome);
         assert!(state.metronome);
         assert!(matches!(effects[0], Effect::SetMetronome(true)));
-        assert!(matches!(&effects[1], Effect::ShowMessage(m) if m == "Metronome on"));
+        assert!(matches!(&effects[1], Effect::ShowMessage(_, m) if m == "Metronome on"));
         let effects = apply_with_empty_status(&mut state, Action::ToggleMetronome);
         assert!(!state.metronome);
         assert!(matches!(effects[0], Effect::SetMetronome(false)));
-        assert!(matches!(&effects[1], Effect::ShowMessage(m) if m == "Metronome off"));
+        assert!(matches!(&effects[1], Effect::ShowMessage(_, m) if m == "Metronome off"));
     }
 
     #[test]
@@ -4024,7 +4133,7 @@ _ = saw(220);";
                     },
                     Effect::UpdateSource(0),
                     // Not playing: the toggle is text-only, no tracker effect.
-                ] if matches!(&on_success[..], [Effect::ShowMessage(m)] if m.contains("beat 3 on"))
+                ] if matches!(&on_success[..], [Effect::ShowMessage(_, m)] if m.contains("beat 3 on"))
                     && on_failure.is_empty()
             ),
             "expected an evaluation followed by a beat-on message, got {:?}",
@@ -4047,7 +4156,7 @@ _ = saw(220);";
             let effects = apply_with_empty_status(&mut state, action);
             assert_eq!(state.active_program().text(), expected);
             assert!(
-                matches!(&effects[0], Effect::ShowMessage(m) if m.starts_with(verb)),
+                matches!(&effects[0], Effect::ShowMessage(_, m) if m.starts_with(verb)),
                 "expected a {} message, got {:?}",
                 verb,
                 effects
@@ -4099,7 +4208,7 @@ _ = saw(220);";
         assert!(
             effects
                 .iter()
-                .any(|e| matches!(e, Effect::ShowMessage(m) if m.contains("beat 2 off"))),
+                .any(|e| matches!(e, Effect::ShowMessage(_, m) if m.contains("beat 2 off"))),
             "expected a beat-off message, got {:?}",
             effects
         );
@@ -4258,7 +4367,7 @@ _ = saw(220);";
         assert_eq!(state.active_program().text(), text_before);
         assert_eq!(effects.len(), 1);
         assert!(
-            matches!(&effects[0], Effect::ShowMessage(m) if m.contains("not sequenceable")),
+            matches!(&effects[0], Effect::ShowMessage(_, m) if m.contains("not sequenceable")),
             "expected a not-sequenceable message, got {:?}",
             effects
         );
@@ -4345,7 +4454,7 @@ _ = saw(220);";
             state.mode
         );
         assert!(
-            matches!(&effects[0], Effect::ShowMessage(m) if m.contains("changed on disk")),
+            matches!(&effects[0], Effect::ShowMessage(_, m) if m.contains("changed on disk")),
             "expected the stale-source message, got {:?}",
             effects
         );
@@ -4359,7 +4468,7 @@ _ = saw(220);";
             apply_with_stale_source(&mut state, Action::ToggleSequencerStep { sixteenth: 0 });
         assert_eq!(state.active_program().text(), text_before);
         assert!(
-            matches!(&effects[0], Effect::ShowMessage(m) if m.contains("changed on disk")),
+            matches!(&effects[0], Effect::ShowMessage(_, m) if m.contains("changed on disk")),
             "expected the stale-source message, got {:?}",
             effects
         );
@@ -4390,7 +4499,7 @@ _ = saw(220);";
         let effects = apply_with_empty_status(&mut state, Action::ChangeSequencerPage(1));
         assert_eq!(state.sequencer_page, 1);
         assert!(
-            matches!(&effects[0], Effect::ShowMessage(m) if m.contains("beats 5–8")),
+            matches!(&effects[0], Effect::ShowMessage(_, m) if m.contains("beats 5–8")),
             "expected the page's beat range, got {:?}",
             effects
         );
@@ -4620,7 +4729,7 @@ _ = saw(220);";
             text,
             on_success: vec![Effect::SetMode(Mode::Select)],
             on_failure: vec![],
-            message: String::new(),
+            message: None,
         });
     }
 
@@ -4662,7 +4771,7 @@ _ = saw(220);";
         // Reading a type, and pads for other programs, still work.
         let effects = apply_with_empty_status(&mut state, Action::ShowType);
         assert!(
-            matches!(&effects[..], [Effect::ShowMessage(_)]),
+            matches!(&effects[..], [Effect::ShowMessage(_, _)]),
             "got {:?}",
             effects
         );
@@ -4686,7 +4795,7 @@ _ = saw(220);";
         pend_evaluation(&mut state, 0);
         let effects = apply_with_empty_status(&mut state, Action::EnterEditMode);
         assert!(
-            matches!(&effects[..], [Effect::ShowMessage(m)] if m == PROCESSING_MESSAGE),
+            matches!(&effects[..], [Effect::ShowProcessing]),
             "got {:?}",
             effects
         );
@@ -4724,7 +4833,7 @@ _ = saw(220);";
             let description = format!("{:?}", action);
             let effects = apply_with_empty_status(&mut state, action);
             assert!(
-                matches!(&effects[..], [Effect::ShowMessage(m)] if m == PROCESSING_MESSAGE),
+                matches!(&effects[..], [Effect::ShowProcessing]),
                 "{} got {:?}",
                 description,
                 effects
@@ -4771,7 +4880,7 @@ _ = saw(220);";
         let effects = apply_with_empty_status(&mut state, Action::ToggleInstalledKeys(0));
         assert!(state.keys.is_none());
         assert!(
-            matches!(&effects[1], Effect::ShowMessage(m) if m == "Uninstalled keys"),
+            matches!(&effects[1], Effect::ShowMessage(_, m) if m == "Uninstalled keys"),
             "expected the uninstall message, got {:?}",
             effects
         );
@@ -4843,7 +4952,7 @@ _ = saw(220);";
         effects
             .iter()
             .filter_map(|e| match e {
-                Effect::ShowMessage(m) => Some(m.as_str()),
+                Effect::ShowMessage(_, m) => Some(m.as_str()),
                 _ => None,
             })
             .collect()
@@ -4868,7 +4977,7 @@ _ = saw(220);";
         let effects = apply_with_empty_status(&mut state, Action::ToggleScopeView);
         assert_eq!(state.scope_view, scope::ScopeView::Scan);
         assert!(
-            matches!(&effects[..], [Effect::ShowMessage(_)]),
+            matches!(&effects[..], [Effect::ShowMessage(_, _)]),
             "expected a message in Edit mode, got {:?}",
             effects
         );
@@ -4880,7 +4989,7 @@ _ = saw(220);";
         let effects = apply_at(&mut state, t0, 1.5, Action::ToggleScopeView);
         assert_eq!(state.scope_view, scope::ScopeView::Scan);
         assert!(
-            matches!(&effects[..], [Effect::ShowMessage(_)]),
+            matches!(&effects[..], [Effect::ShowMessage(_, _)]),
             "expected a message in Record mode, got {:?}",
             effects
         );
@@ -5304,10 +5413,13 @@ _ = saw(220);";
             apply_with_empty_status(&mut state, Action::StartPrefix(PrefixKey::Annotation));
         assert!(effects.is_empty());
         assert_eq!(state.pending_prefix, Some(PrefixKey::Annotation));
-        assert_eq!(state.message, "Annotation? (k)eys (u)p (d)own (l)oop");
+        assert_eq!(
+            current_message(&state),
+            "Annotation? (k)eys (u)p (d)own (l)oop"
+        );
         apply_with_empty_status(&mut state, Action::EndPrefix);
         assert_eq!(state.pending_prefix, None);
-        assert!(state.message.is_empty());
+        assert!(state.messages.current().is_none());
     }
 
     #[test]
@@ -5319,7 +5431,7 @@ _ = saw(220);";
             matches!(
                 &effects[..],
                 [
-                    Effect::ShowMessage(m),
+                    Effect::ShowMessage(_, m),
                     Effect::EvaluateProgram {
                         program_index: 0,
                         ..
@@ -5336,7 +5448,7 @@ _ = saw(220);";
             programs::ProgramKind::Waveform
         );
         assert!(
-            matches!(&effects[0], Effect::ShowMessage(m) if m == "Removed keys from A:1 (k)"),
+            matches!(&effects[0], Effect::ShowMessage(_, m) if m == "Removed keys from A:1 (k)"),
             "got {:?}",
             effects
         );
@@ -5348,7 +5460,10 @@ _ = saw(220);";
         let effects = apply_with_empty_status(&mut state, Action::StartPrefix(PrefixKey::Loop));
         assert!(effects.is_empty(), "got {:?}", effects);
         assert_eq!(state.pending_prefix, Some(PrefixKey::Loop));
-        assert_eq!(state.message, "Loop A:1 (kick)? (1-9) beats (0) once");
+        assert_eq!(
+            current_message(&state),
+            "Loop A:1 (kick)? (1-9) beats (0) once"
+        );
     }
 
     #[test]
@@ -5356,14 +5471,14 @@ _ = saw(220);";
         let mut state = annotation_state("#{keys}\nlead = fn(n, v) => (0, 0);", 1);
         let effects = apply_with_empty_status(&mut state, Action::StartPrefix(PrefixKey::Loop));
         assert!(
-            matches!(&effects[..], [Effect::ShowMessage(m)] if m == "A:2 is empty"),
+            matches!(&effects[..], [Effect::ShowMessage(_, m)] if m == "A:2 is empty"),
             "got {:?}",
             effects
         );
         state.active_program_index = 0;
         let effects = apply_with_stale_source(&mut state, Action::StartPrefix(PrefixKey::Loop));
         assert!(
-            matches!(&effects[..], [Effect::ShowMessage(m)] if m.contains("changed on disk")),
+            matches!(&effects[..], [Effect::ShowMessage(_, m)] if m.contains("changed on disk")),
             "got {:?}",
             effects
         );
@@ -5371,7 +5486,7 @@ _ = saw(220);";
         assert!(
             matches!(
                 &effects[..],
-                [Effect::ShowMessage(m)] if m == "A:1 (lead) plays keys, so it can't loop"
+                [Effect::ShowMessage(_, m)] if m == "A:1 (lead) plays keys, so it can't loop"
             ),
             "got {:?}",
             effects
@@ -5393,7 +5508,7 @@ _ = saw(220);";
         assert!(
             matches!(
                 &effects[..],
-                [Effect::ShowMessage(m), Effect::UpdateSource(0)]
+                [Effect::ShowMessage(_, m), Effect::UpdateSource(0)]
                     if m == "A:1 (kick) loops every 3 beats"
             ),
             "got {:?}",
@@ -5408,7 +5523,7 @@ _ = saw(220);";
         );
         assert_eq!(state.active_program().loop_after_beats(), None);
         assert!(
-            matches!(&effects[0], Effect::ShowMessage(m) if m == "A:1 (kick) plays once"),
+            matches!(&effects[0], Effect::ShowMessage(_, m) if m == "A:1 (kick) plays once"),
             "got {:?}",
             effects
         );
@@ -5431,7 +5546,7 @@ _ = saw(220);";
             assert!(
                 matches!(
                     &effects[0],
-                    Effect::ShowMessage(m)
+                    Effect::ShowMessage(_, m)
                         if m == "A:1 (kick) loops every 3 beats from its next launch"
                 ),
                 "got {:?}",
@@ -5451,7 +5566,7 @@ _ = saw(220);";
             },
         );
         assert!(
-            matches!(&effects[..], [Effect::ShowMessage(m)] if m.ends_with("so it can't loop")),
+            matches!(&effects[..], [Effect::ShowMessage(_, m)] if m.ends_with("so it can't loop")),
             "got {:?}",
             effects
         );
@@ -5461,7 +5576,7 @@ _ = saw(220);";
     /// Returns the text of the last `Effect::ShowMessage` in `effects`.
     fn last_message(effects: &[Effect]) -> Option<&str> {
         effects.iter().rev().find_map(|effect| match effect {
-            Effect::ShowMessage(m) => Some(m.as_str()),
+            Effect::ShowMessage(_, m) => Some(m.as_str()),
             _ => None,
         })
     }
@@ -5621,7 +5736,7 @@ _ = saw(220);";
         let mut state = annotation_state("#{loop_after_beats=4}\nkick = 1;", 0);
         let effects = apply_with_empty_status(&mut state, Action::ToggleKeysAnnotation(0));
         assert!(
-            matches!(&effects[..], [Effect::ShowMessage(m)] if m == "Remove A:1 (kick)'s loop first"),
+            matches!(&effects[..], [Effect::ShowMessage(_, m)] if m == "Remove A:1 (kick)'s loop first"),
             "got {:?}",
             effects
         );
@@ -5670,7 +5785,7 @@ _ = saw(220);";
         ] {
             let effects = apply_with_empty_status(&mut state, action);
             assert!(
-                matches!(&effects[..], [Effect::ShowMessage(m)] if m == "A:2 is empty"),
+                matches!(&effects[..], [Effect::ShowMessage(_, m)] if m == "A:2 is empty"),
                 "got {:?}",
                 effects
             );
@@ -5685,7 +5800,7 @@ _ = saw(220);";
         ] {
             let effects = apply_with_stale_source(&mut state, action);
             assert!(
-                matches!(&effects[..], [Effect::ShowMessage(m)] if m.contains("changed on disk")),
+                matches!(&effects[..], [Effect::ShowMessage(_, m)] if m.contains("changed on disk")),
                 "got {:?}",
                 effects
             );
@@ -5779,7 +5894,7 @@ _ = saw(220);";
             },
         );
         assert!(
-            matches!(&effects[..], [Effect::ShowMessage(m)] if m.starts_with("Can't move A:1 (a) up")),
+            matches!(&effects[..], [Effect::ShowMessage(_, m)] if m.starts_with("Can't move A:1 (a) up")),
             "got {:?}",
             effects
         );
@@ -5792,7 +5907,7 @@ _ = saw(220);";
             },
         );
         assert!(
-            matches!(&effects[..], [Effect::ShowMessage(m)] if m.starts_with("Can't move A:1 (a) down")),
+            matches!(&effects[..], [Effect::ShowMessage(_, m)] if m.starts_with("Can't move A:1 (a) down")),
             "got {:?}",
             effects
         );
