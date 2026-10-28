@@ -230,7 +230,7 @@ impl<'ttf> Renderer<'ttf> {
                 }
                 self.spectrum = fft.make_output_vec();
                 if let Err(e) = fft.process(&mut input, &mut self.spectrum) {
-                    println!("Error processing FFT: {}", e);
+                    log::warn!("Error processing FFT: {}", e);
                 }
             }
         }

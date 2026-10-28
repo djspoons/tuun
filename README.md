@@ -52,6 +52,8 @@ cargo run --bin tuun -- test.tuun
 ```
 In this case, try holding the option key, and moving your mouse around.
 
+The terminal shows status messages, full error reports, and output from `debug`. Internal tracing is off by default; turn it on per component with `RUST_LOG`.
+
 
 ### Keyboard Navigation
 

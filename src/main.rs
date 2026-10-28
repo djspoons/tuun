@@ -83,6 +83,7 @@ struct Args {
 const SAMPLE_HEADER_CAPACITY: usize = 1024;
 
 pub fn main() {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let args = Args::parse();
     let captured_file_prefix = chrono::Local::now().format(&args.date_format).to_string();
 
@@ -161,7 +162,7 @@ pub fn main() {
             {
                 Ok(warnings) => {
                     for warning in &warnings {
-                        println!("Warning: {}", warning);
+                        println!("{}", warning.report());
                     }
                     if state.programs.programs()[program_index].is_playable() {
                         player.play_program(
@@ -178,10 +179,7 @@ pub fn main() {
                 }
                 Err(diagnostics) => {
                     for diagnostic in &diagnostics {
-                        println!("{}: {}", diagnostic.severity.label(), diagnostic);
-                        if let Some(snippet) = &diagnostic.snippet {
-                            println!("{}", snippet);
-                        }
+                        println!("{}", diagnostic.report());
                     }
                     process::exit(1);
                 }
@@ -197,7 +195,7 @@ pub fn main() {
                 println!("All waveforms finished");
                 break;
             }
-            println!("Still running, {} waveforms remaining", remaining);
+            log::debug!("Still running, {} waveforms remaining", remaining);
         }
         process::exit(0);
     }
@@ -214,7 +212,7 @@ pub fn main() {
     let device = audio_subsystem
         .open_playback(None, &desired_spec, |spec| {
             let output_latency = tracker::sdl_output_latency(spec.freq as u32, spec.samples as u32);
-            println!("Spec: {:?}, output latency: {:?}", spec, output_latency);
+            log::info!("Spec: {:?}, output latency: {:?}", spec, output_latency);
             tracker::Tracker::<WaveformId, MarkId>::new(
                 args.sample_rate,
                 args.output_dir.clone().into(),
@@ -449,7 +447,7 @@ pub fn main() {
                 );
             } else {
                 // classify() should cover every SDL event we care about.
-                println!("Unhandled SDL event: {:?}", event);
+                log::debug!("Unhandled SDL event: {:?}", event);
             }
         }
 
@@ -469,14 +467,14 @@ pub fn main() {
                         } else {
                             // classify() should be exhaustive for launchkey
                             // events.
-                            println!("Unhandled launchkey event: {:?}", event);
+                            log::debug!("Unhandled launchkey event: {:?}", event);
                         }
                     }
                     Err(mpsc::TryRecvError::Empty) => {
                         break;
                     }
                     Err(e) => {
-                        println!("Got error receiving from Launchkey: {}", e);
+                        log::warn!("Got error receiving from Launchkey: {}", e);
                         break;
                     }
                 }
