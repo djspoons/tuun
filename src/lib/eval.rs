@@ -259,15 +259,15 @@ where
 fn extend_context<M, S>(
     context: &mut Vec<(String, SourceExpr<M, S>)>,
     pattern: &Pattern,
-    argument: &SourceExpr<M, S>,
+    argument: SourceExpr<M, S>,
 ) -> Result<(), Error<S>>
 where
     M: Clone + Debug + Display,
     S: Clone + Debug,
 {
-    match (pattern, &argument.expr) {
-        (Pattern::Identifier(name), _) => {
-            context.push((name.clone(), argument.clone()));
+    match (pattern, argument.expr) {
+        (Pattern::Identifier(name), expr) => {
+            context.push((name.clone(), SourceExpr { expr, ..argument }));
             Ok(())
         }
         (Pattern::Tuple(patterns), Expr::Tuple(arguments)) => {
@@ -275,7 +275,8 @@ where
                 return Err(Error::eval(
                     format!(
                         "Mismatched number of elements in pattern {} and arguments {}",
-                        pattern, argument
+                        pattern,
+                        Expr::Tuple(arguments)
                     ),
                     argument.span.clone(),
                 ));
@@ -285,10 +286,10 @@ where
             }
             Ok(())
         }
-        _ => Err(Error::eval(
+        (_, expr) => Err(Error::eval(
             format!(
                 "Pattern {} does not match actual expression {}",
-                pattern, argument.expr
+                pattern, expr
             ),
             argument.span.clone(),
         )),
@@ -677,7 +678,7 @@ where
                         ));
                     }
                     let mut context = Vec::new();
-                    for (param, argument) in pos_params.iter().zip(&pos_args) {
+                    for (param, argument) in pos_params.iter().zip(pos_args) {
                         extend_context(&mut context, param, argument)?;
                     }
                     // Each named parameter binds the call-site override if
@@ -971,7 +972,7 @@ where
                 let substituted = substitute(context, def_expr.clone())?;
                 let value = evaluate_closed(substituted)?;
                 let before = context.len();
-                extend_context(context, pattern, &value)?;
+                extend_context(context, pattern, value)?;
                 own.extend(before..context.len());
             }
             // Empty bindings have no semantic content — they exist only to
