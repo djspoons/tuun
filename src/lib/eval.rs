@@ -155,36 +155,49 @@ where
             span,
             via,
         },
-        Expr::Project { module, name } => SourceExpr {
-            expr: Expr::Project {
-                module: Box::new(substitute(context, *module)?),
-                name,
-            },
-            span,
-            via,
-        },
-        Variable(name) => {
-            for (var_name, value) in context.iter().rev() {
-                if var_name == &name {
-                    // A parameter bound to itself keeps this node, and with it
-                    // the place the variable was written.
-                    if matches!(&value.expr, Variable(bound) if *bound == name) {
-                        return Ok(SourceExpr {
-                            expr: Variable(name),
-                            span,
-                            via,
-                        });
-                    }
-                    return Ok(match span {
-                        Some(span) => push_step(value.clone(), &Step::UseSite(span)),
-                        None => value.clone(),
-                    });
-                }
+        Expr::Project { module, name } => {
+            // Projecting from a variable bound to a module copies only the
+            // projected entry, not the whole module, recording the use site
+            // as evaluating the projection would.
+            if let Variable(module_name) = &module.expr
+                && let Some(Expr::BoundModule(entries)) =
+                    lookup(context, module_name).map(|value| &value.expr)
+                && let Some((_, value)) = entries.iter().find(|(n, _)| *n == name)
+            {
+                return Ok(match span {
+                    Some(span) => push_step(value.clone(), &Step::UseSite(span)),
+                    None => value.clone(),
+                });
             }
-            return Err(self::Error::eval(
-                format!("Variable '{}' not found in context", name),
+            SourceExpr {
+                expr: Expr::Project {
+                    module: Box::new(substitute(context, *module)?),
+                    name,
+                },
                 span,
-            ));
+                via,
+            }
+        }
+        Variable(name) => {
+            let Some(value) = lookup(context, &name) else {
+                return Err(self::Error::eval(
+                    format!("Variable '{}' not found in context", name),
+                    span,
+                ));
+            };
+            // A parameter bound to itself keeps this node, and with it the
+            // place the variable was written.
+            if matches!(&value.expr, Variable(bound) if *bound == name) {
+                return Ok(SourceExpr {
+                    expr: Variable(name),
+                    span,
+                    via,
+                });
+            }
+            return Ok(match span {
+                Some(span) => push_step(value.clone(), &Step::UseSite(span)),
+                None => value.clone(),
+            });
         }
         IfThenElse {
             condition,
@@ -254,6 +267,18 @@ where
             via,
         },
     })
+}
+
+/// Returns the value `context` binds `name` to: its latest entry for `name`.
+fn lookup<'c, M, S>(
+    context: &'c [(String, SourceExpr<M, S>)],
+    name: &str,
+) -> Option<&'c SourceExpr<M, S>> {
+    context
+        .iter()
+        .rev()
+        .find(|(bound, _)| bound == name)
+        .map(|(_, value)| value)
 }
 
 fn extend_context<M, S>(
@@ -1335,6 +1360,29 @@ mod tests {
         assert_eq!(context.len(), 1);
         assert_eq!(context[0].0, "b");
         assert_eq!(format!("{}", context[0].1), "module {x}");
+    }
+
+    #[test]
+    fn test_projection_substitutes_only_the_entry() {
+        let (b, errors) = parse_module::<u32, _>("two = 2; three = 3;", ()).unwrap();
+        assert!(errors.is_empty());
+        let resolve = |path: &[String]| {
+            if path == ["b"] {
+                Ok(&b[..])
+            } else {
+                Err(Error::eval_here(format!("no module {:?}", path)))
+            }
+        };
+        let (bindings, errors) = parse_module::<u32, _>("use b;", ()).unwrap();
+        assert!(errors.is_empty());
+
+        // The body of a function that is never applied holds the projected
+        // value, not the module it was projected from.
+        let expr = parse_program::<u32, _>("fn(x) => b.two", ()).unwrap();
+        let Expr::Function { body, .. } = evaluate(resolve, &bindings, expr).unwrap().expr else {
+            panic!("expected a function");
+        };
+        assert_eq!(format!("{}", body), "2");
     }
 
     #[test]
