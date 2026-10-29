@@ -155,6 +155,11 @@ pub struct Environment {
     /// observes a bump clears the whole cache rather than tracking
     /// dependencies (library edits are rare next to program edits).
     module_types: RefCell<infer::ModuleCache<Source>>,
+    /// Evaluated module exports, carried between evaluations so an unchanged
+    /// module is evaluated once per load, not once per evaluation. Its
+    /// entries are keyed by the leaked slices in `modules`, which are never
+    /// freed.
+    module_values: RefCell<eval::ModuleCache<MarkId, Source>>,
     /// Bumped by [`Environment::resolve`] whenever a module file is read or
     /// re-read from disk.
     modules_generation: Cell<u64>,
@@ -206,6 +211,7 @@ impl Environment {
             modules: RefCell::new(HashMap::new()),
             module_info: module_table,
             module_types: RefCell::new(infer::ModuleCache::default()),
+            module_values: RefCell::new(eval::ModuleCache::default()),
             modules_generation: Cell::new(0),
             checked_generation: Cell::new(0),
             reported_modules: RefCell::new(HashSet::new()),
@@ -530,6 +536,21 @@ impl Environment {
         )
     }
 
+    /// Evaluates `expr` under `bindings`, resolving modules through the
+    /// module cache and reusing their evaluated exports.
+    fn evaluate(
+        &self,
+        bindings: &[expr::SourceBinding<MarkId, Source>],
+        expr: expr::SourceExpr<MarkId, Source>,
+    ) -> Result<expr::SourceExpr<MarkId, Source>, expr::Error<Source>> {
+        eval::evaluate_cached(
+            |path| self.resolve(path),
+            &mut self.module_values.borrow_mut(),
+            bindings,
+            expr,
+        )
+    }
+
     /// Parses and evaluates `text` under `bindings`, resolving `open`
     /// directives through the module cache. Returns the evaluated expression,
     /// without trace marks, or a user-visible message.
@@ -543,7 +564,8 @@ impl Environment {
             Ok(expr) => expr,
         };
 
-        let expr = eval::evaluate(|path| self.resolve(path), bindings, expr)
+        let expr = self
+            .evaluate(bindings, expr)
             .map_err(|error| error.to_string())?;
         Ok(expr::SourceExpr {
             expr: trace::strip_expr_trace_marks(expr.expr),
@@ -565,7 +587,7 @@ impl Environment {
     ) -> Option<(waveform::Waveform<MarkId>, Arc<WaveformMarks>)> {
         let mut bindings = input.bindings.clone();
         bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
-        let expr = eval::evaluate(|path| self.resolve(path), &bindings, expr.clone()).ok()?;
+        let expr = self.evaluate(&bindings, expr.clone()).ok()?;
         let trace = trace_walk::result_trace(&expr);
         let waveform = match expr.expr {
             expr::Expr::Waveform(w) => w,
@@ -616,7 +638,7 @@ impl Environment {
             }
             Ok(expr) => expr,
         };
-        let expr = match eval::evaluate(|path| self.resolve(path), &bindings, expr) {
+        let expr = match self.evaluate(&bindings, expr) {
             Err(error) => {
                 return Err(vec![diagnose(&error)]);
             }
@@ -703,7 +725,11 @@ impl Environment {
     ) -> Result<Vec<eval::ContextEntry<MarkId, Source>>, expr::Error<Source>> {
         let mut bindings = set.evaluation_bindings(index);
         bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
-        eval::evaluate_bindings(|path| self.resolve(path), &bindings)
+        eval::evaluate_bindings_cached(
+            |path| self.resolve(path),
+            &mut self.module_values.borrow_mut(),
+            &bindings,
+        )
     }
 
     /// Returns whether the module at `path` defines `name`, counting only its

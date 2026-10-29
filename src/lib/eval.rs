@@ -2,6 +2,7 @@
 //! `open`s through a caller-supplied module resolver), substitutes it into an
 //! expression, and reduces the result to a value.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::fmt::{Debug, Display};
 
@@ -16,6 +17,46 @@ use crate::waveform::Waveform;
 
 /// A context entry: a bound name and the closed value it evaluates to.
 pub type ContextEntry<M, S> = NamedExpr<M, S>;
+
+/// Identifies a module by the slice of bindings it was resolved to: its
+/// address and length.
+type ModuleKey = (usize, usize);
+
+/// Returns the key identifying `module`.
+fn module_key<M, S>(module: &[SourceBinding<M, S>]) -> ModuleKey {
+    (module.as_ptr() as usize, module.len())
+}
+
+/// The evaluated exports of modules, carried between evaluations so that an
+/// unchanged module is evaluated once rather than once per evaluation.
+///
+/// An entry is reused only while the resolver still returns the same slice
+/// (by address and length) for the module and for every module it opened or
+/// used, transitively. So a resolver used with a cache must not free a slice
+/// it has returned and reuse its address for different bindings.
+///
+/// A reused module is not evaluated again, so built-ins applied in its
+/// definitions (such as `debug`) run only when it is first evaluated, and
+/// again after it or one of its dependencies resolves to a new slice.
+pub struct ModuleCache<M, S> {
+    entries: HashMap<Vec<String>, CachedModule<M, S>>,
+}
+
+impl<M, S> Default for ModuleCache<M, S> {
+    fn default() -> ModuleCache<M, S> {
+        ModuleCache {
+            entries: HashMap::new(),
+        }
+    }
+}
+
+/// One module's exports and the slices they were built from.
+struct CachedModule<M, S> {
+    key: ModuleKey,
+    /// The path and slice of each module resolved while building `exports`.
+    dependencies: Vec<(Vec<String>, ModuleKey)>,
+    exports: Vec<ContextEntry<M, S>>,
+}
 
 /// Extends the context with a binding for each identifier in the pattern that is bound to
 /// itself.
@@ -746,7 +787,23 @@ where
     M: Clone + Display + Debug + CarriesTrace<S>,
     S: Clone + Debug,
 {
-    let mut context = evaluate_bindings(resolve, bindings)?;
+    evaluate_cached(resolve, &mut ModuleCache::default(), bindings, expr)
+}
+
+/// Evaluates `bindings` and then `expr`, as [`evaluate`] does, reusing and
+/// updating the module exports in `cache`.
+pub fn evaluate_cached<'a, M, S, F>(
+    resolve: F,
+    cache: &mut ModuleCache<M, S>,
+    bindings: &'a [SourceBinding<M, S>],
+    expr: SourceExpr<M, S>,
+) -> Result<SourceExpr<M, S>, Error<S>>
+where
+    F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
+    M: Clone + Display + Debug + CarriesTrace<S>,
+    S: Clone + Debug,
+{
+    let mut context = evaluate_bindings_cached(resolve, cache, bindings)?;
     evaluate_with_context(&mut context, expr)
 }
 
@@ -764,8 +821,30 @@ where
     M: Clone + Display + Debug + CarriesTrace<S>,
     S: Clone + Debug,
 {
+    evaluate_bindings_cached(resolve, &mut ModuleCache::default(), bindings)
+}
+
+/// Evaluates `bindings` and returns the resulting context, as
+/// [`evaluate_bindings`] does, reusing and updating the module exports in
+/// `cache`.
+pub fn evaluate_bindings_cached<'a, M, S, F>(
+    resolve: F,
+    cache: &mut ModuleCache<M, S>,
+    bindings: &'a [SourceBinding<M, S>],
+) -> Result<Vec<ContextEntry<M, S>>, Error<S>>
+where
+    F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
+    M: Clone + Display + Debug + CarriesTrace<S>,
+    S: Clone + Debug,
+{
+    let mut modules = Modules {
+        resolve: &resolve,
+        cache,
+        open: Vec::new(),
+        resolved: Vec::new(),
+    };
     let mut context = Vec::new();
-    build_context(&resolve, bindings, &mut context, &mut Vec::new())?;
+    build_context(&mut modules, bindings, &mut context)?;
     Ok(context)
 }
 
@@ -782,16 +861,26 @@ where
     evaluate_closed(expr)
 }
 
-/// Walks `bindings`, accumulating evaluated entries into `context`.
-/// Returns what a module exports, refusing a module that is already being
-/// opened.
+/// The modules one evaluation of bindings loads: how it resolves them, the
+/// cache it reuses them from, and what it has loaded so far.
+struct Modules<'r, 'c, F, M, S> {
+    resolve: &'r F,
+    cache: &'c mut ModuleCache<M, S>,
+    /// The modules being opened, innermost last.
+    open: Vec<ModuleKey>,
+    /// The path and slice of each module resolved so far, in order.
+    resolved: Vec<(Vec<String>, ModuleKey)>,
+}
+
+/// Returns what the module `module`, resolved from `path`, exports: from
+/// `modules`' cache when nothing it was built from has changed, else by
+/// evaluating it. Refuses a module that is already being opened.
 ///
 /// The checker reports the same cycle first, so reaching this means the
 /// evaluator was driven without it.
 fn module_exports<'a, M, S, F>(
-    resolve: &F,
+    modules: &mut Modules<'_, '_, F, M, S>,
     module: &'a [SourceBinding<M, S>],
-    open: &mut Vec<(usize, usize)>,
     path: &[String],
     span: &Option<Span<S>>,
 ) -> Result<Vec<ContextEntry<M, S>>, Error<S>>
@@ -800,34 +889,56 @@ where
     M: Clone + Display + Debug + CarriesTrace<S>,
     S: Clone + Debug,
 {
-    let key = (module.as_ptr() as usize, module.len());
-    if open.contains(&key) {
+    let key = module_key(module);
+    if modules.open.contains(&key) {
         return Err(Error::eval(
             format!("module '{}' is opened from itself", path.join(".")),
             span.clone(),
         ));
     }
-    open.push(key);
+    modules.resolved.push((path.to_vec(), key));
+    if let Some(cached) = modules.cache.entries.get(path)
+        && cached.key == key
+        && cached.dependencies.iter().all(|(path, key)| {
+            (modules.resolve)(path).is_ok_and(|module| module_key(module) == *key)
+        })
+    {
+        modules.resolved.extend(cached.dependencies.iter().cloned());
+        return Ok(cached.exports.clone());
+    }
+    let start = modules.resolved.len();
+    modules.open.push(key);
     let mut module_context = Vec::new();
-    let own = build_context(resolve, module, &mut module_context, open);
-    open.pop();
+    let own = build_context(modules, module, &mut module_context);
+    modules.open.pop();
     let mut own = own?.into_iter().peekable();
-    Ok(module_context
+    let exports: Vec<_> = module_context
         .into_iter()
         .enumerate()
         .filter(|(i, _)| own.next_if_eq(i).is_some())
         .map(|(_, entry)| entry)
-        .collect())
+        .collect();
+    let mut dependencies = modules.resolved[start..].to_vec();
+    dependencies.sort();
+    dependencies.dedup();
+    modules.cache.entries.insert(
+        path.to_vec(),
+        CachedModule {
+            key,
+            dependencies,
+            exports: exports.clone(),
+        },
+    );
+    Ok(exports)
 }
 
 /// Evaluates `bindings`, appending an entry to `context` for each bound name.
 /// Returns the indices into `context` of the entries `bindings` defines itself
 /// (as opposed to those brought in by `open`).
 fn build_context<'a, M, S, F>(
-    resolve: &F,
+    modules: &mut Modules<'_, '_, F, M, S>,
     bindings: &'a [SourceBinding<M, S>],
     context: &mut Vec<ContextEntry<M, S>>,
-    open: &mut Vec<(usize, usize)>,
 ) -> Result<Vec<usize>, Error<S>>
 where
     F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
@@ -838,8 +949,8 @@ where
     for source_binding in bindings {
         match &source_binding.binding {
             Binding::Open(path) => {
-                let module = resolve(path)?;
-                let exports = module_exports(resolve, module, open, path, &source_binding.span)?;
+                let module = (modules.resolve)(path)?;
+                let exports = module_exports(modules, module, path, &source_binding.span)?;
                 context.extend(exports);
             }
             Binding::Use(path) => {
@@ -849,8 +960,8 @@ where
                         source_binding.span.clone(),
                     ));
                 };
-                let module = resolve(path)?;
-                let exports = module_exports(resolve, module, open, path, &source_binding.span)?;
+                let module = (modules.resolve)(path)?;
+                let exports = module_exports(modules, module, path, &source_binding.span)?;
                 context.push((
                     name.clone(),
                     SourceExpr::from(Expr::BoundModule(dedup_last_wins(exports))),
@@ -1297,6 +1408,88 @@ mod tests {
         let expr = parse_program::<u32, _>(input, ()).unwrap();
         let evaluated = evaluate_closed(expr).unwrap();
         assert_eq!(format!("{}", evaluated), "(3, 4, 5)");
+    }
+
+    /// Tests of reusing module exports between evaluations, against a
+    /// stand-in built-in that counts its applications.
+    mod module_cache {
+        use super::*;
+        use std::cell::Cell;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// Returns a module binding `tick`, which hands back its argument and
+        /// counts each application in `count`.
+        fn ticks(count: &Arc<AtomicUsize>) -> Vec<SourceBinding<u32, ()>> {
+            let count = Arc::clone(count);
+            vec![SourceBinding::definition(
+                Pattern::Identifier("tick".to_string()),
+                SourceExpr::from(Expr::BuiltIn {
+                    name: "tick".to_string(),
+                    function: BuiltInFn::new(move |mut arguments, _call| {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        Ok(arguments.pop().unwrap())
+                    }),
+                }),
+            )]
+        }
+
+        fn module(text: &str) -> Vec<SourceBinding<u32, ()>> {
+            let (bindings, errors) = parse_module::<u32, _>(text, ()).unwrap();
+            assert!(errors.is_empty());
+            bindings
+        }
+
+        #[test]
+        fn an_unchanged_module_is_evaluated_once() {
+            let count = Arc::new(AtomicUsize::new(0));
+            let ticks = ticks(&count);
+            let a = module("open ticks; x = tick(1);");
+            let resolve = |path: &[String]| match path.join(".").as_str() {
+                "ticks" => Ok(&ticks[..]),
+                "a" => Ok(&a[..]),
+                other => Err(Error::eval_here(format!("no module {}", other))),
+            };
+            let bindings = module("open a;");
+            let mut cache = ModuleCache::default();
+            for _ in 0..3 {
+                let expr = parse_program::<u32, _>("x", ()).unwrap();
+                let value = evaluate_cached(resolve, &mut cache, &bindings, expr).unwrap();
+                assert_eq!(format!("{}", value), "1");
+            }
+            assert_eq!(count.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn a_changed_dependency_reevaluates_its_dependents() {
+            let count = Arc::new(AtomicUsize::new(0));
+            let ticks = ticks(&count);
+            let a = module("open ticks; open b; x = tick(y);");
+            let b1 = module("y = 1;");
+            let b2 = module("y = 2;");
+            let b = Cell::new(&b1[..]);
+            let resolve = |path: &[String]| match path.join(".").as_str() {
+                "ticks" => Ok(&ticks[..]),
+                "a" => Ok(&a[..]),
+                "b" => Ok(b.get()),
+                other => Err(Error::eval_here(format!("no module {}", other))),
+            };
+            let bindings = module("open a;");
+            let mut cache = ModuleCache::default();
+            let mut run = || {
+                let expr = parse_program::<u32, _>("x", ()).unwrap();
+                format!(
+                    "{}",
+                    evaluate_cached(resolve, &mut cache, &bindings, expr).unwrap()
+                )
+            };
+            assert_eq!(run(), "1");
+            // `b` resolves to a new slice, as a reloaded module does; `a`
+            // still resolves to the same one.
+            b.set(&b2[..]);
+            assert_eq!(run(), "2");
+            assert_eq!(run(), "2");
+            assert_eq!(count.load(Ordering::SeqCst), 2);
+        }
     }
 
     /// Tests of how evaluation records provenance, against stand-in
