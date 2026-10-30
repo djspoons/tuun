@@ -896,8 +896,10 @@ impl<'a> Generator<'a> {
             }
 
             match waveform {
-                // Const, Time, and Noise are all infinite.
-                Const(_) | Time(_) | Noise => Npc(Infinite, waveform),
+                // Const and Time are infinite.
+                Const(_) | Time(_) => Npc(Infinite, waveform),
+                // Noise is dynamic.
+                Noise => Npc(Dynamic, waveform),
                 // Fixed is the quintessential pre-computable waveform.
                 Fixed(_, _) => Pc(waveform),
                 Fin {
