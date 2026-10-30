@@ -986,33 +986,51 @@ impl ProgramSet {
     /// anonymous `_` definitions filtered out and each remaining definition's
     /// own sliders bound around its body, plus a binding for each of this
     /// program's sliders at its current value.
+    ///
+    /// These are the first `counts[index]` of the bindings
+    /// [`ProgramSet::shared_evaluation_bindings`] returns, followed by
+    /// [`ProgramSet::own_slider_bindings`].
     pub fn evaluation_bindings(&self, index: usize) -> Vec<expr::SourceBinding<MarkId, Source>> {
-        let program = &self.programs[index];
-        let mut bindings: Vec<expr::SourceBinding<MarkId, Source>> = Vec::new();
-        for (binding_index, source_binding) in
-            self.bindings[..program.binding_index].iter().enumerate()
-        {
-            // Anonymous definitions are not referenceable, so evaluating them
-            // here would be wasted work — and a broken one would poison every
-            // later program's context.
-            let expr::Binding::Definition(pattern, body) = &source_binding.binding else {
-                bindings.push(source_binding.clone());
-                continue;
-            };
-            if matches!(pattern, expr::Pattern::Identifier(v) if v == "_") {
-                continue;
-            }
-            bindings.push(expr::SourceBinding {
-                binding: expr::Binding::Definition(
-                    pattern.clone(),
-                    self.bind_own_sliders(binding_index, body.clone()),
-                ),
-                annotations: source_binding.annotations.clone(),
-                span: source_binding.span.clone(),
-            });
-        }
+        let mut bindings: Vec<_> = (0..self.programs[index].binding_index)
+            .filter_map(|binding_index| self.evaluation_binding(binding_index))
+            .collect();
         // Appended last, so a program's own sliders are never in scope while
         // its predecessors are evaluated.
+        bindings.extend(self.own_slider_bindings(index));
+        bindings
+    }
+
+    /// Returns the file-level bindings programs are evaluated under, in
+    /// source order, and for each program the number of them it reads.
+    ///
+    /// The program at `index` is evaluated under the first `counts[index]`
+    /// bindings followed by its [`ProgramSet::own_slider_bindings`], which is
+    /// what [`ProgramSet::evaluation_bindings`] returns.
+    pub fn shared_evaluation_bindings(
+        &self,
+    ) -> (Vec<expr::SourceBinding<MarkId, Source>>, Vec<usize>) {
+        let mut bindings = Vec::new();
+        // The number of bindings that precede each binding index.
+        let mut preceding = Vec::with_capacity(self.bindings.len() + 1);
+        for binding_index in 0..self.bindings.len() {
+            preceding.push(bindings.len());
+            bindings.extend(self.evaluation_binding(binding_index));
+        }
+        // Padding slots sit past every binding.
+        preceding.push(bindings.len());
+        let counts = self
+            .programs
+            .iter()
+            .map(|program| preceding[program.binding_index])
+            .collect();
+        (bindings, counts)
+    }
+
+    /// Returns a binding for each of the sliders of the program at `index`,
+    /// at its current value.
+    pub fn own_slider_bindings(&self, index: usize) -> Vec<expr::SourceBinding<MarkId, Source>> {
+        let program = &self.programs[index];
+        let mut bindings = Vec::new();
         slider::append_slider_bindings(
             program.sliders.configs(),
             program.sliders.normalized_values(),
@@ -1023,6 +1041,33 @@ impl ProgramSet {
             &mut bindings,
         );
         bindings
+    }
+
+    /// Returns the binding at `binding_index` as later programs read it: a
+    /// definition with its own sliders bound around its body, any other
+    /// binding as is, or `None` for an anonymous `_` definition.
+    fn evaluation_binding(
+        &self,
+        binding_index: usize,
+    ) -> Option<expr::SourceBinding<MarkId, Source>> {
+        let source_binding = &self.bindings[binding_index];
+        let expr::Binding::Definition(pattern, body) = &source_binding.binding else {
+            return Some(source_binding.clone());
+        };
+        // Anonymous definitions are not referenceable, so evaluating them
+        // would be wasted work — and a broken one would poison every later
+        // program's context.
+        if matches!(pattern, expr::Pattern::Identifier(v) if v == "_") {
+            return None;
+        }
+        Some(expr::SourceBinding {
+            binding: expr::Binding::Definition(
+                pattern.clone(),
+                self.bind_own_sliders(binding_index, body.clone()),
+            ),
+            annotations: source_binding.annotations.clone(),
+            span: source_binding.span.clone(),
+        })
     }
 
     /// Returns `body` with the sliders declared on the binding at
@@ -2063,6 +2108,40 @@ later = m;";
             }
         );
         assert_eq!(**waveform, waveform::Waveform::Const(0.5));
+    }
+
+    #[test]
+    fn evaluation_bindings_are_a_shared_prefix_and_own_sliders() {
+        let source = "\
+pi = 3.14;
+#{level_db=0}
+_ = pulse(60);
+#{sliders=[\"vol:0.5:0:1\"]}
+tone = saw(220);
+open more;
+#{sliders=[\"pan:0.2:0:1\"]}
+_ = tone * vol;";
+        let set = state_from(source);
+        let (shared, counts) = set.shared_evaluation_bindings();
+        assert_eq!(binding_names(&shared), vec!["pi", "tone"]);
+        for index in 0..set.programs().len() {
+            let mut expected = shared[..counts[index]].to_vec();
+            expected.extend(set.own_slider_bindings(index));
+            let actual = set.evaluation_bindings(index);
+            assert_eq!(
+                format!("{:?}", actual),
+                format!("{:?}", expected),
+                "program {}",
+                index
+            );
+        }
+        // The last program reads `pi`, `tone` (with its own slider bound
+        // around it) and `open more`, then its own slider.
+        assert_eq!(counts[2], 3);
+        assert_eq!(
+            binding_names(&set.evaluation_bindings(2)),
+            vec!["pi", "tone", "pan"]
+        );
     }
 
     #[test]

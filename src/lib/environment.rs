@@ -573,21 +573,19 @@ impl Environment {
         })
     }
 
-    /// Evaluates a sub-expression of the program `input` describes in that
-    /// program's evaluation context, expecting a waveform result.
+    /// Evaluates a sub-expression of a program in that program's evaluation
+    /// context `context`, expecting a waveform result.
     ///
     /// The waveform is returned as [`Environment::prepare_waveform`] returns
     /// it, with its marks. Returns `None` when evaluation fails or the result is
     /// neither a bare nor a `seq`-wrapped waveform (the `seq` wrapper is
     /// stripped).
-    pub fn evaluate_program_waveform_expr(
+    fn evaluate_program_waveform_expr(
         &self,
-        input: &EvaluationInput,
+        context: &mut Vec<eval::ContextEntry<MarkId, Source>>,
         expr: &expr::SourceExpr<MarkId, Source>,
     ) -> Option<(waveform::Waveform<MarkId>, Arc<WaveformMarks>)> {
-        let mut bindings = input.bindings.clone();
-        bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
-        let expr = self.evaluate(&bindings, expr.clone()).ok()?;
+        let expr = eval::evaluate_with_context(context, expr.clone()).ok()?;
         let trace = trace_walk::result_trace(&expr);
         let waveform = match expr.expr {
             expr::Expr::Waveform(w) => w,
@@ -623,22 +621,94 @@ impl Environment {
     /// note/velocity arguments. A waveform program whose text has the
     /// sequenceable `on_beats` shape evaluates to its decomposed sequence.
     pub fn evaluate_program(&self, input: &EvaluationInput) -> Result<Evaluated, Vec<Diagnostic>> {
+        let expr = self.parse_program(input)?;
+        let mut context = self
+            .base_context()
+            .and_then(|mut context| {
+                self.extend_context(&mut context, &input.bindings)?;
+                Ok(context)
+            })
+            .map_err(|error| vec![self.diagnose(&error, &input.text, &input.source)])?;
+        self.evaluate_parsed_program(input, expr, &mut context)
+    }
+
+    /// Parses the text of the program `input` describes, returning the
+    /// user-visible diagnostics as the error.
+    fn parse_program(
+        &self,
+        input: &EvaluationInput,
+    ) -> Result<expr::SourceExpr<MarkId, Source>, Vec<Diagnostic>> {
+        parser::parse_program(&input.text, Source::Program).map_err(|errors| {
+            errors
+                .iter()
+                .map(|error| self.diagnose(error, &input.text, &input.source))
+                .collect()
+        })
+    }
+
+    /// Returns the context every program's bindings are evaluated after: the
+    /// prelude's entries.
+    pub fn base_context(
+        &self,
+    ) -> Result<Vec<eval::ContextEntry<MarkId, Source>>, expr::Error<Source>> {
         // Programs and their file's sibling bindings see the prelude through an
         // implicit leading `open __prelude`, the same way modules do (see
         // `resolve`).
-        let mut bindings = input.bindings.clone();
-        bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
+        let mut context = Vec::new();
+        self.extend_context(
+            &mut context,
+            &[expr::Binding::Open(vec!["__prelude".to_string()]).into()],
+        )?;
+        Ok(context)
+    }
+
+    /// Evaluates `bindings` after the entries already in `context`, appending
+    /// an entry for each bound name, with modules resolved through the module
+    /// cache and their evaluated exports reused.
+    ///
+    /// `context` should be one [`Environment::base_context`] returned,
+    /// possibly already extended. On failure, it holds the entries of the
+    /// bindings before the one that failed.
+    pub fn extend_context(
+        &self,
+        context: &mut Vec<eval::ContextEntry<MarkId, Source>>,
+        bindings: &[expr::SourceBinding<MarkId, Source>],
+    ) -> Result<(), expr::Error<Source>> {
+        eval::extend_context_cached(
+            |path| self.resolve(path),
+            &mut self.module_values.borrow_mut(),
+            bindings,
+            context,
+        )
+    }
+
+    /// Evaluates the program `input` describes, as
+    /// [`Environment::evaluate_program`] does, in `context`: the evaluated
+    /// [`Environment::base_context`] extended with `input`'s bindings. The
+    /// bindings in `input` themselves are not evaluated.
+    ///
+    /// `context` holds the same entries afterwards.
+    pub fn evaluate_program_in_context(
+        &self,
+        input: &EvaluationInput,
+        context: &mut Vec<eval::ContextEntry<MarkId, Source>>,
+    ) -> Result<Evaluated, Vec<Diagnostic>> {
+        let expr = self.parse_program(input)?;
+        self.evaluate_parsed_program(input, expr, context)
+    }
+
+    /// Evaluates `expr`, the parsed text of the program `input` describes, in
+    /// `context`, as [`Environment::evaluate_program_in_context`] does.
+    fn evaluate_parsed_program(
+        &self,
+        input: &EvaluationInput,
+        expr: expr::SourceExpr<MarkId, Source>,
+        context: &mut Vec<eval::ContextEntry<MarkId, Source>>,
+    ) -> Result<Evaluated, Vec<Diagnostic>> {
         let kind = input.kind;
         let diagnose =
             |error: &expr::Error<Source>| self.diagnose(error, &input.text, &input.source);
-
-        let expr = match parser::parse_program(&input.text, Source::Program) {
-            Err(errors) => {
-                return Err(errors.iter().map(diagnose).collect());
-            }
-            Ok(expr) => expr,
-        };
-        let expr = match self.evaluate(&bindings, expr) {
+        let expr = match eval::evaluate_with_context(context, expr) {
             Err(error) => {
                 return Err(vec![diagnose(&error)]);
             }
@@ -648,14 +718,14 @@ impl Environment {
         let trace = trace_walk::result_trace(&expr);
         match expr.expr {
             expr::Expr::Waveform(w) => match kind {
-                ProgramKind::Waveform => Ok(self.evaluated_waveform(input, w, &trace)),
+                ProgramKind::Waveform => Ok(self.evaluated_waveform(input, context, w, &trace)),
                 ProgramKind::Keys => Err(message_only(
                     "Program is marked #{keys} but evaluates to a waveform",
                 )),
             },
             expr::Expr::Seq { waveform, .. } => match (kind, waveform.expr) {
                 (ProgramKind::Waveform, expr::Expr::Waveform(w)) => {
-                    Ok(self.evaluated_waveform(input, w, &trace))
+                    Ok(self.evaluated_waveform(input, context, w, &trace))
                 }
                 (ProgramKind::Keys, expr::Expr::Waveform(_)) => Err(message_only(
                     "Program is marked #{keys} but evaluates to a waveform",
@@ -687,18 +757,20 @@ impl Environment {
     }
 
     /// Builds the result for the program `input` describes, which evaluated
-    /// to `waveform` with the trace `trace`: the decomposed sequence when the
-    /// program's text has the sequenceable `on_beats` shape and its waveform
-    /// argument evaluates to a waveform, and `waveform` otherwise.
+    /// in `context` to `waveform` with the trace `trace`: the decomposed
+    /// sequence when the program's text has the sequenceable `on_beats` shape
+    /// and its waveform argument evaluates to a waveform, and `waveform`
+    /// otherwise.
     fn evaluated_waveform(
         &self,
         input: &EvaluationInput,
+        context: &mut Vec<eval::ContextEntry<MarkId, Source>>,
         waveform: waveform::Waveform<MarkId>,
         trace: &Arc<Trace<Source>>,
     ) -> Evaluated {
         let sequence = sequencer::analyze(&input.text).and_then(|shape| {
             let (step_waveform, step_marks) =
-                self.evaluate_program_waveform_expr(input, &shape.waveform_expr)?;
+                self.evaluate_program_waveform_expr(context, &shape.waveform_expr)?;
             Some(sequencer::Sequence {
                 steps: shape.steps,
                 step_waveform,

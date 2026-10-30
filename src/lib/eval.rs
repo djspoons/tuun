@@ -863,19 +863,63 @@ where
     M: Clone + Display + Debug + CarriesTrace<S>,
     S: Clone + Debug,
 {
+    let mut context = Vec::new();
+    extend_context_cached(resolve, cache, bindings, &mut context)?;
+    Ok(context)
+}
+
+/// Evaluates `bindings` after the entries already in `context`, appending an
+/// entry to `context` for each bound name, and reusing and updating the
+/// module exports in `cache`.
+///
+/// `context` should be a context [`evaluate_bindings`] or this function
+/// returned. On failure, `context` holds the entries of the bindings before
+/// the one that failed.
+///
+/// # Example
+///
+/// ```
+/// use tuun::eval::{self, ModuleCache};
+/// use tuun::expr::Error;
+/// use tuun::parser::{parse_module, parse_program};
+///
+/// let resolve = |_: &[String]| Err(Error::eval_here("no modules".to_string()));
+/// let mut cache = ModuleCache::default();
+/// let (first, _) = parse_module::<u32, _>("a = 1;", ()).unwrap();
+/// let (second, _) = parse_module::<u32, _>("b = a;", ()).unwrap();
+/// let mut context = Vec::new();
+/// eval::extend_context_cached(resolve, &mut cache, &first, &mut context).unwrap();
+/// eval::extend_context_cached(resolve, &mut cache, &second, &mut context).unwrap();
+/// let b = parse_program::<u32, _>("b", ()).unwrap();
+/// let value = eval::evaluate_with_context(&mut context, b).unwrap();
+/// assert_eq!(format!("{}", value), "1");
+/// ```
+pub fn extend_context_cached<'a, M, S, F>(
+    resolve: F,
+    cache: &mut ModuleCache<M, S>,
+    bindings: &'a [SourceBinding<M, S>],
+    context: &mut Vec<ContextEntry<M, S>>,
+) -> Result<(), Error<S>>
+where
+    F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
+    M: Clone + Display + Debug + CarriesTrace<S>,
+    S: Clone + Debug,
+{
     let mut modules = Modules {
         resolve: &resolve,
         cache,
         open: Vec::new(),
         resolved: Vec::new(),
     };
-    let mut context = Vec::new();
-    build_context(&mut modules, bindings, &mut context)?;
-    Ok(context)
+    build_context(&mut modules, bindings, context)?;
+    Ok(())
 }
 
 /// Substitutes `context` into `expr` and reduces the result to a value.
-fn evaluate_with_context<M, S>(
+///
+/// `context` should be a context [`evaluate_bindings`] or
+/// [`extend_context_cached`] returned; it holds the same entries afterwards.
+pub fn evaluate_with_context<M, S>(
     context: &mut Vec<(String, SourceExpr<M, S>)>,
     expr: SourceExpr<M, S>,
 ) -> Result<SourceExpr<M, S>, Error<S>>
@@ -1263,6 +1307,26 @@ mod tests {
             let start = input.find("nth").unwrap();
             let end = start + "nth(i, [1, 2])".len();
             assert_eq!(error.range(), Some(start..end), "{}", input);
+        }
+    }
+
+    #[test]
+    fn evaluating_in_a_context_leaves_its_entries() {
+        let (bindings, errors) = parse_module::<u32, _>("a = 1; b = fn(x) => x;", ()).unwrap();
+        assert!(errors.is_empty());
+        let resolve = |_: &[String]| Err(Error::eval_here("no modules".to_string()));
+        let mut context = evaluate_bindings(resolve, &bindings).unwrap();
+        let names = |context: &[ContextEntry<u32, ()>]| -> Vec<String> {
+            context.iter().map(|(name, _)| name.clone()).collect()
+        };
+        let before = names(&context);
+        for (input, succeeds) in [
+            ("b(fn(y, z = a) => (y, z))", true),
+            ("fn(y) => fn(z) => nope", false),
+        ] {
+            let expr = parse_program::<u32, _>(input, ()).unwrap();
+            assert_eq!(evaluate_with_context(&mut context, expr).is_ok(), succeeds);
+            assert_eq!(names(&context), before, "{}", input);
         }
     }
 

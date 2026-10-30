@@ -102,6 +102,19 @@ pub struct Loaded {
 /// waveform) comes back with its finite parts replaced by their samples (see
 /// [`Generator::precompute`]).
 pub fn process(environment: &Environment, input: &EvaluationInput, precompute: bool) -> Outcome {
+    process_with(environment, input, precompute, || {
+        environment.evaluate_program(input)
+    })
+}
+
+/// Checks the program `input` describes and evaluates it with `evaluate`,
+/// as [`process`] does.
+fn process_with(
+    environment: &Environment,
+    input: &EvaluationInput,
+    precompute: bool,
+    evaluate: impl FnOnce() -> Result<Evaluated, Vec<Diagnostic>>,
+) -> Outcome {
     if input.text.trim().is_empty() {
         return Ok((None, Vec::new()));
     }
@@ -112,7 +125,7 @@ pub fn process(environment: &Environment, input: &EvaluationInput, precompute: b
     {
         return Err(findings);
     }
-    match environment.evaluate_program(input) {
+    match evaluate() {
         Ok(evaluated) if precompute => Ok((
             Some(precomputed(evaluated, environment.sample_rate())),
             findings,
@@ -158,17 +171,48 @@ pub fn load(
             Some(error) => format!("Parse error: {}", error),
             None => "Parse error".to_string(),
         })?;
+    // Each program reads a prefix of the same file bindings, so evaluate
+    // them once, in source order, and each program in the context of its
+    // prefix rather than evaluating the prefix again for every program.
+    let (shared, counts) = set.shared_evaluation_bindings();
+    let mut order: Vec<usize> = (0..set.programs().len())
+        .filter(|&index| !set.programs()[index].is_empty())
+        .collect();
+    order.sort_by_key(|&index| counts[index]);
+    let mut context = environment.base_context();
+    let mut evaluated = 0;
     let mut failed = Vec::new();
-    for index in 0..set.programs().len() {
-        if set.programs()[index].is_empty() {
-            continue;
+    for index in order {
+        if let Ok(entries) = &mut context
+            && let Err(error) =
+                environment.extend_context(entries, &shared[evaluated..counts[index]])
+        {
+            context = Err(error);
         }
+        evaluated = counts[index];
         let input = set.evaluation_input(index);
-        let outcome = process(environment, &input, precompute);
+        let outcome = process_with(environment, &input, precompute, || match &mut context {
+            Ok(entries) => {
+                let len = entries.len();
+                let result =
+                    match environment.extend_context(entries, &set.own_slider_bindings(index)) {
+                        Ok(()) => environment.evaluate_program_in_context(&input, entries),
+                        // Evaluating from scratch reports the failure as it
+                        // would for this program alone.
+                        Err(_) => environment.evaluate_program(&input),
+                    };
+                entries.truncate(len);
+                result
+            }
+            // A shared binding failed: evaluating from scratch reports it as
+            // it would for this program alone.
+            Err(_) => environment.evaluate_program(&input),
+        });
         if let Err(diagnostics) = set.record(index, input.text.into(), outcome) {
             failed.push((index, diagnostics));
         }
     }
+    failed.sort_by_key(|(index, _)| *index);
     Ok(Loaded {
         set,
         warning,
@@ -463,6 +507,63 @@ mod tests {
         assert!(programs[1].keys_instrument().is_some());
         assert!(programs[3].evaluated().is_none());
         assert_eq!(loaded.set.input_path(), path::Path::new("song.tuun"));
+    }
+
+    #[test]
+    fn load_evaluates_each_program_as_it_would_be_alone() {
+        let environment = Environment::new(8000, 90, PathBuf::new());
+        // Shared bindings with sliders, anonymous and named programs, a
+        // sequenceable program, a keys instrument, and a broken binding that
+        // only the programs after it read.
+        let source = "\
+#{sliders=[\"gain:0.5:0:1\"]}
+base = time * gain | fin(time - 1);
+on_beats = fn(w) => fn(beats) => w;
+#{level_db=0}
+_ = base;
+#{level_db=0, sliders=[\"depth:0.25:0:1\"]}
+twice = base * depth;
+#{level_db=0}
+_ = [1, 3] | on_beats(twice);
+#{keys}
+k = fn(note, vel) => (twice * vel, base);
+broken = time | fin(\"a\");
+#{level_db=0}
+_ = twice;
+";
+        let loaded = load(&environment, source.to_string(), PathBuf::new(), false)
+            .expect("the source parses");
+        let (set, _) = ProgramSet::from_source(source.to_string(), PathBuf::new()).unwrap();
+        let mut live = 0;
+        for (index, program) in loaded.set.programs().iter().enumerate() {
+            if program.is_empty() {
+                continue;
+            }
+            live += 1;
+            let alone = process(&environment, &set.evaluation_input(index), false);
+            let failure = loaded.failed.iter().find(|(i, _)| *i == index);
+            match (alone, failure) {
+                (Ok((evaluated, _)), None) => assert_eq!(
+                    format!("{:?}", program.evaluated()),
+                    format!("{:?}", evaluated.as_ref()),
+                    "program {}",
+                    index
+                ),
+                (Err(alone), Some((_, loaded))) => {
+                    assert_eq!(loaded, &alone, "program {}", index)
+                }
+                (alone, failure) => panic!(
+                    "program {}: alone {:?}, loaded failure {:?}",
+                    index, alone, failure
+                ),
+            }
+        }
+        assert_eq!(live, 6);
+        assert!(matches!(
+            loaded.set.programs()[3].evaluated(),
+            Some(Evaluated::Sequence(_))
+        ));
+        assert_eq!(loaded.failed.len(), 1);
     }
 
     #[test]
