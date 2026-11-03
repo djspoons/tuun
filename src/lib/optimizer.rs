@@ -138,12 +138,44 @@ where
             feed_forward,
             feedback,
             state,
-        } => Filter {
-            waveform: Box::new(optimize(*waveform)),
-            feed_forward: feed_forward.into_iter().map(optimize).collect(),
-            feedback: feedback.into_iter().map(optimize).collect(),
-            state,
-        },
+        } => {
+            let waveform = optimize(*waveform);
+            let feed_forward: Vec<_> = feed_forward.into_iter().map(optimize).collect();
+            let feedback = feedback.into_iter().map(optimize).collect();
+            match (waveform, feed_forward.as_slice()) {
+                // A single non-constant feed-forward coefficient only scales
+                // the current input sample, so apply it to the input instead,
+                // leaving a constant coefficient. The coefficient is
+                // zero-extended, so the product must be too, which keeps the
+                // input's length only if the input is infinite.
+                // TODO Another case here where an "infinite?" predicate on
+                // waveforms would be useful!
+                (waveform @ (Const(_) | Time(_) | Noise), [coefficient])
+                    if !matches!(coefficient, Const(_)) =>
+                {
+                    Filter {
+                        waveform: Box::new(optimize(BinaryOp(
+                            BinaryOperator::Merge,
+                            Box::new(BinaryOp(
+                                BinaryOperator::Multiply,
+                                Box::new(coefficient.clone()),
+                                Box::new(waveform),
+                            )),
+                            Box::new(Const(0.0)),
+                        ))),
+                        feed_forward: vec![Const(1.0)],
+                        feedback,
+                        state,
+                    }
+                }
+                (waveform, _) => Filter {
+                    waveform: Box::new(waveform),
+                    feed_forward,
+                    feedback,
+                    state,
+                },
+            }
+        }
         BinaryOp(BinaryOperator::Add, a, b) => {
             match (optimize(*a), optimize(*b)) {
                 // Add yields the shorter of the two inputs.
@@ -157,6 +189,12 @@ where
                     BinaryOperator::Add,
                     Box::new(b),
                     Box::new(Const(a)),
+                )),
+                // Commute (moving Fixed to the left)
+                (a, Fixed(b, _)) if !matches!(a, Fixed(..)) => optimize(BinaryOp(
+                    BinaryOperator::Add,
+                    Box::new(Fixed(b, ())),
+                    Box::new(a),
                 )),
                 // Re-associate
                 // TODO I think re-associating the other way would mean a lower water mark for allocations (in
@@ -217,6 +255,12 @@ where
                     Box::new(b),
                     Box::new(Const(a)),
                 )),
+                // Commute (moving Fixed to the left)
+                (a, Fixed(b, _)) if !matches!(a, Fixed(..)) => optimize(BinaryOp(
+                    BinaryOperator::Merge,
+                    Box::new(Fixed(b, ())),
+                    Box::new(a),
+                )),
                 // Combine merge of Fin and an Append who first argument is Fin -- this occurs for expressions of
                 // the form `w | fin(t) | seq(t)`.
                 (
@@ -272,6 +316,12 @@ where
                     BinaryOperator::Multiply,
                     Box::new(b),
                     Box::new(Const(a)),
+                )),
+                // Commute (moving Fixed to the left)
+                (a, Fixed(b, _)) if !matches!(a, Fixed(..)) => optimize(BinaryOp(
+                    BinaryOperator::Multiply,
+                    Box::new(Fixed(b, ())),
+                    Box::new(a),
                 )),
                 // Re-associate
                 (BinaryOp(BinaryOperator::Multiply, a, b), Const(c)) => BinaryOp(
@@ -523,6 +573,38 @@ mod tests {
             Box::new(Const(0.0)),
         );
         assert_eq!(optimize(finite), Fixed(vec![1.0, 1.0], ()));
+    }
+
+    #[test]
+    fn single_feed_forward_coefficient_moves_to_infinite_input() {
+        let filter = |waveform: Waveform<(), ()>, feed_forward: Vec<Waveform<(), ()>>| Filter {
+            waveform: Box::new(waveform),
+            feed_forward,
+            feedback: vec![Const(-1.0)],
+            state: (),
+        };
+        let hold = Fixed(vec![1.0], ());
+        assert_eq!(
+            optimize(filter(Noise, vec![hold.clone()])),
+            filter(
+                BinaryOp(
+                    BinaryOperator::Merge,
+                    Box::new(BinaryOp(
+                        BinaryOperator::Multiply,
+                        Box::new(hold.clone()),
+                        Box::new(Noise),
+                    )),
+                    Box::new(Const(0.0)),
+                ),
+                vec![Const(1.0)],
+            )
+        );
+        // A finite input would be extended by the zero-extended product.
+        let finite = filter(Fixed(vec![2.0, 3.0], ()), vec![hold.clone()]);
+        assert_eq!(optimize(finite.clone()), finite);
+        // The first coefficient doesn't scale the delayed samples read by the others.
+        let two = filter(Noise, vec![hold.clone(), Const(0.5)]);
+        assert_eq!(optimize(two.clone()), two);
     }
 
     #[test]

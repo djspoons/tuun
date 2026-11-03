@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::f64;
 use std::fmt::{Debug, Display};
 use std::io::BufWriter;
@@ -13,26 +13,20 @@ use crate::waveform::BinaryOperator;
 pub enum State {
     // The state of a waveform that hasn't yet generated any samples.
     Initial,
-    // The position in the current waveform as the number of samples since the beginning of the waveform.
+    // The position in the current waveform as the number of samples since the
+    // beginning of the waveform.
     Position(usize),
-    // TODO consider a shared vec plus a slice for Fixed?
-    // Shared(Rc<Vec<f32>>, &[f32]),
-    // Whether or not (part of) the waveform is done generating samples (for example, the first argument
-    // to Append)
+    // Whether or not (part of) the waveform is done generating samples (for
+    // example, the first argument to Append)
     Finished(bool),
-    // Previously generated samples as input and/or output to the waveform (for example, for Filter)
-    Samples {
-        input: VecDeque<f32>,
-        output: VecDeque<f32>,
-    },
+    // Previously generated samples as input and/or output to the waveform (for
+    // example, for Filter)
+    Samples { input: Vec<f32>, output: Vec<f32> },
     // The current accumulated value (example, for Phase).
-    Accumulator {
-        value: f64,
-    },
-    // The sign of the last generated value along with the direction of generation (for example, for Reset).
-    Sign {
-        signum: f32,
-    },
+    Accumulator { value: f64 },
+    // The sign of the last generated value along with the direction of
+    // generation (for example, for Reset).
+    Sign { signum: f32 },
 }
 
 pub type Waveform<M> = waveform::Waveform<M, State>;
@@ -229,20 +223,25 @@ impl<'a> Generator<'a> {
                 feedback,
                 state: state @ Initial,
             } => {
-                // Generate the input samples so that they can be used in the feed-forward part of the filter.
-                // TODO we could reverse the order of elements in input and output so that they line up with
-                // how they are used.
+                // Generate the input samples so that they can be used in the
+                // feed-forward part of the filter.
                 let ff_count = feed_forward.len();
                 assert!(ff_count >= 1);
-                let mut input = vec![0.0; ff_count - 1];
+                // Allocate enough room for an entire buffer + ff_count-1 since
+                // we'll use this as intermediate storage in the loop in
+                // generate_filter. If subsequent calls to `generate` use a
+                // larger buffer, it will grow automatically then.
+                let mut input = Vec::with_capacity(out.len() + ff_count - 1);
+                input.resize(ff_count - 1, 0.0);
                 self.allocations += 1;
                 let inner_len = self.generate(inner, &mut input);
                 // Remove any unset elements from input.
                 input.truncate(inner_len);
-                let input = VecDeque::from(input);
-                // Fill the previous output samples with zeros to match the number of feedback coefficients.
+                // Fill the previous output samples with zeros to match the
+                // number of feedback coefficients.
                 let fb_count = feedback.len();
-                let output = VecDeque::from(vec![0.0; fb_count]);
+                let mut output = Vec::with_capacity(out.len() + fb_count);
+                output.resize(fb_count, 0.0);
                 self.allocations += 1;
                 /*
                 println!(
@@ -382,22 +381,24 @@ impl<'a> Generator<'a> {
         inner: &mut Waveform<M>,
         feed_forward: &mut [Waveform<M>],
         feedback: &mut [Waveform<M>],
-        input: &mut VecDeque<f32>,
-        output: &mut VecDeque<f32>,
+        input: &mut Vec<f32>,
+        output: &mut Vec<f32>,
         out: &mut [f32],
     ) -> usize {
-        // Overall, we want the length of the output to match that of the input `inner`. Doing so
-        // means that the last output point will only depend on one input point (and the second to
-        // last output will only depend on two input points, all the way back to the `ff_count-1`^th
-        // to last point.) This means that if the inner waveform is not able to generate `out.len()`
-        // points, we can zero-extend `input` up to `ff_count-1` points. We keep track of this by
-        // saving fewer than ff_count points for the next call to `generate()`. This is the same
-        // thing that happens in the case where the first call to `generate()` with Initial state
-        // doesn't generate `ff_count-1` points.
+        // The length of the output should match that of the input `inner`.
+        // Since we delay the input, in the case that `inner` is finite, the
+        // last output point will only depend on one input point (and the second
+        // to last output will only depend on two input points, all the way back
+        // to the `ff_count-1`^th to last point). This means that if the inner
+        // waveform is not able to generate `out.len()` points, we zero-extend
+        // `input` up to `ff_count-1` points. Keep track of this by saving fewer
+        // than ff_count points for the next call to `generate()`. This is the
+        // same thing that happens in the case where the first call to
+        // `generate()` with Initial state doesn't generate `ff_count-1` points.
 
         // First, generate samples from the inner waveform, if possible.
         let inner_len = self.generate(inner, out);
-        // The number of inner samples saved from earlier calls but not yet output.
+        // The number of inner samples saved from earlier calls.
         let pending = input.len();
         let out_len = out.len().min(inner_len + pending);
         // We may read past the end of inner_len, so make sure those samples are initialized.
@@ -407,9 +408,10 @@ impl<'a> Generator<'a> {
         let input_padding = if input.len() == ff_count - 1 {
             0
         } else {
-            // We've already exhausted `inner` on a previous call to generate (or in the Initial
-            // arm above), but we will be able to generate `input.len()` more samples. To do that,
-            // we need to pad up to `ff_count - 1`.
+            // We've already exhausted `inner` on a previous call to generate
+            // (or in the Initial arm above), but we still need to generate
+            // `input.len()` more samples. To do that, we need to pad up to
+            // `ff_count - 1`.
             assert_eq!(0, inner_len);
             (ff_count - 1) - input.len()
         };
@@ -423,47 +425,40 @@ impl<'a> Generator<'a> {
 
         // Set up the coefficients.
         // First, check to see if all coefficients are constants.
-        use waveform::Waveform::Const;
         let mut all_const_coeffs = true;
         for ff in feed_forward.iter() {
-            if let Const(_) = ff {
-            } else {
+            if self.is_const(ff).is_none() {
                 all_const_coeffs = false;
             };
         }
         for fb in feedback.iter() {
-            if let Const(_) = fb {
-            } else {
+            if self.is_const(fb).is_none() {
                 all_const_coeffs = false;
             };
         }
 
+        // TODO If we want to really avoid allocations, we could move some or
+        // all of these into `state`.
         let mut ff_coeffs = vec![0.0; ff_count];
         let mut fb_coeffs = vec![0.0; fb_count];
         self.allocations += 2;
-        // These are only used in the case where at least one coefficient is not constant.
+        // These are only used in the case where one or more coefficients is not
+        // constant.
         let mut ff_outs = vec![];
         let mut fb_outs = vec![];
 
         if all_const_coeffs {
-            // If they are all constants, then fill in the coefficients once and for all.
+            // If they are all constants, then fill in the coefficients once and
+            // for all.
             for (j, ff) in feed_forward.iter().enumerate() {
-                ff_coeffs[j] = if let Const(x) = &ff {
-                    *x
-                } else {
-                    unreachable!();
-                }
+                ff_coeffs[j] = self.is_const(ff).unwrap();
             }
             for (j, fb) in feedback.iter().enumerate() {
-                fb_coeffs[j] = if let Const(x) = &fb {
-                    *x
-                } else {
-                    unreachable!();
-                }
+                fb_coeffs[j] = self.is_const(fb).unwrap();
             }
         } else {
-            // If they are not all constants, then generate output for each coefficient, which
-            // we'll copy over later (inside the loop).
+            // If they are not all constants, then generate output for each
+            // coefficient, which we'll copy over later (inside the loop).
             for ff in feed_forward.iter_mut() {
                 let mut ff_out = vec![0.0; out_len];
                 self.allocations += 1;
@@ -478,39 +473,58 @@ impl<'a> Generator<'a> {
             }
         }
 
-        // Run the filter!!
-        for (i, x) in out[..out_len].iter_mut().enumerate() {
-            // First, save the current input value for future iterations.
-            if !all_const_coeffs {
-                // Grab the coefficients for this step.
-                for (j, ff_out) in ff_outs.iter().enumerate() {
-                    ff_coeffs[j] = ff_out[i];
+        // Append this buffer's input samples to input and make room for its
+        // outputs in output so that we can use them in the loop below.
+        // input[ff_count - 1 + i] is the i-th input and output[fb_count + i] is
+        // the i-th output.
+        input.extend_from_slice(&out[..out_len]);
+        output.resize(fb_count + out_len, 0.0);
+        {
+            // Borrow `input` and `output` once for the duration of the loop.
+            let (input, output) = (input.as_slice(), output.as_mut_slice());
+            // Special case for when there is exactly one feedback coefficient:
+            // keep the previous output sample in a local variable rather than
+            // reading it from `output` which avoids waiting on a store and
+            // reload every sample.
+            let mut prev = if fb_count > 0 {
+                output[fb_count - 1]
+            } else {
+                0.0
+            };
+            for i in 0..out_len {
+                if !all_const_coeffs {
+                    // Grab the coefficients for this step.
+                    for (j, ff_out) in ff_outs.iter().enumerate() {
+                        ff_coeffs[j] = ff_out[i];
+                    }
+                    for (j, fb_out) in fb_outs.iter().enumerate() {
+                        fb_coeffs[j] = fb_out[i];
+                    }
                 }
-                for (j, fb_out) in fb_outs.iter().enumerate() {
-                    fb_coeffs[j] = fb_out[i];
+                let mut y = 0.0;
+                for (m, ff_coeff) in ff_coeffs.iter().enumerate() {
+                    y += *ff_coeff * input[ff_count - 1 + i - m];
                 }
+                if fb_count == 1 {
+                    y -= fb_coeffs[0] * prev;
+                    prev = y;
+                } else {
+                    for (j, fb_coeff) in fb_coeffs.iter().enumerate() {
+                        y -= *fb_coeff * output[fb_count + i - 1 - j];
+                    }
+                }
+                output[fb_count + i] = y;
             }
-            // Save the input before we overwrite it.
-            input.push_back(*x);
-            // Since there's always at least one feed-forward coefficient, do that in-place.
-            *x *= ff_coeffs[0];
-            for (j, ff_coeff) in ff_coeffs[1..].iter().enumerate() {
-                *x += *ff_coeff * input[(ff_count - 1) - (j + 1)];
-            }
-            for (j, fb_coeff) in fb_coeffs.iter().enumerate() {
-                *x -= *fb_coeff * output[(fb_count - 1) - j];
-            }
-            // Discard the oldest input and output values.
-            input.pop_front();
-            // Push first into `output` in case `fb_count` is zero.
-            output.push_back(*x);
-            output.pop_front();
         }
-
-        // `input` and `output` still contain the last few samples (`ff_count - 1` and
-        // `fb_count` respectively). But if `input` was padded with any zeros or if we
-        // copied any zeros from `out`, we don't want to save those: keep only the inner
-        // samples that haven't been output yet, which come before any zeros.
+        // Copy the results back to `out` and drain the corresponding elements
+        // from `input` and `output` so they contain only the last few samples
+        // (`ff_count - 1` and `fb_count` respectively).
+        out[..out_len].copy_from_slice(&output[fb_count..]);
+        input.drain(..out_len);
+        output.drain(..out_len);
+        // If `input` was padded with any zeros or if we copied any zeros from
+        // `out`, we don't want to save those: keep only the inner samples that
+        // haven't been output yet, which come before any zeros.
         input.truncate(pending + inner_len - out_len);
         out_len
     }
@@ -526,8 +540,9 @@ impl<'a> Generator<'a> {
         out: &mut [f32],
     ) -> usize {
         let extend_to_longer = op.extends_to_longer();
-        // This approach may generate lots of samples from `a` that we don't need (in the case that `b`
-        // is much shorter.)
+        // This approach may generate lots of samples from `a` that we don't
+        // need (in the case that `b` is much shorter.) Therefore, try to put
+        // the shorter waveform on the left-hand side.
         let a_len = self.generate(a, out);
         if a_len == 0 && extend_to_longer {
             // Handle the special case where 'a' has already finished to avoid an allocation. This
@@ -2157,6 +2172,24 @@ mod tests {
             state: (),
         };
         run_tests(&w, &[6.0, 3.0, 0.0]);
+
+        // A single finite coefficient is zero-extended, after which only the feedback remains.
+        let w = Filter {
+            waveform: Box::new(Time(())),
+            feed_forward: vec![Fixed(vec![2.0, 3.0], ())],
+            feedback: vec![Const(-0.5)],
+            state: (),
+        };
+        run_tests(&w, &[0.0, 3.0, 1.5, 0.75, 0.375]);
+
+        // A single infinite coefficient scales every input sample.
+        let w = Filter {
+            waveform: Box::new(Time(())),
+            feed_forward: vec![Time(())],
+            feedback: vec![],
+            state: (),
+        };
+        run_tests(&w, &[0.0, 1.0, 4.0, 9.0, 16.0]);
     }
 
     // TODO test for forgetting to sort pending waveforms

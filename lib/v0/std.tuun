@@ -122,6 +122,13 @@ linear = fn(initial, slope) => initial + (time * slope);
 // Convert from MIDI note numbers to frequency
 @ = fn(m) => pow(2, (m - 69) / 12) * 440;
 
+// Returns a constant waveform whose value is the first sample of the input.
+hold = fn() => filter([fixed([1])], [-1]);
+// Generates a constant but random value between -1 and 1.
+rand = fn() => noise | hold();
+// Returns the given waveform with the given probability or the constant zero
+// waveform otherwise.
+maybe = fn(w, P=0.5) => alt(rand() + (P * 2) - 1, w, 0);
 
 over = fn(freq) => fn(x) => $(freq * x) * (1 / x); // TODO remove in favor of harmonic?
 harmonic = fn(freq) => fn(n) => $(freq * n) * (1 / n);

@@ -1,0 +1,16 @@
+open std;
+use synth.sub;
+
+#{level_db=0}
+_ = alt(rand(), $220, $330) * Qw;
+
+b = sub.kick_drum()(E) | unseq();
+
+#{loop_after_beats=4, level_db=0}
+_ = <map(fn (w) => w * Qw, [b, maybe(b, P=0.2), maybe(b), maybe(b, P=0.7)])>;
+
+#{loop_after_beats=4, level_db=0}
+_ = <map(fn (w) => w * Qw, [b, b, b, b])>;
+
+//#{loop_after_beats=4, level_db=0, sliders=["e2:0:1:0"]}
+//_ = <map(fn (w) => w * Ew, [b, maybe(b, threshold=0.2), maybe(b), maybe(b, threshold=0.7)])>;

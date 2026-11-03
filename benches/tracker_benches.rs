@@ -314,5 +314,46 @@ fn bench_fins(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench_filter, bench_marks, bench_large, bench_fins);
+/// Benchmarks two forms of a sample-and-hold of `noise`, generated for one second in
+/// 1024-sample buffers.
+fn bench_hold(c: &mut Criterion) {
+    const SAMPLE_RATE: u32 = 44100;
+    let environment = environment::Environment::new(SAMPLE_RATE, 120, std::path::PathBuf::new());
+    let bindings: Vec<expr::SourceBinding<MarkId, diagnostics::Source>> =
+        vec![expr::Binding::Open(vec!["__prelude".to_string()]).into()];
+    let forms = [
+        // Holds by zeroing the coefficient after the first sample.
+        ("hold_coefficient", "noise | filter([fixed([1])], [-1])"),
+        // Holds by zeroing the input after the first sample.
+        ("hold_input", "noise * fixed([1]) & 0 | filter([1], [-1])"),
+    ];
+    for (name, source) in forms {
+        let waveform = match environment.evaluate_source(source, &bindings) {
+            Ok(expr) => match expr.expr {
+                expr::Expr::Waveform(waveform) => optimizer::optimize(waveform),
+                expr => panic!("Expected waveform, got {}", expr),
+            },
+            Err(message) => panic!("Error evaluating {}: {}", name, message),
+        };
+        c.bench_function(name, |b| {
+            b.iter(|| {
+                let mut generator = generator::Generator::new(SAMPLE_RATE);
+                let mut w = generator::initialize_state(waveform.clone());
+                let mut out = vec![0.0; 1024];
+                for _ in 0..43 {
+                    let _ = generator.generate(&mut w, &mut out);
+                }
+            });
+        });
+    }
+}
+
+criterion_group!(
+    benches,
+    bench_filter,
+    bench_marks,
+    bench_large,
+    bench_fins,
+    bench_hold
+);
 criterion_main!(benches);

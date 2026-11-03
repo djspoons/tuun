@@ -95,7 +95,7 @@ It's very easy to provide feedback parameters which cause the output to diverge!
 
 A simple example that uses a feedback filter is an exponential decay envelope. Exponential decay is useful in creating percussion instruments where you want a short, intense burst of sound followed by a fast but smooth drop in amplitude. You can create exponential decay using the exponential function `exp` but it can be computationally cheaper to do so with `filter` instead.
 
- In this example, we create an envelope by combining an impulse with a filter that has a single feedback parameter. You can control `f` with the slider below. (Due to rounding in the display, it will sometimes show "1.0" when the actual value is slightly less than $1.0$.) The slider is limited to values less than 1.0, since the filter output diverges when `f` is greater than 1.0.
+ In this example, we create an envelope by combining an impulse with a filter that has a single feedback parameter. You can control `f` with the slider below. (Due to rounding in the display, it will sometimes show "1.00" when the actual value is slightly less than 1.0.) The slider is limited to values less than 1.0, since the filter output diverges when `f` is greater than 1.0.
 
 <div class="container">
   <tuun-synth
@@ -128,7 +128,7 @@ $$
 y[t_n] = w[t_n] + f \cdot y[t_{n - 1}]
 $$
 
-Recall that $y[t_n]$ for $n < 0$ is equal to $0.0$. The first five output values are given for $f = 0.995$ in the table below.
+Recall that $y[t_n]$ for $n <$ 0 is equal to 0.0. The first five output values are given for $f =$ 0.995 in the table below.
 
 
 $t_n$ | $x[t_n]$ | $y[t_n]$
@@ -139,9 +139,39 @@ $t_n$ | $x[t_n]$ | $y[t_n]$
 3     | 0.0      | 0.98507
 4     | 0.0      | 0.98015
 
+### Random Constant Waveform
+
+An even simpler example of a feedback filter is a sample-and-hold register. This filter takes the first sample from its input and repeats it forever.
+```
+Filter(_, [Fixed([1])], [Const(-1)])
+```
+(`Filter` zero extends its coefficient waveforms, so the feed-forward coefficient is equivalent to `Fixed([1]) & Const(0)`.)
+
+This implements the following equations:
+
+$$
+y[t_0] = 1 \cdot x[t_0] = x[t_0]
+\\[1em]
+y[t_n] = 0 \cdot x[t_n] + 1 \cdot y[t_{n-1}] = x[t_0]
+$$
+
+The example below uses a sample-and-hold filter and `Noise` to generate a random constant waveform. As an argument to `Alt`, this means that only one of the two waveforms will be used each time the `Alt` is repeated: you'll hear one of the two notes each time, but which one you hear is selected randomly.
+<div>
+  <tuun-synth open='["std"]'>
+    <script type="text/tuun">
+      let
+        hold = fn() => filter([fixed([1])], [-1]),
+        rand = fn() => noise | hold(),
+      in
+        reset($(1/2), alt(rand(), $220, $330) | fin(time - 1))
+    </script>
+  </tuun-synth>
+</div>
+(One last aside: neither `hold` nor `rand` needs to be defined as a thunk since there are no effects in their bodies. The randomness of `Noise` occurs not during evaluation in Tuun's expression language, but when generating samples: `Noise` is a value in the expression language, but nonetheless will generate _different_ samples each time it's played.)
+
 ### Biquad Low-Pass Filter
 
-Determining feedback coefficients can be a subtle art, and Tuun's library includes several functions that can help. The following example uses a biquad feedback filter described in [Robert Bristow-Johnson's Cookbook](https://webaudio.github.io/Audio-EQ-Cookbook/Audio-EQ-Cookbook.txt). This filter attenuates frequencies above `f_c` (the "center frequency") and passes through those below it.
+`Filter` can also be used to implement much more sophisticated transformations, including low-pass, high-pass, and band-pass filters. In these cases, determining feedback coefficients can be a subtle art, and Tuun's library includes several functions that can help. The following example uses a biquad feedback filter described in [Robert Bristow-Johnson's Cookbook](https://webaudio.github.io/Audio-EQ-Cookbook/Audio-EQ-Cookbook.txt). This filter attenuates frequencies above `f_c` (the "center frequency") and passes through those below it.
 
 <div class="container">
   <tuun-synth
@@ -167,10 +197,10 @@ Determining feedback coefficients can be a subtle art, and Tuun's library includ
 </div>
 
 
-## A Note on Length
+## Notes on Length
 
-Tuun `Filter` waveforms are always the same length as their input. As noted above, finite waveforms are extended by $K-1$ samples (where $K$ is the number of feed-forward coefficients) since the first $K-1$ input samples are consumed for the first output sample. In most cases the coefficient waveforms will be infinite; if they are not, they are extended with zeros to match the length of the input.
+Each Tuun `Filter` output waveform is the same length as its input. As noted above, finite input waveforms are extended by $K-1$ samples (where $K$ is the number of feed-forward coefficients) since the first $K-1$ input samples are consumed for the first output sample. In most cases the coefficient waveforms will be infinite; if they are not, they are extended with zeros to match the length of the input.
 
-Finally, note that because the length of a `Filter` waveform is independent of the *values* of the coefficients, an *infinite* impulse response filter can have a *finite* length. Similarly, a *finite* impulse response filter can have an *infinite* length (though the output will still eventually go to $0.0$).
+Finally, because the length of a `Filter` waveform is independent of the *values* of the coefficients, an *infinite* impulse response filter can have a *finite* length. Similarly, a *finite* impulse response filter can have an *infinite* length (though the output will still eventually go to 0.0).
 
 <script type="module" src="tuun/tuun-synth.js"></script>

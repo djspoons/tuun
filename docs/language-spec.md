@@ -102,11 +102,10 @@ unary_op ::= "-" | "$" | "@" | ...
 binary_op ::= "+" | "-" | "*" | "/" | "&" | "|" | "==" | "!=" | "<" | ...
 ```
 
-Binary and unary operators are de-sugared to applications, as are `let` bindings.
+Binary and unary operators are de-sugared to applications, as are `let` bindings. Division is defined to be total: division by zero is equal to zero.
 
 ```
-value ::= float
-        | string
+value ::= string
         | bool
         | "fn" "(" pattern "," ... "," id "=" value "," ... ")" "=>" expr
         | "(" value "," ... ")"

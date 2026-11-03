@@ -623,6 +623,7 @@ impl Environment {
     /// note/velocity arguments. A waveform program whose text has the
     /// sequenceable `on_beats` shape evaluates to its decomposed sequence.
     pub fn evaluate_program(&self, input: &EvaluationInput) -> Result<Evaluated, Vec<Diagnostic>> {
+        let start = time::Instant::now();
         // Programs and their file's sibling bindings see the prelude through an
         // implicit leading `open __prelude`, the same way modules do (see
         // `resolve`).
@@ -644,6 +645,10 @@ impl Environment {
             }
             Ok(expr) => expr,
         };
+        log::debug!(
+            "Evaluated program in {:.3}s",
+            (time::Instant::now() - start).as_secs_f32(),
+        );
         let message_only = |message: &str| vec![Diagnostic::message_only(message.to_string())];
         let trace = trace_walk::result_trace(&expr);
         match expr.expr {
