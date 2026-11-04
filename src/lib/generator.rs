@@ -325,10 +325,14 @@ impl<'a> Generator<'a> {
                 // TODO maybe consider consts here specially?
                 let mut positive_out = vec![0.0; t_len];
                 self.allocations += 1;
-                let _ = self.generate(positive_waveform, &mut positive_out);
+                let p_len = self.generate(positive_waveform, &mut positive_out);
+                // Since `positive_out` is undefined after `p_len`, clear it.
+                positive_out[p_len..].fill(0.0);
                 let mut negative_out = vec![0.0; t_len];
                 self.allocations += 1;
-                let _ = self.generate(negative_waveform, &mut negative_out);
+                let n_len = self.generate(negative_waveform, &mut negative_out);
+                // Same for `negative_out`
+                negative_out[n_len..].fill(0.0);
                 for (i, x) in out[..t_len].iter_mut().enumerate() {
                     if *x >= 0.0 {
                         *x = positive_out[i];
@@ -462,13 +466,17 @@ impl<'a> Generator<'a> {
             for ff in feed_forward.iter_mut() {
                 let mut ff_out = vec![0.0; out_len];
                 self.allocations += 1;
-                _ = self.generate(ff, &mut ff_out);
+                let ff_len = self.generate(ff, &mut ff_out);
+                // Make sure to clear any values after `ff_len`.
+                ff_out[ff_len..].fill(0.0);
                 ff_outs.push(ff_out);
             }
             for fb in feedback.iter_mut() {
                 let mut fb_out = vec![0.0; out_len];
                 self.allocations += 1;
-                _ = self.generate(fb, &mut fb_out);
+                let fb_len = self.generate(fb, &mut fb_out);
+                // Same for those after `fb_len`.
+                fb_out[fb_len..].fill(0.0);
                 fb_outs.push(fb_out);
             }
         }
@@ -576,6 +584,9 @@ impl<'a> Generator<'a> {
                 // Make sure that any element where we will apply `op` is initialized.
                 if a_len < len {
                     out[a_len..len].fill(0.0);
+                }
+                if b_len < len {
+                    b_out[b_len..len].fill(0.0);
                 }
                 for (i, x) in out[..len].iter_mut().enumerate() {
                     *x = op.apply(*x, b_out[i]);
@@ -758,7 +769,7 @@ impl<'a> Generator<'a> {
                 return waveform;
             }
 
-            log::debug!("Precomputing output for {}", waveform);
+            log::info!("Precomputing output for {}", waveform);
             // Generate in chunks until the waveform ends, stopping at a `MAX_LEN` which is long
             // enough for any reasonable waveform.
             const CHUNK: usize = 1 << 16;
@@ -778,7 +789,7 @@ impl<'a> Generator<'a> {
                 }
             }
 
-            log::debug!("  ...generated {} samples", out.len());
+            log::info!("  ...generated {} samples", out.len());
 
             waveform::Waveform::Fixed(out, State::Initial)
         }
@@ -1104,12 +1115,7 @@ impl<'a> Generator<'a> {
             Result::Pc(w) => generate_fixed(self, w),
             Result::Npc(_, w) => w,
         };
-        /*
-        println!(
-            "precompute waveform:\n{:#?}\ninto:\n{:#?}",
-            &waveform, &result
-        );
-        */
+        log::debug!("precompute result:\n{}", result);
         waveform::remove_state(result)
     }
 }
@@ -1677,6 +1683,51 @@ mod tests {
                 w
             ),
         }
+    }
+
+    #[test]
+    fn ended_operands_read_as_zero() {
+        use waveform::Waveform::Alt;
+
+        // Two samples of 2.0, ending partway through a buffer.
+        let two_samples = || Fin {
+            length: Box::new(BinaryOp(
+                BinaryOperator::Subtract,
+                Box::new(Time(())),
+                Box::new(Const(2.0)),
+            )),
+            waveform: Box::new(Const(2.0)),
+            state: (),
+        };
+        run_tests(
+            &BinaryOp(
+                BinaryOperator::Merge,
+                Box::new(Const(1.0)),
+                Box::new(two_samples()),
+            ),
+            &[3.0, 3.0, 1.0, 1.0, 1.0, 1.0],
+        );
+        run_tests(
+            &Filter {
+                waveform: Box::new(Const(1.0)),
+                feed_forward: vec![two_samples()],
+                feedback: vec![],
+                state: (),
+            },
+            &[2.0, 2.0, 0.0, 0.0, 0.0, 0.0],
+        );
+        run_tests(
+            &Alt {
+                trigger: Box::new(BinaryOp(
+                    BinaryOperator::Subtract,
+                    Box::new(Time(())),
+                    Box::new(Const(1.0)),
+                )),
+                positive_waveform: Box::new(two_samples()),
+                negative_waveform: Box::new(Const(9.0)),
+            },
+            &[9.0, 2.0, 0.0, 0.0, 0.0, 0.0],
+        );
     }
 
     #[test]

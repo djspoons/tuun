@@ -127,9 +127,11 @@ pub enum Waveform<MarkId, State = ()> {
         offset: Box<Waveform<MarkId, State>>,
         state: State,
     },
-    /// Implements an impulse response filter with feed-forward and feedback coefficients. Assumes that
-    /// the first feedback coefficient (a_0) is 1.0. If the filter has no feedback coefficients, then the
-    /// filter has a finite response -- that is, it is a convolution.
+    /// Implements an impulse response filter with feed-forward and feedback
+    /// coefficients. Assumes that the first feedback coefficient (a_0) is 1.0.
+    /// If the filter has no feedback coefficients, then the filter has a finite
+    /// response -- that is, it is a convolution. Its length is determined by
+    /// the input waveform; coefficients are zero extended if necessary.
     Filter {
         waveform: Box<Waveform<MarkId, State>>,
         feed_forward: Vec<Waveform<MarkId, State>>, // b_0, b_1, ...
@@ -153,8 +155,9 @@ pub enum Waveform<MarkId, State = ()> {
         waveform: Box<Waveform<MarkId, State>>,
         state: State,
     },
-    /// Generates a waveform by alternating between two waveforms based on the sign of the trigger
-    /// waveform. Its length is determined by the trigger waveform.
+    /// Generates a waveform by alternating between two waveforms based on the
+    /// sign of the trigger waveform. Its length is determined by the trigger
+    /// waveform; branches are zero extended if necessary.
     Alt {
         trigger: Box<Waveform<MarkId, State>>,
         positive_waveform: Box<Waveform<MarkId, State>>,
