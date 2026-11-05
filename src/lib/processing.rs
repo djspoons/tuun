@@ -174,7 +174,7 @@ pub fn load(
     // Each program reads a prefix of the same file bindings, so evaluate
     // them once, in source order, and each program in the context of its
     // prefix rather than evaluating the prefix again for every program.
-    let (shared, counts) = set.shared_evaluation_bindings();
+    let (used, counts) = set.used_evaluation_bindings();
     let mut order: Vec<usize> = (0..set.programs().len())
         .filter(|&index| !set.programs()[index].is_empty())
         .collect();
@@ -184,8 +184,7 @@ pub fn load(
     let mut failed = Vec::new();
     for index in order {
         if let Ok(entries) = &mut context
-            && let Err(error) =
-                environment.extend_context(entries, &shared[evaluated..counts[index]])
+            && let Err(error) = environment.extend_context(entries, &used[evaluated..counts[index]])
         {
             context = Err(error);
         }
@@ -204,8 +203,8 @@ pub fn load(
                 entries.truncate(len);
                 result
             }
-            // A shared binding failed: evaluating from scratch reports it as
-            // it would for this program alone.
+            // A binding this program uses failed: evaluating from scratch reports
+            // it as it would for this program alone.
             Err(_) => environment.evaluate_program(&input),
         });
         if let Err(diagnostics) = set.record(index, input.text.into(), outcome) {
@@ -512,7 +511,7 @@ mod tests {
     #[test]
     fn load_evaluates_each_program_as_it_would_be_alone() {
         let environment = Environment::new(8000, 90, PathBuf::new());
-        // Shared bindings with sliders, anonymous and named programs, a
+        // Used bindings with sliders, anonymous and named programs, a
         // sequenceable program, a keys instrument, and a broken binding that
         // only the programs after it read.
         let source = "\

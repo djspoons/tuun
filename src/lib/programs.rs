@@ -988,7 +988,7 @@ impl ProgramSet {
     /// program's sliders at its current value.
     ///
     /// These are the first `counts[index]` of the bindings
-    /// [`ProgramSet::shared_evaluation_bindings`] returns, followed by
+    /// [`ProgramSet::used_evaluation_bindings`] returns, followed by
     /// [`ProgramSet::own_slider_bindings`].
     pub fn evaluation_bindings(&self, index: usize) -> Vec<expr::SourceBinding<MarkId, Source>> {
         let mut bindings: Vec<_> = (0..self.programs[index].binding_index)
@@ -1006,7 +1006,7 @@ impl ProgramSet {
     /// The program at `index` is evaluated under the first `counts[index]`
     /// bindings followed by its [`ProgramSet::own_slider_bindings`], which is
     /// what [`ProgramSet::evaluation_bindings`] returns.
-    pub fn shared_evaluation_bindings(
+    pub fn used_evaluation_bindings(
         &self,
     ) -> (Vec<expr::SourceBinding<MarkId, Source>>, Vec<usize>) {
         let mut bindings = Vec::new();
@@ -2111,7 +2111,7 @@ later = m;";
     }
 
     #[test]
-    fn evaluation_bindings_are_a_shared_prefix_and_own_sliders() {
+    fn evaluation_bindings_are_a_prefix_of_used_bindings_and_own_sliders() {
         let source = "\
 pi = 3.14;
 #{level_db=0}
@@ -2122,10 +2122,10 @@ open more;
 #{sliders=[\"pan:0.2:0:1\"]}
 _ = tone * vol;";
         let set = state_from(source);
-        let (shared, counts) = set.shared_evaluation_bindings();
-        assert_eq!(binding_names(&shared), vec!["pi", "tone"]);
+        let (used, counts) = set.used_evaluation_bindings();
+        assert_eq!(binding_names(&used), vec!["pi", "tone"]);
         for index in 0..set.programs().len() {
-            let mut expected = shared[..counts[index]].to_vec();
+            let mut expected = used[..counts[index]].to_vec();
             expected.extend(set.own_slider_bindings(index));
             let actual = set.evaluation_bindings(index);
             assert_eq!(
