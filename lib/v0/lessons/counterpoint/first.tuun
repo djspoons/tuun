@@ -1,6 +1,10 @@
 open std;
 use midi.notes;
 
+// In general, bindings prefixed with "fux" are from Fux's work (and similarly
+// for other composers). Those without a composers name are the work of an
+// anonymous student.
+
 // TODO figure out why this can't be typed when used
 //as_midi_notes = fn(dur, inst) => fn(notes) => <map(fn(n) => inst(dur, @n), notes)>;
 
@@ -16,14 +20,13 @@ brass_notes = fn(dur) => fn(notes) => <map(fn(n) => pm.brass(dur, @n), notes)>;
 (C, C#, D, D#, E, F, F#, G, G#, A, A#, B) = notes.midi_octave(4);
 (C5, C#5, D5, D#5, E5, F5, F#5, G5, G#5, A5, A#5, B5) = notes.midi_octave(5);
 
-// Fux's dorian cantus firmus
+// Fux's dorian (2nd mode) cantus firmus
 #{level_db=-9}
 fux_dorian_c_f =                 [D, F, E, D, G, F, A, G, F, E, D] | brass_notes(Q);
 
 #{level_db=-9}
 fux_dorian_c_p_upper =           [A, A, G, A, B, C5, C5, B, D5, C#5, D5] | brass_notes(Q);
 
-// Some variations on a counterpoint to Fux's dorian
 #{level_db=-9}
 dorian_c_p_upper_1 =             [D5, D5, C5, D5, E5, D5, C5, D5, D5, C#5, D5] | brass_notes(Q);
 #{level_db=-9}
@@ -37,40 +40,82 @@ fux_dorian_c_p_lower_corrected = [D3, D3, A3, F3, E3, D3, F3, C, D, C#, D] | bra
 #{level_db=-9}
 dorian_c_p_lower_1 =             [D3, D3, G3, F3, E3, F3, C, C, A3, C#, D] | brass_notes(Q);
 
-// Fux's lydian first species cantus firmus
+
+// Fux's phrygian (3rd mode) cantus firmus
 #{level_db=-9}
+fux_phrygian_c_f =          [E, C, D, C, A3, A, G, E, F, E] | brass_notes(Q);
+
+#{level_db=-9}
+fux_phrygian_c_p_upper =    [B, C5, F, G, A, C5, B, E5, D5, E5] | brass_notes(Q);
+
+#{level_db=-9}
+phrygian_c_p_upper_1 =      [B, C5, B, A, A, C5, B, C5, D5, E5] | brass_notes(Q);
+
+#{level_db=-9}
+fux_phrygian_c_p_lower =    [E3, A3, D3, E3, F3, F3, B3, C, D, E] | brass_notes(Q);
+
+#{level_db=-9}
+fux_phrygian_c_p_lower_corrected = [E3, A3, D3, E3, F3, F3, C, C, D, E] | brass_notes(Q);
+
+#{level_db=-9}
+phrygian_c_p_lower_1 =    [E3, A3, G3, E3, F3, C, B3, C, D, E] | brass_notes(Q);
+
+
+// Fux's lydian (4th mode) cantus firmus
+#{level_db=-9,skip_slots=2}
 // Written with a vocal tenor clef
 fux_lydian_c_f       = [F3, G3, A3, F3, D3, E3, F3, C, A3, F3, G3, F3] | brass_notes(Q);
 #{level_db=-9}
 fux_lydian_c_p_upper = [F, E, C, F, F, G, A, G, C, F, E, F] | brass_notes(Q);
 
-// Some alternative counterpoints
 #{level_db=-9}
 lydian_c_p_upper_1 =   [C, A#3, C, D, D, C, C, E, C, C, E, F] | brass_notes(Q);
 #{level_db=-9}
-lydian_c_p_upper_2 = [F, E, C, D, F, E, A, G, F, A, E, F] | brass_notes(Q);
+lydian_c_p_upper_2 =   [F, E, C, D, F, E, A, G, F, A, E, F] | brass_notes(Q);
 
 #{level_db=-9}
 fux_lydian_c_p_lower = [F3, E3, F3, A3, A#3, G3, A3, E3, F3, D3, E3, F3] | brass_notes(Q);
 
-// Some alternative counterpoints
 #{level_db=-4}
 lydian_c_p_lower_1 =   [F3, E3, D3, D3, D3, C3, A2, A2, C3, D3, E3, F3] | brass_notes(Q);
 
 
-// Fux's mixolydian first species cantus firmus
-#{level_db=-9,skip_slots=2}
+// Fux's mixolydian (5th mode) cantus firmus
+#{skip_slots=2, level_db=-9}
 fux_mixol_c_f = [G3, C, B3, G3, C, E, D, G, E, C, D, B3, A3, G3] | brass_notes(Q);
 #{level_db=-9}
 fux_mixol_c_p_upper = [G, E, D, G, G, G, A, B, G, E5, D5, G, F#, G] | brass_notes(Q);
 #{level_db=-9}
 fux_mixol_c_p_upper_corrected = [G, E, D, G, G, G, A, B, G, C5, A, G, F#, G] | brass_notes(Q);
 
-// Some alternative counterpoints
 #{level_db=-9}
-mixol_c_p_upper1 = [D, E, D, D, E, C, D, C, C, E, B, G, F#, G] | brass_notes(Q);
+mixol_c_p_upper1 = [D, E, D, G, A, G, A, B, G, C5, B, G, F#, G] | brass_notes(Q);
 
-#{skip_slots=4, level_db=-9}
+#{level_db=-9}
+fux_mixol_c_p_lower = [G3, A3, G3, E3, E3, C3, G3, B3, C, A3, F#3, G3, F#3, G3] | brass_notes(Q);
+
+#{level_db=-9}
+mixol_c_p_lower1 = [G3, A3, G3, E3, E3, G3, G3, B3, C, A3, G3, G3, F#3, G3] | brass_notes(Q);
+
+
+// Fux's aeolian (6th mode) cantus firmus
+#{skip_slots=2, level_db=-9}
+fux_aeolian_c_f =       [A3, C, B3, D, C, E, F, E, D, C, B3, A3] | brass_notes(Q);
+
+#{level_db=-9}
+fix_aeolian_c_p_upper = [A, E, G, F, E, C5, A, B, B, A, G#, A] | brass_notes(Q);
+
+#{level_db=-9}
+aeolian_c_p_upper_1 =   [E, E, G, F, A, C5, A, B, F, G, G#, A] | brass_notes(Q);
+
+#{level_db=-9}
+fux_aeolian_c_p_lower = [A3, A3, G3, F3, E3, E3, D3, C3, G3, A3, G#3, A3] | brass_notes(Q);
+
+#{level_db=-9}
+aeolian_c_p_lower_1 =   [A3, A3, G3, F3, E3, G3, F3, G3, F3, A3, G#3, A3] | brass_notes(Q);
+
+
+#{skip_slots=3, level_db=-9}
 morley_c_f =   [C, F, E, D, C, F, G, A, G, E, D, C] | brass_notes(Q);
 // This one is pretty boring
 #{level_db=-9}
@@ -78,6 +123,7 @@ morley_c_p_upper1 = [G, A, G, F, G, A, B, C5, B, C5, B, C5] | brass_notes(Q);
 // This c.p. sort of jumps the gun on the c.f.'s high note
 #{level_db=-9}
 morley_c_p_upper2 = [C5, D5, C5, F, G, A, E5, C5, B, C5, B, C5] | brass_notes(Q);
+// A lot (too much?) parallel motion here
 #{level_db=-9}
 morley_c_p_upper2 = [C5, D5, C5, F, G, A, B, C5, E5, C5, B, C5] | brass_notes(Q);
 

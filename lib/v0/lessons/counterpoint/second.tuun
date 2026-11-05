@@ -2,7 +2,7 @@ open std;
 use midi.notes;
 use synth.pm;
 
-#{level_db=0,keys}
+#{keys, level_db=0}
 keys = pm.brass_keys;
 
 brass_notes = fn(dur) => fn(notes) => <map(fn(n) => pm.brass(dur, @n), notes)>;
@@ -17,4 +17,48 @@ brass_notes = fn(dur) => fn(notes) => <map(fn(n) => pm.brass(dur, @n), notes)>;
 fux_dorian_c_f =                 [D, F, E, D, G, F, A, G, F, E, D] | brass_notes(H);
 
 #{level_db=-9}
+fux_dorian_c_p_upper_corrected = [A, D5, A, B, C5, G, A, D5, B, C5, D5, A, C5, D5, E5, B, D5, A, B, C#5, D5, D5] | brass_notes(H/2);
+
+#{level_db=-9}
 dorian_c_p_upper_1 =             [D5, B, A, B, C5, E5, F5, E5, D5, B, D5, F5, C5, D5, E5, B, A, D5, B, C#5, D5, D5] | brass_notes(H/2);
+
+#{level_db=-9}
+fux_dorian_c_p_lower =           Qrw \ [D3, D, A3, C, A3, B3, A3, G3, B3, D, E, F, C, E, B3, D, D3, A3, C#, D, D] | brass_notes(H/2);
+
+#{level_db=-9}
+dorian_c_p_lower_1 =             [D, B3, A3, B3, C, G3, B3, A3, G3, B3, A3, D, C, A3, C, B3, D, D3, A3, C#, D, D] | brass_notes(H/2);
+
+
+// Fux's phrygian cantus firmus
+#{level_db=-9,skip_slots=2}
+fux_phrygian_c_f =          [E, C, D, C, A3, A, G, E, F, E] | brass_notes(H);
+
+#{level_db=-9}
+fux_phrygian_c_p_upper = Qrw \ [B, C5, B, A, B, C5, G, A, B, C5, A, B, D5, E5, D5, C5, D5, E5, E5] | brass_notes(H/2);
+
+#{level_db=-9}
+phrygian_c_p_upper_1 =      [B, G, A, C5, A, B, E, A, F, E, D, F, D5, B, E5, D5, C5, D5, E5, E5] | brass_notes(H/2);
+
+#{level_db=-9}
+fux_phrygian_c_p_lower = Qrw \ [E3, A3, G3, F3, D3, E3, C3, F3, C, F, D, E, D, C, B3, A3, D, E, E] | brass_notes(H/2);
+
+#{level_db=-9}
+phrygian_c_p_lower_1 =   Qrw \ [G3, A3, G3, F3, B3, A3, G3, F3, A3, C, A3, B3, E, C, G3, A3, D, E, E] | brass_notes(H/2);
+
+
+// Fux's lydian cantus firmus
+#{level_db=-9,skip_slots=3}
+// Written with a vocal tenor clef
+fux_lydian_c_f       = [F3, G3, A3, F3, D3, E3, F3, C, A3, F3, G3, F3] | brass_notes(H);
+
+//#{level_db=-9}
+//fux_lydian_c_p_upper = [F, F] | brass_notes(H/2);
+
+#{level_db=-9}
+lydian_c_p_upper_1 = [C, D, E, D, C, E, F, A3, B3, D, C, B3, A3, D, E, G, F, E, D, C, D, E, F, F] | brass_notes(H/2);
+
+//#{level_db=-9}
+//fux_lydian_c_p_lower = [] | brass_notes(H/2);
+
+//#{level_db=-9}
+//fux_lydian_c_p_lower_1 = [] | brass_notes(H/2);
