@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::fmt::{Debug, Display};
 
 use crate::eval;
@@ -6,7 +7,7 @@ use crate::expr;
 use crate::expr::{BuiltInFn, Error, Expr, SourceExpr};
 use crate::optimizer;
 use crate::trace::{self, CarriesTrace};
-use crate::waveform::{BinaryOperator, UnaryOperator, Waveform};
+use crate::waveform::{BinaryOperator, ShareId, UnaryOperator, Waveform};
 use Expr::{Bool, BuiltIn, List, Seq};
 
 type BuiltinFn<M, S> =
@@ -925,6 +926,80 @@ where
     }
 }
 
+thread_local! {
+    /// The number of `share` calls on this thread that are applying their
+    /// function.
+    static SHARING: Cell<u32> = const { Cell::new(0) };
+}
+
+/// A `share` call applying its function, which holds the id of its `Shared`
+/// until it is dropped.
+///
+/// Each id is the number of calls already applying theirs, so no two calls
+/// applying their functions at once hold the same id.
+struct Sharing(ShareId);
+
+impl Sharing {
+    fn enter() -> Sharing {
+        SHARING.with(|depth| {
+            let id = depth.get();
+            depth.set(id + 1);
+            Sharing(ShareId(id))
+        })
+    }
+}
+
+impl Drop for Sharing {
+    fn drop(&mut self) {
+        SHARING.with(|depth| depth.set(self.0.0));
+    }
+}
+
+/// Returns the waveform the function `body` returns when applied to a reference
+/// to the waveform `waveform`, with `waveform` generated once and read wherever
+/// that reference is used, on the clock of the result.
+pub fn share<M, S>(
+    arguments: Vec<SourceExpr<M, S>>,
+    call: &BuiltInCall<S>,
+) -> Result<SourceExpr<M, S>, Error<S>>
+where
+    M: Clone + Debug + Display + CarriesTrace<S>,
+    S: Clone + Debug,
+{
+    let [waveform, function] = exactly(arguments, "share")?;
+    // TODO consider overloading `share` so that a function returning a seq
+    // gives a seq, threading the offset as `fin` and `filter` do, so the
+    // result composes with `\`. An offset that uses the parameter would need
+    // its own `Shared` (a copy of `waveform`).
+    if !matches!(waveform.expr, Expr::Waveform(_)) {
+        return Err(Error::internal_here("First argument must be a waveform"));
+    }
+    // A `Ref` resolves to the nearest `Shared` with its id, so the id only
+    // has to differ from those of the calls whose parameters are in scope
+    // while the function is applied. Evaluation is eager and the function
+    // returns a waveform, so those are exactly the calls applying theirs.
+    let sharing = Sharing::enter();
+    let id = sharing.0;
+    // The reference carries the trace of `waveform`, so where it is heard
+    // the text of `waveform` lights along with the parameter's uses.
+    let reference = SourceExpr {
+        expr: Expr::Waveform(Waveform::Ref(id)),
+        span: waveform.span.clone(),
+        via: waveform.via.clone(),
+    };
+    // TODO as in `map`, this application records no `Call` step, so the
+    // function's text doesn't light.
+    let body = eval::evaluate_closed(SourceExpr::application(function, vec![reference]))?;
+    drop(sharing);
+    let body = embed_waveform(body, "The function passed to share must return a waveform")?;
+    let waveform = embed_waveform(waveform, "First argument must be a waveform")?;
+    Ok(call.assembled(Expr::Waveform(Waveform::Shared {
+        id,
+        waveform: Box::new(waveform),
+        body: Box::new(body),
+    })))
+}
+
 // TODO move to main? (Because it only works in the native app anyway...?)
 fn capture<M, S>(
     arguments: Vec<SourceExpr<M, S>>,
@@ -1097,6 +1172,7 @@ where
         //("~*", waveform_convolution),
         ("reset", reset),
         ("alt", alt),
+        ("share", share),
         ("capture", capture),
         ("__chord", chord),
         ("__sequence", sequence),
@@ -1265,6 +1341,76 @@ mod tests {
         // As is an index past the end.
         let result = call(nth, vec![Expr::float(9.0), list()]);
         assert!(matches!(&result, Err(e) if e.kind() == ErrorKind::Eval));
+    }
+
+    /// The built-in that returns its argument.
+    fn identity() -> Expr<u32, ()> {
+        BuiltIn {
+            name: "identity".to_string(),
+            function: BuiltInFn::new(|arguments, call| {
+                let [x] = exactly(arguments, "identity")?;
+                Ok(call.assembled(x.expr))
+            }),
+        }
+    }
+
+    /// Returns the `Shared` node with `id` that shares `waveform` with `body`.
+    fn shared(id: u32, waveform: Waveform<u32>, body: Waveform<u32>) -> Waveform<u32> {
+        Waveform::Shared {
+            id: ShareId(id),
+            waveform: Box::new(waveform),
+            body: Box::new(body),
+        }
+    }
+
+    /// Returns the waveform `result` holds.
+    fn waveform_of(result: Result<Expr<u32, ()>, Error<()>>) -> Waveform<u32> {
+        match result {
+            Ok(Expr::Waveform(w)) => w,
+            other => panic!("expected a waveform, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn share_applies_its_function_to_a_ref() {
+        let result = call(share, vec![Expr::Waveform(Waveform::Time(())), identity()]);
+        assert_eq!(
+            waveform_of(result),
+            shared(0, Waveform::Time(()), Waveform::Ref(ShareId(0)))
+        );
+    }
+
+    #[test]
+    fn shares_applying_their_functions_at_once_have_different_ids() {
+        // `share(time, fn(x) => share(x, fn(y) => y))`
+        let inner = BuiltIn {
+            name: "inner".to_string(),
+            function: BuiltInFn::new(|arguments, call| {
+                let [x] = exactly(arguments, "inner")?;
+                share(vec![x, SourceExpr::from(identity())], call)
+            }),
+        };
+        let time = || Expr::Waveform(Waveform::Time(()));
+        let nested = shared(
+            0,
+            Waveform::Time(()),
+            Waveform::Shared {
+                id: ShareId(1),
+                waveform: Box::new(Waveform::Ref(ShareId(0))),
+                body: Box::new(Waveform::Ref(ShareId(1))),
+            },
+        );
+        assert_eq!(waveform_of(call(share, vec![time(), inner])), nested);
+        // Once a call returns, even with an error, its id is free again.
+        let failing = BuiltIn {
+            name: "failing".to_string(),
+            function: BuiltInFn::new(|_, _| Err(Error::eval_here("failed"))),
+        };
+        assert!(call(share, vec![time(), failing]).is_err());
+        assert_eq!(
+            waveform_of(call(share, vec![time(), identity()])),
+            shared(0, Waveform::Time(()), Waveform::Ref(ShareId(0)))
+        );
     }
 
     #[test]

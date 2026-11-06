@@ -195,6 +195,15 @@ pub fn signature(name: &str) -> Option<Type> {
             vec![Type::waveform(), Type::waveform(), Type::waveform()],
             Type::waveform(),
         ),
+        // The function's parameter is a reference to the shared waveform,
+        // which is never a constant, even when the shared waveform is.
+        "share" => Type::function(
+            vec![
+                Type::waveform(),
+                Type::function(vec![Type::non_const_wave()], Type::waveform()),
+            ],
+            Type::non_const_wave(),
+        ),
         "capture" => Type::function(vec![Type::String], waveform_filter()),
         "__chord" => Type::function(
             vec![Type::List(Box::new(Type::waveform()))],

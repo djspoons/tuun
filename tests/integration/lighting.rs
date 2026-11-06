@@ -440,3 +440,24 @@ fn note_names_light_during_their_own_notes() {
         ]
     );
 }
+
+#[test]
+fn a_shared_waveform_lights_where_its_parameter_is_heard() {
+    // `$440` is generated from the start, but heard only through `x`, after
+    // the rest.
+    let v = voice("share($440, fn(x) => 0 * Qw \\ x * Qw | unseq())");
+    assert_eq!(segments(&v), ["500+500"]);
+    assert_eq!(
+        lit(&v),
+        [
+            "$440: 500..1000",
+            "440: 500..1000",
+            "0: ",
+            "*: ",
+            "Qw: ",
+            "x: 500..1000",
+            "*: 500..1000",
+            "Qw: 500..1000",
+        ]
+    );
+}

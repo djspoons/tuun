@@ -10,11 +10,11 @@ use crate::expr::{Expr, SourceExpr, Span};
 use crate::generator::Generator;
 use crate::optimizer;
 use crate::trace::{self, CarriesTrace, Step, Trace, Via};
-use crate::waveform::Waveform;
+use crate::waveform::{ShareId, Waveform};
 
 /// The smallest finite range of samples around one or more source waveforms
-/// (`phase`, `noise` or `fixed`), or just the start of those samples, measured
-/// from the waveform's start.
+/// (`phase`, `noise`, `fixed`, or a `Ref` to a shared waveform), or just the
+/// start of those samples, measured from the waveform's start.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Segment {
     pub offset: usize,
@@ -83,6 +83,7 @@ where
         sources: 0,
         unclaimed: 0,
         unscoped: 0,
+        shared: Vec::new(),
     };
     let out = walk.walk(root, Some(0), false, Bound::Whole);
     if walk.unclaimed > 0 {
@@ -158,6 +159,9 @@ struct Walk<S> {
     unclaimed: usize,
     /// Marks with no scope yet.
     unscoped: usize,
+    /// The `Shared` nodes whose body holds the node being walked, outermost
+    /// first, each with its id and whether its shared waveform is infinite.
+    shared: Vec<(ShareId, bool)>,
 }
 
 /// What a node's end bounds.
@@ -332,14 +336,27 @@ impl<S> Walk<S> {
                 file_stem,
                 waveform: self.child(waveform, offset, opaque, within),
             },
-            // TODO light the shared waveform's sources while a `Ref` to it is
-            // heard; until then they stay dark.
-            Shared { id, waveform, body } => Shared {
-                id,
-                waveform: Box::new(trace::strip_trace_marks(*waveform)),
-                body: self.child(body, offset, opaque, within),
-            },
-            leaf @ Ref(_) => leaf,
+            // The shared waveform is generated whether or not it is heard, so
+            // its marks stay dark. A `Ref` is heard in its place: it reads
+            // samples as a source makes them, and the mark above it lights
+            // the text of the shared waveform (see `builtins::share`).
+            // TODO a shared waveform with no source in it, such as `time`, is
+            // a source here, though a copy of it wouldn't be.
+            Shared { id, waveform, body } => {
+                let infinite = self.known_length(&waveform) == Some(usize::MAX);
+                self.shared.push((id, infinite));
+                let body = self.child(body, offset, opaque, within);
+                self.shared.pop();
+                Shared {
+                    id,
+                    waveform: Box::new(trace::strip_trace_marks(*waveform)),
+                    body,
+                }
+            }
+            Ref(id) => {
+                self.add_source();
+                Ref(id)
+            }
         };
         // A node's length is only read when it could claim a source or scope a
         // mark beneath it. A `Fin` whose length can't be measured still ends,
@@ -419,10 +436,14 @@ impl<S> Walk<S> {
     }
 
     /// Returns the length of `w` in samples when it is known and finite.
-    fn finite_length<M>(&self, w: &Waveform<M>) -> Option<usize> {
-        self.generator
-            .known_length(w)
-            .filter(|&length| length != usize::MAX)
+    fn finite_length<M>(&mut self, w: &Waveform<M>) -> Option<usize> {
+        self.known_length(w).filter(|&length| length != usize::MAX)
+    }
+
+    /// Returns the length of `w` in samples when it is known, where `w` sits
+    /// at the node being walked.
+    fn known_length<M>(&mut self, w: &Waveform<M>) -> Option<usize> {
+        self.generator.known_length_within(w, &mut self.shared)
     }
 
     /// Returns the `Fin` length `length` in a form whose cutoff the generator
@@ -526,7 +547,7 @@ mod tests {
     use std::fmt;
 
     use super::*;
-    use crate::waveform::BinaryOperator;
+    use crate::waveform::{BinaryOperator, ShareId};
 
     /// Which text a test span indexes.
     #[derive(Clone, Copy, Debug, PartialEq)]
@@ -961,6 +982,39 @@ mod tests {
                 Mark {
                     text_range: 6..9,
                     segments: 1..2
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_shared_waveform_lights_where_a_ref_to_it_is_heard() {
+        // As in `share(noise, fn(x) => rest \ x)`, with `noise` at 0..1 and
+        // `x` at 5..6: the shared waveform is generated from the start, but
+        // only heard after the rest.
+        let used = trace(Some(span(0..1)), vec![Step::UseSite(span(5..6))]);
+        let heard = Waveform::Fin {
+            length: seconds(1.0),
+            waveform: Box::new(mark(&used, Waveform::Ref(ShareId(0)))),
+            state: (),
+        };
+        let w = Waveform::Shared {
+            id: ShareId(0),
+            waveform: Box::new(mark(&written(0..1), Waveform::Noise)),
+            body: Box::new(append(rest(1.0), heard)),
+        };
+        let marks = walked(w, &dark());
+        assert_eq!(marks.segments, [segment(10, 10)]);
+        assert_eq!(
+            marks.marks,
+            [
+                Mark {
+                    text_range: 0..1,
+                    segments: 0..1
+                },
+                Mark {
+                    text_range: 5..6,
+                    segments: 0..1
                 }
             ]
         );

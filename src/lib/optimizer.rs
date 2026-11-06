@@ -1,4 +1,4 @@
-use crate::waveform::{BinaryOperator, Waveform};
+use crate::waveform::{BinaryOperator, ShareId, Waveform};
 
 // First root returns the first non-negative value at which the given waveform is zero. This
 // is implemented for waveforms of the forms:
@@ -63,6 +63,8 @@ where
 ///   * pulling Fin's up and combining nested Fin's
 ///   * replacing zero-length waveforms with the canonical `Fixed(vec![])`
 ///   * handling some common cases of Fin in Add and Multiply
+///   * reading a constant shared waveform as that constant, and dropping a
+///     shared waveform that nothing reads
 ///
 /// In addition, `optimize` also anticipates the implementation of
 /// `Generator::generate` and re-associates binary operations so that Const
@@ -623,13 +625,111 @@ where
             file_stem,
             waveform: Box::new(optimize(*waveform)),
         },
-        Shared { id, waveform, body } => Shared {
-            id,
-            waveform: Box::new(optimize(*waveform)),
-            body: Box::new(optimize(*body)),
+        Shared { id, waveform, body } => match optimize(*waveform) {
+            // A constant reads the same wherever a `Ref` starts reading it, and
+            // never ends.
+            Const(value) => {
+                let mut body = *body;
+                for reference in refs_to(&mut body, id) {
+                    *reference = Const(value);
+                }
+                optimize(body)
+            }
+            // TODO when the body holds exactly one `Ref` and every path down to
+            // it keeps the clock, the `Ref` could be replaced by the shared
+            // waveform itself.
+            waveform => {
+                let mut body = optimize(*body);
+                match refs_to(&mut body, id).is_empty() && !has_marked_or_captured(&waveform) {
+                    true => body,
+                    false => Shared {
+                        id,
+                        waveform: Box::new(waveform),
+                        body: Box::new(body),
+                    },
+                }
+            }
         },
         w @ Ref(_) => w,
     }
+}
+
+/// Returns each `Ref(id)` in `waveform` that would resolve to a `Shared` with
+/// `id` enclosing `waveform`, that is, each one outside the `body` of every
+/// `Shared` with `id` in `waveform`.
+fn refs_to<M>(waveform: &mut Waveform<M>, id: ShareId) -> Vec<&mut Waveform<M>> {
+    fn find<'a, M>(
+        waveform: &'a mut Waveform<M>,
+        id: ShareId,
+        refs: &mut Vec<&'a mut Waveform<M>>,
+    ) {
+        use Waveform::*;
+        if matches!(waveform, Ref(r) if *r == id) {
+            refs.push(waveform);
+            return;
+        }
+        match waveform {
+            Const(_) | Time(_) | Noise | Fixed(_, _) | Ref(_) => {}
+            UnaryOp(_, a) | Marked { waveform: a, .. } | Captured { waveform: a, .. } => {
+                find(a, id, refs)
+            }
+            Fin {
+                length: a,
+                waveform: b,
+                ..
+            }
+            | Append(a, b, _)
+            | Phase {
+                frequency: a,
+                offset: b,
+                ..
+            }
+            | BinaryOp(_, a, b)
+            | Reset {
+                trigger: a,
+                waveform: b,
+                ..
+            } => {
+                find(a, id, refs);
+                find(b, id, refs);
+            }
+            Filter {
+                waveform,
+                feed_forward,
+                feedback,
+                ..
+            } => {
+                find(waveform, id, refs);
+                for w in feed_forward.iter_mut().chain(feedback) {
+                    find(w, id, refs);
+                }
+            }
+            Alt {
+                trigger,
+                positive_waveform,
+                negative_waveform,
+            } => {
+                find(trigger, id, refs);
+                find(positive_waveform, id, refs);
+                find(negative_waveform, id, refs);
+            }
+            // A `Ref` in the shared waveform reads a `Shared` around this one,
+            // and one in the body reads this one when the ids match.
+            Shared {
+                id: inner,
+                waveform,
+                body,
+            } => {
+                find(waveform, id, refs);
+                if *inner != id {
+                    find(body, id, refs);
+                }
+            }
+        }
+    }
+    let mut refs = Vec::new();
+    find(waveform, id, &mut refs);
+    refs
 }
 
 /// Returns false only if waveform is certainly infinite.
@@ -909,6 +1009,61 @@ mod tests {
             fin(one_second(), Const(2.0)),
         );
         assert_eq!(optimize(equal), fin(one_second(), Const(3.0)));
+    }
+
+    fn shared(id: u32, waveform: Waveform<()>, body: Waveform<()>) -> Waveform<()> {
+        Shared {
+            id: ShareId(id),
+            waveform: Box::new(waveform),
+            body: Box::new(body),
+        }
+    }
+
+    fn reference(id: u32) -> Waveform<()> {
+        Ref(ShareId(id))
+    }
+
+    #[test]
+    fn a_constant_shared_waveform_is_read_as_that_constant() {
+        let sum = BinaryOp(
+            BinaryOperator::Add,
+            Box::new(reference(0)),
+            Box::new(reference(0)),
+        );
+        assert_eq!(optimize(shared(0, Const(2.0), sum)), Const(4.0));
+        // A `Ref` in the shared waveform of a `Shared` with the same id reads
+        // the outer one; one in its body reads the inner one.
+        let inner = shared(0, reference(0), reference(0));
+        assert_eq!(optimize(shared(0, Const(2.0), inner)), Const(2.0));
+        let inner = shared(0, Time(()), reference(0));
+        assert_eq!(optimize(shared(0, Const(2.0), inner.clone())), inner);
+    }
+
+    #[test]
+    fn a_shared_waveform_nothing_reads_is_dropped() {
+        assert_eq!(optimize(shared(0, Time(()), Noise)), Noise);
+        // Nor does a `Ref` with another id read it.
+        assert_eq!(optimize(shared(0, Time(()), reference(1))), reference(1));
+        // Two `Ref`s read one stream of noise, where two copies would differ.
+        let read = shared(
+            0,
+            Noise,
+            BinaryOp(
+                BinaryOperator::Add,
+                Box::new(reference(0)),
+                Box::new(reference(0)),
+            ),
+        );
+        assert_eq!(optimize(read.clone()), read);
+        let marked = shared(
+            0,
+            Marked {
+                id: (),
+                waveform: Box::new(Time(())),
+            },
+            Noise,
+        );
+        assert_eq!(optimize(marked.clone()), marked);
     }
 
     #[test]

@@ -7,5 +7,6 @@ mod common;
 mod finseq;
 mod lighting;
 mod precompute;
+mod share;
 mod strip;
 mod tracing;

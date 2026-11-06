@@ -647,7 +647,9 @@ impl<'a> Generator<'a> {
             | Alt { .. }
             // Captured needs the side effect that occurs during generate.
             | Captured { .. }
-            // TODO Is it worth recording whether or not a shared waveform in the stack is const?
+            // TODO record in each `SharedBlock` whether its shared waveform is
+            // const for a generation quantum (e.g. a slider), and look that up
+            // here.
             | Ref(_) => None,
 
             Const(f) => Some(*f),
@@ -693,16 +695,32 @@ impl<'a> Generator<'a> {
     /// assert_eq!(Generator::new(4).known_length(&w), Some(4));
     /// ```
     pub fn known_length<M, S>(&self, waveform: &waveform::Waveform<M, S>) -> Option<usize> {
+        self.known_length_within(waveform, &mut Vec::new())
+    }
+
+    /// Returns the number of samples that `waveform` generates from its initial state, as
+    /// [`Generator::known_length`] does, when `waveform` sits in the body of the `Shared` nodes in
+    /// `shared`, outermost first, each with its id and whether its shared waveform is infinite.
+    ///
+    /// `shared` holds the same entries afterwards.
+    pub fn known_length_within<M, S>(
+        &self,
+        waveform: &waveform::Waveform<M, S>,
+        shared: &mut Vec<(ShareId, bool)>,
+    ) -> Option<usize> {
         use waveform::Waveform::*;
+        let mut length = |w| self.known_length_within(w, shared);
         match waveform {
             Const(_) | Time(_) | Noise => Some(usize::MAX),
             Fixed(samples, _) => Some(samples.len()),
             Fin {
-                length, waveform, ..
-            } => Some(self.fin_cutoff(length)?.min(self.known_length(waveform)?)),
-            Append(a, b, _) => Some(self.known_length(a)?.saturating_add(self.known_length(b)?)),
+                length: fin_length,
+                waveform,
+                ..
+            } => Some(self.fin_cutoff(fin_length)?.min(length(waveform)?)),
+            Append(a, b, _) => Some(length(a)?.saturating_add(length(b)?)),
             BinaryOp(op, a, b) => {
-                let (a, b) = (self.known_length(a)?, self.known_length(b)?);
+                let (a, b) = (length(a)?, length(b)?);
                 Some(if op.extends_to_longer() {
                     a.max(b)
                 } else {
@@ -711,18 +729,25 @@ impl<'a> Generator<'a> {
             }
             Phase {
                 frequency, offset, ..
-            } => Some(
-                self.known_length(frequency)?
-                    .min(self.known_length(offset)?),
-            ),
+            } => Some(length(frequency)?.min(length(offset)?)),
             UnaryOp(_, waveform)
             | Filter { waveform, .. }
             | Marked { waveform, .. }
-            | Captured { waveform, .. } => self.known_length(waveform),
-            Reset { trigger, .. } | Alt { trigger, .. } => self.known_length(trigger),
-            Shared { body, .. } => self.known_length(body),
-            // How many samples a `Ref` reads depends on where it starts reading.
-            Ref(_) => None,
+            | Captured { waveform, .. } => length(waveform),
+            Reset { trigger, .. } | Alt { trigger, .. } => length(trigger),
+            Shared { id, waveform, body } => {
+                let infinite = length(waveform) == Some(usize::MAX);
+                shared.push((*id, infinite));
+                let body = self.known_length_within(body, shared);
+                shared.pop();
+                body
+            }
+            // An infinite shared waveform is infinite wherever a `Ref` starts reading it.
+            // Otherwise, how many samples a `Ref` reads depends on where it starts.
+            Ref(id) => match shared.iter().rev().find(|(shared_id, _)| shared_id == id) {
+                Some((_, true)) => Some(usize::MAX),
+                _ => None,
+            },
         }
     }
 
@@ -2468,5 +2493,30 @@ mod tests {
         let mut g = new_test_generator(1);
         check_known_length(&mut g, &shared(Time(()), Fixed(vec![1.0; 3], ())), Some(3));
         check_known_length(&mut g, &shared(Fixed(vec![1.0; 3], ()), reference()), None);
+    }
+
+    #[test]
+    fn refs_to_infinite_shared_waveforms_are_infinite() {
+        let g = new_test_generator(1);
+        let fin = |waveform| Fin {
+            length: Box::new(BinaryOp(
+                BinaryOperator::Subtract,
+                Box::new(Time(())),
+                Box::new(Const(2.0)),
+            )),
+            waveform: Box::new(waveform),
+            state: (),
+        };
+        assert_eq!(g.known_length(&shared(Time(()), fin(reference()))), Some(2));
+        // The nearest `Shared` with the id decides.
+        let finite_inside_infinite =
+            shared(Time(()), shared(Fixed(vec![1.0; 3], ()), fin(reference())));
+        assert_eq!(g.known_length(&finite_inside_infinite), None);
+        let infinite_inside_finite =
+            shared(Fixed(vec![1.0; 3], ()), shared(Time(()), fin(reference())));
+        assert_eq!(g.known_length(&infinite_inside_finite), Some(2));
+        // A `Ref` in a shared waveform reads the `Shared` around its own.
+        let read_in_waveform = shared(Time(()), shared(reference(), fin(reference())));
+        assert_eq!(g.known_length(&read_in_waveform), Some(2));
     }
 }
