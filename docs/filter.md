@@ -12,28 +12,20 @@ To start with a simple example, the following is a filter that averages the four
 Filter(w, [Const(0.25), Const(0.25), Const(0.25), Const(0.25)], [])
 ```
 
-The value of the $n^\text{th}$ sample (at time $t_n$) is usually written as the sum of products:
+The value of the $n^\text{th}$ sample (at time $t_n$) is the sum of products:
 
 $$
 y[t_n] = 0.25 \cdot w[t_n] + 0.25 \cdot w
 [t_{n-1}] + 0.25 \cdot w[t_{n-2}] + 0.25 \cdot w[t_{n-3}]
 $$
 
-However, Tuun implements this without negative indexes or padding the beginning of the input:
+Input samples before the first one are 0.0, so the first three output samples average fewer than four input samples:
 
 $$
-y[t_n] = 0.25 \cdot w[t_{n+3}] + 0.25 \cdot w[t_{n+2}] + 0.25 \cdot w[t_{n+1}] + 0.25 \cdot w[t_n]
+y[t_0] = 0.25 \cdot w[t_0] + 0.25 \cdot 0 + 0.25 \cdot 0 + 0.25 \cdot 0 = 0.25 \cdot w[t_0]
 $$
 
-This means that the input to the filter `w` is delayed by three samples in this example. `Filter` will not use the input sample for $t_{n+3}$ until $t_n$.
-
-If the input waveform to this filter has a finite length, Tuun will extend it by three samples (all zeros), so if $w[t_n]$ is the last input sample, the following defines the last output sample.
-
-$$
-y[t_n] = 0.25 \cdot 0 + 0.25 \cdot 0 + 0.25 \cdot 0 + 0.25 \cdot w[t_n] = 0.25 \cdot w[t_n]
-$$
-
-That is, the last sample in the output only depends on one sample from the input.
+Each output sample depends only on the current and earlier input samples: that is, the filter is *causal*. A sound passed through it never starts before the sound itself would have.
 
 A feed-forward filter with $K$ *constant* coefficients can be written as the following waveform:
 
@@ -44,10 +36,10 @@ Filter(w, [Const(b_0), Const(b_1), ..., Const(b_K)], [])
 The output of that filter at time $t_n$ is defined as follows:
 
 $$
-y[t_n] = \sum_{i=0}^{K-1} b_i \cdot w[t_{n + (K - 1 - i)}]
+y[t_n] = \sum_{i=0}^{K-1} b_i \cdot w[t_{n - i}]
 $$
 
-If there are $K$ feed-forward coefficients, then the input is delayed by $K-1$ samples, and finite inputs are zero-extended by $K-1$ samples at the end.
+where $w[t_{n - i}] = 0$ when $n - i < 0$.
 
 <!--
 TODO example with weighted average filter
@@ -62,10 +54,10 @@ Filter(w, [b_0, b_1, ..., b_K], [])
 The output of which is defined by the following formula:
 
 $$
-y[t_n] = \sum_{i=0}^{K-1} b_i[t_n] \cdot w[t_{n + (K - 1 - i)}]
+y[t_n] = \sum_{i=0}^{K-1} b_i[t_n] \cdot w[t_{n - i}]
 $$
 
-Notice that the filter reads one sample from each coefficient for each output sample. 
+Notice that the filter reads one sample from each coefficient for each output sample, and that each coefficient's sample is taken at the time of the output, not of the input sample it multiplies. 
 
 <!-- 
 TODO example where coefficients change over time
@@ -84,7 +76,7 @@ Filter(w, [b_0, b_1, ..., b_K], [a_1, ..., a_J])
 Feedback coefficients are multiplied together with previously generated *output* samples and then subtracted from the result. If there are $J$ feedback coefficients, Tuun uses $J$ values equal to $0.0$ to bootstrap the filter.
 
 $$
-y[t_n] = \sum_{i=0}^{K-1} b_i[t_n] \cdot w[t_{n + (K - 1 - i)}] - \sum_{i=1}^J a_i[t_n] \cdot y[t_{n - i}]
+y[t_n] = \sum_{i=0}^{K-1} b_i[t_n] \cdot w[t_{n - i}] - \sum_{i=1}^J a_i[t_n] \cdot y[t_{n - i}]
 $$
 
 The feedback coefficients are labeled starting with $a_1$ with the assumption that the coefficient $a_0$ for $y[t_n]$ is equal to $1$. If you are implementing a feedback filter where $a_0 \ne 1$, simply divide all of the other coefficients by $a_0$, as in the low-pass filter example below.
@@ -199,7 +191,7 @@ The example below uses a sample-and-hold filter and `Noise` to generate a random
 
 ## Notes on Length
 
-Each Tuun `Filter` output waveform is the same length as its input. As noted above, finite input waveforms are extended by $K-1$ samples (where $K$ is the number of feed-forward coefficients) since the first $K-1$ input samples are consumed for the first output sample. In most cases the coefficient waveforms will be infinite; if they are not, they are extended with zeros to match the length of the input.
+Each Tuun `Filter` output waveform is the same length as its input. The output ends with the last input sample, so with $K$ feed-forward coefficients, the response to the last $K-1$ input samples is cut short. (To hear all of it, extend the input with zeros, for example by appending a waveform that is $K-1$ samples of 0.0.) In most cases the coefficient waveforms will be infinite; if they are not, they are extended with zeros to match the length of the input.
 
 Finally, because the length of a `Filter` waveform is independent of the *values* of the coefficients, an *infinite* impulse response filter can have a *finite* length. Similarly, a *finite* impulse response filter can have an *infinite* length (though the output will still eventually go to 0.0).
 

@@ -218,37 +218,25 @@ impl<'a> Generator<'a> {
             }
             Phase { .. } => unreachable!("Phase waveform has non-Initial, non-Accumulator state"),
             Filter {
-                waveform: inner,
                 feed_forward,
                 feedback,
                 state: state @ Initial,
+                ..
             } => {
-                // Generate the input samples so that they can be used in the
-                // feed-forward part of the filter.
+                // Fill the previous input and output samples with zeros to
+                // match the number of feed-forward and feedback coefficients.
+                // Set capacities with enough room for an entire buffer since
+                // we'll use these as intermediate storage in the loop in
+                // generate_filter. If subsequent calls to `generate` use a
+                // larger buffer, they will grow automatically then.
                 let ff_count = feed_forward.len();
                 assert!(ff_count >= 1);
-                // Allocate enough room for an entire buffer + ff_count-1 since
-                // we'll use this as intermediate storage in the loop in
-                // generate_filter. If subsequent calls to `generate` use a
-                // larger buffer, it will grow automatically then.
                 let mut input = Vec::with_capacity(out.len() + ff_count - 1);
                 input.resize(ff_count - 1, 0.0);
-                self.allocations += 1;
-                let inner_len = self.generate(inner, &mut input);
-                // Remove any unset elements from input.
-                input.truncate(inner_len);
-                // Fill the previous output samples with zeros to match the
-                // number of feedback coefficients.
                 let fb_count = feedback.len();
                 let mut output = Vec::with_capacity(out.len() + fb_count);
                 output.resize(fb_count, 0.0);
-                self.allocations += 1;
-                /*
-                println!(
-                    "Started generate for Filter with {} feed-forward and {} feedback coefficients",
-                    ff_count, fb_count
-                );
-                */
+                self.allocations += 2;
                 *state = Samples { input, output };
                 self.generate(waveform, out)
             }
@@ -389,41 +377,12 @@ impl<'a> Generator<'a> {
         output: &mut Vec<f32>,
         out: &mut [f32],
     ) -> usize {
-        // The length of the output should match that of the input `inner`.
-        // Since we delay the input, in the case that `inner` is finite, the
-        // last output point will only depend on one input point (and the second
-        // to last output will only depend on two input points, all the way back
-        // to the `ff_count-1`^th to last point). This means that if the inner
-        // waveform is not able to generate `out.len()` points, we zero-extend
-        // `input` up to `ff_count-1` points. Keep track of this by saving fewer
-        // than ff_count points for the next call to `generate()`. This is the
-        // same thing that happens in the case where the first call to
-        // `generate()` with Initial state doesn't generate `ff_count-1` points.
+        // The output has the same length as the input `inner`.
+        let out_len = self.generate(inner, out);
 
-        // First, generate samples from the inner waveform, if possible.
-        let inner_len = self.generate(inner, out);
-        // The number of inner samples saved from earlier calls.
-        let pending = input.len();
-        let out_len = out.len().min(inner_len + pending);
-        // We may read past the end of inner_len, so make sure those samples are initialized.
-        out[inner_len..].fill(0.0);
-
+        // The saved input and output should already be the correct size.
         let ff_count = feed_forward.len();
-        let input_padding = if input.len() == ff_count - 1 {
-            0
-        } else {
-            // We've already exhausted `inner` on a previous call to generate
-            // (or in the Initial arm above), but we still need to generate
-            // `input.len()` more samples. To do that, we need to pad up to
-            // `ff_count - 1`.
-            assert_eq!(0, inner_len);
-            (ff_count - 1) - input.len()
-        };
-        // Add the padding.
-        input.resize(input.len() + input_padding, 0.0);
         assert_eq!(ff_count - 1, input.len());
-
-        // The saved output should already be the correct size.
         let fb_count = feedback.len();
         assert_eq!(fb_count, output.len());
 
@@ -484,7 +443,7 @@ impl<'a> Generator<'a> {
         // Append this buffer's input samples to input and make room for its
         // outputs in output so that we can use them in the loop below.
         // input[ff_count - 1 + i] is the i-th input and output[fb_count + i] is
-        // the i-th output.
+        // the i-th output of this buffer. Smaller indexes hold earlier samples.
         input.extend_from_slice(&out[..out_len]);
         output.resize(fb_count + out_len, 0.0);
         {
@@ -525,15 +484,11 @@ impl<'a> Generator<'a> {
             }
         }
         // Copy the results back to `out` and drain the corresponding elements
-        // from `input` and `output` so they contain only the last few samples
-        // (`ff_count - 1` and `fb_count` respectively).
+        // from `input` and `output` so they contain only the most recent
+        // samples (`ff_count - 1` and `fb_count` respectively).
         out[..out_len].copy_from_slice(&output[fb_count..]);
         input.drain(..out_len);
         output.drain(..out_len);
-        // If `input` was padded with any zeros or if we copied any zeros from
-        // `out`, we don't want to save those: keep only the inner samples that
-        // haven't been output yet, which come before any zeros.
-        input.truncate(pending + inner_len - out_len);
         out_len
     }
 
@@ -2108,7 +2063,7 @@ mod tests {
             feedback: vec![],
             state: (),
         };
-        run_tests(&w, &[6.0, 12.0, 18.0, 24.0, 30.0, 36.0, 42.0, 48.0]);
+        run_tests(&w, &[0.0, 2.0, 6.0, 12.0, 18.0, 24.0, 30.0, 36.0]);
 
         let w = Filter {
             waveform: Box::new(Fin {
@@ -2124,7 +2079,9 @@ mod tests {
             feedback: vec![],
             state: (),
         };
-        run_tests(&w, &[6.0, 12.0, 18.0, 14.0, 8.0]);
+        // The output ends with the input, so it doesn't include the response to
+        // the last inputs after the input ends.
+        run_tests(&w, &[0.0, 2.0, 6.0, 12.0, 18.0]);
 
         let w = Filter {
             waveform: Box::new(Fixed(vec![1.0, 2.0, 3.0], ())),
@@ -2133,8 +2090,9 @@ mod tests {
             state: (),
         };
         check_known_length(&mut g, &w, Some(3));
-        // The inner waveform is shorter than `ff_count - 1`.
-        run_tests(&w, &[12.0, 10.0, 6.0]);
+        // The inner waveform is shorter than the input history (`ff_count -
+        // 1`).
+        run_tests(&w, &[2.0, 6.0, 12.0]);
 
         let w = Filter {
             waveform: Box::new(Fin {
@@ -2152,7 +2110,7 @@ mod tests {
         };
         let mut g = new_test_generator(1);
         check_known_length(&mut g, &w, Some(8));
-        run_tests(&w, &[20.0, 30.0, 40.0, 50.0, 44.0, 36.0, 26.0, 14.0]);
+        run_tests(&w, &[0.0, 2.0, 6.0, 12.0, 20.0, 30.0, 40.0, 50.0]);
 
         let w = Filter {
             waveform: Box::new(Reset {
@@ -2165,7 +2123,7 @@ mod tests {
             feedback: vec![],
             state: (),
         };
-        run_tests(&w, &[0.0, 2.0, 6.0, 4.0, 2.0, 6.0, 4.0, 2.0]);
+        run_tests(&w, &[0.0, 0.0, 2.0, 6.0, 4.0, 2.0, 6.0, 4.0]);
 
         let w = Filter {
             waveform: Box::new(Const(1.0)),
@@ -2173,7 +2131,8 @@ mod tests {
             feedback: vec![],
             state: (),
         };
-        run_tests(&w, &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+        // The average ramps up while the history still holds the initial zeros.
+        run_tests(&w, &[0.2, 0.4, 0.6, 0.8, 1.0, 1.0, 1.0, 1.0]);
 
         // IIRs
         let w = Filter {
@@ -2222,7 +2181,7 @@ mod tests {
             feedback: vec![],
             state: (),
         };
-        run_tests(&w, &[6.0, 3.0, 0.0]);
+        run_tests(&w, &[1.0, 1.0, 1.0]);
 
         // A single finite coefficient is zero-extended, after which only the feedback remains.
         let w = Filter {

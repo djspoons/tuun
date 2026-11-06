@@ -129,7 +129,9 @@ pub enum Waveform<MarkId, State = ()> {
     },
     /// Implements an impulse response filter with feed-forward and feedback
     /// coefficients. Assumes that the first feedback coefficient (a_0) is 1.0.
-    /// If the filter has no feedback coefficients, then the filter has a finite
+    /// The filter is causal: each output sample depends only on the current
+    /// and earlier input samples, and inputs and outputs before the first are
+    /// zero. If the filter has no feedback coefficients, then the filter has a finite
     /// response -- that is, it is a convolution. Its length is determined by
     /// the input waveform; coefficients are zero extended if necessary.
     Filter {
