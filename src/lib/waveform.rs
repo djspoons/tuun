@@ -93,6 +93,16 @@ impl UnaryOperator {
     }
 }
 
+/// The id that ties a `Ref` to its `Shared`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShareId(pub u32);
+
+impl Display for ShareId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Waveform is a compact representation of a sequence of samples.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Waveform<MarkId, State = ()> {
@@ -172,12 +182,26 @@ pub enum Waveform<MarkId, State = ()> {
         id: MarkId,
         waveform: Box<Waveform<MarkId, State>>,
     },
-    /// Generate the same samples as the inner waveform and also writes them to a file whose name begins
-    /// with the given file stem.
+    /// Generates the same samples as the inner waveform and also writes them to
+    /// a file whose name begins with the given file stem.
     Captured {
         file_stem: String,
         waveform: Box<Waveform<MarkId, State>>,
     },
+    /// Generates `body`, in which each `Ref(id)` reads the samples of
+    /// `waveform`. Its length is determined by `body`.
+    ///
+    /// `waveform` is generated over the same samples as `body`, on the clock of
+    /// this node, whether or not any `Ref` reads them.
+    Shared {
+        id: ShareId,
+        waveform: Box<Waveform<MarkId, State>>,
+        body: Box<Waveform<MarkId, State>>,
+    },
+    /// Generates the samples of the `waveform` of the nearest enclosing
+    /// `Shared` with this id, from the point where this node is generated. It
+    /// ends when that waveform ends.
+    Ref(ShareId),
 }
 
 impl<MarkId: Display, State> Display for Waveform<MarkId, State> {
@@ -257,6 +281,10 @@ impl<MarkId: Display, State> Display for Waveform<MarkId, State> {
             } => {
                 write!(f, "Captured({}, {})", file_stem, waveform)
             }
+            Shared {
+                id, waveform, body, ..
+            } => write!(f, "Shared({}, {}, {})", id, waveform, body),
+            Ref(id) => write!(f, "Ref({})", id),
         }
     }
 }
@@ -341,6 +369,14 @@ where
             file_stem,
             waveform: Box::new(initialize_state(*waveform, state)),
         },
+        Shared {
+            id, waveform, body, ..
+        } => Shared {
+            id,
+            waveform: Box::new(initialize_state(*waveform, state.clone())),
+            body: Box::new(initialize_state(*body, state)),
+        },
+        Ref(id) => Ref(id),
     }
 }
 
@@ -407,6 +443,14 @@ pub fn remove_state<M, S>(waveform: Waveform<M, S>) -> Waveform<M> {
             file_stem,
             waveform: Box::new(remove_state(*waveform)),
         },
+        Shared {
+            id, waveform, body, ..
+        } => Shared {
+            id,
+            waveform: Box::new(remove_state(*waveform)),
+            body: Box::new(remove_state(*body)),
+        },
+        Ref(id) => Ref(id),
     }
 }
 
@@ -490,6 +534,11 @@ where
         Captured { waveform, .. } => {
             set_state(waveform, new_state);
         }
+        Shared { waveform, body, .. } => {
+            set_state(waveform, new_state.clone());
+            set_state(body, new_state);
+        }
+        Ref(_) => (),
     }
 }
 
@@ -525,7 +574,7 @@ where
             }
         }
         // Leaf nodes — nothing to recurse into
-        Const(_) | Time(_) | Noise | Fixed(..) => {}
+        Const(_) | Time(_) | Noise | Fixed(..) | Ref(_) => {}
 
         Fin {
             length, waveform, ..
@@ -580,5 +629,9 @@ where
             substitute(negative_waveform, mark_id, new_waveform);
         }
         Captured { waveform, .. } => substitute(waveform, mark_id, new_waveform),
+        Shared { waveform, body, .. } => {
+            substitute(waveform, mark_id, new_waveform);
+            substitute(body, mark_id, new_waveform);
+        }
     }
 }

@@ -277,7 +277,7 @@ where
     ) {
         use waveform::Waveform::*;
         match waveform {
-            Const(_) | Time(_) | Noise | Fixed(_, _) => {}
+            Const(_) | Time(_) | Noise | Fixed(_, _) | Ref(_) => {}
             // TODO think harder about captures for the other sub-waveforms in these cases
             Fin { waveform, .. }
             | Alt {
@@ -292,7 +292,12 @@ where
                 ..
             }
             | Append(a, b, _)
-            | BinaryOp(_, a, b) => {
+            | BinaryOp(_, a, b)
+            | Shared {
+                waveform: a,
+                body: b,
+                ..
+            } => {
                 self.process_captured(a, out);
                 self.process_captured(b, out);
             }
@@ -1226,4 +1231,6 @@ mod tests {
             "the clock should have resynchronized forward"
         );
     }
+
+    // TODO test for forgetting to sort pending waveforms
 }

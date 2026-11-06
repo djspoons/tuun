@@ -60,7 +60,7 @@ fn program_files(root: &Path) -> Vec<PathBuf> {
 fn mark_ids(waveform: &Waveform<MarkId>, found: &mut Vec<MarkId>) {
     use Waveform::*;
     match waveform {
-        Const(_) | Time(_) | Noise | Fixed(_, _) => {}
+        Const(_) | Time(_) | Noise | Fixed(_, _) | Ref(_) => {}
         Fin {
             length: a,
             waveform: b,
@@ -76,6 +76,11 @@ fn mark_ids(waveform: &Waveform<MarkId>, found: &mut Vec<MarkId>) {
         | Reset {
             trigger: a,
             waveform: b,
+            ..
+        }
+        | Shared {
+            waveform: a,
+            body: b,
             ..
         } => {
             mark_ids(a, found);

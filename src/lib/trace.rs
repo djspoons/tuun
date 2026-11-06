@@ -294,6 +294,12 @@ pub fn strip_trace_marks<M: CarriesTrace<S>, S>(w: Waveform<M>) -> Waveform<M> {
             file_stem,
             waveform: strip(waveform),
         },
+        Shared { id, waveform, body } => Shared {
+            id,
+            waveform: strip(waveform),
+            body: strip(body),
+        },
+        Ref(id) => Ref(id),
     }
 }
 

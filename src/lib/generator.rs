@@ -7,7 +7,7 @@ use std::io::BufWriter;
 use fastrand;
 
 use crate::waveform;
-use crate::waveform::BinaryOperator;
+use crate::waveform::{BinaryOperator, ShareId};
 
 #[derive(Debug, Clone)]
 pub enum State {
@@ -35,6 +35,20 @@ pub fn initialize_state<M, S>(waveform: waveform::Waveform<M, S>) -> Waveform<M>
     waveform::initialize_state(waveform, State::Initial)
 }
 
+/// One block of the shared waveform of a `Shared` node, while its body is
+/// generated.
+struct SharedBlock {
+    id: ShareId,
+    /// The position of the block's first sample (see `Generator::offset`).
+    offset: usize,
+    /// The number of samples in the block. This might be more than the number
+    /// of samples in `samples` if the shared waveform ended.
+    len: usize,
+    /// The samples of the shared waveform in the block, fewer than `len` if it
+    /// ended.
+    samples: Vec<f32>,
+}
+
 pub type CaptureState<'a> =
     Option<RefCell<&'a mut HashMap<String, hound::WavWriter<BufWriter<std::fs::File>>>>>;
 
@@ -46,6 +60,14 @@ pub struct Generator<'a> {
     pub capture_state: CaptureState<'a>,
     // Number of buffers allocated as part of generation
     pub allocations: usize,
+    // The position of the current `out[0]`, in samples after the `out[0]` of
+    // the outermost call to `generate`. Every waveform is generated over a
+    // contiguous run of samples within its parent's, so this places the current
+    // `out` on the clock of every enclosing waveform.
+    offset: usize,
+    // The blocks of the `Shared` nodes enclosing the waveform being generated,
+    // innermost last.
+    shared: Vec<SharedBlock>,
 }
 
 // TODO add metrics for waveform expr depth and total ops
@@ -58,6 +80,8 @@ impl<'a> Generator<'a> {
             sample_rate,
             capture_state: None,
             allocations: 0,
+            offset: 0,
+            shared: Vec::new(),
         }
     }
 
@@ -168,7 +192,7 @@ impl<'a> Generator<'a> {
                     a_len = 0;
                 }
                 // a_len < out.len()
-                let b_len = self.generate(b, &mut out[a_len..]);
+                let b_len = self.generate_from(a_len, b, &mut out[a_len..]);
                 a_len + b_len
             }
             Append(_, _, _) => unreachable!("Append waveform has non-Initial, non-Finished state"),
@@ -288,8 +312,11 @@ impl<'a> Generator<'a> {
                         }
                     }
                     // Overwrite the trigger values up to inner_desired.
-                    let inner_len =
-                        self.generate(inner, &mut out[generated..generated + inner_desired]);
+                    let inner_len = self.generate_from(
+                        generated,
+                        inner,
+                        &mut out[generated..generated + inner_desired],
+                    );
                     // If the inner waveform ended early, fill with zeros.
                     out[generated + inner_len..generated + inner_desired].fill(0.0);
                     // TODO it's a little strange that we keep calling generate even if inner_len == 0
@@ -365,7 +392,61 @@ impl<'a> Generator<'a> {
                 }
                 len
             }
+            Shared {
+                id,
+                waveform: shared,
+                body,
+            } => {
+                // Generate one block of the shared waveform on this node's
+                // clock. Its own block isn't on the stack yet, so a `Ref` in it
+                // can only read an enclosing `Shared`.
+                let mut samples = vec![0.0; out.len()];
+                self.allocations += 1;
+                let len = self.generate(shared, &mut samples);
+                samples.truncate(len);
+                self.shared.push(SharedBlock {
+                    id: *id,
+                    offset: self.offset,
+                    len: out.len(),
+                    samples,
+                });
+                let len = self.generate(body, out);
+                self.shared.pop();
+                len
+            }
+            Ref(id) => {
+                let Some(block) = self.shared.iter().rev().find(|block| block.id == *id) else {
+                    debug_assert!(false, "Ref({}) has no enclosing Shared", id);
+                    return 0;
+                };
+                // No waveform is generated outside of its parent's block, so
+                // `out` lies within the block of every enclosing `Shared`.
+                debug_assert!(
+                    block.offset <= self.offset
+                        && self.offset + out.len() <= block.offset + block.len
+                );
+                let from = self.offset.saturating_sub(block.offset);
+                // The shared waveform may have ended before `from`.
+                let samples = block.samples.get(from..).unwrap_or_default();
+                let len = samples.len().min(out.len());
+                out[..len].copy_from_slice(&samples[..len]);
+                len
+            }
         }
+    }
+
+    /// Generates `waveform` into `out` as `generate` does, where `out[0]` is
+    /// `start` samples after the current `out[0]`.
+    fn generate_from<M: Debug + Display>(
+        &mut self,
+        start: usize,
+        waveform: &mut Waveform<M>,
+        out: &mut [f32],
+    ) -> usize {
+        self.offset += start;
+        let len = self.generate(waveform, out);
+        self.offset -= start;
+        len
     }
 
     fn generate_filter<M: Debug + Display>(
@@ -565,7 +646,9 @@ impl<'a> Generator<'a> {
             | Fin { .. }
             | Alt { .. }
             // Captured needs the side effect that occurs during generate.
-            | Captured { .. } => None,
+            | Captured { .. }
+            // TODO Is it worth recording whether or not a shared waveform in the stack is const?
+            | Ref(_) => None,
 
             Const(f) => Some(*f),
             BinaryOp(op, a, b) => match (self.is_const(a), self.is_const(b)) {
@@ -578,6 +661,11 @@ impl<'a> Generator<'a> {
                 _ => None,
             },
             Marked { waveform, .. } => self.is_const(waveform),
+            // The shared waveform must be generated unless it, too, is
+            // constant. This ensures that any Captured waveforms inside of the
+            // shared one are generated, even if they are not referenced in
+            // `body`.
+            Shared { waveform, body, .. } => self.is_const(waveform).and(self.is_const(body)),
         }
     }
 
@@ -632,6 +720,9 @@ impl<'a> Generator<'a> {
             | Marked { waveform, .. }
             | Captured { waveform, .. } => self.known_length(waveform),
             Reset { trigger, .. } | Alt { trigger, .. } => self.known_length(trigger),
+            Shared { body, .. } => self.known_length(body),
+            // How many samples a `Ref` reads depends on where it starts reading.
+            Ref(_) => None,
         }
     }
 
@@ -1063,6 +1154,21 @@ impl<'a> Generator<'a> {
                     waveform: Box::new(waveform),
                     file_stem,
                 }),
+                // TODO a `Shared` whose body is dynamic only because of its own
+                // `Ref`s could be pre-computed as a whole.
+                Shared { id, waveform, body } => {
+                    do_two(g, BoundedBy::First, *body, *waveform, |body, waveform| {
+                        Shared {
+                            id,
+                            waveform: Box::new(waveform),
+                            body: Box::new(body),
+                        }
+                    })
+                }
+                // TODO Figure out of a shared waveform can be precomputed
+                // before we get here. For now: a `Ref` reads from a `Shared` at
+                // run time, and so must never be generated apart from it.
+                Ref(_) => Npc(Dynamic, waveform),
             }
         }
 
@@ -2202,5 +2308,165 @@ mod tests {
         run_tests(&w, &[0.0, 1.0, 4.0, 9.0, 16.0]);
     }
 
-    // TODO test for forgetting to sort pending waveforms
+    // Returns a `Shared` with id 0 holding `waveform` and `body`.
+    fn shared(waveform: Waveform, body: Waveform) -> Waveform {
+        waveform::Waveform::Shared {
+            id: ShareId(0),
+            waveform: Box::new(waveform),
+            body: Box::new(body),
+        }
+    }
+
+    fn reference() -> Waveform {
+        waveform::Waveform::Ref(ShareId(0))
+    }
+
+    #[test]
+    fn shared_waveforms_are_generated_once() {
+        // Two copies of noise differ, but two references to one agree.
+        let w = shared(
+            waveform::Waveform::Noise,
+            BinaryOp(
+                BinaryOperator::Subtract,
+                Box::new(reference()),
+                Box::new(reference()),
+            ),
+        );
+        run_tests(&w, &[0.0; 8]);
+    }
+
+    #[test]
+    fn refs_below_a_reset_keep_the_shared_clock() {
+        // The trigger turns non-negative every four samples; a copy of `time`
+        // restarts then.
+        let w = shared(
+            Time(()),
+            Reset {
+                trigger: sin_waveform(0.25, 0.0),
+                waveform: Box::new(reference()),
+                state: (),
+            },
+        );
+        run_tests(&w, &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+    }
+
+    #[test]
+    fn a_reset_above_a_shared_restarts_it() {
+        let w = Reset {
+            trigger: sin_waveform(0.25, 0.0),
+            waveform: Box::new(shared(Time(()), reference())),
+            state: (),
+        };
+        run_tests(&w, &[0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn refs_in_a_second_operand_read_from_where_it_starts() {
+        // Nothing reads the shared waveform for the first three samples, but it
+        // keeps time.
+        let w = shared(
+            Time(()),
+            Append(Box::new(Fixed(vec![9.0; 3], ())), Box::new(reference()), ()),
+        );
+        run_tests(&w, &[9.0, 9.0, 9.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+        // The same, with a `Reset` inside the second operand.
+        let w = shared(
+            Time(()),
+            Append(
+                Box::new(Fixed(vec![9.0; 3], ())),
+                Box::new(Reset {
+                    trigger: sin_waveform(0.25, 0.0),
+                    waveform: Box::new(reference()),
+                    state: (),
+                }),
+                (),
+            ),
+        );
+        run_tests(&w, &[9.0, 9.0, 9.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+    }
+
+    #[test]
+    fn refs_end_with_the_shared_waveform() {
+        let w = shared(
+            Fixed(vec![1.0, 2.0, 3.0], ()),
+            BinaryOp(
+                BinaryOperator::Merge,
+                Box::new(reference()),
+                Box::new(Fixed(vec![0.0; 5], ())),
+            ),
+        );
+        run_tests(&w, &[1.0, 2.0, 3.0, 0.0, 0.0]);
+
+        // A `Ref` that starts reading after the shared waveform ended ends at
+        // once.
+        let w = shared(
+            Fixed(vec![1.0, 2.0, 3.0], ()),
+            Append(Box::new(Fixed(vec![9.0; 4], ())), Box::new(reference()), ()),
+        );
+        run_tests(&w, &[9.0; 4]);
+        let mut out = [0.0; 6];
+        let len = new_test_generator(1).generate(&mut initialize_state(w), &mut out);
+        assert_eq!(len, 4);
+    }
+
+    #[test]
+    fn refs_in_a_filter_input_match_a_filter_of_a_copy() {
+        // y[n] = x[n] + 2 x[n - 1] + 3 x[n - 2], and each case below adds x[n]
+        // to that, with x = time.
+        let filter = |input| Filter {
+            waveform: Box::new(input),
+            feed_forward: vec![Const(1.0), Const(2.0), Const(3.0)],
+            feedback: vec![],
+            state: (),
+        };
+        let expected = [0.0, 2.0, 6.0, 13.0, 20.0, 27.0, 34.0, 41.0];
+        let copied = BinaryOp(
+            BinaryOperator::Add,
+            Box::new(filter(Time(()))),
+            Box::new(Time(())),
+        );
+        run_tests(&copied, &expected);
+        let w = shared(
+            Time(()),
+            BinaryOp(
+                BinaryOperator::Add,
+                Box::new(filter(reference())),
+                Box::new(reference()),
+            ),
+        );
+        run_tests(&w, &expected);
+    }
+
+    #[test]
+    fn refs_resolve_to_the_nearest_shared_with_their_id() {
+        // The inner shared waveform reads the outer one; the inner body reads
+        // the inner one.
+        let w = shared(
+            Time(()),
+            shared(
+                BinaryOp(
+                    BinaryOperator::Multiply,
+                    Box::new(reference()),
+                    Box::new(Const(10.0)),
+                ),
+                reference(),
+            ),
+        );
+        run_tests(&w, &[0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0]);
+    }
+
+    #[test]
+    #[cfg_attr(debug_assertions, should_panic(expected = "has no enclosing Shared"))]
+    fn unresolved_refs_end() {
+        let mut out = [0.0; 4];
+        let len = new_test_generator(1).generate(&mut initialize_state(reference()), &mut out);
+        assert_eq!(len, 0);
+    }
+
+    #[test]
+    fn known_length_of_shared_follows_its_body() {
+        let mut g = new_test_generator(1);
+        check_known_length(&mut g, &shared(Time(()), Fixed(vec![1.0; 3], ())), Some(3));
+        check_known_length(&mut g, &shared(Fixed(vec![1.0; 3], ()), reference()), None);
+    }
 }

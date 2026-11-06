@@ -332,6 +332,14 @@ impl<S> Walk<S> {
                 file_stem,
                 waveform: self.child(waveform, offset, opaque, within),
             },
+            // TODO light the shared waveform's sources while a `Ref` to it is
+            // heard; until then they stay dark.
+            Shared { id, waveform, body } => Shared {
+                id,
+                waveform: Box::new(trace::strip_trace_marks(*waveform)),
+                body: self.child(body, offset, opaque, within),
+            },
+            leaf @ Ref(_) => leaf,
         };
         // A node's length is only read when it could claim a source or scope a
         // mark beneath it. A `Fin` whose length can't be measured still ends,

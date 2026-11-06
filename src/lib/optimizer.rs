@@ -623,6 +623,12 @@ where
             file_stem,
             waveform: Box::new(optimize(*waveform)),
         },
+        Shared { id, waveform, body } => Shared {
+            id,
+            waveform: Box::new(optimize(*waveform)),
+            body: Box::new(optimize(*body)),
+        },
+        w @ Ref(_) => w,
     }
 }
 
@@ -651,6 +657,9 @@ fn is_possibly_finite<M, S>(waveform: &Waveform<M, S>) -> bool {
         UnaryOp(_, a) => is_possibly_finite(a),
         Reset { trigger, .. } | Alt { trigger, .. } => is_possibly_finite(trigger),
         Marked { .. } | Captured { .. } => true,
+        Shared { body, .. } => is_possibly_finite(body),
+        // TODO a `Ref` is finite only if the waveform of its `Shared` is.
+        Ref(_) => true,
     }
 }
 
@@ -658,7 +667,7 @@ fn is_possibly_finite<M, S>(waveform: &Waveform<M, S>) -> bool {
 fn has_marked_or_captured<M, S>(waveform: &Waveform<M, S>) -> bool {
     use Waveform::*;
     match waveform {
-        Const(_) | Time(_) | Noise | Fixed(_, _) => false,
+        Const(_) | Time(_) | Noise | Fixed(_, _) | Ref(_) => false,
         Marked { .. } | Captured { .. } => true,
         UnaryOp(_, a) => has_marked_or_captured(a),
         Fin {
@@ -676,6 +685,11 @@ fn has_marked_or_captured<M, S>(waveform: &Waveform<M, S>) -> bool {
         | Reset {
             trigger: a,
             waveform: b,
+            ..
+        }
+        | Shared {
+            waveform: a,
+            body: b,
             ..
         } => has_marked_or_captured(a) || has_marked_or_captured(b),
         Filter {
