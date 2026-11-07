@@ -209,8 +209,8 @@ fn count_fins<M, S>(waveform: &waveform::Waveform<M, S>) -> usize {
 /// envelopes end with `fin`.
 const FINS_MODULE: &str = r#"
 // Copied from std.
-min = fn(x, y) => alt(x - y, y, x);
-max = fn(x, y) => alt(x - y, x, y);
+min = fn(x, y) => share(x, fn(x) => share(y, fn(y) => alt(x - y, y, x)));
+max = fn(x, y) => share(x, fn(x) => share(y, fn(y) => alt(x - y, x, y)));
 pi = 3.14159265;
 sine = fn(ang_freq, phase_offset) =>
   sin(2 * pi * phase(ang_freq / (2 * pi), phase_offset / (2 * pi)));

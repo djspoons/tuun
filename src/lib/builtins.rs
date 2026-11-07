@@ -958,6 +958,9 @@ impl Drop for Sharing {
 /// Returns the waveform the function `body` returns when applied to a reference
 /// to the waveform `waveform`, with `waveform` generated once and read wherever
 /// that reference is used, on the clock of the result.
+///
+/// A constant `waveform` reads the same wherever it is used, so the function
+/// is applied to `waveform` itself.
 pub fn share<M, S>(
     arguments: Vec<SourceExpr<M, S>>,
     call: &BuiltInCall<S>,
@@ -973,6 +976,11 @@ where
     // its own `Shared` (a copy of `waveform`).
     if !matches!(waveform.expr, Expr::Waveform(_)) {
         return Err(Error::internal_here("First argument must be a waveform"));
+    }
+    // As `alt` does with a constant trigger, this lets the function's built-ins
+    // fold the constant, so the trace keeps only what contributes.
+    if waveform.expr.as_const_float().is_some() {
+        return eval::evaluate_closed(SourceExpr::application(function, vec![waveform]));
     }
     // A `Ref` resolves to the nearest `Shared` with its id, so the id only
     // has to differ from those of the calls whose parameters are in scope
@@ -1378,6 +1386,15 @@ mod tests {
             waveform_of(result),
             shared(0, Waveform::Time(()), Waveform::Ref(ShareId(0)))
         );
+    }
+
+    #[test]
+    fn share_applies_its_function_to_a_constant() {
+        let result = call(
+            share,
+            vec![Expr::Waveform(Waveform::Const(0.5)), identity()],
+        );
+        assert_eq!(waveform_of(result), Waveform::Const(0.5));
     }
 
     #[test]

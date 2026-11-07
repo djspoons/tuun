@@ -1,10 +1,12 @@
 
 // MATH
 
-// Define min and max in a waveform-compatible way.
-min = fn(x, y) => alt(x - y, y, x);
-max = fn(x, y) => alt(x - y, x, y);
-abs = fn(x) => alt(x, x, -x);
+// Define min and max in a waveform-compatible way. Each argument is shared so
+// that it is generated once (and so that, for example, `abs(noise)` is
+// non-negative).
+min = fn(x, y) => share(x, fn(x) => share(y, fn(y) => alt(x - y, y, x)));
+max = fn(x, y) => share(x, fn(x) => share(y, fn(y) => alt(x - y, x, y)));
+abs = fn(x) => share(x, fn(x) => alt(x, x, -x));
 sign = fn(x) => alt(x, 1, -1);
 clamp = fn(lower, upper) => fn(x) => min(max(x, lower), upper);
 clamp01 = clamp(0, 1);
@@ -19,7 +21,7 @@ ln = fn(x) => log(x, exp(1));
 // and start with their first positive value (including +0.0) at the origin (at least they 
 // should when no offset is applied). This will ensure they work well with Reset.
 
-// `sine computes a sine wave whose angular frequency and phase offset may both
+// `sine` computes a sine wave whose angular frequency and phase offset may both
 // vary with time (analogous to `phase`). Both frequency and offset are given in
 // radians.
 sine = fn(ang_freq, phase_offset) =>
@@ -52,6 +54,9 @@ naive_pulse = fn(width, freq_hz) =>
 // The polyBLEP correction for a rising edge from -1 to 1 at phase `t` = 0,
 // where `t` is in [0, 1) and `dt` is the phase increment per sample.
 blep = fn(t, dt) =>
+  // `t` and `dt` are each shared, since both are used several times.
+  share(t, fn(t) =>
+  share(dt, fn(dt) =>
   let
     // u and v count the number of (fractional) samples since/until the
     // true beginning/end of a cycle.
@@ -59,31 +64,37 @@ blep = fn(t, dt) =>
     v = (t - 1) / dt,    // samples counting back from the end of the cycle
     // Add corrections to the first and last samples
   in alt(dt - t, 2*u - u*u - 1, 0) // only add in the first sample
-     + alt(t - (1 - dt), v*v + 2*v + 1, 0); // only add in the last sample
+     + alt(t - (1 - dt), v*v + 2*v + 1, 0))); // only add in the last sample
 
 // Computes a square wave at the given frequency in hertz with polyBLEP
 // correction.
 square = fn(freq_hz) =>
+  // The frequency and phase are shared so that, for example, a noisy
+  // frequency drives a single phase.
+  share(freq_hz, fn(freq_hz) =>
+  share(phase(freq_hz, 0), fn(p) =>
   let
-    p = phase(freq_hz, 0),
     dt = freq_hz / sample_rate,
     d = p - 0.5,
-  in alt(d, -1, 1)                 // naive square
-     + blep(p, dt)                 // rising edge at the wrap
-     - blep(d + alt(d, 0, 1), dt); // falling edge at p = 0.5
+  in alt(d, -1, 1)                    // naive square
+     + blep(p, dt)                    // rising edge at the wrap
+     - blep(d + alt(d, 0, 1), dt)));  // falling edge at p = 0.5
 
 // Computes a pulse wave with the given width and polyBLEP correction. `width`
 // should be a number (or waveform) in [0,1), where 0.0 is a square wave 
 // (i.e., 50% duty cycle). If width isn't constant; then this is a PWM oscillator.
 pulse = fn(width, freq_hz) =>
+  // The width, frequency and phase are shared, as in `square`.
+  share(width, fn(width) =>
+  share(freq_hz, fn(freq_hz) =>
+  share(phase(freq_hz, 0), fn(p) =>
   let
-    p = phase(freq_hz, 0),
     dt = freq_hz / sample_rate,
     e = (1 - width) / 2, // the phase of the falling edge
     d = p - e,
   in alt(d, -1, 1)
-     + blep(p, dt)                 // rising edge at the wrap
-     - blep(d + alt(d, 0, 1), dt); // falling edge at p = e
+     + blep(p, dt)                     // rising edge at the wrap
+     - blep(d + alt(d, 0, 1), dt)))); // falling edge at p = e
 
 // LISTS
 
@@ -128,7 +139,10 @@ hold = fn() => filter([fixed([1])], [-1]);
 rand = fn() => noise | hold();
 // Returns the given waveform with the given probability or the constant zero
 // waveform of the same length otherwise.
-maybe = fn(w, P=0.5) => alt(rand() + (P * 2) - 1 + w * 0, w, 0);
+maybe = fn(w, P=0.5) =>
+  // `w` is shared so that it is generated once.
+  share(w, fn(w) =>
+  alt(rand() + (P * 2) - 1 + w * 0, w, 0));
 
 over = fn(freq) => fn(x) => $(freq * x) * (1 / x); // TODO remove in favor of harmonic?
 harmonic = fn(freq) => fn(n) => $(freq * n) * (1 / n);

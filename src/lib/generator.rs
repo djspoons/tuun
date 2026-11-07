@@ -791,7 +791,7 @@ impl<'a> Generator<'a> {
     /// Replaces parts of `waveform` that can be precomputed with their equivalent Fixed versions.
     ///
     /// Notably, infinite waveforms and waveforms that depend on or have dynamic behavior (Marked,
-    /// Captured) cannot be replaced.
+    /// Captured, Noise) cannot be replaced.
     pub fn precompute<M>(&mut self, waveform: waveform::Waveform<M>) -> waveform::Waveform<M>
     where
         M: Clone + Debug + Display,

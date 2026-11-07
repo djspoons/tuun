@@ -67,3 +67,20 @@ fn a_shared_lfo_keeps_running_inside_a_reset() {
     let copied = render(bindings, "reset(t, alt(lfo, up, down))", 6.5);
     assert!(copied.iter().all(|&x| x > 0.0));
 }
+
+#[test]
+fn std_oscillators_with_a_noisy_input_stay_in_range() {
+    // Copied, each use of the phase integrates its own noise, and `blep`
+    // divides by a phase increment that disagrees with its trigger, so the
+    // output reaches the hundreds of thousands.
+    for program in [
+        "square(220 + 100 * noise)",
+        "pulse(0.3 * noise, 220)",
+        "pulse(0.3 * noise, 220 + 100 * noise)",
+    ] {
+        let out = render("", &format!("{} | fin(time - 1)", program), 2.0);
+        assert_eq!(out.len(), 8000, "{}", program);
+        let peak = out.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
+        assert!(peak <= 1.0, "{}: peak {}", program, peak);
+    }
+}
