@@ -2,7 +2,7 @@
 //! in, and the program text each mark lights while one of those segments
 //! sounds.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -13,8 +13,8 @@ use crate::trace::{self, CarriesTrace, Step, Trace, Via};
 use crate::waveform::{ShareId, Waveform};
 
 /// The smallest finite range of samples around one or more source waveforms
-/// (`phase`, `noise`, `fixed`, or a `Ref` to a shared waveform), or just the
-/// start of those samples, measured from the waveform's start.
+/// (`phase`, `noise`, `fixed`, or a `Ref` to a shared waveform holding one), or
+/// just the start of those samples, measured from the waveform's start.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Segment {
     pub offset: usize,
@@ -22,6 +22,20 @@ pub struct Segment {
     /// any finite node, and those in a `Fin` of unknown length that nothing
     /// outlasts.
     pub duration: Option<usize>,
+}
+
+impl Segment {
+    /// Returns the part of the segment from `start` on, with no duration when
+    /// the segment ends by `start`.
+    fn after(&self, start: usize) -> Segment {
+        let offset = self.offset.max(start);
+        Segment {
+            offset,
+            duration: self
+                .duration
+                .map(|duration| (self.offset + duration).saturating_sub(offset)),
+        }
+    }
 }
 
 /// A range of program text and the segments during which it is current.
@@ -76,19 +90,11 @@ where
         },
         _ => waveform,
     };
-    let mut walk = Walk {
-        generator: Generator::new(sample_rate),
-        segments: Vec::new(),
-        marks: Vec::new(),
-        sources: 0,
-        unclaimed: 0,
-        unscoped: 0,
-        shared: Vec::new(),
-    };
+    let mut walk = Walk::new(sample_rate);
     let out = walk.walk(root, Some(0), false, Bound::Whole);
-    if walk.unclaimed > 0 {
+    if let Some(offset) = walk.first_unclaimed(0) {
         walk.segments.push(Segment {
-            offset: 0,
+            offset,
             duration: None,
         });
     }
@@ -148,6 +154,29 @@ struct WalkMark<S> {
     scope: Option<Range<usize>>,
 }
 
+/// What the walk holds from a shared waveform for each `Ref` to it.
+struct Held<S> {
+    /// The segments of the shared waveform's marks, measured from the start
+    /// of the whole waveform.
+    segments: Vec<Segment>,
+    marks: Vec<HeldMark<S>>,
+    /// Whether a source waveform is in the shared waveform.
+    sounds: bool,
+    /// The sources in the shared waveform that it doesn't put in a segment:
+    /// when each starts, as in [`Walk::unclaimed`].
+    unclaimed: Vec<Option<usize>>,
+}
+
+/// A trace mark in a shared waveform.
+struct HeldMark<S> {
+    trace: Arc<Trace<S>>,
+    folded: bool,
+    /// For a mark the shared waveform scopes itself, the segments it is
+    /// scoped to, as indices into [`Held::segments`]; `None` for one it
+    /// doesn't scope.
+    scope: Option<Range<usize>>,
+}
+
 /// The walk's state.
 struct Walk<S> {
     generator: Generator<'static>,
@@ -155,13 +184,16 @@ struct Walk<S> {
     marks: Vec<WalkMark<S>>,
     /// Source waveforms seen so far.
     sources: usize,
-    /// Source waveforms not yet inside a segment.
-    unclaimed: usize,
+    /// Source waveforms not yet inside a segment: when each starts, in samples
+    /// from the start of the whole waveform, or `None` if that isn't known.
+    unclaimed: Vec<Option<usize>>,
     /// Marks with no scope yet.
     unscoped: usize,
     /// The `Shared` nodes whose body holds the node being walked, outermost
     /// first, each with its id and whether its shared waveform is infinite.
     shared: Vec<(ShareId, bool)>,
+    /// For each of those `Shared` nodes, what is held from its shared waveform.
+    held: Vec<Held<S>>,
 }
 
 /// What a node's end bounds.
@@ -188,6 +220,20 @@ impl Bound {
 }
 
 impl<S> Walk<S> {
+    /// Returns a walk that has recorded nothing yet.
+    fn new(sample_rate: u32) -> Self {
+        Walk {
+            generator: Generator::new(sample_rate),
+            segments: Vec::new(),
+            marks: Vec::new(),
+            sources: 0,
+            unclaimed: Vec::new(),
+            unscoped: 0,
+            shared: Vec::new(),
+            held: Vec::new(),
+        }
+    }
+
     /// Returns `w` without trace marks, recording its segments and marks.
     ///
     /// `offset` is when `w` starts, in samples from the start of the whole
@@ -209,7 +255,7 @@ impl<S> Walk<S> {
             self.marks.len(),
             self.segments.len(),
             self.sources,
-            self.unclaimed,
+            self.unclaimed.len(),
             self.unscoped,
         );
         let within = bound.inner();
@@ -277,15 +323,15 @@ impl<S> Walk<S> {
                     offset: self.child(phase_offset, offset, opaque, within),
                     state,
                 };
-                self.add_source();
+                self.add_source(offset);
                 w
             }
             Noise => {
-                self.add_source();
+                self.add_source(offset);
                 Noise
             }
             Fixed(samples, state) => {
-                self.add_source();
+                self.add_source(offset);
                 Fixed(samples, state)
             }
             leaf @ (Const(_) | Time(_)) => leaf,
@@ -337,24 +383,42 @@ impl<S> Walk<S> {
                 waveform: self.child(waveform, offset, opaque, within),
             },
             // The shared waveform is generated whether or not it is heard, so
-            // its marks stay dark. A `Ref` is heard in its place: it reads
-            // samples as a source makes them, and the mark above it lights
-            // the text of the shared waveform (see `builtins::share`).
-            // TODO a shared waveform with no source in it, such as `time`, is
-            // a source here, though a copy of it wouldn't be.
+            // its marks are held rather than lit here. A `Ref` is heard in its
+            // place: it lights the held marks, along with the mark above it
+            // (see `builtins::share`), and is a source when its shared waveform
+            // holds one, as a copy would be.
             Shared { id, waveform, body } => {
                 let infinite = self.known_length(&waveform) == Some(usize::MAX);
+                let (waveform, held) = self.walk_shared(*waveform, offset, opaque);
                 self.shared.push((id, infinite));
+                self.held.push(held);
                 let body = self.child(body, offset, opaque, within);
                 self.shared.pop();
+                self.held.pop();
                 Shared {
                     id,
-                    waveform: Box::new(trace::strip_trace_marks(*waveform)),
+                    waveform: Box::new(waveform),
                     body,
                 }
             }
             Ref(id) => {
-                self.add_source();
+                if let Some(i) = self.shared.iter().rposition(|(shared, _)| *shared == id) {
+                    self.add_held(i, offset.filter(|_| !opaque));
+                    if self.held[i].sounds {
+                        self.sources += 1;
+                        // Inside a `Reset`, or after an unknown offset, the
+                        // `Ref` is one source where it starts.
+                        match offset.filter(|_| !opaque) {
+                            Some(start) => self.unclaimed.extend(
+                                self.held[i]
+                                    .unclaimed
+                                    .iter()
+                                    .map(|source| source.map(|source| source.max(start))),
+                            ),
+                            None => self.unclaimed.push(offset),
+                        }
+                    }
+                }
                 Ref(id)
             }
         };
@@ -364,27 +428,35 @@ impl<S> Walk<S> {
         // the waveform ends when nothing outlasts it; otherwise it has none,
         // and what it holds stays dark. A node its parent may outlast scopes
         // marks even with no source beneath: above it, they'd light while it
-        // no longer plays.
-        let claims = self.unclaimed > unclaimed0;
+        // no longer plays. With no source beneath, a node of unknown length
+        // may end at any time, so it scopes them as such a `Fin` does.
+        let claims = self.unclaimed.len() > unclaimed0;
         let scopes =
             self.unscoped > unscoped0 && (self.sources > sources0 || bound == Bound::Outlasted);
         let length = match !opaque && (claims || scopes) {
-            true => {
-                (self.finite_length(&out).map(Some)).or(matches!(out, Fin { .. }).then_some(None))
-            }
+            true => self.finite_length(&out).map(Some).or_else(|| {
+                let ends = matches!(out, Fin { .. })
+                    || (self.sources == sources0 && self.known_length(&out).is_none());
+                ends.then_some(None)
+            }),
             false => None,
         };
         if let Some(length) = length {
             if claims {
+                // The segment starts when the first source it claims does,
+                // and ends with this node. A segment cut before it starts
+                // keeps its place, with no duration left.
                 if let Some(offset) = offset
                     && (length.is_some() || bound == Bound::Whole)
+                    && let Some(start) = self.first_unclaimed(unclaimed0)
                 {
+                    let start = start.max(offset);
                     self.segments.push(Segment {
-                        offset,
-                        duration: length,
+                        offset: start,
+                        duration: length.map(|length| (offset + length).saturating_sub(start)),
                     });
                 }
-                self.unclaimed = unclaimed0;
+                self.unclaimed.truncate(unclaimed0);
             }
             if scopes {
                 let scope = s0..self.segments.len();
@@ -398,12 +470,16 @@ impl<S> Walk<S> {
         }
         // Nothing beneath a node sounds after the node ends, so a node that can
         // stop before its children cuts their segments at its end. A segment
-        // cut before it starts keeps its place, with no duration left.
+        // cut before it starts keeps its place, with no duration left. A `Fin`
+        // ends by its cutoff even when what it holds has no known length.
         if !opaque
             && self.segments.len() > s0
             && stops_children(&out)
             && let Some(offset) = offset
-            && let Some(length) = self.finite_length(&out)
+            && let Some(length) = self.finite_length(&out).or(match &out {
+                Fin { length, .. } => self.generator.fin_cutoff(length),
+                _ => None,
+            })
         {
             let end = offset + length;
             for segment in &mut self.segments[s0..] {
@@ -430,9 +506,117 @@ impl<S> Walk<S> {
         w
     }
 
-    fn add_source(&mut self) {
+    /// Returns the shared waveform `w` without trace marks, and what to hold
+    /// from it for each `Ref` to it.
+    ///
+    /// `offset` and `opaque` are those of the `Shared` node. Nothing in `w` is
+    /// recorded: only a `Ref` to it is heard.
+    fn walk_shared<M>(
+        &mut self,
+        w: Waveform<M>,
+        offset: Option<usize>,
+        opaque: bool,
+    ) -> (Waveform<M>, Held<S>)
+    where
+        M: CarriesTrace<S> + Clone + PartialEq,
+    {
+        let segments = std::mem::take(&mut self.segments);
+        let marks = std::mem::take(&mut self.marks);
+        let unclaimed = std::mem::take(&mut self.unclaimed);
+        let counts = (self.sources, self.unscoped);
+        // Walked at the `Shared` node's offset, `w`'s segments are measured on
+        // the clock of the whole waveform, as a `Ref`'s are. A `Ref` to `w`
+        // ends no later than `w` does.
+        let w = self.walk(w, offset, opaque, Bound::Parent);
+        let w_segments = std::mem::replace(&mut self.segments, segments);
+        // Each `Ref` in `w` adds the marks and segments held for it, the same
+        // ones when the `Ref`s start together: kept, they would double at each
+        // level of nested sharing. A mark lights while any of its segments
+        // sounds, so it keeps each segment once.
+        let mut seen = HashSet::new();
+        let marks: Vec<_> = std::mem::replace(&mut self.marks, marks)
+            .into_iter()
+            .map(|mark| {
+                let segments = mark.scope.map(|scope| {
+                    let mut distinct = HashSet::new();
+                    w_segments[scope]
+                        .iter()
+                        .filter(|segment| distinct.insert(*segment))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                });
+                (mark.trace, mark.folded, segments)
+            })
+            .filter(|(trace, folded, segments)| {
+                seen.insert((Arc::as_ptr(trace), *folded, segments.clone()))
+            })
+            .collect();
+        let (segments, runs) = lay_out(marks.iter().filter_map(|(_, _, s)| s.as_ref()));
+        let held = Held {
+            segments,
+            marks: marks
+                .into_iter()
+                .map(|(trace, folded, segments)| HeldMark {
+                    trace,
+                    folded,
+                    scope: segments.map(|segments| runs[&segments].clone()),
+                })
+                .collect(),
+            sounds: self.sources > counts.0,
+            unclaimed: std::mem::replace(&mut self.unclaimed, unclaimed),
+        };
+        (self.sources, self.unscoped) = counts;
+        (w, held)
+    }
+
+    /// Records the marks held for the `i`th enclosing `Shared` node, as a `Ref`
+    /// that starts at `start` hears them.
+    ///
+    /// A mark the shared waveform scopes itself lights during its segments from
+    /// `start` on, or stays dark when `start` is `None`. The rest are scoped
+    /// where the `Ref` is, as a copy's marks would be.
+    fn add_held(&mut self, i: usize, start: Option<usize>) {
+        let held = &self.held[i];
+        let first = self.segments.len();
+        if let Some(start) = start {
+            self.segments
+                .extend(held.segments.iter().map(|segment| segment.after(start)));
+        }
+        for mark in &held.marks {
+            let scope = match (&mark.scope, start) {
+                (None, _) => {
+                    self.unscoped += 1;
+                    None
+                }
+                (Some(scope), Some(_)) => Some(first + scope.start..first + scope.end),
+                (Some(_), None) => Some(first..first),
+            };
+            self.marks.push(WalkMark {
+                trace: mark.trace.clone(),
+                folded: mark.folded,
+                scope,
+            });
+        }
+    }
+
+    /// Records a source waveform that starts at `offset`.
+    fn add_source(&mut self, offset: Option<usize>) {
         self.sources += 1;
-        self.unclaimed += 1;
+        self.unclaimed.push(offset);
+    }
+
+    /// Returns the earliest start of the unclaimed sources past the first
+    /// `from`, if there are any.
+    ///
+    /// A source whose start isn't known is taken to start at 0, as early as
+    /// any could.
+    fn first_unclaimed(&self, from: usize) -> Option<usize> {
+        // TODO a source whose start isn't known may start later than the
+        // segment does, so it could light too early.
+        self.unclaimed[from..]
+            .iter()
+            .map(|start| start.unwrap_or(0))
+            .min()
     }
 
     /// Returns the length of `w` in samples when it is known and finite.
@@ -454,6 +638,36 @@ impl<S> Walk<S> {
             None => optimizer::optimize(length),
         }
     }
+}
+
+/// Returns segments holding each of `runs` contiguously, and where each run
+/// is in them.
+///
+/// A run that is part of a longer one shares its segments.
+fn lay_out<'a>(
+    runs: impl Iterator<Item = &'a Vec<Segment>>,
+) -> (Vec<Segment>, HashMap<Vec<Segment>, Range<usize>>) {
+    let mut runs: Vec<_> = runs.collect();
+    runs.sort_by_key(|run| std::cmp::Reverse(run.len()));
+    let mut segments: Vec<Segment> = Vec::new();
+    let mut placed = HashMap::new();
+    for run in runs {
+        if placed.contains_key(run) {
+            continue;
+        }
+        let at = match run.is_empty() {
+            true => Some(0),
+            false => segments
+                .windows(run.len())
+                .position(|w| w == run.as_slice()),
+        };
+        let at = at.unwrap_or_else(|| {
+            segments.extend(run.iter().cloned());
+            segments.len() - run.len()
+        });
+        placed.insert(run.clone(), at..at + run.len());
+    }
+    (segments, placed)
 }
 
 /// Returns whether `w` can end before one of its children does.
@@ -698,6 +912,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_source_after_a_rest_starts_its_segment_when_it_starts() {
+        // With no finite node around it, it sounds from then on.
+        let delayed = || append(rest(1.0), Waveform::Noise);
+        assert_eq!(
+            walked(delayed(), &dark()).segments,
+            [Segment {
+                offset: 10,
+                duration: None
+            }]
+        );
+        // A finite node around it ends the segment, but doesn't start it.
+        assert_eq!(
+            walked(op(delayed(), rest(2.0)), &dark()).segments,
+            [segment(10, 10)]
+        );
+        // Sources that start at different times share a segment from the first.
+        let w = Waveform::BinaryOp(
+            BinaryOperator::Merge,
+            Box::new(append(rest(1.5), Waveform::Noise)),
+            Box::new(delayed()),
+        );
+        assert_eq!(
+            walked(op(w, rest(2.0)), &dark()).segments,
+            [segment(10, 10)]
+        );
+    }
+
     /// A marked source in a `Fin` whose length reads a mark the generator can't
     /// see through, as a slider's does.
     fn unmeasurable_note(trace: &Arc<Trace<Text>>) -> W {
@@ -713,6 +955,39 @@ mod tests {
             waveform: Box::new(mark(trace, Waveform::Noise)),
             state: (),
         }
+    }
+
+    #[test]
+    fn a_rest_of_unmeasurable_length_beside_a_note_stays_dark() {
+        // As in `0 * rest & note`, with the rest's length read from a slider
+        // and `0 * rest` at 0..1: the rest may end at any time, so it doesn't
+        // light while the note plays.
+        let rest = Waveform::Fin {
+            length: Box::new(Waveform::BinaryOp(
+                BinaryOperator::Subtract,
+                Box::new(Waveform::Time(())),
+                Box::new(Waveform::Marked {
+                    id: Id::Other,
+                    waveform: Box::new(Waveform::Const(1.0)),
+                }),
+            )),
+            waveform: Box::new(Waveform::Const(0.0)),
+            state: (),
+        };
+        let w = Waveform::BinaryOp(
+            BinaryOperator::Merge,
+            Box::new(mark(&written(0..1), op(Waveform::Const(0.0), rest))),
+            Box::new(note(2.0)),
+        );
+        let marks = walked(w, &dark());
+        assert_eq!(marks.segments, [segment(0, 20)]);
+        assert_eq!(
+            marks.marks,
+            [Mark {
+                text_range: 0..1,
+                segments: 0..0
+            }]
+        );
     }
 
     #[test]
@@ -1018,6 +1293,154 @@ mod tests {
                 }
             ]
         );
+    }
+
+    #[test]
+    fn marks_a_shared_waveform_scopes_itself_light_during_their_own_segments() {
+        // As in `share(a \\ b & noise, fn(x) => x)` with `a`, `b`, the whole
+        // shared waveform and `x` at 0..1, 2..3, 0..4 and 5..6: `a` and `b`
+        // each light while they play, the rest while `x` is heard.
+        let shared = mark(
+            &written(0..4),
+            Waveform::BinaryOp(
+                BinaryOperator::Merge,
+                Box::new(append(
+                    mark(&written(0..1), note(1.0)),
+                    mark(&written(2..3), note(1.0)),
+                )),
+                Box::new(Waveform::Noise),
+            ),
+        );
+        let used = trace(None, vec![Step::UseSite(span(5..6))]);
+        let w = Waveform::Shared {
+            id: ShareId(0),
+            waveform: Box::new(shared),
+            body: Box::new(mark(&used, Waveform::Ref(ShareId(0)))),
+        };
+        let marks = walked(w, &dark());
+        assert_eq!(
+            marks.segments,
+            [
+                segment(0, 10),
+                segment(10, 10),
+                Segment {
+                    offset: 0,
+                    duration: None
+                }
+            ]
+        );
+        let mark = |text_range, segments| Mark {
+            text_range,
+            segments,
+        };
+        assert_eq!(
+            marks.marks,
+            [
+                mark(0..1, 0..1),
+                mark(2..3, 1..2),
+                mark(0..4, 0..3),
+                mark(5..6, 0..3)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_fin_cuts_what_it_holds_at_its_cutoff_when_its_length_is_unknown() {
+        // As in `share(a, fn(x) => x | fin(time - 1))`, with `a` a 2 s note at
+        // 0..1: a `Ref` to a finite waveform has no known length, but the
+        // `Fin` still ends at 1 s.
+        let w = Waveform::Shared {
+            id: ShareId(0),
+            waveform: Box::new(mark(&written(0..1), note(2.0))),
+            body: Box::new(Waveform::Fin {
+                length: seconds(1.0),
+                waveform: Box::new(Waveform::Ref(ShareId(0))),
+                state: (),
+            }),
+        };
+        let marks = walked(w, &dark());
+        assert_eq!(marks.segments, [segment(0, 10)]);
+        assert_eq!(
+            marks.marks,
+            [Mark {
+                text_range: 0..1,
+                segments: 0..1
+            }]
+        );
+    }
+
+    #[test]
+    fn a_ref_lights_the_parts_of_a_shared_waveform_from_when_it_starts() {
+        // As in `share(a \\ b, fn(x) => rest \\ x)`, with `a` and `b` at 0..1
+        // and 2..3: `x` starts as `b` does, so `a` has no time left.
+        let w = Waveform::Shared {
+            id: ShareId(0),
+            waveform: Box::new(append(
+                mark(&written(0..1), note(1.0)),
+                mark(&written(2..3), note(1.0)),
+            )),
+            body: Box::new(append(rest(1.0), Waveform::Ref(ShareId(0)))),
+        };
+        let marks = walked(w, &dark());
+        assert_eq!(marks.segments, [segment(10, 0), segment(10, 10)]);
+        assert_eq!(
+            marks.marks,
+            [
+                Mark {
+                    text_range: 0..1,
+                    segments: 0..1
+                },
+                Mark {
+                    text_range: 2..3,
+                    segments: 1..2
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_ref_to_a_shared_waveform_with_no_source_is_not_a_source() {
+        // As in `share(a, fn(x) => x * rest)` with `a` at 0..1: like a copy of
+        // `a`, it gets no segment of its own...
+        let shared = |body| Waveform::Shared {
+            id: ShareId(0),
+            waveform: Box::new(mark(&written(0..1), Waveform::Time(()))),
+            body: Box::new(body),
+        };
+        let copy = walked(
+            op(mark(&written(0..1), Waveform::Time(())), rest(1.0)),
+            &dark(),
+        );
+        let marks = walked(shared(op(Waveform::Ref(ShareId(0)), rest(1.0))), &dark());
+        assert_eq!(marks.segments, []);
+        assert_eq!(marks, copy);
+        // ...but lights with a note it controls.
+        let marks = walked(shared(op(Waveform::Ref(ShareId(0)), note(1.0))), &dark());
+        assert_eq!(marks.segments, [segment(0, 10)]);
+        assert_eq!(
+            marks.marks,
+            [Mark {
+                text_range: 0..1,
+                segments: 0..1
+            }]
+        );
+    }
+
+    #[test]
+    fn marks_held_through_several_refs_are_held_once() {
+        // As in `share(share(a, fn(y) => y & y), fn(x) => x)`, with `a` at 0..1:
+        // both uses of `y` add `a`, but `x` holds it once.
+        let w = Waveform::Shared {
+            id: ShareId(1),
+            waveform: Box::new(mark(&written(0..1), Waveform::Noise)),
+            body: Box::new(Waveform::BinaryOp(
+                BinaryOperator::Merge,
+                Box::new(Waveform::Ref(ShareId(1))),
+                Box::new(Waveform::Ref(ShareId(1))),
+            )),
+        };
+        let (_, held) = Walk::new(RATE).walk_shared(w, Some(0), false);
+        assert_eq!(held.marks.len(), 1);
     }
 
     #[test]

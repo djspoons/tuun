@@ -442,6 +442,30 @@ fn note_names_light_during_their_own_notes() {
 }
 
 #[test]
+fn a_value_bound_outside_a_nested_min_lights() {
+    // `max(…)` reaches `min` as a shared waveform, so `0.7` lights through
+    // the marks held from it.
+    let v = voice("let s = 0.7 in $440 * min(time, max(time * 2, s)) | fin(time - 1)");
+    assert_eq!(segments(&v), ["0+1000"]);
+    assert_eq!(
+        lit(&v),
+        [
+            "0.7: 0..1000",
+            "$440: 0..1000",
+            "440: 0..1000",
+            "*: 0..1000",
+            "min(time, max(time * 2, s)): 0..1000",
+            "time: 0..1000",
+            "max(time * 2, s): 0..1000",
+            "time: 0..1000",
+            "*: 0..1000",
+            "2: 0..1000",
+            "s: 0..1000",
+        ]
+    );
+}
+
+#[test]
 fn a_shared_waveform_lights_where_its_parameter_is_heard() {
     // `$440` is generated from the start, but heard only through `x`, after
     // the rest.
@@ -458,6 +482,116 @@ fn a_shared_waveform_lights_where_its_parameter_is_heard() {
             "x: 500..1000",
             "*: 500..1000",
             "Qw: 500..1000",
+        ]
+    );
+}
+
+#[test]
+fn notes_a_shared_waveform_times_itself_light_as_a_copys_do() {
+    // Each note lights during its own half, while `x` reads it.
+    let v = voice("share($440 * Qw \\ $220 * Qw | unseq(), fn(x) => x)");
+    let copy = voice("let x = $440 * Qw \\ $220 * Qw | unseq() in x");
+    assert_eq!(segments(&v), ["0+500", "500+500"]);
+    assert_eq!(segments(&v), segments(&copy));
+    assert_eq!(lit(&v), lit(&copy));
+}
+
+#[test]
+fn a_delayed_ref_lights_only_the_part_it_reads() {
+    // `x` starts reading halfway through, so it hears only `$330`: `$220`'s
+    // segment is cut before it starts.
+    let v = voice("share(($220 * Qw \\ $330 * Qw) | unseq(), fn(x) => 0 * Qw \\ x)");
+    assert_eq!(segments(&v), ["500+0", "500+500"]);
+    assert_eq!(
+        lit(&v),
+        [
+            "$220: 500..500",
+            "220: 500..500",
+            "*: 500..500",
+            "Qw: 500..500",
+            "$330: 500..1000",
+            "330: 500..1000",
+            "*: 500..1000",
+            "Qw: 500..1000",
+            "0: ",
+            "*: ",
+            "Qw: ",
+            "x: 500..1000",
+        ]
+    );
+}
+
+#[test]
+fn a_fin_around_a_ref_cuts_the_parts_it_reads() {
+    let v = voice(
+        "share(($220 * Qw \\ $330 * Qw) | unseq(), fn(x) => (0 * Qw \\ x) | fin(time - 0.75))",
+    );
+    assert_eq!(segments(&v), ["500+0", "500+250"]);
+    assert_eq!(
+        lit(&v),
+        [
+            "$220: 500..500",
+            "220: 500..500",
+            "*: 500..500",
+            "Qw: 500..500",
+            "$330: 500..750",
+            "330: 500..750",
+            "*: 500..750",
+            "Qw: 500..750",
+            "0: ",
+            "*: ",
+            "Qw: ",
+            "x: 500..750",
+        ]
+    );
+}
+
+#[test]
+fn a_note_after_a_rest_lights_when_it_starts() {
+    let v = voice("0 * Qw \\ $440");
+    assert_eq!(segments(&v), ["500+"]);
+    assert_eq!(lit(&v), ["0: ", "*: ", "Qw: ", "$440: 500..", "440: 500.."]);
+    // A finite waveform around it ends it, but doesn't start it.
+    let v = voice("(0 * Qw \\ $440) * Hw");
+    assert_eq!(segments(&v), ["500+500"]);
+    assert_eq!(
+        lit(&v),
+        [
+            "0: ",
+            "*: ",
+            "Qw: ",
+            "$440: 500..1000",
+            "440: 500..1000",
+            "*: 500..1000",
+            "Hw: 500..1000",
+        ]
+    );
+}
+
+#[test]
+fn a_shared_control_has_no_segment_of_its_own() {
+    // As with `time * Qw`, nothing sounds, so nothing lights.
+    let v = voice("share(time, fn(x) => x) * Qw");
+    assert_eq!(segments(&v), Vec::<String>::new());
+    assert_eq!(lit(&v), ["time: ", "x: ", "*: ", "Qw: "]);
+}
+
+#[test]
+fn a_rest_of_no_length_stays_dark() {
+    // `Qrw` is `fin(0)`: like `0 * Qw`, `0 * Qrw` doesn't light while the
+    // note after it plays.
+    let v = voice("0 * Qrw \\ $440 * Hw");
+    assert_eq!(segments(&v), ["500+1000"]);
+    assert_eq!(
+        lit(&v),
+        [
+            "0: ",
+            "*: ",
+            "Qrw: ",
+            "$440: 500..1500",
+            "440: 500..1500",
+            "*: 500..1500",
+            "Hw: 500..1500",
         ]
     );
 }

@@ -977,8 +977,8 @@ where
     if !matches!(waveform.expr, Expr::Waveform(_)) {
         return Err(Error::internal_here("First argument must be a waveform"));
     }
-    // As `alt` does with a constant trigger, this lets the function's built-ins
-    // fold the constant, so the trace keeps only what contributes.
+    // Fold a constant here since generating constants is cheap and they don't
+    // depend on the offset.
     if waveform.expr.as_const_float().is_some() {
         return eval::evaluate_closed(SourceExpr::application(function, vec![waveform]));
     }

@@ -752,10 +752,11 @@ impl<'a> Generator<'a> {
     }
 
     /// Returns the number of samples before `length` is first non-negative, when `length` is
-    /// `time` offset by a constant.
+    /// `time` offset by a constant, or a constant that is non-negative.
     pub(crate) fn fin_cutoff<M, S>(&self, length: &waveform::Waveform<M, S>) -> Option<usize> {
         use waveform::Waveform::{BinaryOp, Const, Time};
         let offset = match length {
+            Const(c) if *c >= 0.0 => return Some(0),
             BinaryOp(op @ (BinaryOperator::Add | BinaryOperator::Subtract), a, b) => {
                 match (a.as_ref(), b.as_ref()) {
                     (Time(_), Const(c)) if *op == BinaryOperator::Add => *c,
@@ -1693,6 +1694,20 @@ mod tests {
             state: (),
         };
         check_known_length(&mut g, &w, None);
+    }
+
+    #[test]
+    fn a_fin_of_constant_length_ends_at_once_unless_the_length_is_negative() {
+        let mut g = new_test_generator(1);
+        let fin = |length| Fin {
+            length: Box::new(Const(length)),
+            waveform: Box::new(Const(1.0)),
+            state: (),
+        };
+        check_known_length(&mut g, &fin(0.0), Some(0));
+        check_known_length(&mut g, &fin(2.0), Some(0));
+        check_known_length(&mut g, &fin(-1.0), None);
+        check_known_length(&mut g, &fin(f32::NAN), None);
     }
 
     #[test]
