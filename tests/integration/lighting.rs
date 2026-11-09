@@ -605,3 +605,240 @@ fn a_ref_to_a_finite_shared_waveform_is_measured_as_a_copy_is() {
     assert_eq!(segments(&v), ["0+1000"]);
     assert_eq!(lit(&v), lit(&copy));
 }
+
+#[test]
+fn notes_of_a_shared_waveform_heard_twice_light_when_they_play() {
+    // The shared waveform plays once, on its own clock: the second `x` reads
+    // its second half.
+    let v = voice("share($220 * Qw \\ $330 * Qw | unseq(), fn(x) => x * Qw \\ x * Qw | unseq())");
+    assert_eq!(segments(&v), ["0+500", "500+0", "500+0", "500+500"]);
+    assert_eq!(
+        lit(&v),
+        [
+            "$220: 0..500",
+            "220: 0..500",
+            "*: 0..500",
+            "Qw: 0..500",
+            "$330: 500..1000",
+            "330: 500..1000",
+            "*: 500..1000",
+            "Qw: 500..1000",
+            "x: 0..500",
+            "*: 0..500",
+            "Qw: 0..500",
+            "x: 500..1000",
+            "*: 500..1000",
+            "Qw: 500..1000",
+        ]
+    );
+}
+
+#[test]
+fn nested_shares_light_the_parts_each_ref_reads() {
+    // `b` reads `a` after a rest, so `$220` is never heard; the first `b`
+    // hears `$330` and the second, `$440`.
+    let v = voice(
+        "share($220 * Qw \\ $330 * Qw \\ $440 * Qw | unseq(), \
+         fn(a) => share(0 * Qw \\ a, fn(b) => (b * Hw \\ b * Qw) | unseq()))",
+    );
+    assert_eq!(
+        segments(&v),
+        ["500+0", "500+500", "1000+0", "1000+0", "1000+0", "1000+500"]
+    );
+    assert_eq!(
+        lit(&v),
+        [
+            "$220: 500..500 1000..1000",
+            "220: 500..500 1000..1000",
+            "*: 500..500 1000..1000",
+            "Qw: 500..500 1000..1000",
+            "$330: 500..1000",
+            "330: 500..1000",
+            "*: 500..1000",
+            "Qw: 500..1000",
+            "$440: 1000..1500",
+            "440: 1000..1500",
+            "*: 1000..1500",
+            "Qw: 1000..1500",
+            "0: ",
+            "*: ",
+            "Qw: ",
+            "a: 500..1500",
+            "b: 500..1000",
+            "*: 500..1000",
+            "Hw: 500..1000",
+            "b: 1000..1500",
+            "*: 1000..1500",
+            "Qw: 1000..1500",
+        ]
+    );
+}
+
+#[test]
+fn a_shared_waveform_heard_in_a_reset_isnt_reset() {
+    // The `reset` restarts `x`'s reading, not the shared waveform, so each
+    // note lights while it plays. A copy is restarted, and holds `$220`.
+    let v = voice(
+        "share($220 * Qw \\ $330 * Qw | unseq(), fn(x) => reset(time - 0.25, x) * Hw | unseq())",
+    );
+    assert_eq!(segments(&v), ["0+500", "500+500"]);
+    assert_eq!(
+        lit(&v),
+        [
+            "$220: 0..500",
+            "220: 0..500",
+            "*: 0..500",
+            "Qw: 0..500",
+            "$330: 500..1000",
+            "330: 500..1000",
+            "*: 500..1000",
+            "Qw: 500..1000",
+            "reset: 0..1000",
+            "time: 0..1000",
+            "-: 0..1000",
+            "0.25: 0..1000",
+            "x: 0..1000",
+            "*: 0..1000",
+            "Hw: 0..1000",
+        ]
+    );
+}
+
+#[test]
+fn refs_in_both_branches_of_an_alt_light_while_they_read() {
+    let v = voice(
+        "share($220 * Qw \\ $330 * Qw | unseq(), \
+         fn(x) => alt(0.25 - time, x * Ew | unseq(), 0 * Qw \\ x) * Hw | unseq())",
+    );
+    assert_eq!(segments(&v), ["0+250", "500+0", "500+0", "500+500"]);
+    // `alt` plays `x * Ew` until 250 and `0 * Qw \\ x` after. The first
+    // `x * Ew` ends at 250, cutting what it hears of `$220`, and nothing
+    // sounds again until the second `x` reads `$330` from 500.
+    assert_eq!(
+        lit(&v),
+        [
+            "$220: 0..250 500..500",
+            "220: 0..250 500..500",
+            "*: 0..250 500..500",
+            "Qw: 0..250 500..500",
+            "$330: 500..1000",
+            "330: 500..1000",
+            "*: 500..1000",
+            "Qw: 500..1000",
+            "alt: 0..250 500..1000",
+            "0.25: 0..250 500..1000",
+            "-: 0..250 500..1000",
+            "time: 0..250 500..1000",
+            "x: 0..250 500..500",
+            "*: 0..250 500..500",
+            "Ew: 0..250 500..500",
+            "0: ",
+            "*: ",
+            "Qw: ",
+            "x: 500..1000",
+            "*: 0..250 500..1000",
+            "Hw: 0..250 500..1000",
+        ]
+    );
+}
+
+#[test]
+fn a_part_of_a_shared_waveform_cut_before_it_plays_stays_dark() {
+    // `(x & y) * Qw` ends when `$330` would start, and `y` has ended by the
+    // time the second `y` reads it.
+    let v = voice(
+        "share($220 * Qw \\ $330 * Qw | unseq(), \
+         fn(x) => share($440 * Ew | unseq(), fn(y) => (x & y) * Qw \\ y))",
+    );
+    assert_eq!(segments(&v), ["0+500", "500+0", "0+250", "500+0"]);
+    assert_eq!(
+        lit(&v),
+        [
+            "$220: 0..500",
+            "220: 0..500",
+            "*: 0..500",
+            "Qw: 0..500",
+            "$330: 500..500",
+            "330: 500..500",
+            "*: 500..500",
+            "Qw: 500..500",
+            "$440: 0..250 500..500",
+            "440: 0..250 500..500",
+            "*: 0..250 500..500",
+            "Ew: 0..250 500..500",
+            "x: 0..500",
+            "&: 0..500",
+            "y: 0..250",
+            "*: 0..500",
+            "Qw: 0..500",
+            "y: 500..500",
+        ]
+    );
+}
+
+#[test]
+fn a_fin_around_overlapping_refs_cuts_what_both_read() {
+    let v = voice(
+        "share($220 * Qw \\ $330 * Qw | unseq(), fn(x) => (x & (Ew \\ x)) | fin(time - 0.625))",
+    );
+    assert_eq!(segments(&v), ["0+500", "500+125", "250+250", "500+125"]);
+    assert_eq!(
+        lit(&v),
+        [
+            "$220: 0..500",
+            "220: 0..500",
+            "*: 0..500",
+            "Qw: 0..500",
+            "$330: 500..625",
+            "330: 500..625",
+            "*: 500..625",
+            "Qw: 500..625",
+            "x: 0..625",
+            "&: 0..625",
+            "Ew: ",
+            "x: 250..625",
+        ]
+    );
+}
+
+#[test]
+fn a_note_of_unknown_length_lights_no_longer_than_what_stops_it() {
+    // `time * time - 1` stands in for a length that can't be measured, as a
+    // slider's can't. The product ends by the end of `Qw`.
+    let v = voice("($220 | fin(time * time - 1)) * Qw");
+    assert_eq!(segments(&v), ["0+500"]);
+    assert_eq!(
+        lit(&v),
+        ["$220: 0..500", "220: 0..500", "*: 0..500", "Qw: 0..500"]
+    );
+}
+
+#[test]
+fn a_ref_to_a_shared_waveform_of_unknown_length_lights_no_longer_than_what_stops_it() {
+    let v = voice(
+        "share(($220 * Qw \\ $330 * Qw | unseq()) * (1 | fin(time * time - 1)), \
+         fn(x) => x * Qw \\ x * Qw | unseq())",
+    );
+    assert_eq!(segments(&v), ["0+500", "500+0", "500+0", "500+500"]);
+    assert_eq!(
+        lit(&v),
+        [
+            "$220: 0..500",
+            "220: 0..500",
+            "*: 0..500",
+            "Qw: 0..500",
+            "$330: 500..1000",
+            "330: 500..1000",
+            "*: 500..1000",
+            "Qw: 500..1000",
+            "*: 0..1000",
+            "1: 0..1000",
+            "x: 0..500",
+            "*: 0..500",
+            "Qw: 0..500",
+            "x: 500..1000",
+            "*: 500..1000",
+            "Qw: 500..1000",
+        ]
+    );
+}
