@@ -84,3 +84,19 @@ fn std_oscillators_with_a_noisy_input_stay_in_range() {
         assert!(peak <= 1.0, "{}: peak {}", program, peak);
     }
 }
+
+#[test]
+fn a_shared_seq_chains_like_its_waveform() {
+    // A seq returned by the function keeps its offset, so `\` places what
+    // follows after it, as without `share`.
+    let shared = render(
+        "",
+        "(share(noise, fn(n) => (n - n + 1) | fin(time - 0.25) | seq(time - 0.25)) \
+         \\ (2 | fin(time - 0.25) | seq(time - 0.25))) \\ (3 | fin(time - 0.25))",
+        1.0,
+    );
+    let mut expected = vec![1.0; 2000];
+    expected.extend([2.0; 2000]);
+    expected.extend([3.0; 2000]);
+    assert_eq!(shared, expected);
+}

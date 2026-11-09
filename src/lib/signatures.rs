@@ -195,13 +195,24 @@ pub fn signature(name: &str) -> Option<Type> {
             vec![Type::waveform(), Type::waveform(), Type::waveform()],
             Type::waveform(),
         ),
-        "share" => Type::function(
-            vec![
+        // The function's result selects the conjunct: a seq threads its
+        // offset, as the curried filters do.
+        "share" => Type::intersection(vec![
+            Type::function(
+                vec![
+                    Type::waveform(),
+                    Type::function(vec![Type::waveform()], Type::waveform()),
+                ],
                 Type::waveform(),
-                Type::function(vec![Type::waveform()], Type::waveform()),
-            ],
-            Type::waveform(),
-        ),
+            ),
+            Type::function(
+                vec![
+                    Type::waveform(),
+                    Type::function(vec![Type::waveform()], Type::seq()),
+                ],
+                Type::seq(),
+            ),
+        ]),
         "capture" => Type::function(vec![Type::String], waveform_filter()),
         "__chord" => Type::function(
             vec![Type::List(Box::new(Type::waveform()))],

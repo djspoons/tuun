@@ -2260,18 +2260,6 @@ impl<S: Clone> Infer<S> {
     /// Ψ frame, and `subtype` selects with a pseudo-frame built from an
     /// expected arrow's parameters.
     fn select_core(&mut self, conjuncts: &[Type], frame: &Frame<S>) -> Selection {
-        // The argument sorts. Erroneous and unsolved metas may be any
-        // numeric; a non-numeric argument (list, function, ...) has no sort
-        // and is checked against each conjunct's domain by subtyping.
-        let sorts: Vec<Option<Sort>> = frame
-            .positional
-            .iter()
-            .map(|(argument, _)| match self.resolved(argument) {
-                Type::Numeric(rep) => Some(self.may_of(rep)),
-                Type::Erroneous | Type::Meta(_) => Some(Sort::TOP),
-                _ => None,
-            })
-            .collect();
         // Only the conjuncts shaped like this call can answer it.
         let shaped: Vec<Type> = conjuncts
             .iter()
@@ -2284,6 +2272,22 @@ impl<S: Clone> Infer<S> {
         if shaped.is_empty() {
             return Selection::NoMatchingConjuncts;
         }
+        // The argument sorts. Erroneous and unsolved metas may be any
+        // numeric; a non-numeric argument (list, function, ...) has no sort
+        // and is checked against each conjunct's domain by subtyping. So is
+        // an unsolved meta at a position where every conjunct's domain is
+        // a non-numeric type, since no conjunct could take it as a numeric.
+        let sorts: Vec<Option<Sort>> = frame
+            .positional
+            .iter()
+            .enumerate()
+            .map(|(position, (argument, _))| match self.resolved(argument) {
+                Type::Numeric(rep) => Some(self.may_of(rep)),
+                Type::Meta(_) if self.non_numeric_domains(&shaped, position) => None,
+                Type::Erroneous | Type::Meta(_) => Some(Sort::TOP),
+                _ => None,
+            })
+            .collect();
         // Contracts for unsolved arguments use the union of every conjunct's domain
         // at the position: the variable may still grow (an arrow's result can
         // feed back into it — see the fixed-point iteration in `subtype`), and
@@ -2373,6 +2377,28 @@ impl<S: Clone> Infer<S> {
                     _ => true,
                 }
             })
+        })
+    }
+
+    /// Returns whether every one of `conjuncts` (which all should be function
+    /// types) has a non-numeric type as its domain at `position`.
+    ///
+    /// A domain that is unknown or a type variable could still be numeric, so
+    /// it does not count.
+    ///
+    /// # Example
+    ///
+    /// `(waveform, (waveform) -> waveform) -> waveform ∧ (waveform, (waveform)
+    /// -> seq) -> seq` has non-numeric domains at position 1 but not 0.
+    fn non_numeric_domains(&self, conjuncts: &[Type], position: usize) -> bool {
+        conjuncts.iter().all(|conjunct| {
+            let Type::Function { positional, .. } = conjunct else {
+                unreachable!("conjuncts are arrows");
+            };
+            !matches!(
+                self.resolved(&positional[position]),
+                Type::Numeric(_) | Type::Meta(_) | Type::Var(_) | Type::Erroneous
+            )
         })
     }
 
@@ -4010,13 +4036,29 @@ mod tests {
                 vec![Type::float(), Type::float()],
                 Type::float(),
             )),
+            "by_result" => Some(Type::intersection(vec![
+                Type::function(
+                    vec![
+                        Type::waveform(),
+                        Type::function(vec![Type::waveform()], Type::waveform()),
+                    ],
+                    Type::waveform(),
+                ),
+                Type::function(
+                    vec![
+                        Type::waveform(),
+                        Type::function(vec![Type::waveform()], Type::seq()),
+                    ],
+                    Type::seq(),
+                ),
+            ])),
             _ => signatures::signature(name),
         }
     }
 
     /// Builds a prelude mirroring the native one: the built-ins plus
     /// `tempo`, `sample_rate` and `debug`, and then the test
-    /// stand-ins `w2`, `f1`, `f2`, and `src_w1`. The extra built-ins get stub
+    /// stand-ins `w2`, `f1`, `f2`, `by_result`, and `src_w1`. The extra built-ins get stub
     /// closures — the checker only looks at their names.
     fn test_prelude<S: Clone + std::fmt::Debug + Send + Sync + 'static>()
     -> Vec<SourceBinding<u32, S>> {
@@ -4075,6 +4117,18 @@ mod tests {
                         .into_iter()
                         .next()
                         .ok_or_else(|| Error::internal_here("f2 takes two arguments"))
+                }),
+            }),
+        ));
+        // `by_result`: an overloaded built-in whose conjuncts differ only in
+        // the result of their function parameter (see `test_signature`). These
+        // tests only check programs, so it is never applied.
+        prelude.push(SourceBinding::definition(
+            Pattern::Identifier("by_result".to_string()),
+            SourceExpr::from(Expr::BuiltIn {
+                name: "by_result".to_string(),
+                function: BuiltInFn::new(|_, _| {
+                    Err(Error::internal_here("by_result is never applied"))
                 }),
             }),
         ));
@@ -4306,6 +4360,38 @@ mod tests {
         // conjuncts), so seq-ness survives to the following `\`.
         assert_clean("(seq(0)(w2(440, 0)) * 0.5) \\ 1");
         assert_clean("(-seq(0)(w2(440, 0))) \\ 1");
+    }
+
+    // A function argument's result selects among conjuncts that agree on
+    // its parameters, whether the function is a lambda or a name.
+    #[test]
+    fn a_function_arguments_result_selects_the_conjunct() {
+        assert_eq!(
+            declared_sort("by_result(time, fn(x) => seq(0)(x))"),
+            Some(Sort::SEQ)
+        );
+        assert_eq!(
+            declared_sort("by_result(time, fn(x) => x * 2)"),
+            Some(Sort::WAVE)
+        );
+        assert_clean("by_result(time, fn(x) => seq(0)(x)) \\ 1");
+        assert_clean("let g = fn(x) => seq(0)(x) in by_result(time, g) \\ 1");
+        assert_errors(
+            "by_result(time, fn(x) => x * 2) \\ 1",
+            &["expected seq, found waveform"],
+        );
+    }
+
+    // An unannotated parameter passed where every conjunct expects a
+    // function can't be numeric, so it binds to the first conjunct's domain
+    // rather than being rejected as a possible numeric.
+    #[test]
+    fn an_unknown_argument_at_function_domains_takes_the_first() {
+        assert_clean("let with = fn(w, f) => by_result(w, f) in with(time, fn(x) => x)");
+        assert_errors(
+            "let with = fn(f) => by_result(time, f) in with(fn(x) => seq(0)(x))",
+            &["expected waveform, found seq"],
+        );
     }
 
     // Runtime errors the refinement lattice makes visible: arms the

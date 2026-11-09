@@ -732,6 +732,27 @@ fn refs_to<M>(waveform: &mut Waveform<M>, id: ShareId) -> Vec<&mut Waveform<M>> 
     refs
 }
 
+/// Returns whether `waveform` holds a `Ref(id)` that would resolve to a
+/// `Shared` with `id` enclosing `waveform`.
+///
+/// # Example
+///
+/// ```
+/// use tuun::optimizer::references;
+/// use tuun::waveform::{BinaryOperator, ShareId, Waveform};
+///
+/// let offset: Waveform<()> = Waveform::BinaryOp(
+///     BinaryOperator::Subtract,
+///     Box::new(Waveform::Ref(ShareId(0))),
+///     Box::new(Waveform::Const(0.25)),
+/// );
+/// assert!(references(&offset, ShareId(0)));
+/// assert!(!references(&offset, ShareId(1)));
+/// ```
+pub fn references<M: Clone>(waveform: &Waveform<M>, id: ShareId) -> bool {
+    !refs_to(&mut waveform.clone(), id).is_empty()
+}
+
 /// Returns false only if waveform is certainly infinite.
 ///
 /// Marked waveforms count as possibly finite because their contents can change,
