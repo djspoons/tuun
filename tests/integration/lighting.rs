@@ -595,3 +595,13 @@ fn a_rest_of_no_length_stays_dark() {
         ]
     );
 }
+
+#[test]
+fn a_ref_to_a_finite_shared_waveform_is_measured_as_a_copy_is() {
+    // `x` reads all of a quarter note, so the half note around it ends the
+    // segment, as it does around a copy.
+    let v = voice("share(time * Qw | unseq(), fn(x) => (x & $440) * Hw | unseq())");
+    let copy = voice("let x = time * Qw | unseq() in (x & $440) * Hw | unseq()");
+    assert_eq!(segments(&v), ["0+1000"]);
+    assert_eq!(lit(&v), lit(&copy));
+}

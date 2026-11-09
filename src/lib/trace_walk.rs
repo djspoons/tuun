@@ -7,10 +7,10 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use crate::expr::{Expr, SourceExpr, Span};
-use crate::generator::Generator;
+use crate::generator::{Generator, SharedExtent};
 use crate::optimizer;
 use crate::trace::{self, CarriesTrace, Step, Trace, Via};
-use crate::waveform::{ShareId, Waveform};
+use crate::waveform::Waveform;
 
 /// The smallest finite range of samples around one or more source waveforms
 /// (`phase`, `noise`, `fixed`, or a `Ref` to a shared waveform holding one), or
@@ -190,8 +190,8 @@ struct Walk<S> {
     /// Marks with no scope yet.
     unscoped: usize,
     /// The `Shared` nodes whose body holds the node being walked, outermost
-    /// first, each with its id and whether its shared waveform is infinite.
-    shared: Vec<(ShareId, bool)>,
+    /// first, each with when its shared waveform starts and its length.
+    shared: Vec<SharedExtent>,
     /// For each of those `Shared` nodes, what is held from its shared waveform.
     held: Vec<Held<S>>,
 }
@@ -293,7 +293,7 @@ impl<S> Walk<S> {
                 let b_offset = match opaque {
                     true => offset,
                     false => offset
-                        .zip(self.finite_length(&a))
+                        .zip(self.finite_length(&a, offset))
                         .map(|(offset, length)| offset + length),
                 };
                 Append(
@@ -388,9 +388,15 @@ impl<S> Walk<S> {
             // (see `builtins::share`), and is a source when its shared waveform
             // holds one, as a copy would be.
             Shared { id, waveform, body } => {
-                let infinite = self.known_length(&waveform) == Some(usize::MAX);
+                // Inside a `Reset`, offsets don't advance, so where the
+                // shared waveform starts isn't known.
+                let extent = SharedExtent {
+                    id,
+                    start: offset.filter(|_| !opaque),
+                    length: self.known_length(&waveform, offset),
+                };
                 let (waveform, held) = self.walk_shared(*waveform, offset, opaque);
-                self.shared.push((id, infinite));
+                self.shared.push(extent);
                 self.held.push(held);
                 let body = self.child(body, offset, opaque, within);
                 self.shared.pop();
@@ -402,7 +408,7 @@ impl<S> Walk<S> {
                 }
             }
             Ref(id) => {
-                if let Some(i) = self.shared.iter().rposition(|(shared, _)| *shared == id) {
+                if let Some(i) = self.shared.iter().rposition(|extent| extent.id == id) {
                     self.add_held(i, offset.filter(|_| !opaque));
                     if self.held[i].sounds {
                         self.sources += 1;
@@ -434,9 +440,9 @@ impl<S> Walk<S> {
         let scopes =
             self.unscoped > unscoped0 && (self.sources > sources0 || bound == Bound::Outlasted);
         let length = match !opaque && (claims || scopes) {
-            true => self.finite_length(&out).map(Some).or_else(|| {
+            true => self.finite_length(&out, offset).map(Some).or_else(|| {
                 let ends = matches!(out, Fin { .. })
-                    || (self.sources == sources0 && self.known_length(&out).is_none());
+                    || (self.sources == sources0 && self.known_length(&out, offset).is_none());
                 ends.then_some(None)
             }),
             false => None,
@@ -476,7 +482,7 @@ impl<S> Walk<S> {
             && self.segments.len() > s0
             && stops_children(&out)
             && let Some(offset) = offset
-            && let Some(length) = self.finite_length(&out).or(match &out {
+            && let Some(length) = self.finite_length(&out, Some(offset)).or(match &out {
                 Fin { length, .. } => self.generator.fin_cutoff(length),
                 _ => None,
             })
@@ -620,14 +626,15 @@ impl<S> Walk<S> {
     }
 
     /// Returns the length of `w` in samples when it is known and finite.
-    fn finite_length<M>(&mut self, w: &Waveform<M>) -> Option<usize> {
-        self.known_length(w).filter(|&length| length != usize::MAX)
+    fn finite_length<M>(&mut self, w: &Waveform<M>, offset: Option<usize>) -> Option<usize> {
+        self.known_length(w, offset)
+            .filter(|&length| length != usize::MAX)
     }
 
     /// Returns the length of `w` in samples when it is known, where `w` sits
-    /// at the node being walked.
-    fn known_length<M>(&mut self, w: &Waveform<M>) -> Option<usize> {
-        self.generator.known_length_within(w, &mut self.shared)
+    /// at the node being walked and starts at `offset`.
+    fn known_length<M>(&mut self, w: &Waveform<M>, offset: Option<usize>) -> Option<usize> {
+        self.generator.known_length_at(w, offset, &mut self.shared)
     }
 
     /// Returns the `Fin` length `length` in a form whose cutoff the generator
@@ -1346,27 +1353,14 @@ mod tests {
 
     #[test]
     fn a_fin_cuts_what_it_holds_at_its_cutoff_when_its_length_is_unknown() {
-        // As in `share(a, fn(x) => x | fin(time - 1))`, with `a` a 2 s note at
-        // 0..1: a `Ref` to a finite waveform has no known length, but the
-        // `Fin` still ends at 1 s.
-        let w = Waveform::Shared {
-            id: ShareId(0),
-            waveform: Box::new(mark(&written(0..1), note(2.0))),
-            body: Box::new(Waveform::Fin {
-                length: seconds(1.0),
-                waveform: Box::new(Waveform::Ref(ShareId(0))),
-                state: (),
-            }),
+        // What the `Fin` holds has no known length, but the `Fin` still ends
+        // at 1 s.
+        let w = Waveform::Fin {
+            length: seconds(1.0),
+            waveform: Box::new(unmeasurable_note(&written(0..1))),
+            state: (),
         };
-        let marks = walked(w, &dark());
-        assert_eq!(marks.segments, [segment(0, 10)]);
-        assert_eq!(
-            marks.marks,
-            [Mark {
-                text_range: 0..1,
-                segments: 0..1
-            }]
-        );
+        assert_eq!(walked(w, &dark()).segments, [segment(0, 10)]);
     }
 
     #[test]
