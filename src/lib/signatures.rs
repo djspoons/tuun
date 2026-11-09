@@ -352,8 +352,7 @@ mod tests {
         } else if atom == Sort::NON_CONST_WAVE {
             Expr::Waveform(Waveform::Time(()))
         } else if atom == Sort::SEQ {
-            // A realistic seq: offset linear in time (`time - 1`), so
-            // offset-threading arms (`\`'s, `add_offsets`) work.
+            // A realistic seq, with an offset of `time - 1`.
             Expr::Seq {
                 offset: boxed(Expr::Waveform(Waveform::BinaryOp(
                     BinaryOperator::Subtract,

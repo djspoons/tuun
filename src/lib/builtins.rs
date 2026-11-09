@@ -166,12 +166,14 @@ where
     binary_op(arguments, call, "&", BinaryOperator::Merge)
 }
 
-// Given waveforms that represent offsets (and assuming offset waveforms are of the form
-// `Time ~+ w` or `Const(x)`) return a new waveform which represents the sum of those offsets.
-fn add_offsets<M, S>(a: Waveform<M>, b: Waveform<M>) -> Result<Waveform<M>, Error<S>>
+/// Returns an offset whose first root is the sum of the first roots of the
+/// offsets `a` and `b`.
+///
+/// An offset is a waveform whose first non-negative point marks a time, as for
+/// a `Fin` length.
+fn add_offsets<M, S>(a: Waveform<M>, b: Waveform<M>) -> Waveform<M>
 where
-    M: Clone + Debug + PartialEq + CarriesTrace<S>,
-    S: Clone + Debug,
+    M: Clone + PartialEq + CarriesTrace<S>,
 {
     // The roots are read through bare copies; `a` and `b` themselves keep
     // their trace marks, which the caller embeds.
@@ -183,8 +185,9 @@ where
         optimizer::first_root(&a_bare),
         optimizer::first_root(&b_bare),
     ) {
-        // The sum's root is the sum of the roots: `Time - (a + b)`.
-        (Some(a_root), Some(b_root)) => Ok(Waveform::BinaryOp(
+        // When both roots can be read off symbolically (as for `Time - c`),
+        // the sum stays in that form, so a chain of sums stays flat.
+        (Some(a_root), Some(b_root)) => Waveform::BinaryOp(
             BinaryOperator::Subtract,
             Box::new(Waveform::Time(())),
             Box::new(Waveform::BinaryOp(
@@ -192,11 +195,19 @@ where
                 Box::new(a_root),
                 Box::new(b_root),
             )),
-        )),
-        (a_root, b_root) => Err(Error::internal_here(format!(
-            "Cannot add offsets that are not linear functions of Time, got {:?} and {:?} for {:?} and {:?}",
-            a_root, b_root, a, b
-        ))),
+        ),
+        // Otherwise the sum is negative until `a`'s root and then follows
+        // `b`, whose `Time` starts at 0 when the `Fin` ends, so `b`'s root is
+        // measured from `a`'s.
+        _ => Waveform::Append(
+            Box::new(Waveform::Fin {
+                length: Box::new(a),
+                waveform: Box::new(Waveform::Const(-1.0)),
+                state: (),
+            }),
+            Box::new(b),
+            (),
+        ),
     }
 }
 
@@ -256,7 +267,7 @@ where
         Operand::Waveform(b) => Expr::Waveform(after(a_offset, a, b)),
         Operand::Seq(b_offset, b) => {
             let b_offset = embed_waveform(b_offset, "Invalid offset of seq in \\")?;
-            let total_offset = add_offsets(a_offset.clone(), b_offset)?;
+            let total_offset = add_offsets(a_offset.clone(), b_offset);
             Seq {
                 offset: Box::new(call.assembled(Expr::Waveform(total_offset))),
                 waveform: Box::new(call.assembled(Expr::Waveform(after(a_offset, a, b)))),
@@ -1083,7 +1094,7 @@ where
     let (mut offset, mut waveform) = embed_seq(last, "sequence")?;
     while let Some(element) = elements.pop() {
         let (a_offset, a) = embed_seq(element, "sequence")?;
-        offset = add_offsets(a_offset.clone(), offset)?;
+        offset = add_offsets(a_offset.clone(), offset);
         waveform = after(a_offset, a, waveform);
     }
     Ok(call.assembled(seq(offset, waveform)))
@@ -1498,6 +1509,44 @@ mod tests {
         assert_eq!(offset_root(two.clone()), Some(Waveform::Const(3.0)));
         let three = call(followed_by, vec![two, seq(4.0)]).unwrap();
         assert_eq!(offset_root(three), Some(Waveform::Const(7.0)));
+    }
+
+    #[test]
+    fn test_followed_by_sums_offsets_without_symbolic_roots() {
+        // `2 * time - 1` has no symbolic root, so the sum runs `a` and then
+        // `b` from its own start.
+        let doubled = Waveform::BinaryOp(
+            BinaryOperator::Subtract,
+            Box::new(Waveform::BinaryOp(
+                BinaryOperator::Multiply,
+                Box::new(Waveform::Const(2.0)),
+                Box::new(Waveform::Time(())),
+            )),
+            Box::new(Waveform::Const(1.0)),
+        );
+        let seq = |offset: Waveform<u32>| -> Expr<u32, ()> {
+            Seq {
+                offset: boxed(Expr::Waveform(offset)),
+                waveform: boxed(Expr::float(1.0)),
+            }
+        };
+        let Seq { offset, .. } = call(
+            followed_by,
+            vec![seq(doubled.clone()), seq(Waveform::Time(()))],
+        )
+        .unwrap() else {
+            panic!("seq \\ seq should be a seq");
+        };
+        let expected = Waveform::Append(
+            Box::new(Waveform::Fin {
+                length: Box::new(doubled),
+                waveform: Box::new(Waveform::Const(-1.0)),
+                state: (),
+            }),
+            Box::new(Waveform::Time(())),
+            (),
+        );
+        assert!(matches!(offset.expr, Expr::Waveform(w) if w == expected));
     }
 
     #[test]

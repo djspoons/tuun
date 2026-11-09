@@ -55,3 +55,35 @@ fn adsr_segments_meet_without_gaps_or_overlaps() {
         }
     }
 }
+
+#[test]
+fn seqs_with_offsets_not_of_the_form_time_minus_c_chain() {
+    // `time * 2 - 0.5` first reaches 0 at 0.25 s, as `time - 0.25` does, but
+    // its root can't be read off symbolically. Each segment lasts 0.25 s.
+    let sample_rate = 8000;
+    let library_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lib/v0");
+    for program in [
+        "((1 | fin(time - 0.25) | seq(time * 2 - 0.5)) \\ \
+          (2 | fin(time - 0.25) | seq(time - 0.25))) \\ (3 | fin(time - 0.25))",
+        "((1 | fin(time - 0.25) | seq(time - 0.25)) \\ \
+          (2 | fin(time - 0.25) | seq(time * 2 - 0.5))) \\ (3 | fin(time - 0.25))",
+    ] {
+        let source = format!("open std;\n#{{level_db=0}}\n_ = {};\n", program);
+        let (set, _) =
+            ProgramSet::from_source(source, PathBuf::new()).expect("test source should parse");
+        let environment = Environment::new(sample_rate, 90, library_root.clone());
+        let waveform = match environment.evaluate_program(&set.evaluation_input(0)) {
+            Ok(Evaluated::Waveform(waveform, _)) => waveform,
+            Err(diagnostics) => panic!("{}: {:?}", program, diagnostics),
+            Ok(_) => panic!("{}: not a waveform", program),
+        };
+        let mut out = vec![0.0; 10000];
+        let len = Generator::new(sample_rate)
+            .generate(&mut generator::initialize_state(waveform), &mut out);
+        let expected: Vec<f32> = [1.0, 2.0, 3.0]
+            .iter()
+            .flat_map(|&x| std::iter::repeat_n(x, 2000))
+            .collect();
+        assert_eq!(&out[..len], &expected[..], "{}", program);
+    }
+}
