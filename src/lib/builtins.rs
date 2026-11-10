@@ -959,9 +959,8 @@ impl Drop for Sharing {
 /// reference to the waveform `waveform`, with `waveform` generated once and
 /// read wherever that reference is used, on the clock of the result.
 ///
-/// A seq keeps its offset, and its waveform shares `waveform` as above. An
-/// offset that uses the reference reads its own copy of `waveform`, generated
-/// on the clock of the offset.
+/// A seq keeps its offset, and its waveform shares `waveform` as above. Its
+/// offset must not use the reference: that is an error.
 ///
 /// A constant `waveform` reads the same wherever it is used, so the function
 /// is applied to `waveform` itself.
@@ -1009,17 +1008,17 @@ where
     Ok(call.assembled(match operand(body, "share")? {
         Operand::Waveform(body) => Expr::Waveform(shared(body)),
         Operand::Seq(offset, body) => {
-            // An offset that doesn't use the reference is passed through as
-            // is, as `curry` does.
-            // TODO `\` cannot sum an offset that uses the reference, since
-            // `optimizer::first_root` does not look through `Shared`.
-            let offset = match &offset.expr {
-                Expr::Waveform(w) if optimizer::references(w, id) => {
-                    let offset = embed_waveform(offset, "Invalid offset of seq in share")?;
-                    call.assembled(Expr::Waveform(shared(offset)))
-                }
-                _ => offset,
-            };
+            // The offset and the waveform of a seq are generated apart, so an
+            // offset could only read its own copy of `waveform`, not the one
+            // the waveform reads. `\` would also have to sum it with other
+            // offsets, read from the start of the combined seq rather than on
+            // the clock of this one.
+            if matches!(&offset.expr, Expr::Waveform(w) if optimizer::references(w, id)) {
+                return Err(Error::eval_here(
+                    "the offset of a seq returned by share's function cannot use the shared waveform",
+                ));
+            }
+            // As `curry` does, the offset is passed through as is.
             Seq {
                 offset: Box::new(offset),
                 waveform: Box::new(call.assembled(Expr::Waveform(shared(body)))),
@@ -1466,12 +1465,9 @@ mod tests {
             waveform,
             shared(0, Waveform::Time(()), Waveform::Ref(ShareId(0)))
         );
-        // One that does reads its own copy.
-        let (offset, _) = seq_of(call(share, vec![time(), seq_with_offset(minus_one)]));
-        assert_eq!(
-            offset,
-            shared(0, Waveform::Time(()), minus_one(Waveform::Ref(ShareId(0))))
-        );
+        // One that uses it is an error.
+        let result = call(share, vec![time(), seq_with_offset(minus_one)]);
+        assert!(matches!(&result, Err(e) if e.kind() == ErrorKind::Eval));
     }
 
     #[test]

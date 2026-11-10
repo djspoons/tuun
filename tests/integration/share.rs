@@ -4,15 +4,16 @@
 
 use std::path::PathBuf;
 
+use tuun::diagnostics::Diagnostic;
 use tuun::environment::Environment;
 use tuun::generator::{self, Generator};
 use tuun::programs::{Evaluated, ProgramSet};
 
 const SAMPLE_RATE: u32 = 8000;
 
-/// Returns the samples of the program `_ = program`, after `open std;` and
-/// `bindings`, up to `seconds` long.
-fn render(bindings: &str, program: &str, seconds: f32) -> Vec<f32> {
+/// Returns the result of evaluating the program `_ = program`, after `open
+/// std;` and `bindings`.
+fn evaluate(bindings: &str, program: &str) -> Result<Evaluated, Vec<Diagnostic>> {
     let source = format!(
         "open std;\n{}\n#{{level_db=0}}\n_ = {};\n",
         bindings, program
@@ -25,7 +26,13 @@ fn render(bindings: &str, program: &str, seconds: f32) -> Vec<f32> {
         .expect("a program");
     let library_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lib/v0");
     let environment = Environment::new(SAMPLE_RATE, 90, library_root);
-    let waveform = match environment.evaluate_program(&set.evaluation_input(index)) {
+    environment.evaluate_program(&set.evaluation_input(index))
+}
+
+/// Returns the samples of the program `_ = program`, after `open std;` and
+/// `bindings`, up to `seconds` long.
+fn render(bindings: &str, program: &str, seconds: f32) -> Vec<f32> {
+    let waveform = match evaluate(bindings, program) {
         Ok(Evaluated::Waveform(waveform, _)) => waveform,
         Err(diagnostics) => panic!("{}: {:?}", program, diagnostics),
         Ok(_) => panic!("{}: not a waveform", program),
@@ -99,4 +106,43 @@ fn a_shared_seq_chains_like_its_waveform() {
     expected.extend([2.0; 2000]);
     expected.extend([3.0; 2000]);
     assert_eq!(shared, expected);
+}
+
+#[test]
+fn a_shared_seq_with_its_own_offset_chains_like_its_waveform() {
+    let shared = render(
+        "",
+        "share(time, fn(t) => t * 0.5 | fin(time - 0.25) | seq(time - 0.25)) \\ (2 | fin(time - 0.25))",
+        1.0,
+    );
+    let copied = render(
+        "",
+        "(time * 0.5 | fin(time - 0.25) | seq(time - 0.25)) \\ (2 | fin(time - 0.25))",
+        1.0,
+    );
+    assert_eq!(shared.len(), 4000);
+    assert_eq!(shared, copied);
+}
+
+#[test]
+fn a_seq_offset_cannot_use_the_shared_waveform() {
+    for program in [
+        "share(time, fn(t) => 1 | fin(time - 0.25) | seq(t - 0.25)) \\ 2",
+        // Through `\\`, whose summed offset keeps the root `0.25 - t`.
+        "share(time, fn(t) => (1 | fin(time - 0.25) | seq(time - 0.25)) \\ \
+         (2 | fin(time - 0.25) | seq(time + (t - 0.25)))) \\ 3",
+    ] {
+        let Err(diagnostics) = evaluate("", program) else {
+            panic!("{}: expected an error", program);
+        };
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|d| d.message.as_str())
+                .collect::<Vec<_>>(),
+            ["the offset of a seq returned by share's function cannot use the shared waveform"],
+            "{}",
+            program
+        );
+    }
 }
