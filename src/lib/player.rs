@@ -534,19 +534,25 @@ impl Player {
         for i in 0..self.beats_per_measure {
             ws.push(format!(
                 "({} * _metronome_amplitude) | fin(time - {}) | seq(time - {})",
-                click_source(i == 0),
+                if i == 0 { "_accent_click" } else { "_click" },
                 seconds_per_beat,
                 seconds_per_beat,
             ));
         }
         let source = format!("<[{}]>", ws.join(", "));
-        let metronome_amplitude = metronome_amplitude(false);
+        let definition = |name: &str, waveform| {
+            expr::SourceBinding::definition(
+                expr::Pattern::Identifier(name.to_string()),
+                expr::Expr::Waveform(waveform).into(),
+            )
+        };
+        // Bind definitions for the two types of clicks as Fixed waveforms so
+        // they are only evaluated once.
         let bindings: Vec<expr::SourceBinding<MarkId, Source>> = vec![
             expr::Binding::Open(vec!["__prelude".to_string()]).into(),
-            expr::SourceBinding::definition(
-                expr::Pattern::Identifier("_metronome_amplitude".to_string()),
-                expr::Expr::Waveform(metronome_amplitude).into(),
-            ),
+            definition("_metronome_amplitude", metronome_amplitude(false)),
+            definition("_accent_click", fixed_click(environment, true)),
+            definition("_click", fixed_click(environment, false)),
         ];
         match environment
             .evaluate_source(&source, &bindings)
@@ -571,8 +577,8 @@ impl Player {
     }
 }
 
-/// Returns tuun source for a metronome click followed by silence, pitched
-/// higher when `accent`.
+/// Returns tuun source for a finite metronome click, pitched higher when
+/// `accent`.
 fn click_source(accent: bool) -> String {
     const CLICK_SECS: f32 = 0.02;
     const Q: f32 = 4.0;
@@ -587,13 +593,36 @@ fn click_source(accent: bool) -> String {
            alpha = sin(w0) / (2 * {Q}),
            a0 = 1 + alpha,
          in
-           ((noise * (1 - time / {CLICK_SECS}) * {GAIN}
+           noise * (1 - time / {CLICK_SECS}) * {GAIN}
              | filter([alpha / a0, 0, -alpha / a0],
                       [-2 * sin(w0 + 3.14159265 / 2) / a0, (1 - alpha) / a0])
-             | fin(time - {CLICK_SECS})
-             | seq(time - {CLICK_SECS}))
-            \\ 0)"
+             | fin(time - {CLICK_SECS})"
     )
+}
+
+/// Returns the metronome click of [`click_source`] as its samples, followed by
+/// silence that never ends.
+fn fixed_click(environment: &Environment, accent: bool) -> waveform::Waveform<MarkId> {
+    use waveform::Waveform::{Append, Const, Fixed};
+    // The click is evaluated with only the prelude in scope (no std).
+    let bindings: Vec<expr::SourceBinding<MarkId, Source>> =
+        vec![expr::Binding::Open(vec!["__prelude".to_string()]).into()];
+    let click = match environment
+        .evaluate_source(&click_source(accent), &bindings)
+        .map(|s| s.expr)
+    {
+        Ok(expr::Expr::Waveform(waveform)) => optimizer::optimize(waveform),
+        Ok(expr) => panic!("Error creating metronome click, got {}", expr),
+        Err(message) => panic!("Error evaluating metronome click: {}", message),
+    };
+    let mut generator = generator::Generator::new(environment.sample_rate());
+    let len = generator
+        .known_length(&click)
+        .expect("metronome click is finite");
+    let mut samples = vec![0.0; len];
+    let len = generator.generate(&mut generator::initialize_state(click), &mut samples);
+    samples.truncate(len);
+    Append(Box::new(Fixed(samples, ())), Box::new(Const(0.0)), ())
 }
 
 /// Returns the `MetronomeAmplitude` mark holding the click's amplitude: 1
@@ -816,15 +845,23 @@ mod tests {
     }
 
     // The click is evaluated with only the prelude in scope (no std), so it
-    // must not depend on library definitions.
+    // must not depend on library definitions. It renders to 20 ms of samples as
+    // Fixed waveform, then silence.
     #[test]
-    fn click_source_evaluates_with_the_prelude_alone() {
-        let environment = Environment::new(44100, 90, std::path::PathBuf::new());
-        let bindings: Vec<expr::SourceBinding<MarkId, Source>> =
-            vec![expr::Binding::Open(vec!["__prelude".to_string()]).into()];
+    fn fixed_click_renders_with_the_prelude_alone() {
+        use waveform::Waveform::{Append, Const, Fixed};
+        let environment = Environment::new(8000, 90, std::path::PathBuf::new());
         for accent in [false, true] {
-            let result = environment.evaluate_source(&click_source(accent), &bindings);
-            assert!(result.is_ok(), "{:?}", result.err());
+            match fixed_click(&environment, accent) {
+                Append(a, b, ()) => match (*a, *b) {
+                    (Fixed(samples, ()), Const(0.0)) => {
+                        assert_eq!(samples.len(), 160);
+                        assert!(samples.iter().any(|&x| x != 0.0));
+                    }
+                    (a, b) => panic!("expected a fixed click then silence, got {} and {}", a, b),
+                },
+                w => panic!("expected an Append, got {}", w),
+            }
         }
     }
 
