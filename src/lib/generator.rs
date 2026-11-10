@@ -342,28 +342,42 @@ impl<'a> Generator<'a> {
                 positive_waveform,
                 negative_waveform,
             } => {
-                let t_len = self.generate(trigger, out);
-                // TODO we could avoid this allocation by generating runs from one of these...
-                // though both would still need to advance by t_len samples.
-                // TODO maybe consider consts here specially?
-                let mut positive_out = vec![0.0; t_len];
-                self.allocations += 1;
-                let p_len = self.generate(positive_waveform, &mut positive_out);
-                // Since `positive_out` is undefined after `p_len`, clear it.
-                positive_out[p_len..].fill(0.0);
-                let mut negative_out = vec![0.0; t_len];
-                self.allocations += 1;
-                let n_len = self.generate(negative_waveform, &mut negative_out);
-                // Same for `negative_out`
-                negative_out[n_len..].fill(0.0);
-                for (i, x) in out[..t_len].iter_mut().enumerate() {
-                    if *x >= 0.0 {
-                        *x = positive_out[i];
+                if let Some(v) = self.is_const(trigger) {
+                    // If the trigger is constant, save allocations by
+                    // generating the throw-away branch first. This does change
+                    // the order that the sub-waveforms are generated, which
+                    // could (in theory?) affect cases that have side effects.
+                    let len = if v >= 0.0 {
+                        self.generate(negative_waveform, out);
+                        self.generate(positive_waveform, out)
                     } else {
-                        *x = negative_out[i];
+                        self.generate(positive_waveform, out);
+                        self.generate(negative_waveform, out)
+                    };
+                    // Clear whatever wasn't filled.
+                    out[len..].fill(0.0);
+                    out.len()
+                } else {
+                    let t_len = self.generate(trigger, out);
+                    let mut positive_out = vec![0.0; t_len];
+                    self.allocations += 1;
+                    let p_len = self.generate(positive_waveform, &mut positive_out);
+                    // Since `positive_out` is undefined after `p_len`, clear it.
+                    positive_out[p_len..].fill(0.0);
+                    let mut negative_out = vec![0.0; t_len];
+                    self.allocations += 1;
+                    let n_len = self.generate(negative_waveform, &mut negative_out);
+                    // Same for `negative_out`
+                    negative_out[n_len..].fill(0.0);
+                    for (i, x) in out[..t_len].iter_mut().enumerate() {
+                        if *x >= 0.0 {
+                            *x = positive_out[i];
+                        } else {
+                            *x = negative_out[i];
+                        }
                     }
+                    t_len
                 }
-                t_len
             }
             Marked {
                 waveform: inner, ..
@@ -666,10 +680,9 @@ impl<'a> Generator<'a> {
                 _ => None,
             },
             UnaryOp(op, a) => self.is_const(a).map(|f| op.apply(f)),
-            Append(a, b, _) => match (self.is_const(a), self.is_const(b)) {
-                (Some(f), Some(g)) if f == g => Some(f),
-                _ => None,
-            },
+            Append(_, b, State::Finished(true)) => self.is_const(b),
+            // If `a` is not finished and it's constant in this quantum then we won't get to `b`.
+            Append(a, _, _) => self.is_const(a),
             Marked { waveform, .. } => self.is_const(waveform),
             // The shared waveform must be generated unless it, too, is
             // constant. This ensures that any Captured waveforms inside of the
