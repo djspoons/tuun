@@ -2,7 +2,7 @@
 
 Tuun is an interactive, language-based sound and music generation system. It has three main components:
 
- * A language-based way of specifying audio along with a way of converting those specifications into actual samples.
+ * Language-based mechanisms for describing audio along with a way of rendering actual audio samples.
  * A tracker, which interfaces with the underlying audio subsystem, managing things like sample rates, buffers, mixing, and scheduling.
  * A visual UI that lets users compose sounds, enter commands, and see and hear the results.
 
@@ -136,12 +136,14 @@ These combinators that change how a waveform behaves in time and in relation to 
 
 There are the combinators that combine the samples themselves.
 
+ * `Sin(a)` - takes the $sin$ of each sample
  * `Add(a, b)` - adds samples together
  * `Subtract(a, b)` - subtracts samples
  * `Multiply(a, b)` - multiplies samples together
  * `Divide(a, b)` - divides samples
- * `Merge(a, b)` - merges two waveforms by extending the shorter one, and then adding samples together
- * `Sin(a)` - takes the $sin$ of each sample
+ * `Power(a, b)` - raises each sample in `a` to the power `b`
+ * `Log(a, b)` - returns the logarithm of each sample in `a` in the base of `b`
+ * `Merge(a, b)` - merges two waveforms by extending the shorter one, then adding samples together
  * [`Filter(c, [b_0, ...], [a_1, ...])`](filter.md) - processes `c` using a finite or infinite impulse response filter with the given coefficients
 
 There are three combinators for describing periodic waveforms:
@@ -150,7 +152,14 @@ There are three combinators for describing periodic waveforms:
  * `Alt(trigger, a, b)` - generates samples from `a` when `trigger` is positive and from `b` otherwise
  * `Reset(trigger, a)` - restarts the second waveform each time the `trigger` switches from negative to positive
 
-And finally, two combinators that are used to dynamically interact with waveforms through a user interface. Marked waveforms are used to [dynamically update](dynamic.md) waveforms during playback, as well as to track provenance during expression language evaluation. The captured waveform provides a way to save samples from part or all of a waveform persistently.
+Two combinators allow samples to be shared and reused by different combinators.
+
+ * `Shared(id, waveform, body)` - generates `waveform` and `body` in parallel and makes the samples of `waveform` available in `body` though a `Ref`
+ * `Ref(id)` - generates the samples from the enclosing `Shared` with `id`
+
+The `Shared` and `Ref` combinators are not only useful from an efficiency point of view, but are important in cases where you require the exact same samples in two places. They are also used together with `Reset` to define [synchronized oscillators](alt-and-reset.md#synchronized-oscillators).
+
+Finally, there are two combinators that are used to interact with waveforms through a user interface. Marked waveforms are used to [dynamically update](dynamic.md) waveforms during playback, as well as to track provenance during expression language evaluation. A captured waveform provides a way to save samples from part or all of a waveform persistently.
 
  * `Marked(id, a)` - generates samples from `a`, may be replaced during playback
  * `Captured(file_stem, a)` - generates samples from `a` and also saves them to a file.
@@ -166,14 +175,16 @@ For comparison, here are the lengths of each waveform:
 | `Noise`                 | ∞
 | `Fixed(v)`              | length of v
 | `Fin(a, b)`             | position w/ `a` >= 0.0
+| `Append(a, b)`          | a.length + b.length
 | `Sin(a)`                | a.length
-| `Add(a, b)`, `Subtract(a, b)`, `Multiply(a, b)`, `Divide(a, b)` | min(a.length, b.length)
+| `Add(a, b)`, `Subtract(a, b)`, `Multiply(a, b)`, `Divide(a, b)`, `Power(a, b)`, `Log(a,b)` | min(a.length, b.length)
 | `Merge(a, b)`           | max(a.length, b.length)
 | `Phase(a, b)`           | min(a.length, b.length)
-| `Append(a, b)`          | a.length + b.length
-| `Filter(c, [b_0, ...], [a_1, ...])` | c.length
-| `Reset(trigger, a)`     | trigger.length
 | `Alt(trigger, a, b)`    | trigger.length
+| `Reset(trigger, a)`     | trigger.length
+| `Filter(c, [b_0, ...], [a_1, ...])` | c.length
+| `Shared(id, waveform, body)` | body.length
+| `Ref(id)`               | length of the referenced waveform measured from the beginning its `Shared` waveform
 
 This small set of combinators is enough to create synthesizers, filters, and even musical compositions with the help of the Tuun expressions.
 
