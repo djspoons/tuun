@@ -999,6 +999,11 @@ where
     // function's text doesn't light.
     let body = eval::evaluate_closed(SourceExpr::application(function, vec![reference]))?;
     drop(sharing);
+    if !matches!(body.expr, Expr::Waveform(_) | Seq { .. }) {
+        return Err(Error::internal_here(
+            "The function passed to share must return a waveform or a seq",
+        ));
+    }
     let waveform = embed_waveform(waveform, "First argument must be a waveform")?;
     let shared = |body| Waveform::Shared {
         id,
