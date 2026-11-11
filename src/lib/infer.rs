@@ -24,7 +24,10 @@
 //! One exception to this, however: a lambda literal passed to an expression
 //! with a (possibly quantified) function type (but *not* an intersection type)
 //! is checked *after* the other argument types are inferred and the function is
-//! checked; see [`Infer::check_deferred`].
+//! checked; see [`Infer::check_deferred`]. A lambda literal passed to an
+//! intersection whose conjuncts all take an arrow with the same parameters at
+//! its position is judged once with those parameters; see
+//! [`Infer::agreed_parameters`].
 //!
 //! At an abstraction, Freeman and Pfenning's ABS rule is used and the function
 //! body is checked under each of the numeric atoms (see [`Infer::tabulate`]).
@@ -3162,33 +3165,111 @@ impl<S: Clone> Infer<S> {
         }
     }
 
-    /// Whether `function` names a value typed by a single (possibly
-    /// quantified) arrow.
+    /// Returns the type of the value `function` names, resolved, or `None`
+    /// if `function` is not a name or its type is unknown.
     ///
-    /// Intersections are excluded: conjunct selection reads argument
-    /// types, so a deferred lambda would give it nothing to select on. So
-    /// is anything that is not a name: a callee still being inferred has
-    /// no type to peek at.
-    fn arrow_callee<M>(&self, context: &TypeContext, function: &SourceExpr<M, S>) -> bool {
-        let arrow = |ty: &Type| match ty {
+    /// A callee still being inferred has no type to peek at, so anything that
+    /// is not a name has none.
+    fn callee_type<M>(&self, context: &TypeContext, function: &SourceExpr<M, S>) -> Option<Type> {
+        let name = match &function.expr {
+            Expr::Variable(name) => name,
+            Expr::BuiltIn { name, .. } => return (self.signatures)(name),
+            _ => return None,
+        };
+        match context.iter().rev().find(|(n, _)| n == name) {
+            Some((_, ContextEntry::Ty(ty, _))) => Some(self.resolve(ty)),
+            Some((_, ContextEntry::Builtin(builtin))) => (self.signatures)(builtin),
+            None => None,
+        }
+    }
+
+    /// Returns whether `callee`, a type from [`Infer::callee_type`], is a single
+    /// (possibly quantified) arrow.
+    fn is_arrow(callee: &Type) -> bool {
+        match callee {
             Type::Function { .. } => true,
             Type::Forall(_, body) => matches!(**body, Type::Function { .. }),
             _ => false,
-        };
-        let name = match &function.expr {
-            Expr::Variable(name) => name,
-            Expr::BuiltIn { name, .. } => {
-                return (self.signatures)(name).as_ref().is_some_and(arrow);
-            }
-            _ => return false,
-        };
-        match context.iter().rev().find(|(n, _)| n == name) {
-            Some((_, ContextEntry::Ty(ty, _))) => arrow(&self.resolve(ty)),
-            Some((_, ContextEntry::Builtin(builtin))) => {
-                (self.signatures)(builtin).as_ref().is_some_and(arrow)
-            }
-            None => false,
         }
+    }
+
+    /// Returns, for each position of a call with `arity` positional
+    /// arguments to an intersection `callee`, the parameter types of the
+    /// arrow every conjunct of that arity takes there, when they all take
+    /// one with the same parameters and those are ready (see
+    /// [`Infer::domain_ready`]).
+    ///
+    /// A lambda passed at such a position has the same parameter types under
+    /// whichever conjunct is selected, so it can be judged once with them.
+    ///
+    /// # Example
+    ///
+    /// For `(waveform, (waveform) -> waveform) -> waveform ∧ (waveform,
+    /// (waveform) -> seq) -> seq` and two arguments, position 0 has none and
+    /// position 1 has `[waveform]`.
+    fn agreed_parameters(&self, callee: &Type, arity: usize) -> Vec<Option<Rc<[Type]>>> {
+        let mut agreed = vec![None; arity];
+        let Type::And(conjuncts) = callee else {
+            return agreed;
+        };
+        let shaped: Vec<&Rc<[Type]>> = conjuncts
+            .iter()
+            .filter_map(|conjunct| match conjunct {
+                Type::Function { positional, .. } if positional.len() == arity => Some(positional),
+                _ => None,
+            })
+            .collect();
+        for (position, slot) in agreed.iter_mut().enumerate() {
+            let mut parameters: Option<&Rc<[Type]>> = None;
+            let all_agree = !shaped.is_empty()
+                && shaped.iter().all(|domains| match &domains[position] {
+                    Type::Function {
+                        positional, named, ..
+                    } if named.is_empty() => {
+                        let same = parameters.is_none_or(|first| first == positional);
+                        parameters = Some(positional);
+                        same
+                    }
+                    _ => false,
+                });
+            if let Some(parameters) = parameters
+                && all_agree
+                && parameters.iter().all(|p| self.domain_ready(p, true))
+            {
+                *slot = Some(parameters.clone());
+            }
+        }
+        agreed
+    }
+
+    /// Returns the type of the body of the lambda `argument` judged once, with
+    /// its positional parameters bound to `domains` (AT-Lam2's shape), or
+    /// `None` if the lambda's parameters don't line up with `domains` or it
+    /// has named parameters.
+    fn infer_lambda_body<M>(
+        &mut self,
+        context: &mut TypeContext,
+        domains: &[Type],
+        argument: &SourceExpr<M, S>,
+    ) -> Option<Type> {
+        let Expr::Function {
+            positional,
+            named,
+            body,
+        } = &argument.expr
+        else {
+            return None;
+        };
+        if positional.len() != domains.len() || !named.is_empty() {
+            return None;
+        }
+        let depth = context.len();
+        for (pattern, domain) in positional.iter().zip(domains.iter()) {
+            self.bind_pattern(context, pattern, domain.clone(), &argument.span, false);
+        }
+        let body_ty = self.infer(context, &mut Vec::new(), body);
+        context.truncate(depth);
+        Some(body_ty)
     }
 
     /// Checks a deferred lambda argument against the domain its call
@@ -3208,12 +3289,7 @@ impl<S: Clone> Infer<S> {
         placeholder: &Type,
         argument: &SourceExpr<M, S>,
     ) {
-        let Expr::Function {
-            positional,
-            named,
-            body,
-        } = &argument.expr
-        else {
+        let Expr::Function { body, .. } = &argument.expr else {
             unreachable!("only lambda literals defer");
         };
         let resolved = placeholder.apply(&self.subst);
@@ -3222,17 +3298,10 @@ impl<S: Clone> Infer<S> {
             named: named_domains,
             result,
         } = &resolved
-            && domains.len() == positional.len()
-            && named.is_empty()
             && named_domains.is_empty()
             && domains.iter().all(|domain| self.domain_ready(domain, true))
+            && let Some(body_ty) = self.infer_lambda_body(context, domains, argument)
         {
-            let depth = context.len();
-            for (pattern, domain) in positional.iter().zip(domains.iter()) {
-                self.bind_pattern(context, pattern, domain.clone(), &argument.span, false);
-            }
-            let body_ty = self.infer(context, &mut Vec::new(), body);
-            context.truncate(depth);
             self.subtype_check(&body_ty, result, &body.span);
             return;
         }
@@ -3464,33 +3533,59 @@ impl<S: Clone> Infer<S> {
             // sort its parameters admit, and a demand that summary makes
             // of an enclosing unknown — an instrument parameter applied to
             // an overloaded result, say — is committed before the sorts
-            // are known. Tables keep the up-front path: conjunct selection
-            // reads the argument's type, so a deferred lambda would give
-            // it nothing to select on.
+            // are known.
+            //
+            // Tables can't defer: conjunct selection reads the argument's
+            // type, so a deferred lambda would give it nothing to select on.
+            // But where every conjunct takes an arrow with the same
+            // parameters at the lambda's position, the lambda has those
+            // parameter types whichever conjunct is selected, so it is judged
+            // once with them (`agreed_parameters`), and selection reads its
+            // result. Inferring it up front instead would judge its body once
+            // per atom of each parameter, and again for each lambda nested in
+            // it.
             Expr::Application {
                 function,
                 positional,
                 named,
             } => {
+                let is_lambda =
+                    |argument: &SourceExpr<M, S>| matches!(argument.expr, Expr::Function { .. });
                 // The peek costs a context scan (and, for a built-in, a
-                // signature construction), so only calls that could defer
+                // signature construction), so only calls that could use it
                 // — a lambda literal among the arguments — pay it.
-                let defer = positional
-                    .iter()
-                    .any(|argument| matches!(argument.expr, Expr::Function { .. }))
-                    && self.arrow_callee(context, function);
+                let callee = match positional.iter().any(is_lambda) {
+                    true => self.callee_type(context, function),
+                    false => None,
+                };
+                let defer = callee.as_ref().is_some_and(Self::is_arrow);
+                let agreed = match &callee {
+                    Some(callee) if !defer => self.agreed_parameters(callee, positional.len()),
+                    _ => vec![None; positional.len()],
+                };
                 let mut deferred: Vec<(Type, &SourceExpr<M, S>)> = Vec::new();
                 let positional_types = positional
                     .iter()
-                    .map(|argument| {
-                        if defer && matches!(argument.expr, Expr::Function { .. }) {
+                    .zip(agreed)
+                    .map(|(argument, parameters)| {
+                        if defer && is_lambda(argument) {
                             let placeholder = self.fresh_meta();
                             deferred.push((placeholder.clone(), argument));
-                            (placeholder, argument.span.clone())
-                        } else {
-                            let ty = self.infer_definition(context, argument);
-                            (self.generalize(context, ty), argument.span.clone())
+                            return (placeholder, argument.span.clone());
                         }
+                        let judged_once = parameters.and_then(|parameters| {
+                            let result = self.infer_lambda_body(context, &parameters, argument)?;
+                            Some(Type::Function {
+                                positional: parameters,
+                                named: Rc::from([]),
+                                result: Rc::new(result),
+                            })
+                        });
+                        let ty = match judged_once {
+                            Some(ty) => ty,
+                            None => self.infer_definition(context, argument),
+                        };
+                        (self.generalize(context, ty), argument.span.clone())
                     })
                     .collect();
                 let named_types = named
@@ -4379,6 +4474,26 @@ mod tests {
         assert_errors(
             "by_result(time, fn(x) => x * 2) \\ 1",
             &["expected seq, found waveform"],
+        );
+    }
+
+    // Where every conjunct takes an arrow with the same parameters, a
+    // lambda passed there is judged once with them: an error in its body is
+    // reported where it occurs, and each lambda nested in it is judged once
+    // too, rather than once per atom of each enclosing parameter.
+    #[test]
+    fn a_lambda_at_agreed_parameters_is_judged_once() {
+        assert_errors(
+            "by_result(time, fn(x) => nth(x, [1]))",
+            &["expected int, found waveform"],
+        );
+        assert_clean(
+            "fn(a, b, c, d) => by_result(a, fn(x) => by_result(b, fn(y) => \
+             by_result(c, fn(z) => by_result(d, fn(w) => alt(x - y, z, w)))))",
+        );
+        assert_eq!(
+            declared_sort("by_result(time, fn(x) => by_result(x, fn(y) => seq(0)(y)))"),
+            Some(Sort::SEQ)
         );
     }
 
