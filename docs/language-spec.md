@@ -151,6 +151,8 @@ high_cutoff = filtered(440, cutoff_freq_hz = 6000);
 
 The followed-by operator `\` is right-associative: `a \ b \ c` is `a \ (b \ c)`. Each operand's offset is measured from that operand's own start, so a seq that ends at its own offset (for example, `w | fin(time - d) | seq(time - d)`) is followed sample-exactly by the next operand. Writing `(a \ b) \ c` instead starts `c` at the sum of the offsets of `a` and `b`, which can round to a sample one earlier or later than where `b` ends.
 
+When both operands of `\` are seqs, the result is a seq whose offset is the sum of theirs. This sum is only defined when each offset reaches 0 at a fixed time: an offset built from `time` and constants by `+`, `-`, and multiplying or dividing by a constant (for example, `time - d` or `2 * time - 1`). Any other offset, such as one with `noise`, is an evaluation error. The same holds for the seqs passed to `sequence`, when there are two or more.
+
 
 <!-- TODO update or remove this overloading section
 

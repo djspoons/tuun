@@ -55,3 +55,64 @@ fn adsr_segments_meet_without_gaps_or_overlaps() {
         }
     }
 }
+
+/// Returns the samples of the program `_ = program` after `open std;`, at
+/// `sample_rate`, or the messages of the diagnostics evaluating it reports.
+fn render(sample_rate: u32, program: &str) -> Result<Vec<f32>, Vec<String>> {
+    let source = format!("open std;\n#{{level_db=0}}\n_ = {};\n", program);
+    let (set, _) = ProgramSet::from_source(source, PathBuf::new()).expect("source should parse");
+    let library_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lib/v0");
+    let environment = Environment::new(sample_rate, 90, library_root);
+    let waveform = match environment.evaluate_program(&set.evaluation_input(0)) {
+        Ok(Evaluated::Waveform(waveform, _)) => waveform,
+        Err(diagnostics) => return Err(diagnostics.into_iter().map(|d| d.message).collect()),
+        Ok(_) => panic!("{}: not a waveform", program),
+    };
+    let mut out = vec![0.0; 10000];
+    let len =
+        Generator::new(sample_rate).generate(&mut generator::initialize_state(waveform), &mut out);
+    out.truncate(len);
+    Ok(out)
+}
+
+#[test]
+fn left_nested_seqs_with_linear_offsets_meet_without_gaps_or_overlaps() {
+    // Each offset reaches 0 at 0.25 s, though only the last is written
+    // `time - 0.25`. Each segment lasts 0.25 s.
+    let expected: Vec<f32> = [1.0, 2.0, 3.0]
+        .iter()
+        .flat_map(|&x| std::iter::repeat_n(x, 2000))
+        .collect();
+    for program in [
+        "((1 | fin(time - 0.25) | seq(time * 2 - 0.5)) \\ \
+          (2 | fin(time - 0.25) | seq(time - 0.25))) \\ (3 | fin(time - 0.25))",
+        "((1 | fin(time - 0.25) | seq(time - 0.25)) \\ \
+          (2 | fin(time - 0.25) | seq(time * 2 - 0.5))) \\ (3 | fin(time - 0.25))",
+        "((1 | fin(time - 0.25) | seq((time - 0.5) + 0.25)) \\ \
+          (2 | fin(time - 0.25) | seq(time - 0.25))) \\ (3 | fin(time - 0.25))",
+    ] {
+        assert_eq!(render(8000, program), Ok(expected.clone()), "{}", program);
+    }
+}
+
+#[test]
+fn left_nested_seqs_with_noisy_offsets_are_evaluation_errors() {
+    // A noisy offset has no fixed root to sum, so the combined seq could start
+    // its successor at a different time than the first seq's own offset ends.
+    for program in [
+        "((1 | fin(time - 0.25) | seq(time - 0.25 + 0.01 * noise)) \\ \
+          (2 | fin(time - 0.25) | seq(time - 0.25))) \\ (3 | fin(time - 0.25))",
+        "((1 | fin(time - 0.25) | seq(time + (0.01 * noise - 0.25))) \\ \
+          (2 | fin(time - 0.25) | seq(time - 0.25))) \\ (3 | fin(time - 0.25))",
+    ] {
+        let messages = render(8000, program).expect_err(program);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("Cannot combine seqs") && !m.contains("internal error")),
+            "{}: {:?}",
+            program,
+            messages
+        );
+    }
+}
