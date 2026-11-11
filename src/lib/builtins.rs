@@ -955,12 +955,15 @@ impl Drop for Sharing {
     }
 }
 
-/// Returns the waveform the function `body` returns when applied to a reference
-/// to the waveform `waveform`, with `waveform` generated once and read wherever
-/// that reference is used, on the clock of the result.
+/// Returns the waveform or seq that `function` returns when applied to a
+/// reference to the waveform `waveform`, with `waveform` generated once and
+/// read wherever that reference is used, on the clock of the result.
 ///
-/// A constant `waveform` reads the same wherever it is used, so the function
-/// is applied to `waveform` itself.
+/// A seq keeps its offset, and its waveform shares `waveform` as above. Its
+/// offset must not use the reference.
+///
+/// A constant `waveform` reads the same wherever it is used, so in that case
+/// the function is applied to `waveform` itself.
 pub fn share<M, S>(
     arguments: Vec<SourceExpr<M, S>>,
     call: &BuiltInCall<S>,
@@ -970,10 +973,6 @@ where
     S: Clone + Debug,
 {
     let [waveform, function] = exactly(arguments, "share")?;
-    // TODO consider overloading `share` so that a function returning a seq
-    // gives a seq, threading the offset as `fin` and `filter` do, so the
-    // result composes with `\`. An offset that uses the parameter would need
-    // its own `Shared` (a copy of `waveform`).
     if !matches!(waveform.expr, Expr::Waveform(_)) {
         return Err(Error::internal_here("First argument must be a waveform"));
     }
@@ -982,10 +981,11 @@ where
     if waveform.expr.as_const_float().is_some() {
         return eval::evaluate_closed(SourceExpr::application(function, vec![waveform]));
     }
-    // A `Ref` resolves to the nearest `Shared` with its id, so the id only
-    // has to differ from those of the calls whose parameters are in scope
-    // while the function is applied. Evaluation is eager and the function
-    // returns a waveform, so those are exactly the calls applying theirs.
+    // A `Ref` resolves to the nearest `Shared` with its id, so the id only has
+    // to differ from those of the calls whose parameters are in scope while the
+    // function is applied. Evaluation is eager and the function returns a
+    // waveform or a seq of waveforms, so those are exactly the calls applying
+    // theirs.
     let sharing = Sharing::enter();
     let id = sharing.0;
     // The reference carries the trace of `waveform`, so where it is heard
@@ -999,13 +999,37 @@ where
     // function's text doesn't light.
     let body = eval::evaluate_closed(SourceExpr::application(function, vec![reference]))?;
     drop(sharing);
-    let body = embed_waveform(body, "The function passed to share must return a waveform")?;
+    if !matches!(body.expr, Expr::Waveform(_) | Seq { .. }) {
+        return Err(Error::internal_here(
+            "The function passed to share must return a waveform or a seq",
+        ));
+    }
     let waveform = embed_waveform(waveform, "First argument must be a waveform")?;
-    Ok(call.assembled(Expr::Waveform(Waveform::Shared {
+    let shared = |body| Waveform::Shared {
         id,
-        waveform: Box::new(waveform),
+        waveform: Box::new(waveform.clone()),
         body: Box::new(body),
-    })))
+    };
+    Ok(call.assembled(match operand(body, "share")? {
+        Operand::Waveform(body) => Expr::Waveform(shared(body)),
+        Operand::Seq(offset, body) => {
+            // The offset and the waveform of a seq are generated apart, so an
+            // offset could only read its own copy of `waveform`, not the one
+            // the waveform reads. `\` would also have to sum it with other
+            // offsets, read from the start of the combined seq rather than on
+            // the clock of this one.
+            if matches!(&offset.expr, Expr::Waveform(w) if optimizer::references(w, id)) {
+                return Err(Error::eval_here(
+                    "the offset of a seq returned by share's function cannot use the shared waveform",
+                ));
+            }
+            // As `curry` does, the offset is passed through as is.
+            Seq {
+                offset: Box::new(offset),
+                waveform: Box::new(call.assembled(Expr::Waveform(shared(body)))),
+            }
+        }
+    }))
 }
 
 // TODO move to main? (Because it only works in the native app anyway...?)
@@ -1395,6 +1419,60 @@ mod tests {
             vec![Expr::Waveform(Waveform::Const(0.5)), identity()],
         );
         assert_eq!(waveform_of(result), Waveform::Const(0.5));
+    }
+
+    /// The built-in that returns a seq of its argument with the offset
+    /// `offset(x)`.
+    fn seq_with_offset(offset: fn(Waveform<u32>) -> Waveform<u32>) -> Expr<u32, ()> {
+        BuiltIn {
+            name: "seq_with_offset".to_string(),
+            function: BuiltInFn::new(move |arguments, call| {
+                let [x] = exactly(arguments, "seq_with_offset")?;
+                let Expr::Waveform(w) = x.expr else {
+                    return Err(Error::internal_here("expected a waveform"));
+                };
+                Ok(call.assembled(Seq {
+                    offset: Box::new(call.assembled(Expr::Waveform(offset(w.clone())))),
+                    waveform: Box::new(call.assembled(Expr::Waveform(w))),
+                }))
+            }),
+        }
+    }
+
+    /// Returns the offset and waveform of the seq `result` holds.
+    fn seq_of(result: Result<Expr<u32, ()>, Error<()>>) -> (Waveform<u32>, Waveform<u32>) {
+        match result {
+            Ok(Seq { offset, waveform }) => match (offset.expr, waveform.expr) {
+                (Expr::Waveform(offset), Expr::Waveform(waveform)) => (offset, waveform),
+                other => panic!("expected waveforms in a seq, got {:?}", other),
+            },
+            other => panic!("expected a seq, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn share_threads_a_seqs_offset() {
+        let time = || Expr::Waveform(Waveform::Time(()));
+        let minus_one = |w: Waveform<u32>| {
+            Waveform::BinaryOp(
+                BinaryOperator::Subtract,
+                Box::new(w),
+                Box::new(Waveform::Const(1.0)),
+            )
+        };
+        // An offset that doesn't use the reference is passed through.
+        let (offset, waveform) = seq_of(call(
+            share,
+            vec![time(), seq_with_offset(|_| Waveform::Const(0.0))],
+        ));
+        assert_eq!(offset, Waveform::Const(0.0));
+        assert_eq!(
+            waveform,
+            shared(0, Waveform::Time(()), Waveform::Ref(ShareId(0)))
+        );
+        // One that uses it is an error.
+        let result = call(share, vec![time(), seq_with_offset(minus_one)]);
+        assert!(matches!(&result, Err(e) if e.kind() == ErrorKind::Eval));
     }
 
     #[test]

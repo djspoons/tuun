@@ -487,7 +487,7 @@ fn a_shared_waveform_lights_where_its_parameter_is_heard() {
 }
 
 #[test]
-fn notes_a_shared_waveform_times_itself_light_as_a_copys_do() {
+fn notes_a_shared_waveform_times_itself_light_as_a_copy_s_do() {
     // Each note lights during its own half, while `x` reads it.
     let v = voice("share($440 * Qw \\ $220 * Qw | unseq(), fn(x) => x)");
     let copy = voice("let x = $440 * Qw \\ $220 * Qw | unseq() in x");
@@ -675,7 +675,7 @@ fn nested_shares_light_the_parts_each_ref_reads() {
 }
 
 #[test]
-fn a_shared_waveform_heard_in_a_reset_isnt_reset() {
+fn a_shared_waveform_heard_in_a_reset_is_not_reset() {
     // The `reset` restarts `x`'s reading, not the shared waveform, so each
     // note lights while it plays. A copy is restarted, and holds `$220`.
     let v = voice(

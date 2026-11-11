@@ -54,7 +54,7 @@ fn gen_expr(rng: &mut Rng, depth: usize) -> String {
         return rng.pick(ATOMS).to_string();
     }
     let d = depth - 1;
-    match rng.below(34) {
+    match rng.below(38) {
         0 | 1 => format!(
             "({} {} {})",
             gen_expr(rng, d),
@@ -208,6 +208,23 @@ fn gen_expr(rng: &mut Rng, depth: usize) -> String {
             gen_expr(rng, d),
             gen_expr(rng, d)
         ),
+        // `share`, whose conjuncts differ only in the result of its function
+        // argument: a lambda, a named function, and an unannotated parameter
+        // passed through
+        34 => format!("share({}, fn(x) => {})", gen_expr(rng, d), gen_expr(rng, d)),
+        35 => format!("share({}, {})", gen_expr(rng, d), rng.pick(FN1)),
+        36 => format!(
+            "(let w = fn(v, f) => share(v, f) in w({}, fn(x) => {}))",
+            gen_expr(rng, d),
+            gen_expr(rng, d)
+        ),
+        // a seq offset that uses the shared waveform, which evaluation
+        // rejects
+        37 => format!(
+            "share({}, fn(x) => ({} | seq(time - x)))",
+            gen_expr(rng, d),
+            gen_expr(rng, d)
+        ),
         _ => format!(
             "unfold(fn(v) => {}, {}, 2)",
             gen_expr(rng, d),
@@ -255,9 +272,9 @@ fn generated(rng: &mut Rng) -> String {
 /// roughly one program in a thousand; `soundness_fuzz` and
 /// `false_positive_fuzz` are where a finer sweep belongs.
 const CANARY: [(u64, usize, u64); 3] = [
-    (12345, 350, 1170461391898692706),
-    (777, 350, 12246305972029091934),
-    (20260901, 350, 9300518567311359572),
+    (12345, 350, 3846492811572819280),
+    (777, 350, 4061731024259078106),
+    (20260901, 350, 14061225848427326811),
 ];
 
 /// Returns an FNV-1a hash of which generated programs check clean.
