@@ -116,18 +116,18 @@ fn left_nested_seqs_with_nonlinear_offsets_meet_sample_exactly() {
 
 #[test]
 fn left_nested_seqs_with_a_shared_noisy_offset_meet_without_gaps_or_overlaps() {
-    // Both copies of the first offset read the one shared noise, so the third
-    // segment starts where the second ends. A gap would show as a 0 and an
-    // overlap as a sum (11 or 110).
+    // The first segment lasts a random 0.15 to 0.35 s. Both copies of its
+    // offset read the one shared value, so the third segment starts where the
+    // second ends. A gap would show as a 0 and an overlap as a sum (11 or 110).
     let out = render(
         8000,
-        "share(noise, fn(n) => \
-           ((1 | fin(time - 0.25 + 0.01 * n) | seq(time - 0.25 + 0.01 * n)) \\ \
+        "share(noise | hold(), fn(n) => \
+           ((1 | fin(time - 0.25 + 0.1 * n) | seq(time - 0.25 + 0.1 * n)) \\ \
             (10 | fin(time - 0.25) | seq(time - 0.25))) \\ (100 | fin(time - 0.25)))",
     )
     .expect("renders");
     let first = out.iter().take_while(|&&x| x == 1.0).count();
-    assert!((1900..=2100).contains(&first), "first segment: {}", first);
+    assert!((1200..=2800).contains(&first), "first segment: {}", first);
     let expected: Vec<f32> = [10.0, 100.0]
         .iter()
         .flat_map(|&x| std::iter::repeat_n(x, 2000))
