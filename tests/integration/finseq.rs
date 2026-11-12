@@ -96,9 +96,50 @@ fn left_nested_seqs_with_linear_offsets_meet_without_gaps_or_overlaps() {
 }
 
 #[test]
+fn left_nested_seqs_with_nonlinear_offsets_meet_sample_exactly() {
+    // `time * time - 0.00010201` first reaches 0 at 0.0101 s, 445.41 samples,
+    // so a sum of rounded roots would drift from where each segment ends.
+    let segment = "fin(time * time - 0.00010201) | seq(time * time - 0.00010201)";
+    let n = render(44100, "1 | fin(time * time - 0.00010201)")
+        .expect("one segment")
+        .len();
+    let program = format!(
+        "(((1 | {s}) \\ (10 | {s})) \\ (100 | {s})) \\ (1000 | fin(time * time - 0.00010201))",
+        s = segment
+    );
+    let expected: Vec<f32> = [1.0, 10.0, 100.0, 1000.0]
+        .iter()
+        .flat_map(|&x| std::iter::repeat_n(x, n))
+        .collect();
+    assert_eq!(render(44100, &program), Ok(expected));
+}
+
+#[test]
+fn left_nested_seqs_with_a_shared_noisy_offset_meet_without_gaps_or_overlaps() {
+    // Both copies of the first offset read the one shared noise, so the third
+    // segment starts where the second ends. A gap would show as a 0 and an
+    // overlap as a sum (11 or 110).
+    let out = render(
+        8000,
+        "share(noise, fn(n) => \
+           ((1 | fin(time - 0.25 + 0.01 * n) | seq(time - 0.25 + 0.01 * n)) \\ \
+            (10 | fin(time - 0.25) | seq(time - 0.25))) \\ (100 | fin(time - 0.25)))",
+    )
+    .expect("renders");
+    let first = out.iter().take_while(|&&x| x == 1.0).count();
+    assert!((1900..=2100).contains(&first), "first segment: {}", first);
+    let expected: Vec<f32> = [10.0, 100.0]
+        .iter()
+        .flat_map(|&x| std::iter::repeat_n(x, 2000))
+        .collect();
+    assert_eq!(&out[first..], &expected[..]);
+}
+
+#[test]
 fn left_nested_seqs_with_noisy_offsets_are_evaluation_errors() {
-    // A noisy offset has no fixed root to sum, so the combined seq could start
-    // its successor at a different time than the first seq's own offset ends.
+    // Without `share`, each copy of a noisy offset reads its own noise, so the
+    // combined seq could start its successor at a different time than the
+    // first seq's own offset ends.
     for program in [
         "((1 | fin(time - 0.25) | seq(time - 0.25 + 0.01 * noise)) \\ \
           (2 | fin(time - 0.25) | seq(time - 0.25))) \\ (3 | fin(time - 0.25))",
@@ -109,7 +150,7 @@ fn left_nested_seqs_with_noisy_offsets_are_evaluation_errors() {
         assert!(
             messages
                 .iter()
-                .any(|m| m.contains("Cannot combine seqs") && !m.contains("internal error")),
+                .any(|m| m.contains("offset uses noise") && !m.contains("internal error")),
             "{}: {:?}",
             program,
             messages

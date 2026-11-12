@@ -149,9 +149,9 @@ high_cutoff = filtered(440, cutoff_freq_hz = 6000);
 
 ### Seq and Followed-By
 
-The followed-by operator `\` is right-associative: `a \ b \ c` is `a \ (b \ c)`. Each operand's offset is measured from that operand's own start, so a seq that ends at its own offset (for example, `w | fin(time - d) | seq(time - d)`) is followed sample-exactly by the next operand. Writing `(a \ b) \ c` instead starts `c` at the sum of the offsets of `a` and `b`, which can round to a sample one earlier or later than where `b` ends.
+The followed-by operator `\` is right-associative: `a \ b \ c` is `a \ (b \ c)`. Each operand's offset is measured from that operand's own start, so a seq that ends at its own offset (for example, `w | fin(time - d) | seq(time - d)`) is followed sample-exactly by the next operand.
 
-When both operands of `\` are seqs, the result is a seq whose offset is the sum of theirs. This sum is only defined when each offset reaches 0 at a fixed time: an offset built from `time` and constants by `+`, `-`, and multiplying or dividing by a constant (for example, `time - d` or `2 * time - 1`). Any other offset, such as one with `noise`, is an evaluation error. The same holds for the seqs passed to `sequence`, when there are two or more.
+When both operands of `\` are seqs, the result is a seq whose offset is the sum of theirs: it first reaches 0 where the second operand's offset does, measured from where the first operand's offset reaches 0. When both offsets reach 0 at a fixed time (each is built from `time` and constants by `+`, `-`, and multiplying or dividing by a constant, as in `time - d` or `2 * time - 1`), the sum is `time` minus the sum of those times, so writing `(a \ b) \ c` starts `c` at a time that can round to a sample one earlier or later than where `b` ends. Otherwise, `c` starts exactly where `b` ends. In that case, the first operand's offset must not use `noise` except through the reference `share` passes to its function, since the sum and the delay of the second operand would read different noise; such an offset is an evaluation error. The same holds for the seqs passed to `sequence`, when there are two or more.
 
 
 <!-- TODO update or remove this overloading section

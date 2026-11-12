@@ -782,11 +782,42 @@ fn is_possibly_finite<M, S>(waveform: &Waveform<M, S>) -> bool {
 
 /// Returns true if `waveform` contains a `Marked` or `Captured` waveform.
 fn has_marked_or_captured<M, S>(waveform: &Waveform<M, S>) -> bool {
+    any_node(waveform, &|w| {
+        matches!(w, Waveform::Marked { .. } | Waveform::Captured { .. })
+    })
+}
+
+/// Returns true if `waveform` contains `Noise`, so that two copies of it can
+/// generate different samples.
+///
+/// # Example
+///
+/// ```
+/// use tuun::optimizer::has_noise;
+/// use tuun::waveform::{BinaryOperator, Waveform};
+///
+/// let noisy: Waveform<()> = Waveform::BinaryOp(
+///     BinaryOperator::Add,
+///     Box::new(Waveform::Time(())),
+///     Box::new(Waveform::Noise),
+/// );
+/// assert!(has_noise(&noisy));
+/// assert!(!has_noise(&Waveform::<()>::Time(())));
+/// ```
+pub fn has_noise<M, S>(waveform: &Waveform<M, S>) -> bool {
+    any_node(waveform, &|w| matches!(w, Waveform::Noise))
+}
+
+/// Returns true if `matches` holds for `waveform` or any waveform within it.
+fn any_node<M, S>(waveform: &Waveform<M, S>, matches: &impl Fn(&Waveform<M, S>) -> bool) -> bool {
     use Waveform::*;
+    if matches(waveform) {
+        return true;
+    }
+    let any = |w: &Waveform<M, S>| any_node(w, matches);
     match waveform {
         Const(_) | Time(_) | Noise | Fixed(_, _) | Ref(_) => false,
-        Marked { .. } | Captured { .. } => true,
-        UnaryOp(_, a) => has_marked_or_captured(a),
+        UnaryOp(_, a) | Marked { waveform: a, .. } | Captured { waveform: a, .. } => any(a),
         Fin {
             length: a,
             waveform: b,
@@ -808,28 +839,18 @@ fn has_marked_or_captured<M, S>(waveform: &Waveform<M, S>) -> bool {
             waveform: a,
             body: b,
             ..
-        } => has_marked_or_captured(a) || has_marked_or_captured(b),
+        } => any(a) || any(b),
         Filter {
             waveform,
             feed_forward,
             feedback,
             ..
-        } => {
-            has_marked_or_captured(waveform)
-                || feed_forward
-                    .iter()
-                    .chain(feedback)
-                    .any(has_marked_or_captured)
-        }
+        } => any(waveform) || feed_forward.iter().chain(feedback).any(any),
         Alt {
             trigger,
             positive_waveform,
             negative_waveform,
-        } => {
-            has_marked_or_captured(trigger)
-                || has_marked_or_captured(positive_waveform)
-                || has_marked_or_captured(negative_waveform)
-        }
+        } => any(trigger) || any(positive_waveform) || any(negative_waveform),
     }
 }
 
