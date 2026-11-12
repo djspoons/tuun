@@ -166,44 +166,27 @@ where
     binary_op(arguments, call, "&", BinaryOperator::Merge)
 }
 
-/// Returns an offset whose first root is the sum of the first roots of the
-/// offsets `a` and `b`, or an evaluation error if `a` uses noise and its root
-/// isn't constant.
+/// Returns an offset that first reaches 0 where the offset `b` does, measured
+/// from where the offset `a` first reaches 0, or an evaluation error if `a`
+/// uses noise.
 ///
-/// An offset's first root is the time it marks, as for a `Fin` length (see
-/// [`optimizer::first_root`]). When both roots are constant the result is
-/// `Time - c`. Otherwise it holds a copy of `a`, which, when `a` uses noise,
-/// can reach 0 at a different time than any other copy of `a`.
+/// An offset reaches 0 where it would end a `Fin` whose length it is. The
+/// result holds a copy of `a`, which, when `a` uses noise, can reach 0 at a
+/// different time than any other copy of `a`.
 fn add_offsets<M, S>(a: Waveform<M>, b: Waveform<M>) -> Result<Waveform<M>, Error<S>>
 where
     M: Clone + Display + CarriesTrace<S>,
     S: Clone + Debug,
 {
-    // Trace marks don't change a waveform's samples, but `first_root` doesn't
-    // read through them.
-    let (a_bare, b_bare) = (
-        trace::strip_trace_marks(a.clone()),
-        trace::strip_trace_marks(b.clone()),
-    );
-    if let (Some(a_root), Some(b_root)) = (
-        optimizer::first_root(&a_bare),
-        optimizer::first_root(&b_bare),
-    ) {
-        return Ok(Waveform::BinaryOp(
-            BinaryOperator::Subtract,
-            Box::new(Waveform::Time(())),
-            Box::new(Waveform::Const(a_root + b_root)),
-        ));
-    }
-    if optimizer::has_noise(&a_bare) {
+    if optimizer::has_noise(&a) {
         return Err(Error::eval_here(format!(
             "A seq whose offset uses noise can only be followed by another seq \
-             if that offset reaches 0 at a fixed time (like time - 0.5), got {}",
-            a_bare
+             if that noise comes from share, got {}",
+            trace::strip_trace_marks(a)
         )));
     }
     // Negative until `a` reaches 0, then `b`, whose `Time` starts at 0 there,
-    // so `b`'s root is measured from `a`'s.
+    // so where `b` reaches 0 is measured from where `a` does.
     Ok(Waveform::Append(
         Box::new(Waveform::Fin {
             length: Box::new(a),
@@ -1566,33 +1549,6 @@ mod tests {
 
     #[test]
     fn test_followed_by_sums_seq_offsets() {
-        fn seq(seconds: f32) -> Expr<u32, ()> {
-            Seq {
-                offset: boxed(Expr::Waveform(Waveform::BinaryOp(
-                    BinaryOperator::Subtract,
-                    Box::new(Waveform::Time(())),
-                    Box::new(Waveform::Const(seconds)),
-                ))),
-                waveform: boxed(Expr::float(1.0)),
-            }
-        }
-        fn offset_root(expr: Expr<u32, ()>) -> Option<f32> {
-            let Seq { offset, .. } = expr else {
-                panic!("seq \\ seq should be a seq");
-            };
-            let Expr::Waveform(offset) = offset.expr else {
-                panic!("offset should be a waveform");
-            };
-            optimizer::first_root(&offset)
-        }
-        let two = call(followed_by, vec![seq(1.0), seq(2.0)]).unwrap();
-        assert_eq!(offset_root(two.clone()), Some(3.0));
-        let three = call(followed_by, vec![two, seq(4.0)]).unwrap();
-        assert_eq!(offset_root(three), Some(7.0));
-    }
-
-    #[test]
-    fn test_followed_by_sums_offsets_without_constant_roots() {
         let op = |op, a, b| Waveform::BinaryOp(op, Box::new(a), Box::new(b));
         let seq = |offset: Waveform<u32>| -> Expr<u32, ()> {
             Seq {
@@ -1650,14 +1606,16 @@ mod tests {
             )
         };
         for (a, b) in [
+            (quarter(), quarter()),
             (squared(), quarter()),
             (quarter(), squared()),
             (quarter(), noisy()),
+            (then(quarter(), squared()), quarter()),
         ] {
             let offset = offset_of(call(followed_by, vec![seq(a.clone()), seq(b.clone())]));
             assert_eq!(offset, then(a, b));
         }
-        // The first offset uses noise and has no constant root.
+        // The first offset is copied, so it may not use noise.
         let error = call(followed_by, vec![seq(noisy()), seq(quarter())]).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Eval);
     }
@@ -1818,22 +1776,20 @@ mod tests {
     }
 
     #[test]
-    fn traced_offsets_still_add() {
-        let seq = |seconds: f32| Seq {
+    fn traced_noisy_offsets_are_still_evaluation_errors() {
+        let seq = |offset| Seq {
             offset: boxed(Expr::Waveform(Waveform::BinaryOp(
                 BinaryOperator::Subtract,
                 Box::new(traced(Waveform::Time(()))),
-                Box::new(traced(Waveform::Const(seconds))),
+                Box::new(traced(offset)),
             ))),
             waveform: boxed(Expr::float(1.0)),
         };
-        let Seq { offset, .. } = call(followed_by, vec![seq(1.0), seq(2.0)]).unwrap() else {
-            panic!("seq \\ seq should be a seq");
-        };
-        let Expr::Waveform(offset) = offset.expr else {
-            panic!("offset should be a waveform");
-        };
-        let root = optimizer::first_root(&trace::strip_trace_marks(offset));
-        assert_eq!(root, Some(3.0));
+        let error = call(
+            followed_by,
+            vec![seq(Waveform::Noise), seq(Waveform::Const(2.0))],
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Eval);
     }
 }

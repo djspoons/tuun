@@ -1979,6 +1979,44 @@ mod tests {
     }
 
     #[test]
+    fn appends_after_appended_fins_start_where_those_fins_end() {
+        use waveform::Waveform::Marked;
+        // `time - seconds`, marked so that it stays dynamic.
+        let minus = |id, seconds| {
+            BinaryOp(
+                BinaryOperator::Subtract,
+                Box::new(Time(())),
+                Box::new(Marked {
+                    id,
+                    waveform: Box::new(Const(seconds)),
+                }),
+            )
+        };
+        let fin = |length, value| Fin {
+            length: Box::new(length),
+            waveform: Box::new(Const(value)),
+            state: (),
+        };
+        let append = |a, b| Append(Box::new(a), Box::new(b), ());
+        let merge = |a, b| BinaryOp(BinaryOperator::Merge, Box::new(a), Box::new(b));
+        // A sound of 4 samples, then one of 3 samples starting at 3 (the
+        // first whole second after 2.5) and lasting 3, then one of 3 starting
+        // at 3 + 3 = 6. The last waits on a length that is negative until the
+        // first sound's offset, then is the second sound's offset.
+        let w = merge(
+            merge(
+                fin(minus(1, 3.5), 1.0),
+                append(fin(minus(2, 2.5), 0.0), fin(minus(2, 2.5), 10.0)),
+            ),
+            append(
+                fin(append(fin(minus(2, 2.5), -1.0), minus(2, 2.5)), 0.0),
+                fin(minus(2, 2.5), 100.0),
+            ),
+        );
+        run_tests(&w, &[1.0, 1.0, 1.0, 11.0, 10.0, 10.0, 100.0, 100.0, 100.0]);
+    }
+
+    #[test]
     fn test_append() {
         let mut g = new_test_generator(1);
         let w = Append(

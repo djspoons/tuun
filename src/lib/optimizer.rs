@@ -76,6 +76,8 @@ fn linear<M>(waveform: &Waveform<M>) -> Option<(f32, f32)> {
 ///   * pulling Fin's up and combining nested Fin's
 ///   * replacing zero-length waveforms with the canonical `Fixed(vec![])`
 ///   * handling some common cases of Fin in Add and Multiply
+///   * re-associating Appends to the right, and factoring out a Fin that both
+///     Appends in a Merge start with
 ///   * reading a constant shared waveform as that constant, and dropping a
 ///     shared waveform that nothing reads
 ///
@@ -83,7 +85,8 @@ fn linear<M>(waveform: &Waveform<M>) -> Option<(f32, f32)> {
 /// `Generator::generate` and re-associates binary operations so that Const
 /// waveforms are on the right and Fixed waveforms are on the left.
 ///
-/// Throughout this, `optimize` preserves any Marked or Captured waveforms.
+/// Throughout this, `optimize` preserves any Captured waveforms, and at least
+/// one of any equal Marked waveforms.
 pub fn optimize<M>(waveform: Waveform<M>) -> Waveform<M>
 where
     M: Clone + PartialEq,
@@ -111,6 +114,40 @@ where
                     Fixed(v, _) if v.is_empty() && !has_marked_or_captured(&length) => {
                         Fixed(vec![], ())
                     }
+                    // A length that is negative until a Fin of `first_length`
+                    // ends, and then `rest`, ends a constant where a Fin of
+                    // `first_length` followed by a Fin of `rest` ends.
+                    Const(c) => match length {
+                        Append(first, rest, ()) => match *first {
+                            Fin {
+                                length: first_length,
+                                waveform: first,
+                                ..
+                            } if matches!(*first, Const(k) if k < 0.0) => optimize(Append(
+                                Box::new(Fin {
+                                    length: first_length,
+                                    waveform: Box::new(Const(c)),
+                                    state: (),
+                                }),
+                                Box::new(Fin {
+                                    length: rest,
+                                    waveform: Box::new(Const(c)),
+                                    state: (),
+                                }),
+                                (),
+                            )),
+                            first => Fin {
+                                length: Box::new(Append(Box::new(first), rest, ())),
+                                waveform: Box::new(Const(c)),
+                                state: (),
+                            },
+                        },
+                        length => Fin {
+                            length: Box::new(length),
+                            waveform: Box::new(Const(c)),
+                            state: (),
+                        },
+                    },
                     // Nested Fin's
                     Fin {
                         length: inner_length,
@@ -151,6 +188,11 @@ where
                 (Fixed(a, _), b) if a.is_empty() => b,
                 (a, Fixed(b, _)) if b.is_empty() => a,
                 (Fixed(a, _), Fixed(b, _)) => Fixed([a, b].concat(), ()),
+                // Re-associate to the right, so that a Merge of two Appends
+                // can find a first waveform they share.
+                (Append(a, b, ()), c) => {
+                    Append(a, Box::new(optimize(Append(b, Box::new(c), ()))), state)
+                }
                 (a, b) => Append(Box::new(a), Box::new(b), state),
             }
         }
@@ -267,13 +309,11 @@ where
                         waveform: b,
                         ..
                     },
-                ) if first_root(&a_length).is_some_and(|a| Some(a) == first_root(&b_length)) => {
-                    Fin {
-                        length: a_length,
-                        waveform: Box::new(optimize(BinaryOp(BinaryOperator::Add, a, b))),
-                        state: (),
-                    }
-                }
+                ) if interchangeable_lengths(&a_length, &b_length) => Fin {
+                    length: a_length,
+                    waveform: Box::new(optimize(BinaryOp(BinaryOperator::Add, a, b))),
+                    state: (),
+                },
                 (
                     a,
                     Fin {
@@ -348,8 +388,8 @@ where
                         length: b_length,
                         waveform: b,
                         ..
-                    } if first_root(&a_length)
-                        .is_some_and(|a| Some(a) == first_root(&b_length)) =>
+                    } if interchangeable_lengths(&a_length, &b_length)
+                        && !is_possibly_finite(&b) =>
                     {
                         optimize(Append(
                             Box::new(Fin {
@@ -371,6 +411,41 @@ where
                         Box::new(Append(b, c, ())),
                     ),
                 },
+                // Factor out the Fin that two Appends start with, when they
+                // end together: `(u then p) & (v then q)` is `(u & v) then (p &
+                // q)`. This occurs for expressions of the form `(a \ b) \ c`.
+                (Append(a, p, ()), Append(b, q, ())) if fins_end_together(&a, &b) => {
+                    match (*a, *b) {
+                        (
+                            Fin {
+                                length,
+                                waveform: u,
+                                ..
+                            },
+                            Fin { waveform: v, .. },
+                        ) => optimize(Append(
+                            Box::new(Fin {
+                                length,
+                                waveform: Box::new(BinaryOp(BinaryOperator::Merge, u, v)),
+                                state: (),
+                            }),
+                            Box::new(BinaryOp(BinaryOperator::Merge, p, q)),
+                            (),
+                        )),
+                        _ => unreachable!("fins_end_together matches only Fins"),
+                    }
+                }
+                // Re-associate so that the rule above applies.
+                (BinaryOp(BinaryOperator::Merge, a, b), c)
+                    if matches!((&*b, &c), (Append(b, ..), Append(c, ..))
+                        if fins_end_together(b, c)) =>
+                {
+                    optimize(BinaryOp(
+                        BinaryOperator::Merge,
+                        a,
+                        Box::new(BinaryOp(BinaryOperator::Merge, b, Box::new(c))),
+                    ))
+                }
                 (a, b) => BinaryOp(BinaryOperator::Merge, Box::new(a), Box::new(b)),
             }
         }
@@ -749,6 +824,43 @@ pub fn references<M: Clone>(waveform: &Waveform<M>, id: ShareId) -> bool {
     !refs_to(&mut waveform.clone(), id).is_empty()
 }
 
+/// Returns true if one `Fin` length, `a`, can stand in for both `a` and `b` in
+/// `Fin`s that start together.
+///
+/// That holds when the two are equal and hold no `Noise`, so they reach 0 at
+/// the same sample, and no `Captured`, whose samples would then be captured
+/// once instead of twice.
+fn interchangeable_lengths<M: PartialEq>(a: &Waveform<M>, b: &Waveform<M>) -> bool {
+    a == b
+        && !any_node(a, &|w| {
+            matches!(w, Waveform::Noise | Waveform::Captured { .. })
+        })
+}
+
+/// Returns true if `a` and `b` are `Fin`s of infinite waveforms with
+/// interchangeable lengths, so that they end together when they start together.
+fn fins_end_together<M: PartialEq>(a: &Waveform<M>, b: &Waveform<M>) -> bool {
+    match (a, b) {
+        (
+            Waveform::Fin {
+                length: a_length,
+                waveform: a,
+                ..
+            },
+            Waveform::Fin {
+                length: b_length,
+                waveform: b,
+                ..
+            },
+        ) => {
+            interchangeable_lengths(a_length, b_length)
+                && !is_possibly_finite(a)
+                && !is_possibly_finite(b)
+        }
+        _ => false,
+    }
+}
+
 /// Returns false only if waveform is certainly infinite.
 ///
 /// Marked waveforms count as possibly finite because their contents can change,
@@ -1065,13 +1177,8 @@ mod tests {
     }
 
     #[test]
-    fn fins_combine_only_with_the_same_constant_root() {
+    fn added_fins_share_one_length_only_when_they_end_together() {
         let op = |op, a, b| BinaryOp(op, Box::new(a), Box::new(b));
-        let fin = |length, waveform| Fin {
-            length: Box::new(length),
-            waveform: Box::new(waveform),
-            state: (),
-        };
         let scaled_second = |k| {
             op(
                 BinaryOperator::Add,
@@ -1095,6 +1202,110 @@ mod tests {
             fin(one_second(), Const(2.0)),
         );
         assert_eq!(optimize(equal), fin(one_second(), Const(3.0)));
+        // Two copies of a noisy length can end at different times.
+        let noisy = || op(BinaryOperator::Add, Time(()), Noise);
+        let equal_but_noisy: Waveform<(), ()> = op(
+            BinaryOperator::Add,
+            fin(noisy(), Const(1.0)),
+            fin(noisy(), Const(2.0)),
+        );
+        assert_eq!(
+            optimize(equal_but_noisy),
+            fin(noisy(), fin(noisy(), Const(3.0)))
+        );
+    }
+
+    fn fin(length: Waveform<()>, waveform: Waveform<()>) -> Waveform<()> {
+        Fin {
+            length: Box::new(length),
+            waveform: Box::new(waveform),
+            state: (),
+        }
+    }
+
+    fn append(a: Waveform<()>, b: Waveform<()>) -> Waveform<()> {
+        Append(Box::new(a), Box::new(b), ())
+    }
+
+    fn merge(a: Waveform<()>, b: Waveform<()>) -> Waveform<()> {
+        BinaryOp(BinaryOperator::Merge, Box::new(a), Box::new(b))
+    }
+
+    /// Returns `time - seconds`, as optimized.
+    fn minus_seconds(seconds: f32) -> Waveform<()> {
+        BinaryOp(
+            BinaryOperator::Add,
+            Box::new(Time(())),
+            Box::new(Const(-seconds)),
+        )
+    }
+
+    #[test]
+    fn a_fin_of_a_constant_splits_where_its_length_appends() {
+        // The length is -1 until 1 s, then `time - 2` from there.
+        let length = append(fin(minus_seconds(1.0), Const(-1.0)), minus_seconds(2.0));
+        assert_eq!(
+            optimize(fin(length, Const(0.0))),
+            append(
+                fin(minus_seconds(1.0), Const(0.0)),
+                fin(minus_seconds(2.0), Const(0.0))
+            )
+        );
+        // A length that starts non-negative ends the Fin at once instead.
+        let length = append(fin(minus_seconds(1.0), Const(1.0)), minus_seconds(2.0));
+        let starts_non_negative = fin(length, Const(0.0));
+        assert_eq!(optimize(starts_non_negative.clone()), starts_non_negative);
+    }
+
+    #[test]
+    fn appends_nest_to_the_right() {
+        let (a, b, c) = (
+            fin(minus_seconds(1.0), Const(1.0)),
+            fin(minus_seconds(2.0), Const(2.0)),
+            Time(()),
+        );
+        assert_eq!(
+            optimize(append(append(a.clone(), b.clone()), c.clone())),
+            append(a, append(b, c))
+        );
+    }
+
+    #[test]
+    fn merged_appends_starting_with_fins_that_end_together_share_them() {
+        let (p, q) = (Fixed(vec![1.0], ()), Fixed(vec![2.0], ()));
+        let starting_with =
+            |first: &Waveform<()>, rest: &Waveform<()>| append(first.clone(), rest.clone());
+        let silence = fin(minus_seconds(1.0), Const(0.0));
+        assert_eq!(
+            optimize(merge(
+                starting_with(&silence, &p),
+                starting_with(&silence, &q)
+            )),
+            append(silence.clone(), merge(p.clone(), q.clone()))
+        );
+        // A Merge with another waveform first is re-associated to share them.
+        assert_eq!(
+            optimize(merge(
+                merge(Time(()), starting_with(&silence, &p)),
+                starting_with(&silence, &q)
+            )),
+            merge(
+                Time(()),
+                append(silence.clone(), merge(p.clone(), q.clone()))
+            )
+        );
+        // Fins that can end at different times aren't shared: copies of a noisy
+        // length, and a waveform that can end before its length does.
+        for first in [
+            fin(
+                BinaryOp(BinaryOperator::Add, Box::new(Time(())), Box::new(Noise)),
+                Const(0.0),
+            ),
+            fin(minus_seconds(1.0), Fixed(vec![0.0], ())),
+        ] {
+            let merged = merge(starting_with(&first, &p), starting_with(&first, &q));
+            assert_eq!(optimize(merged.clone()), merged);
+        }
     }
 
     fn shared(id: u32, waveform: Waveform<()>, body: Waveform<()>) -> Waveform<()> {
