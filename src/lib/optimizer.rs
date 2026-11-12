@@ -1,72 +1,5 @@
 use crate::waveform::{BinaryOperator, ShareId, Waveform};
 
-/// Returns the first non-negative time at which `waveform` is non-negative, if
-/// `waveform` is linear in `Time` with constant coefficients.
-///
-/// This is the time at which a `Fin` whose length is `waveform` ends. Returns
-/// `None` for any other waveform, and for a linear waveform that never becomes
-/// non-negative.
-///
-/// # Example
-///
-/// ```
-/// use tuun::optimizer::first_root;
-/// use tuun::waveform::{BinaryOperator, Waveform};
-///
-/// // time * 2 - 0.5
-/// let length: Waveform<()> = Waveform::BinaryOp(
-///     BinaryOperator::Subtract,
-///     Box::new(Waveform::BinaryOp(
-///         BinaryOperator::Multiply,
-///         Box::new(Waveform::Time(())),
-///         Box::new(Waveform::Const(2.0)),
-///     )),
-///     Box::new(Waveform::Const(0.5)),
-/// );
-/// assert_eq!(first_root(&length), Some(0.25));
-/// assert_eq!(first_root(&Waveform::<()>::Noise), None);
-/// ```
-pub fn first_root<M>(waveform: &Waveform<M>) -> Option<f32> {
-    let (slope, intercept) = linear(waveform)?;
-    let root = if intercept >= 0.0 {
-        0.0
-    } else if slope > 0.0 {
-        -intercept / slope
-    } else {
-        return None;
-    };
-    Some(root).filter(|root| root.is_finite())
-}
-
-/// Returns `(slope, intercept)` such that `waveform` generates `slope * Time +
-/// intercept`, if it is built from `Time` and constants by `+`, `-`, and by
-/// multiplying or dividing by a constant.
-fn linear<M>(waveform: &Waveform<M>) -> Option<(f32, f32)> {
-    use Waveform::*;
-    match waveform {
-        Const(c) => Some((0.0, *c)),
-        Time(_) => Some((1.0, 0.0)),
-        BinaryOp(op, a, b) => {
-            let ((a_slope, a_intercept), (b_slope, b_intercept)) = (linear(a)?, linear(b)?);
-            match op {
-                BinaryOperator::Add => Some((a_slope + b_slope, a_intercept + b_intercept)),
-                BinaryOperator::Subtract => Some((a_slope - b_slope, a_intercept - b_intercept)),
-                BinaryOperator::Multiply if a_slope == 0.0 => {
-                    Some((a_intercept * b_slope, a_intercept * b_intercept))
-                }
-                BinaryOperator::Multiply if b_slope == 0.0 => {
-                    Some((a_slope * b_intercept, a_intercept * b_intercept))
-                }
-                BinaryOperator::Divide if b_slope == 0.0 && b_intercept != 0.0 => {
-                    Some((a_slope / b_intercept, a_intercept / b_intercept))
-                }
-                _ => None,
-            }
-        }
-        _ => None,
-    }
-}
-
 /// Optimizes a waveform through algebraic transformations which preserve its
 /// length and its output, up to small differences in sample values and some
 /// changes to floating-point special values.
@@ -148,30 +81,15 @@ where
                             state: (),
                         },
                     },
-                    // Nested Fin's
+                    // Nested Fin's that end together
                     Fin {
                         length: inner_length,
                         waveform,
                         ..
-                    } => match (first_root(&length), first_root(&inner_length)) {
-                        (Some(a), Some(b)) => Fin {
-                            length: Box::new(optimize(BinaryOp(
-                                BinaryOperator::Subtract,
-                                Box::new(Time(())),
-                                Box::new(Const(a.min(b))),
-                            ))),
-                            waveform,
-                            state: (),
-                        },
-                        _ => Fin {
-                            length: Box::new(length),
-                            waveform: Box::new(Fin {
-                                length: inner_length,
-                                waveform,
-                                state: (),
-                            }),
-                            state: (),
-                        },
+                    } if interchangeable_lengths(&length, &inner_length) => Fin {
+                        length: inner_length,
+                        waveform,
+                        state: (),
                     },
                     waveform => Fin {
                         length: Box::new(length),
@@ -1129,54 +1047,6 @@ mod tests {
     }
 
     #[test]
-    fn first_root_reads_linear_waveforms_with_constant_coefficients() {
-        let op = |op, a, b| BinaryOp(op, Box::new(a), Box::new(b));
-        let quarter = || op(BinaryOperator::Subtract, Time(()), Const(0.25));
-        let cases: Vec<(Waveform<(), ()>, Option<f32>)> = vec![
-            (Const(0.0), Some(0.0)),
-            (Const(1.0), Some(0.0)),
-            (Const(-1.0), None),
-            (Time(()), Some(0.0)),
-            (quarter(), Some(0.25)),
-            // Re-associated: (time - 0.25) + 0.05
-            (op(BinaryOperator::Add, quarter(), Const(0.05)), Some(0.2)),
-            // Non-negative from the start: time + 1
-            (op(BinaryOperator::Add, Time(()), Const(1.0)), Some(0.0)),
-            // (2 * time - 1) / 4
-            (
-                op(
-                    BinaryOperator::Divide,
-                    op(
-                        BinaryOperator::Subtract,
-                        op(BinaryOperator::Multiply, Const(2.0), Time(())),
-                        Const(1.0),
-                    ),
-                    Const(4.0),
-                ),
-                Some(0.5),
-            ),
-            // Decreasing, and negative at 0: -1 - time
-            (op(BinaryOperator::Subtract, Const(-1.0), Time(())), None),
-            // Time on both sides: time - time - 1
-            (
-                op(
-                    BinaryOperator::Subtract,
-                    op(BinaryOperator::Subtract, Time(()), Time(())),
-                    Const(1.0),
-                ),
-                None,
-            ),
-            // Non-constant terms
-            (op(BinaryOperator::Add, quarter(), Noise), None),
-            (op(BinaryOperator::Multiply, Time(()), Time(())), None),
-            (op(BinaryOperator::Divide, Time(()), Time(())), None),
-        ];
-        for (waveform, root) in cases {
-            assert_eq!(first_root(&waveform), root, "{waveform:?}");
-        }
-    }
-
-    #[test]
     fn added_fins_share_one_length_only_when_they_end_together() {
         let op = |op, a, b| BinaryOp(op, Box::new(a), Box::new(b));
         let scaled_second = |k| {
@@ -1187,15 +1057,17 @@ mod tests {
             )
         };
         let one_second = || op(BinaryOperator::Add, Time(()), Const(-1.0));
-        let one_quarter_second = || op(BinaryOperator::Add, Time(()), Const(-0.25));
         let unequal: Waveform<(), ()> = op(
             BinaryOperator::Add,
             fin(scaled_second(2.0), Const(1.0)),
             fin(scaled_second(4.0), Const(2.0)),
         );
-        // The roots (0.5 and 0.25) differ, so the sum nests the two Fin's,
-        // which then end at the earlier root.
-        assert_eq!(optimize(unequal), fin(one_quarter_second(), Const(3.0)));
+        // The lengths differ, so the sum nests the two Fin's, which then end
+        // at the earlier root.
+        assert_eq!(
+            optimize(unequal),
+            fin(scaled_second(4.0), fin(scaled_second(2.0), Const(3.0)))
+        );
         let equal: Waveform<(), ()> = op(
             BinaryOperator::Add,
             fin(one_second(), Const(1.0)),
@@ -1238,6 +1110,17 @@ mod tests {
             Box::new(Time(())),
             Box::new(Const(-seconds)),
         )
+    }
+
+    #[test]
+    fn nested_fins_combine_only_when_they_end_together() {
+        let w = fin(minus_seconds(1.0), Time(()));
+        assert_eq!(optimize(fin(minus_seconds(1.0), w.clone())), w);
+        let unequal = fin(minus_seconds(2.0), w.clone());
+        assert_eq!(optimize(unequal.clone()), unequal);
+        let noisy = || BinaryOp(BinaryOperator::Add, Box::new(Time(())), Box::new(Noise));
+        let equal_but_noisy = fin(noisy(), fin(noisy(), Time(())));
+        assert_eq!(optimize(equal_but_noisy.clone()), equal_but_noisy);
     }
 
     #[test]
@@ -1471,17 +1354,11 @@ mod tests {
                 state: (),
             }),
         );
+        // The Fin's are pulled out of the product, but their lengths differ, so
+        // they stay nested.
         assert_eq!(
             optimize(w5),
-            Fin {
-                length: Box::new(BinaryOp(
-                    BinaryOperator::Add,
-                    Box::new(Time(())),
-                    Box::new(Const(-1.5))
-                )),
-                waveform: Box::new(Const(15.0)),
-                state: ()
-            }
+            fin(minus_seconds(2.0), fin(minus_seconds(1.5), Const(15.0)))
         );
     }
 }
