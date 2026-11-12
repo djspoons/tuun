@@ -788,11 +788,23 @@ impl<'a> Generator<'a> {
     }
 
     /// Returns the number of samples before `length` is first non-negative, when `length` is
-    /// `time` offset by a constant, or a constant that is non-negative.
+    /// `time` offset by a constant, a constant that is non-negative, or a negative constant until
+    /// such a length is first non-negative, followed by such a length.
     pub(crate) fn fin_cutoff<M, S>(&self, length: &waveform::Waveform<M, S>) -> Option<usize> {
-        use waveform::Waveform::{BinaryOp, Const, Time};
+        use waveform::Waveform::{Append, BinaryOp, Const, Fin, Time};
         let offset = match length {
             Const(c) if *c >= 0.0 => return Some(0),
+            // The second part's `time` starts at 0 where the first part ends.
+            Append(first, rest, _) => {
+                return match first.as_ref() {
+                    Fin {
+                        length, waveform, ..
+                    } if matches!(**waveform, Const(k) if k < 0.0) => {
+                        Some(self.fin_cutoff(length)? + self.fin_cutoff(rest)?)
+                    }
+                    _ => None,
+                };
+            }
             BinaryOp(op @ (BinaryOperator::Add | BinaryOperator::Subtract), a, b) => {
                 match (a.as_ref(), b.as_ref()) {
                     (Time(_), Const(c)) if *op == BinaryOperator::Add => *c,
@@ -1763,13 +1775,30 @@ mod tests {
                         Box::new(Const(-seconds)),
                     ),
                 ];
-                for length in lengths {
+                // Negative until `length` is first non-negative, then `rest`.
+                let then = |length: &Waveform, rest: Waveform| {
+                    Append(
+                        Box::new(Fin {
+                            length: Box::new(length.clone()),
+                            waveform: Box::new(Const(-1.0)),
+                            state: (),
+                        }),
+                        Box::new(rest),
+                        (),
+                    )
+                };
+                let appended = [
+                    then(&lengths[0], lengths[1].clone()),
+                    then(&then(&lengths[0], lengths[1].clone()), lengths[0].clone()),
+                ];
+                for length in lengths.into_iter().chain(appended) {
                     let w = Fin {
                         length: Box::new(length),
                         waveform: Box::new(Const(1.0)),
                         state: (),
                     };
-                    let mut out = vec![0.0; 4 * sample_rate as usize + 1];
+                    // The longest length, three times 10/3 seconds, fits.
+                    let mut out = vec![0.0; 12 * sample_rate as usize + 1];
                     let generated = g.generate(&mut initialize_state(w.clone()), &mut out);
                     check_known_length(&mut g, &w, Some(generated));
                 }

@@ -376,6 +376,28 @@ fn t14_each_phrase_note_lights_its_key_and_velocity() {
 }
 
 #[test]
+fn left_nested_seqs_light_each_note_while_it_sounds() {
+    // `(a \ b) \ c` delays `c` until a length that is negative until `a`'s
+    // offset reaches 0, then is `b`'s offset, reaches 0.
+    let v = voice(
+        "(($220 | fin(time - Q) | seq(time - Q)) \\ ($330 | fin(time - Q) | seq(time - Q))) \
+         \\ ($440 | fin(time - Q))",
+    );
+    assert_eq!(segments(&v), ["0+500", "500+500", "1000+500"]);
+    assert_eq!(
+        lit(&v),
+        [
+            "$220: 0..500",
+            "220: 0..500",
+            "$330: 500..1000",
+            "330: 500..1000",
+            "$440: 1000..1500",
+            "440: 1000..1500",
+        ]
+    );
+}
+
+#[test]
 fn a_mapped_element_lights_the_lambdas_use_of_it() {
     let v = voice("<map(fn (x) => x, [$220 * Qw | unseq() | seq(time - Q)])>");
     assert_eq!(
