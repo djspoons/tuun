@@ -692,33 +692,6 @@ impl<'a> Generator<'a> {
         }
     }
 
-    /// Returns the number of samples that `waveform` generates from its initial state.
-    ///
-    /// Returns `Some(usize::MAX)` when `waveform` is infinite and `None` when its length can't be
-    /// determined without generating it.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use tuun::generator::Generator;
-    /// use tuun::waveform::{BinaryOperator, Waveform};
-    ///
-    /// // One second at 4 samples per second.
-    /// let w: Waveform<u32> = Waveform::Fin {
-    ///     length: Box::new(Waveform::BinaryOp(
-    ///         BinaryOperator::Subtract,
-    ///         Box::new(Waveform::Time(())),
-    ///         Box::new(Waveform::Const(1.0)),
-    ///     )),
-    ///     waveform: Box::new(Waveform::Noise),
-    ///     state: (),
-    /// };
-    /// assert_eq!(Generator::new(4).known_length(&w), Some(4));
-    /// ```
-    pub fn known_length<M, S>(&self, waveform: &waveform::Waveform<M, S>) -> Option<usize> {
-        self.known_length_at(waveform, Some(0), &mut Vec::new())
-    }
-
     /// Returns the number of samples that `waveform` generates from its initial
     /// state, as [`Generator::known_length`] does, when `waveform` starts at
     /// `offset` and sits in the body of the `Shared` nodes in `shared`,
@@ -727,7 +700,7 @@ impl<'a> Generator<'a> {
     /// `offset` and the starts in `shared` are measured on the same clock, and
     /// `None` when they aren't known. `shared` holds the same entries
     /// afterwards.
-    pub fn known_length_at<M, S>(
+    pub(crate) fn known_length_at<M, S>(
         &self,
         waveform: &waveform::Waveform<M, S>,
         offset: Option<usize>,
@@ -787,12 +760,25 @@ impl<'a> Generator<'a> {
         }
     }
 
-    /// Returns the number of samples before `length` is first non-negative, when `length` is
-    /// `time` offset by a constant, or a constant that is non-negative.
+    /// Returns the number of samples before `length` is first non-negative,
+    /// when `length` is `time` offset by a constant, a constant that is
+    /// non-negative, or a negative constant until such a length is first
+    /// non-negative, followed by such a length.
     pub(crate) fn fin_cutoff<M, S>(&self, length: &waveform::Waveform<M, S>) -> Option<usize> {
-        use waveform::Waveform::{BinaryOp, Const, Time};
+        use waveform::Waveform::{Append, BinaryOp, Const, Fin, Time};
         let offset = match length {
             Const(c) if *c >= 0.0 => return Some(0),
+            // The second part's `time` starts at 0 where the first part ends.
+            Append(first, second, _) => {
+                return match first.as_ref() {
+                    Fin {
+                        length, waveform, ..
+                    } if matches!(**waveform, Const(k) if k < 0.0) => {
+                        Some(self.fin_cutoff(length)? + self.fin_cutoff(second)?)
+                    }
+                    _ => None,
+                };
+            }
             BinaryOp(op @ (BinaryOperator::Add | BinaryOperator::Subtract), a, b) => {
                 match (a.as_ref(), b.as_ref()) {
                     (Time(_), Const(c)) if *op == BinaryOperator::Add => *c,
@@ -1260,11 +1246,15 @@ mod tests {
         Generator::new(sample_frequency)
     }
 
+    fn known_length(g: &Generator, waveform: &Waveform) -> Option<usize> {
+        g.known_length_at(&waveform, Some(0), &mut vec![])
+    }
+
     // Verifies that `known_length` of `waveform` is `expected` and, when finite, that generating
     // `waveform` to its end produces that many samples.
     fn check_known_length(g: &mut Generator, waveform: &Waveform, expected: Option<usize>) {
         assert_eq!(
-            g.known_length(waveform),
+            known_length(g, waveform),
             expected,
             "known_length of {}",
             waveform
@@ -1279,7 +1269,7 @@ mod tests {
     // Verifies that `waveform` is either of unknown length or at least `len` samples long.
     fn check_not_known_shorter(g: &Generator, waveform: &Waveform, len: usize) {
         assert!(
-            g.known_length(waveform).is_none_or(|known| known >= len),
+            known_length(g, waveform).is_none_or(|known| known >= len),
             "known_length of {} is shorter than {}",
             waveform,
             len
@@ -1763,13 +1753,30 @@ mod tests {
                         Box::new(Const(-seconds)),
                     ),
                 ];
-                for length in lengths {
+                // Negative until `length` is first non-negative, then `rest`.
+                let then = |length: &Waveform, rest: Waveform| {
+                    Append(
+                        Box::new(Fin {
+                            length: Box::new(length.clone()),
+                            waveform: Box::new(Const(-1.0)),
+                            state: (),
+                        }),
+                        Box::new(rest),
+                        (),
+                    )
+                };
+                let appended = [
+                    then(&lengths[0], lengths[1].clone()),
+                    then(&then(&lengths[0], lengths[1].clone()), lengths[0].clone()),
+                ];
+                for length in lengths.into_iter().chain(appended) {
                     let w = Fin {
                         length: Box::new(length),
                         waveform: Box::new(Const(1.0)),
                         state: (),
                     };
-                    let mut out = vec![0.0; 4 * sample_rate as usize + 1];
+                    // The longest length, three times 10/3 seconds, fits.
+                    let mut out = vec![0.0; 12 * sample_rate as usize + 1];
                     let generated = g.generate(&mut initialize_state(w.clone()), &mut out);
                     check_known_length(&mut g, &w, Some(generated));
                 }
@@ -1795,7 +1802,12 @@ mod tests {
                 };
                 let mut out = vec![0.0; sample_rate as usize];
                 let generated = g.generate(&mut initialize_state(w.clone()), &mut out);
-                assert_eq!(g.known_length(&w), Some(generated), "known_length of {}", w);
+                assert_eq!(
+                    known_length(&g, &w),
+                    Some(generated),
+                    "known_length of {}",
+                    w
+                );
             }
         }
     }
@@ -1976,6 +1988,44 @@ mod tests {
                 0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0, 3.0,
             ],
         );
+    }
+
+    #[test]
+    fn appends_after_appended_fins_start_where_those_fins_end() {
+        use waveform::Waveform::Marked;
+        // `time - seconds`, marked so that it stays dynamic.
+        let minus = |id, seconds| {
+            BinaryOp(
+                BinaryOperator::Subtract,
+                Box::new(Time(())),
+                Box::new(Marked {
+                    id,
+                    waveform: Box::new(Const(seconds)),
+                }),
+            )
+        };
+        let fin = |length, value| Fin {
+            length: Box::new(length),
+            waveform: Box::new(Const(value)),
+            state: (),
+        };
+        let append = |a, b| Append(Box::new(a), Box::new(b), ());
+        let merge = |a, b| BinaryOp(BinaryOperator::Merge, Box::new(a), Box::new(b));
+        // A sound of 4 samples, then one of 3 samples starting at 3 (the
+        // first whole second after 2.5) and lasting 3, then one of 3 starting
+        // at 3 + 3 = 6. The last waits on a length that is negative until the
+        // first sound's offset, then is the second sound's offset.
+        let w = merge(
+            merge(
+                fin(minus(1, 3.5), 1.0),
+                append(fin(minus(2, 2.5), 0.0), fin(minus(2, 2.5), 10.0)),
+            ),
+            append(
+                fin(append(fin(minus(2, 2.5), -1.0), minus(2, 2.5)), 0.0),
+                fin(minus(2, 2.5), 100.0),
+            ),
+        );
+        run_tests(&w, &[1.0, 1.0, 1.0, 11.0, 10.0, 10.0, 100.0, 100.0, 100.0]);
     }
 
     #[test]
@@ -2574,7 +2624,7 @@ mod tests {
             state: (),
         };
         assert_eq!(
-            g.known_length(&shared(fixed(5), after(unknown, reference()))),
+            known_length(&g, &shared(fixed(5), after(unknown, reference()))),
             None
         );
     }
@@ -2591,16 +2641,19 @@ mod tests {
             waveform: Box::new(waveform),
             state: (),
         };
-        assert_eq!(g.known_length(&shared(Time(()), fin(reference()))), Some(2));
+        assert_eq!(
+            known_length(&g, &shared(Time(()), fin(reference()))),
+            Some(2)
+        );
         // The nearest `Shared` with the id decides.
         let finite_inside_infinite =
             shared(Time(()), shared(Fixed(vec![1.0; 1], ()), fin(reference())));
-        assert_eq!(g.known_length(&finite_inside_infinite), Some(1));
+        assert_eq!(known_length(&g, &finite_inside_infinite), Some(1));
         let infinite_inside_finite =
             shared(Fixed(vec![1.0; 3], ()), shared(Time(()), fin(reference())));
-        assert_eq!(g.known_length(&infinite_inside_finite), Some(2));
+        assert_eq!(known_length(&g, &infinite_inside_finite), Some(2));
         // A `Ref` in a shared waveform reads the `Shared` around its own.
         let read_in_waveform = shared(Time(()), shared(reference(), fin(reference())));
-        assert_eq!(g.known_length(&read_in_waveform), Some(2));
+        assert_eq!(known_length(&g, &read_in_waveform), Some(2));
     }
 }

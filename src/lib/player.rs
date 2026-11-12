@@ -530,6 +530,8 @@ impl Player {
     /// one on each beat, whose level a `MetronomeAmplitude` mark sets.
     pub fn beats_waveform(&self, environment: &Environment) -> waveform::Waveform<MarkId> {
         let seconds_per_beat = duration_from_beats(self.tempo, 1).as_secs_f32();
+        let samples_per_beat =
+            (seconds_per_beat * environment.sample_rate() as f32).ceil() as usize;
         let mut ws = Vec::new();
         for i in 0..self.beats_per_measure {
             ws.push(format!(
@@ -551,8 +553,11 @@ impl Player {
         let bindings: Vec<expr::SourceBinding<MarkId, Source>> = vec![
             expr::Binding::Open(vec!["__prelude".to_string()]).into(),
             definition("_metronome_amplitude", metronome_amplitude(false)),
-            definition("_accent_click", fixed_click(environment, true)),
-            definition("_click", fixed_click(environment, false)),
+            definition(
+                "_accent_click",
+                fixed_click(environment, true, samples_per_beat),
+            ),
+            definition("_click", fixed_click(environment, false, samples_per_beat)),
         ];
         match environment
             .evaluate_source(&source, &bindings)
@@ -600,9 +605,13 @@ fn click_source(accent: bool) -> String {
     )
 }
 
-/// Returns the metronome click of [`click_source`] as its samples, followed by
-/// silence that never ends.
-fn fixed_click(environment: &Environment, accent: bool) -> waveform::Waveform<MarkId> {
+/// Returns the metronome click of [`click_source`] as its samples, at most
+/// `max_len` of them, followed by silence that never ends.
+fn fixed_click(
+    environment: &Environment,
+    accent: bool,
+    max_len: usize,
+) -> waveform::Waveform<MarkId> {
     use waveform::Waveform::{Append, Const, Fixed};
     // The click is evaluated with only the prelude in scope (no std).
     let bindings: Vec<expr::SourceBinding<MarkId, Source>> =
@@ -616,10 +625,7 @@ fn fixed_click(environment: &Environment, accent: bool) -> waveform::Waveform<Ma
         Err(message) => panic!("Error evaluating metronome click: {}", message),
     };
     let mut generator = generator::Generator::new(environment.sample_rate());
-    let len = generator
-        .known_length(&click)
-        .expect("metronome click is finite");
-    let mut samples = vec![0.0; len];
+    let mut samples = vec![0.0; max_len];
     let len = generator.generate(&mut generator::initialize_state(click), &mut samples);
     samples.truncate(len);
     Append(Box::new(Fixed(samples, ())), Box::new(Const(0.0)), ())
@@ -795,27 +801,6 @@ mod tests {
         );
     }
 
-    /// Collects the known length of each mark in `waveform`, by mark.
-    fn collect_mark_lengths(
-        generator: &generator::Generator,
-        waveform: &waveform::Waveform<MarkId>,
-        lengths: &mut Vec<(MarkId, Option<usize>)>,
-    ) {
-        use waveform::Waveform::*;
-        match waveform {
-            Marked { id, waveform } => {
-                lengths.push((id.clone(), generator.known_length(waveform)));
-                collect_mark_lengths(generator, waveform, lengths);
-            }
-            Fin { waveform, .. } => collect_mark_lengths(generator, waveform, lengths),
-            Append(a, b, _) | BinaryOp(_, a, b) => {
-                collect_mark_lengths(generator, a, lengths);
-                collect_mark_lengths(generator, b, lengths);
-            }
-            _ => {}
-        }
-    }
-
     // The measure has a known length, and each beat keeps the mark the
     // metronome switch substitutes, with or without precompute.
     #[test]
@@ -827,20 +812,13 @@ mod tests {
         let precomputed = generator.precompute(beats.clone());
         for waveform in [beats, precomputed] {
             // A beat at 90 bpm is 2/3 s: 5334 samples at 8000 Hz, rounded up.
-            assert_eq!(
-                generator.known_length(&waveform),
-                Some(4 * 5334),
-                "for beats {}",
-                waveform
+            // Generate the samples to see how many there are using a buffer
+            // that's bigger than necessary.
+            let length = generator.generate(
+                &mut generator::initialize_state(waveform.clone()),
+                &mut vec![0.0; 4 * 6000],
             );
-            let mut lengths = Vec::new();
-            collect_mark_lengths(&generator, &waveform, &mut lengths);
-            assert_eq!(
-                lengths,
-                vec![(MarkId::MetronomeAmplitude, Some(usize::MAX)); 4],
-                "for beats {}",
-                waveform
-            );
+            assert_eq!(length, 4 * 5334, "for beats {}", waveform);
         }
     }
 
@@ -852,7 +830,7 @@ mod tests {
         use waveform::Waveform::{Append, Const, Fixed};
         let environment = Environment::new(8000, 90, std::path::PathBuf::new());
         for accent in [false, true] {
-            match fixed_click(&environment, accent) {
+            match fixed_click(&environment, accent, 8000) {
                 Append(a, b, ()) => match (*a, *b) {
                     (Fixed(samples, ()), Const(0.0)) => {
                         assert_eq!(samples.len(), 160);

@@ -289,6 +289,79 @@ impl<MarkId: Display, State> Display for Waveform<MarkId, State> {
     }
 }
 
+impl<M, S> Waveform<M, S> {
+    /// Returns true if `waveform` contains a `Marked` or `Captured` waveform.
+    pub fn has_marked_or_captured(self: &Waveform<M, S>) -> bool {
+        self.any_node(&|w| matches!(w, Waveform::Marked { .. } | Waveform::Captured { .. }))
+    }
+
+    /// Returns true if `self` contains `Noise`, so that two copies of it can
+    /// generate different samples.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tuun::waveform::{BinaryOperator, Waveform};
+    ///
+    /// let noisy: Waveform<()> = Waveform::BinaryOp(
+    ///     BinaryOperator::Add,
+    ///     Box::new(Waveform::Time(())),
+    ///     Box::new(Waveform::Noise),
+    /// );
+    /// assert!(noisy.has_noise());
+    /// assert!(!(&Waveform::<()>::Time(())).has_noise());
+    /// ```
+    pub fn has_noise(self: &Waveform<M, S>) -> bool {
+        self.any_node(&|w| matches!(w, Waveform::Noise))
+    }
+
+    /// Returns true if `matches` holds for `self` or any waveform within it.
+    pub fn any_node(self: &Waveform<M, S>, matches: &impl Fn(&Waveform<M, S>) -> bool) -> bool {
+        use Waveform::*;
+        if matches(self) {
+            return true;
+        }
+        let any = |w: &Waveform<M, S>| w.any_node(matches);
+        match self {
+            Const(_) | Time(_) | Noise | Fixed(_, _) | Ref(_) => false,
+            UnaryOp(_, a) | Marked { waveform: a, .. } | Captured { waveform: a, .. } => any(a),
+            Fin {
+                length: a,
+                waveform: b,
+                ..
+            }
+            | Append(a, b, _)
+            | Phase {
+                frequency: a,
+                offset: b,
+                ..
+            }
+            | BinaryOp(_, a, b)
+            | Reset {
+                trigger: a,
+                waveform: b,
+                ..
+            }
+            | Shared {
+                waveform: a,
+                body: b,
+                ..
+            } => any(a) || any(b),
+            Filter {
+                waveform,
+                feed_forward,
+                feedback,
+                ..
+            } => any(waveform) || feed_forward.iter().chain(feedback).any(any),
+            Alt {
+                trigger,
+                positive_waveform,
+                negative_waveform,
+            } => any(trigger) || any(positive_waveform) || any(negative_waveform),
+        }
+    }
+}
+
 /// Replaces the state of `waveform` and every component with `state`.
 pub fn initialize_state<M, S, T>(waveform: Waveform<M, S>, state: T) -> Waveform<M, T>
 where

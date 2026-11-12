@@ -149,7 +149,9 @@ high_cutoff = filtered(440, cutoff_freq_hz = 6000);
 
 ### Seq and Followed-By
 
-The followed-by operator `\` is right-associative: `a \ b \ c` is `a \ (b \ c)`. Each operand's offset is measured from that operand's own start, so a seq that ends at its own offset (for example, `w | fin(time - d) | seq(time - d)`) is followed sample-exactly by the next operand. Writing `(a \ b) \ c` instead starts `c` at the sum of the offsets of `a` and `b`, which can round to a sample one earlier or later than where `b` ends.
++The followed-by operator `a \ b` starts `b` where the offset of the seq `a` first reaches 0, measured from `a`'s start, and `b`'s own time starts there. A seq that ends at its own offset (for example, `w | fin(time - d) | seq(time - d)`) is followed sample-exactly by the next operand.
+
+When both operands of `\` are seqs, the result is a seq whose offset is the sum of theirs. The first operand's offset must not use `noise` except through the reference `share` passes to its function, since the sum and the delay of the second operand would read different noise; such an offset is an evaluation error. The same holds for the seqs passed to `sequence`, when there are two or more.
 
 
 <!-- TODO update or remove this overloading section

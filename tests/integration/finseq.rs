@@ -6,20 +6,17 @@ use std::path::PathBuf;
 
 use tuun::environment::Environment;
 use tuun::generator::{self, Generator};
+use tuun::ids::MarkId;
 use tuun::programs::{Evaluated, ProgramSet};
+use tuun::waveform::Waveform;
 
 #[test]
 fn adsr_segments_meet_without_gaps_or_overlaps() {
-    // This tests the rounding in \ implied by its associativity. When
-    // right-associated, the second argument's own time starts at that offset.
-    // When it is a seq, the result is a seq whose offset is the sum of the two
-    // offsets, measured from the start of the first argument. That sum can
-    // round to a different sample than the second argument's own offset does
-    // from its own start, so a waveform that ends at its offset (e.g. `w |
-    // fin(time - d) | seq(time - d)`) is followed sample-exactly by `a \ (b \
-    // c)` but not always by `(a \ b) \ c`. The property depends on how the
-    // parser nests `\`, how `\` delays each segment, and how the generator ends
-    // each `fin`.
+    // Each segment ends at its own offset (`w | fin(time - d) | seq(time -
+    // d)`), and `\` starts the next segment's own time there, so segments meet
+    // sample-exactly even when a duration isn't a whole number of samples. The
+    // property depends on how `\` delays each segment and how the generator
+    // ends each `fin`.
     let sample_rate = 44100;
     // (arguments, length of each segment in samples)
     let cases = [
@@ -53,5 +50,163 @@ fn adsr_segments_meet_without_gaps_or_overlaps() {
         for (i, &x) in out[..len].iter().enumerate().skip(1) {
             assert!(x > 0.0 && x <= 1.0, "ADSR({}) [{}] = {}", arguments, i, x);
         }
+    }
+}
+
+/// Returns the optimized waveform of the program `_ = program` after `open
+/// std;`, at `sample_rate`, or the messages of the diagnostics evaluating it
+/// reports.
+fn evaluate(sample_rate: u32, program: &str) -> Result<Waveform<MarkId>, Vec<String>> {
+    let source = format!("open std;\n#{{level_db=0}}\n_ = {};\n", program);
+    let (set, _) = ProgramSet::from_source(source, PathBuf::new()).expect("source should parse");
+    let library_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lib/v0");
+    let environment = Environment::new(sample_rate, 90, library_root);
+    match environment.evaluate_program(&set.evaluation_input(0)) {
+        Ok(Evaluated::Waveform(waveform, _)) => Ok(waveform),
+        Err(diagnostics) => Err(diagnostics.into_iter().map(|d| d.message).collect()),
+        Ok(_) => panic!("{}: not a waveform", program),
+    }
+}
+
+/// Returns the samples of the program `_ = program` after `open std;`, at
+/// `sample_rate`, or the messages of the diagnostics evaluating it reports.
+fn render(sample_rate: u32, program: &str) -> Result<Vec<f32>, Vec<String>> {
+    let waveform = evaluate(sample_rate, program)?;
+    let mut out = vec![0.0; 10000];
+    let len =
+        Generator::new(sample_rate).generate(&mut generator::initialize_state(waveform), &mut out);
+    out.truncate(len);
+    Ok(out)
+}
+
+#[test]
+fn left_nested_seqs_with_linear_offsets_meet_without_gaps_or_overlaps() {
+    // Each offset reaches 0 at 0.25 s, though only the last is written
+    // `time - 0.25`. Each segment lasts 0.25 s.
+    let expected: Vec<f32> = [1.0, 2.0, 3.0]
+        .iter()
+        .flat_map(|&x| std::iter::repeat_n(x, 2000))
+        .collect();
+    for program in [
+        "((1 | fin(time - 0.25) | seq(time * 2 - 0.5)) \\ \
+          (2 | fin(time - 0.25) | seq(time - 0.25))) \\ (3 | fin(time - 0.25))",
+        "((1 | fin(time - 0.25) | seq(time - 0.25)) \\ \
+          (2 | fin(time - 0.25) | seq(time * 2 - 0.5))) \\ (3 | fin(time - 0.25))",
+        "((1 | fin(time - 0.25) | seq((time - 0.5) + 0.25)) \\ \
+          (2 | fin(time - 0.25) | seq(time - 0.25))) \\ (3 | fin(time - 0.25))",
+    ] {
+        assert_eq!(render(8000, program), Ok(expected.clone()), "{}", program);
+    }
+}
+
+#[test]
+fn left_nested_seqs_with_nonlinear_offsets_meet_sample_exactly() {
+    // `time * time - 0.00010201` first reaches 0 at 0.0101 s, 445.41 samples,
+    // so a sum of rounded roots would drift from where each segment ends.
+    let segment = "fin(time * time - 0.00010201) | seq(time * time - 0.00010201)";
+    let n = render(44100, "1 | fin(time * time - 0.00010201)")
+        .expect("one segment")
+        .len();
+    let program = format!(
+        "(((1 | {s}) \\ (10 | {s})) \\ (100 | {s})) \\ (1000 | fin(time * time - 0.00010201))",
+        s = segment
+    );
+    let expected: Vec<f32> = [1.0, 10.0, 100.0, 1000.0]
+        .iter()
+        .flat_map(|&x| std::iter::repeat_n(x, n))
+        .collect();
+    assert_eq!(render(44100, &program), Ok(expected));
+}
+
+#[test]
+fn left_nested_seqs_with_a_shared_noisy_offset_meet_without_gaps_or_overlaps() {
+    // The first segment lasts a random 0.15 to 0.35 s. Both copies of its
+    // offset read the one shared value, so the third segment starts where the
+    // second ends. A gap would show as a 0 and an overlap as a sum (11 or 110).
+    let out = render(
+        8000,
+        "share(noise | hold(), fn(n) => \
+           ((1 | fin(time - 0.25 + 0.1 * n) | seq(time - 0.25 + 0.1 * n)) \\ \
+            (10 | fin(time - 0.25) | seq(time - 0.25))) \\ (100 | fin(time - 0.25)))",
+    )
+    .expect("renders");
+    let first = out.iter().take_while(|&&x| x == 1.0).count();
+    assert!((1200..=2800).contains(&first), "first segment: {}", first);
+    let expected: Vec<f32> = [10.0, 100.0]
+        .iter()
+        .flat_map(|&x| std::iter::repeat_n(x, 2000))
+        .collect();
+    assert_eq!(&out[first..], &expected[..]);
+}
+
+#[test]
+fn left_nested_seqs_optimize_like_right_nested_ones() {
+    // Each case's segments are joined by `\` as the parser nests them (to the
+    // right), nested to the left, and in pairs.
+    let cases = [
+        // Each segment ends at its own offset.
+        ["1 | fin(time - 0.25) | seq(time - 0.25)"; 4],
+        // Each segment runs past its offset.
+        ["1 | fin(time - 0.5) | seq(time - 0.25)"; 4],
+        // Mixed, with offsets that aren't linear and that don't match.
+        [
+            "1 | fin(time - 0.25) | seq(time - 0.25)",
+            "2 | fin(time - 0.5) | seq(time * time - 0.01)",
+            "3 | fin(time * 2 - 0.5) | seq(time * 2 - 0.5)",
+            "4 | fin(time - 0.25)",
+        ],
+    ];
+    for segments in cases {
+        let segments = segments.map(|s| format!("({})", s));
+        let right = segments.join(" \\ ");
+        let left = segments[1..]
+            .iter()
+            .fold(segments[0].clone(), |a, b| format!("({} \\ {})", a, b));
+        let mixed = format!(
+            "({} \\ {}) \\ ({} \\ {})",
+            segments[0], segments[1], segments[2], segments[3]
+        );
+        let expected = evaluate(8000, &right).expect(&right);
+        assert_eq!(evaluate(8000, &left), Ok(expected.clone()), "{}", left);
+        assert_eq!(evaluate(8000, &mixed), Ok(expected), "{}", mixed);
+    }
+    // Within `share`, both copies of an offset read the same shared value.
+    let shared = |body: &str| {
+        format!(
+            "share(noise | hold(), fn(n) => {})",
+            body.replace(
+                "{}",
+                "(1 | fin(time - 0.25 + 0.1 * n) | seq(time - 0.25 + 0.1 * n))"
+            )
+        )
+    };
+    let right = shared("{} \\ {} \\ (2 | fin(time - 0.25))");
+    let left = shared("({} \\ {}) \\ (2 | fin(time - 0.25))");
+    assert_eq!(
+        evaluate(8000, &left),
+        Ok(evaluate(8000, &right).expect(&right))
+    );
+}
+
+#[test]
+fn left_nested_seqs_with_noisy_offsets_are_evaluation_errors() {
+    // Without `share`, each copy of a noisy offset reads its own noise, so the
+    // combined seq could start its successor at a different time than the
+    // first seq's own offset ends.
+    for program in [
+        "((1 | fin(time - 0.25) | seq(time - 0.25 + 0.01 * noise)) \\ \
+          (2 | fin(time - 0.25) | seq(time - 0.25))) \\ (3 | fin(time - 0.25))",
+        "((1 | fin(time - 0.25) | seq(time + (0.01 * noise - 0.25))) \\ \
+          (2 | fin(time - 0.25) | seq(time - 0.25))) \\ (3 | fin(time - 0.25))",
+    ] {
+        let messages = render(8000, program).expect_err(program);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("offset uses noise") && !m.contains("internal error")),
+            "{}: {:?}",
+            program,
+            messages
+        );
     }
 }

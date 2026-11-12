@@ -609,7 +609,10 @@ impl Environment {
         instrument: Option<&Trace<Source>>,
     ) -> (waveform::Waveform<MarkId>, Arc<WaveformMarks>) {
         let (waveform, marks) = trace_walk::walk(waveform, trace, instrument, self.sample_rate);
-        (optimizer::optimize(waveform), Arc::new(marks))
+        log::debug!("before optimization: {:#?}", &waveform);
+        let waveform = optimizer::optimize(waveform);
+        log::debug!(" after optimization: {:#?}", &waveform);
+        (waveform, Arc::new(marks))
     }
 
     /// Evaluates the program `input` describes against its declared kind: an

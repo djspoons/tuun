@@ -535,7 +535,7 @@ impl<'ttf> Renderer<'ttf> {
             self.tempo,
             self.sample_rate,
         );
-        // Each mark's rectangle, its colour, and whether it's sounding.
+        // Each mark's rectangle, its color, and whether it's sounding.
         let mut rects = Vec::new();
         for even in [false, true] {
             // The oldest odd/even Beats waveform's measure.

@@ -166,38 +166,34 @@ where
     binary_op(arguments, call, "&", BinaryOperator::Merge)
 }
 
-// Given waveforms that represent offsets (and assuming offset waveforms are of the form
-// `Time ~+ w` or `Const(x)`) return a new waveform which represents the sum of those offsets.
+/// Adds two offset waveform by returning an offset that reaches 0 where the
+/// offset `b` does, measured from where the offset `a` reaches 0, or an
+/// evaluation error if `a` uses noise.
 fn add_offsets<M, S>(a: Waveform<M>, b: Waveform<M>) -> Result<Waveform<M>, Error<S>>
 where
-    M: Clone + Debug + PartialEq + CarriesTrace<S>,
+    M: Clone + Display + CarriesTrace<S>,
     S: Clone + Debug,
 {
-    // The roots are read through bare copies; `a` and `b` themselves keep
-    // their trace marks, which the caller embeds.
-    let (a_bare, b_bare) = (
-        trace::strip_trace_marks(a.clone()),
-        trace::strip_trace_marks(b.clone()),
-    );
-    match (
-        optimizer::first_root(&a_bare),
-        optimizer::first_root(&b_bare),
-    ) {
-        // The sum's root is the sum of the roots: `Time - (a + b)`.
-        (Some(a_root), Some(b_root)) => Ok(Waveform::BinaryOp(
-            BinaryOperator::Subtract,
-            Box::new(Waveform::Time(())),
-            Box::new(Waveform::BinaryOp(
-                BinaryOperator::Add,
-                Box::new(a_root),
-                Box::new(b_root),
-            )),
-        )),
-        (a_root, b_root) => Err(Error::internal_here(format!(
-            "Cannot add offsets that are not linear functions of Time, got {:?} and {:?} for {:?} and {:?}",
-            a_root, b_root, a, b
-        ))),
+    // The result copies of `a`. If `a` uses noise those can reach 0 at a
+    // different times.
+    if a.has_noise() {
+        return Err(Error::eval_here(format!(
+            "A seq whose offset uses noise can only be followed by another seq \
+             if that noise comes from share, got {}",
+            trace::strip_trace_marks(a)
+        )));
     }
+    // Negative until `a` reaches 0, then `b`, whose `Time` starts at 0 there,
+    // so where `b` reaches 0 is measured from where `a` does.
+    Ok(Waveform::Append(
+        Box::new(Waveform::Fin {
+            length: Box::new(a),
+            waveform: Box::new(Waveform::Const(-1.0)),
+            state: (),
+        }),
+        Box::new(b),
+        (),
+    ))
 }
 
 /// Returns the merge of `a` with `b` delayed until `a_offset`, `a`'s offset.
@@ -1551,31 +1547,75 @@ mod tests {
 
     #[test]
     fn test_followed_by_sums_seq_offsets() {
-        fn seq(seconds: f32) -> Expr<u32, ()> {
+        let op = |op, a, b| Waveform::BinaryOp(op, Box::new(a), Box::new(b));
+        let seq = |offset: Waveform<u32>| -> Expr<u32, ()> {
             Seq {
-                offset: boxed(Expr::Waveform(Waveform::BinaryOp(
-                    BinaryOperator::Subtract,
-                    Box::new(Waveform::Time(())),
-                    Box::new(Waveform::Const(seconds)),
-                ))),
+                offset: boxed(Expr::Waveform(offset)),
                 waveform: boxed(Expr::float(1.0)),
             }
+        };
+        let offset_of = |result: Result<Expr<u32, ()>, Error<()>>| match result {
+            Ok(Seq { offset, .. }) => match offset.expr {
+                Expr::Waveform(offset) => offset,
+                expr => panic!("offset should be a waveform, got {}", expr),
+            },
+            _ => panic!("seq \\ seq should be a seq"),
+        };
+        let then = |a, b| {
+            Waveform::Append(
+                Box::new(Waveform::Fin {
+                    length: Box::new(a),
+                    waveform: Box::new(Waveform::Const(-1.0)),
+                    state: (),
+                }),
+                Box::new(b),
+                (),
+            )
+        };
+        let quarter = || {
+            op(
+                BinaryOperator::Subtract,
+                Waveform::Time(()),
+                Waveform::Const(0.25),
+            )
+        };
+        // time * time - 0.0625
+        let squared = || {
+            op(
+                BinaryOperator::Subtract,
+                op(
+                    BinaryOperator::Multiply,
+                    Waveform::Time(()),
+                    Waveform::Time(()),
+                ),
+                Waveform::Const(0.0625),
+            )
+        };
+        // (time - 0.25) + 0.01 * noise
+        let noisy = || {
+            op(
+                BinaryOperator::Add,
+                quarter(),
+                op(
+                    BinaryOperator::Multiply,
+                    Waveform::Const(0.01),
+                    Waveform::Noise,
+                ),
+            )
+        };
+        for (a, b) in [
+            (quarter(), quarter()),
+            (squared(), quarter()),
+            (quarter(), squared()),
+            (quarter(), noisy()),
+            (then(quarter(), squared()), quarter()),
+        ] {
+            let offset = offset_of(call(followed_by, vec![seq(a.clone()), seq(b.clone())]));
+            assert_eq!(offset, then(a, b));
         }
-        fn offset_root(expr: Expr<u32, ()>) -> Option<Waveform<u32>> {
-            let Seq { offset, .. } = expr else {
-                panic!("seq \\ seq should be a seq");
-            };
-            let Expr::Waveform(offset) = offset.expr else {
-                panic!("offset should be a waveform");
-            };
-            optimizer::first_root(&offset)
-        }
-        // The combined offset is left unoptimized; the next `\` still reads
-        // its root off, so a chain stays flat.
-        let two = call(followed_by, vec![seq(1.0), seq(2.0)]).unwrap();
-        assert_eq!(offset_root(two.clone()), Some(Waveform::Const(3.0)));
-        let three = call(followed_by, vec![two, seq(4.0)]).unwrap();
-        assert_eq!(offset_root(three), Some(Waveform::Const(7.0)));
+        // The first offset is copied, so it may not use noise.
+        let error = call(followed_by, vec![seq(noisy()), seq(quarter())]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Eval);
     }
 
     #[test]
@@ -1734,22 +1774,20 @@ mod tests {
     }
 
     #[test]
-    fn traced_offsets_still_add() {
-        let seq = |seconds: f32| Seq {
+    fn traced_noisy_offsets_are_still_evaluation_errors() {
+        let seq = |offset| Seq {
             offset: boxed(Expr::Waveform(Waveform::BinaryOp(
                 BinaryOperator::Subtract,
                 Box::new(traced(Waveform::Time(()))),
-                Box::new(traced(Waveform::Const(seconds))),
+                Box::new(traced(offset)),
             ))),
             waveform: boxed(Expr::float(1.0)),
         };
-        let Seq { offset, .. } = call(followed_by, vec![seq(1.0), seq(2.0)]).unwrap() else {
-            panic!("seq \\ seq should be a seq");
-        };
-        let Expr::Waveform(offset) = offset.expr else {
-            panic!("offset should be a waveform");
-        };
-        let root = optimizer::first_root(&trace::strip_trace_marks(offset));
-        assert!(matches!(root, Some(Waveform::Const(v)) if v == 3.0));
+        let error = call(
+            followed_by,
+            vec![seq(Waveform::Noise), seq(Waveform::Const(2.0))],
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Eval);
     }
 }
