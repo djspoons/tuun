@@ -24,6 +24,11 @@ pub fn optimize<M>(waveform: Waveform<M>) -> Waveform<M>
 where
     M: Clone + PartialEq,
 {
+    // TODO could distribute constant arithmetic over Append, Reset, and Alt
+    // though...
+    //  * we should decide if constants should be pushed into or pulled out
+    //  * we should be careful about doing adding work since Alt generates both
+    //    branches
     use Waveform::*;
     match waveform {
         // No changes for these:
@@ -213,52 +218,28 @@ where
                         Box::new(Const(c)),
                     ))),
                 ),
-                // TODO could distribute constants over Append(Fin, _), Reset, and Alt
-                // ... though Alt generates both branches, so better not to do too much work
-
-                // Combine two Fins with the same length
-                // TODO is this really necessary for Add anymore?
+                // Pull Fin out
                 (
+                    waveform,
                     Fin {
-                        length: a_length,
-                        waveform: a,
+                        length,
+                        waveform: inner,
                         ..
                     },
+                )
+                | (
                     Fin {
-                        length: b_length,
-                        waveform: b,
+                        length,
+                        waveform: inner,
                         ..
                     },
-                ) if interchangeable_lengths(&a_length, &b_length) => Fin {
-                    length: a_length,
-                    waveform: Box::new(optimize(BinaryOp(BinaryOperator::Add, a, b))),
-                    state: (),
-                },
-                (
-                    a,
-                    Fin {
-                        length, waveform, ..
-                    },
+                    waveform,
                 ) => optimize(Fin {
                     length,
                     waveform: Box::new(optimize(BinaryOp(
                         BinaryOperator::Add,
-                        Box::new(a),
-                        waveform,
-                    ))),
-                    state: (),
-                }),
-                (
-                    Fin {
-                        length, waveform, ..
-                    },
-                    b,
-                ) => optimize(Fin {
-                    length,
-                    waveform: Box::new(optimize(BinaryOp(
-                        BinaryOperator::Add,
-                        waveform,
-                        Box::new(b),
+                        Box::new(waveform),
+                        inner,
                     ))),
                     state: (),
                 }),
@@ -442,37 +423,28 @@ where
                     ))),
                     b,
                 ),
-                // TODO could check the inside of Marked/Capture.
-
-                // TODO could distribute constants over, Append, Reset, and Alt
-                // ... though currently Alt generates both branches, so better not to do too much work
-
-                // Pull Fin out
+                // Pull out Fins
                 (
                     Fin {
-                        length, waveform, ..
+                        length,
+                        waveform: inner,
+                        ..
                     },
-                    b,
-                ) => optimize(Fin {
-                    length,
-                    waveform: Box::new(optimize(BinaryOp(
-                        BinaryOperator::Multiply,
-                        waveform,
-                        Box::new(b),
-                    ))),
-                    state: (),
-                }),
-                (
-                    a,
+                    waveform,
+                )
+                | (
+                    waveform,
                     Fin {
-                        length, waveform, ..
+                        length,
+                        waveform: inner,
+                        ..
                     },
                 ) => optimize(Fin {
                     length,
                     waveform: Box::new(optimize(BinaryOp(
                         BinaryOperator::Multiply,
-                        Box::new(a),
-                        waveform,
+                        Box::new(waveform),
+                        inner,
                     ))),
                     state: (),
                 }),
@@ -588,7 +560,7 @@ where
         },
         // TODO if the waveform has constants, they can be pulled out; also
         // nested resets with the same trigger. Consider a naive version of the
-        // triangle wave as an example
+        // triangle wave as an example.
         Reset {
             trigger,
             waveform,
@@ -624,7 +596,8 @@ where
             },
         },
         Marked { id, waveform } => {
-            // TODO could pull out Fin if process_marks better implemented Fin
+            // Shouldn't move things out of a Marked, since that would change
+            // the result of future substitutions.
             Marked {
                 id,
                 waveform: Box::new(optimize(*waveform)),
