@@ -35,13 +35,37 @@ pub trait Id: Clone + fmt::Debug + Send + PartialEq {
     type Selector: Select<Self>;
 }
 
+/// When a played waveform starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Start {
+    /// The given time after the start of the buffer being generated when the
+    /// tracker receives the command.
+    After(Duration),
+    /// At the given instant. An instant already past plays from where the
+    /// waveform would be by now, dropping what was missed.
+    At(Instant),
+}
+
+impl Start {
+    /// The start of the buffer being generated when the tracker receives the
+    /// command.
+    pub const NOW: Start = Start::After(Duration::ZERO);
+
+    /// Returns the start `offset` after this one.
+    pub fn later(self, offset: Duration) -> Start {
+        match self {
+            Start::After(delay) => Start::After(delay + offset),
+            Start::At(instant) => Start::At(instant + offset),
+        }
+    }
+}
+
 pub enum Command<I: Id, M> {
     Play {
         // A unique id for this waveform
         id: I,
         waveform: waveform::Waveform<M>,
-        // When the waveform should start playing; if in the past or None, then play immediately
-        start: Option<Instant>,
+        start: Start,
         // If set, play this waveform in a loop
         repeat_every: Option<Duration>,
     },
@@ -53,6 +77,9 @@ pub enum Command<I: Id, M> {
         mark_id: M,
         waveform: waveform::Waveform<M>,
     },
+    // Process each command in order against the same buffer, so their
+    // `Start::After` starts share one origin.
+    Batch(Vec<Command<I, M>>),
     // Remove matching pending waveforms. With `after`, only those starting at
     // or after that instant are removed; matching pending waveforms starting
     // earlier lose their repeat instead, so an in-progress cycle finishes but
@@ -514,7 +541,10 @@ where
                 self.pending_waveforms.push(PendingWaveform {
                     id,
                     waveform,
-                    start: start.unwrap_or(buffer_start),
+                    start: match start {
+                        Start::After(delay) => buffer_start + delay,
+                        Start::At(instant) => instant,
+                    },
                     repeat_every,
                 });
                 self.pending_waveforms.sort_by_key(|w| w.start);
@@ -542,6 +572,11 @@ where
                         waveform::substitute(&mut pending.waveform, &mark_id, &waveform);
                         log::trace!("  new pending waveform is: {}", pending.waveform);
                     }
+                }
+            }
+            Command::Batch(commands) => {
+                for command in commands {
+                    self.process_command(command, buffer_start);
                 }
             }
             Command::RemovePending { selector, after } => {
@@ -792,7 +827,7 @@ mod tests {
         Command::Play {
             id,
             waveform,
-            start: None,
+            start: Start::NOW,
             repeat_every: None,
         }
     }
@@ -920,7 +955,7 @@ mod tests {
         let (mut tracker, sender, status_receiver, _samples) = test_tracker();
         let mut out = vec![0.0f32; 64];
 
-        let start = Some(Instant::now() + Duration::from_secs(60));
+        let start = Start::At(Instant::now() + Duration::from_secs(60));
         for id in [
             WaveformId::Program(3),
             WaveformId::Step {
@@ -966,7 +1001,7 @@ mod tests {
             .send(Command::Play {
                 id: current_cycle_step.clone(),
                 waveform: waveform::Waveform::Const(1.0),
-                start: None,
+                start: Start::NOW,
                 repeat_every: Some(Duration::from_secs(1)),
             })
             .unwrap();
@@ -978,7 +1013,7 @@ mod tests {
                     sixteenth: 0,
                 },
                 waveform: waveform::Waveform::Const(1.0),
-                start: Some(now + Duration::from_secs(10)),
+                start: Start::At(now + Duration::from_secs(10)),
                 repeat_every: Some(Duration::from_secs(1)),
             })
             .unwrap();
@@ -999,6 +1034,44 @@ mod tests {
         assert_eq!(remaining, vec![&current_cycle_step]);
     }
 
+    /// Starts relative to the receiving buffer begin at that buffer's start, so
+    /// a waveform played now loses none of its samples.
+    #[test]
+    fn batched_after_starts_offset_from_the_receiving_buffer() {
+        use waveform::Waveform::Fixed;
+        let (mut tracker, sender, status_receiver, _samples) = test_tracker();
+        let later = Duration::from_secs(10);
+        sender
+            .send(Command::Batch(vec![
+                Command::Play {
+                    id: WaveformId::Program(0),
+                    waveform: Fixed(vec![1.0, 2.0, 3.0], ()),
+                    start: Start::NOW,
+                    repeat_every: None,
+                },
+                Command::Play {
+                    id: WaveformId::Program(1),
+                    waveform: Fixed(vec![1.0], ()),
+                    start: Start::After(later),
+                    repeat_every: None,
+                },
+            ]))
+            .unwrap();
+        let mut out = vec![0.0f32; 64];
+        tracker.callback(&mut out);
+
+        assert_eq!(out[..4], [1.0, 2.0, 3.0, 0.0]);
+        let status = status_receiver.try_recv().unwrap();
+        let start = status.buffer_start;
+        assert_eq!(
+            status.start_times,
+            vec![
+                (WaveformId::Program(0), start),
+                (WaveformId::Program(1), start + later),
+            ]
+        );
+    }
+
     #[test]
     fn status_reports_the_starts_of_finished_active_and_pending_waveforms() {
         use waveform::Waveform::{Const, Fixed};
@@ -1016,7 +1089,7 @@ mod tests {
             .send(Command::Play {
                 id: WaveformId::Program(2),
                 waveform: Const(1.0),
-                start: Some(later),
+                start: Start::At(later),
                 repeat_every: None,
             })
             .unwrap();
@@ -1154,7 +1227,7 @@ mod tests {
                 .send(Command::Play {
                     id: WaveformId::Beats(even),
                     waveform: beat,
-                    start: Some(now + offset),
+                    start: Start::At(now + offset),
                     repeat_every: Some(2 * length),
                 })
                 .unwrap();

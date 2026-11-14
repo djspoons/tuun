@@ -1983,7 +1983,7 @@ mod tests {
         else {
             panic!("expected a Play");
         };
-        assert_eq!(start, Some(at));
+        assert_eq!(start, tracker::Start::At(at));
         assert_eq!(repeat_every, Some(std::time::Duration::from_secs(4)));
         assert_eq!(current_message(&state), "Recorded 1 note into A:1");
     }

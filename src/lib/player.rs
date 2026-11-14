@@ -150,6 +150,27 @@ pub fn play_message(played: Played, display_name: &str, loop_after_beats: Option
     }
 }
 
+/// Returns when the tracker should start a waveform played at `start`, finding
+/// the next measure from `status`.
+///
+/// Panics when `start` is `Start::NextMeasure` and `status` has no next
+/// measure.
+fn tracker_start(start: Start, status: &tracker::Status<WaveformId>) -> tracker::Start {
+    match start {
+        Start::Now => tracker::Start::NOW,
+        Start::NextMeasure => {
+            let now = time::Instant::now();
+            tracker::Start::At(next_measure_start(status, now).unwrap_or_else(|| {
+                panic!(
+                    "No next measure found at {:?}: {:?}",
+                    now, status.start_times
+                )
+            }))
+        }
+        Start::At(instant) => tracker::Start::At(instant),
+    }
+}
+
 pub struct Player {
     tempo: u32,
     beats_per_measure: u32,
@@ -246,17 +267,7 @@ impl Player {
         );
         let repeat_every =
             loop_after_beats.map(|beats| duration_from_beats(self.tempo, beats.into()));
-        let now = time::Instant::now();
-        let start_instant = match start {
-            Start::Now => None,
-            Start::NextMeasure => Some(next_measure_start(status, now).unwrap_or_else(|| {
-                panic!(
-                    "No next measure found at {:?}: {:?}",
-                    now, status.start_times
-                )
-            })),
-            Start::At(instant) => Some(instant),
-        };
+        let start = tracker_start(start, status);
         let mut waveform = waveform.clone();
         // Substitute the program's current slider positions before handing
         // the waveform to the tracker (since the cached ones may be old).
@@ -266,7 +277,7 @@ impl Player {
             .send(tracker::Command::Play {
                 id: id.clone(),
                 waveform: build_leveled_waveform(waveform, program.level_db()),
-                start: start_instant,
+                start,
                 repeat_every,
             })
             .unwrap();
@@ -294,33 +305,23 @@ impl Player {
         );
         let repeat_every =
             loop_after_beats.map(|beats| duration_from_beats(self.tempo, beats.into()));
-        let now = time::Instant::now();
-        let base = match start {
-            Start::Now => now,
-            Start::NextMeasure => next_measure_start(status, now).unwrap_or_else(|| {
-                panic!(
-                    "No next measure found at {:?}: {:?}",
-                    now, status.start_times
-                )
-            }),
-            Start::At(instant) => instant,
-        };
+        let start = tracker_start(start, status);
         let mut step = sequence.step_waveform.clone();
         substitute_current_slider_values(&mut step, set);
+        // One batch, so that steps started now all count from the same buffer.
+        let mut plays = Vec::new();
         for step_beat in sequence.step_beats() {
             let sixteenth = sequencer::sixteenth_for_beat(step_beat);
             let id = WaveformId::Step {
                 program: program_index,
                 sixteenth,
             };
-            self.sender
-                .send(tracker::Command::Play {
-                    id: id.clone(),
-                    waveform: build_leveled_waveform(step.clone(), program.level_db()),
-                    start: Some(base + beat_offset(self.tempo, step_beat)),
-                    repeat_every,
-                })
-                .unwrap();
+            plays.push(tracker::Command::Play {
+                id: id.clone(),
+                waveform: build_leveled_waveform(step.clone(), program.level_db()),
+                start: start.later(beat_offset(self.tempo, step_beat)),
+                repeat_every,
+            });
             let extra = sequence.step_literal_marks(sixteenth);
             let marks = played_marks(program_index, program, &sequence.step_marks, extra);
             waveform_marks.insert(id, marks);
@@ -334,20 +335,19 @@ impl Player {
                     let measures = ((step_beat - 0.75) / self.beats_per_measure as f32).ceil();
                     acc.max(measures * self.beats_per_measure as f32)
                 });
-        self.sender
-            .send(tracker::Command::Play {
-                id: WaveformId::Step {
-                    program: program_index,
-                    sixteenth: ANCHOR_SIXTEENTH,
-                },
-                waveform: build_leveled_waveform(
-                    silence_of_beats(pattern_beats, self.tempo),
-                    program.level_db(),
-                ),
-                start: Some(base),
-                repeat_every,
-            })
-            .unwrap();
+        plays.push(tracker::Command::Play {
+            id: WaveformId::Step {
+                program: program_index,
+                sixteenth: ANCHOR_SIXTEENTH,
+            },
+            waveform: build_leveled_waveform(
+                silence_of_beats(pattern_beats, self.tempo),
+                program.level_db(),
+            ),
+            start,
+            repeat_every,
+        });
+        self.sender.send(tracker::Command::Batch(plays)).unwrap();
         Some(message)
     }
 
@@ -415,7 +415,7 @@ impl Player {
         let _ = self.sender.send(tracker::Command::Play {
             id: id.clone(),
             waveform: build_leveled_waveform(step, program.level_db()),
-            start: Some(start),
+            start: tracker::Start::At(start),
             repeat_every,
         });
         let extra = sequence.step_literal_marks(sixteenth);
@@ -438,7 +438,7 @@ impl Player {
         let _ = self.sender.send(tracker::Command::Play {
             id: id.clone(),
             waveform: build_leveled_waveform(waveform, level_db),
-            start: None,
+            start: tracker::Start::NOW,
             repeat_every: None,
         });
         waveform_marks.insert(id, marks);
@@ -502,7 +502,7 @@ impl Player {
             .send(tracker::Command::Play {
                 id: WaveformId::Beats(false),
                 waveform: beats.clone(),
-                start: None,
+                start: tracker::Start::NOW,
                 repeat_every: Some(measure * 2),
             })
             .unwrap();
@@ -515,7 +515,7 @@ impl Player {
                             .send(tracker::Command::Play {
                                 id: WaveformId::Beats(true),
                                 waveform: beats,
-                                start: Some(start + measure),
+                                start: tracker::Start::At(start + measure),
                                 repeat_every: Some(measure * 2),
                             })
                             .unwrap();
@@ -888,6 +888,17 @@ mod tests {
         (player, receiver)
     }
 
+    /// Returns the commands in `receiver`, expecting one batch, as that
+    /// batch's commands.
+    fn batched_plays(receiver: &CommandReceiver) -> Vec<tracker::Command<WaveformId, MarkId>> {
+        let mut commands: Vec<_> = receiver.try_iter().collect();
+        assert_eq!(commands.len(), 1);
+        match commands.pop() {
+            Some(tracker::Command::Batch(commands)) => commands,
+            _ => panic!("expected a Batch command"),
+        }
+    }
+
     fn anchor_start(program: usize, start: Instant) -> (WaveformId, Instant) {
         (
             WaveformId::Step {
@@ -914,7 +925,7 @@ mod tests {
         );
         assert!(message.is_some());
 
-        let commands: Vec<_> = receiver.try_iter().collect();
+        let commands = batched_plays(&receiver);
         let plays: Vec<_> = commands
             .iter()
             .map(|c| match c {
@@ -923,7 +934,7 @@ mod tests {
                     waveform,
                     start,
                     repeat_every,
-                } => (id, waveform, start.unwrap(), repeat_every.unwrap()),
+                } => (id, waveform, *start, repeat_every.unwrap()),
                 _ => panic!("expected only Play commands"),
             })
             .collect();
@@ -952,11 +963,13 @@ mod tests {
                 sixteenth: ANCHOR_SIXTEENTH
             }
         );
-        // Steps are offset from the anchored cycle start by their beats.
-        assert_eq!(step_on_1.2, anchor.2);
+        // Played now, the anchor and the step on beat 1 start with the
+        // receiving buffer, and other steps after it by their beats.
+        assert_eq!(anchor.2, tracker::Start::NOW);
+        assert_eq!(step_on_1.2, tracker::Start::NOW);
         assert_eq!(
-            step_on_2_5.2 - step_on_1.2,
-            duration_from_beats_f32(90, 1.5)
+            step_on_2_5.2,
+            tracker::Start::After(duration_from_beats_f32(90, 1.5))
         );
         // All entries share the loop period.
         assert!(plays.iter().all(|p| p.3 == one_measure));
@@ -1007,7 +1020,10 @@ mod tests {
                 sixteenth: 8
             }
         );
-        assert_eq!(start.unwrap(), cycle + duration_from_beats_f32(90, 2.0));
+        assert_eq!(
+            *start,
+            tracker::Start::At(cycle + duration_from_beats_f32(90, 2.0))
+        );
         assert_eq!(repeat_every.unwrap(), next_cycle - cycle);
     }
 
@@ -1031,7 +1047,7 @@ mod tests {
         let tracker::Command::Play { start, .. } = &commands[0] else {
             panic!("expected a Play command");
         };
-        assert_eq!(start.unwrap(), next_cycle);
+        assert_eq!(*start, tracker::Start::At(next_cycle));
     }
 
     #[test]
@@ -1076,7 +1092,10 @@ mod tests {
         else {
             panic!("expected a Play command");
         };
-        assert_eq!(start.unwrap(), cycle + duration_from_beats_f32(90, 2.0));
+        assert_eq!(
+            *start,
+            tracker::Start::At(cycle + duration_from_beats_f32(90, 2.0))
+        );
         assert_eq!(
             *repeat_every, None,
             "the step outlived the one-shot family it was scheduled into"
@@ -1104,10 +1123,12 @@ mod tests {
         assert_eq!(*repeat_every, Some(duration_from_beats(90, 3)));
     }
 
-    /// Returns the period of every Play command in `receiver`.
-    fn repeat_periods(receiver: &CommandReceiver) -> Vec<Option<Duration>> {
-        receiver
-            .try_iter()
+    /// Returns the period of every Play command in `commands`.
+    fn repeat_periods(
+        commands: Vec<tracker::Command<WaveformId, MarkId>>,
+    ) -> Vec<Option<Duration>> {
+        commands
+            .into_iter()
             .map(|c| match c {
                 tracker::Command::Play { repeat_every, .. } => repeat_every,
                 _ => panic!("expected only Play commands"),
@@ -1133,7 +1154,7 @@ mod tests {
 
         assert_eq!(message.unwrap(), "Looping waveform A:1 every 3 beats");
         assert_eq!(
-            repeat_periods(&receiver),
+            repeat_periods(receiver.try_iter().collect()),
             vec![Some(duration_from_beats(90, 3))]
         );
     }
@@ -1157,7 +1178,7 @@ mod tests {
         assert_eq!(message.unwrap(), "Looping sequence A:1 every 3 beats");
         // Two steps and the anchor, all repeating every 3 beats.
         assert_eq!(
-            repeat_periods(&receiver),
+            repeat_periods(batched_plays(&receiver)),
             vec![Some(duration_from_beats(90, 3)); 3]
         );
     }
