@@ -265,7 +265,7 @@ impl Wasm {
         // be playable — produce a waveform or a seq — matching the
         // waveform check below.
         let (findings, _) = infer::check_program(
-            &resolve,
+            resolve,
             &bindings,
             signatures::signature,
             &parsed_expr,

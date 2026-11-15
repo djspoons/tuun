@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path;
 use std::process;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -16,7 +16,7 @@ use tuun::effects;
 use tuun::environment;
 use tuun::launchkey;
 use tuun::metric;
-use tuun::midi_input;
+use tuun::midi;
 use tuun::player;
 use tuun::processing;
 use tuun::renderer;
@@ -46,6 +46,7 @@ struct Args {
     date_format: String,
     /// Whether the finite parts of each evaluated waveform (and of the Beats
     /// waveforms) are replaced by their samples before they are played.
+    // TODO probably time for the pre-compute flag to say goodbye
     #[arg(long,
         num_args(0..=1), // Allows --flag or --flag=value
         action = clap::ArgAction::Set,
@@ -232,7 +233,7 @@ pub fn main() {
     let player = player::Player::new(args.tempo, args.beats_per_measure, command_sender.clone());
 
     // Start the beats!
-    player.start_beats(&environment, &status_receiver, args.precompute);
+    player.start_beats(&environment, &status_receiver);
 
     // Seed each slider's ramp baseline where the slider currently sits, so its
     // first move ramps instead of stepping to the target.
@@ -306,11 +307,27 @@ pub fn main() {
     let wake_event_type = unsafe { event_subsystem.register_event() }.unwrap();
 
     let launchkey = launchkey::Launchkey::new(main_loop_waker(&event_subsystem, wake_event_type));
-    if let Err(e) = &launchkey {
-        println!(
+    match &launchkey {
+        Ok(_) => println!("Using the Launchkey as the control surface"),
+        Err(e) => println!(
             "Couldn't find Launchkey... falling back on mouse slider controls ({})",
             e
-        );
+        ),
+    }
+    // The control surface's ports are not keyboards.
+    let exclude = launchkey
+        .as_ref()
+        .map(|launchkey| launchkey.claimed_inputs())
+        .unwrap_or_default();
+    let keyboards = midi::Keyboards::open(
+        &exclude,
+        Arc::new(main_loop_waker(&event_subsystem, wake_event_type)),
+    );
+    for name in keyboards.names() {
+        println!("Playing keys from MIDI keyboard {:?}", name);
+    }
+    if keyboards.names().is_empty() {
+        println!("No MIDI keyboard opened");
     }
 
     let ttf_context: Sdl2TtfContext = sdl2::ttf::init().unwrap();
@@ -454,7 +471,7 @@ pub fn main() {
             loop {
                 match launchkey.events.try_recv() {
                     Ok(event) => {
-                        let actions = midi_input::classify(&event, &state);
+                        let actions = launchkey::classify(&event, &state);
                         if let Some(actions) = actions {
                             dispatch_actions(
                                 &mut effect_runner,
@@ -464,9 +481,9 @@ pub fn main() {
                                 actions,
                             );
                         } else {
-                            // classify() should be exhaustive for launchkey
-                            // events.
-                            log::debug!("Unhandled launchkey event: {:?}", event);
+                            // classify() should be exhaustive for
+                            // control-surface events.
+                            log::debug!("Unhandled control-surface event: {:?}", event);
                         }
                     }
                     Err(mpsc::TryRecvError::Empty) => {
@@ -478,6 +495,17 @@ pub fn main() {
                     }
                 }
             }
+        }
+
+        // With no keyboard open the channel is disconnected, which also ends this.
+        while let Ok(action) = keyboards.events.try_recv() {
+            dispatch_actions(
+                &mut effect_runner,
+                &mut state,
+                launchkey.as_mut(),
+                &status,
+                vec![action],
+            );
         }
 
         if state.take_tick_due(Instant::now()) {
@@ -507,7 +535,7 @@ pub fn main() {
             );
 
             if let Some(launchkey) = launchkey.as_mut() {
-                midi_input::update_launchkey_state(
+                launchkey::update_launchkey_state(
                     &state,
                     &status,
                     args.tempo,

@@ -481,21 +481,16 @@ impl Player {
         });
     }
 
-    /// Starts the two alternating Beats waveforms that keep time for the
-    /// rest of the runtime, with their finite parts replaced by their samples
-    /// when `precompute` is set (see [`generator::Generator::precompute`]).
-    /// Blocks on `status_receiver` until the first Beats waveform is
-    /// scheduled so the second can start a measure later.
+    /// Starts the two alternating Beats waveforms that keep time for the rest
+    /// of the runtime. Blocks on `status_receiver` until the first Beats
+    /// waveform is scheduled so the second can start a measure later.
     pub fn start_beats(
         &self,
         environment: &Environment,
         status_receiver: &mpsc::Receiver<tracker::Status<WaveformId>>,
-        precompute: bool,
     ) {
-        let mut beats = self.beats_waveform(environment);
-        if precompute {
-            beats = generator::Generator::new(environment.sample_rate()).precompute(beats);
-        }
+        let beats = generator::Generator::new(environment.sample_rate())
+            .precompute(self.beats_waveform(environment));
         let measure = duration_from_beats(self.tempo, self.beats_per_measure as u64);
         // Play the odd Beats waveform starting immediately and repeating every two measures
         self.sender

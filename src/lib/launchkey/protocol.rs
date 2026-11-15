@@ -1,28 +1,9 @@
-use std::sync::{Arc, mpsc};
-use std::time::Instant;
+//! The Launchkey MK4's DAW protocol: decoding its messages into events, and
+//! building the messages that drive its LEDs and display.
 
-use midir::{Ignore, MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
 use midly::MidiMessage;
 use midly::live::LiveEvent;
 use midly::num::u7;
-
-use thiserror::Error;
-
-pub struct Launchkey {
-    daw_output_conn: MidiOutputConnection,
-    daw_input_conn: MidiInputConnection<()>,
-    midi_input_conn: MidiInputConnection<()>,
-
-    pub events: mpsc::Receiver<Event>,
-    /// Main-thread mirror of `DAWState::encoder_mode`, kept in sync by
-    /// observing `Event::EncoderModeChanged`. Lets the runner decide what
-    /// to push back without crossing the input-thread boundary.
-    pub encoder_mode: EncoderMode,
-    /// Main-thread mirror of `DAWState::pad_mode`.
-    //
-    // Kept in sync by observing `Event::PadModeChanged`.
-    pub pad_mode: PadMode,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EncoderMode {
@@ -41,56 +22,16 @@ pub enum PadMode {
     Other,
 }
 
-/// Responsible for decoding and forwarding messages received on the DAW connection.
-struct DAWState {
+/// The decoder for messages received on the DAW connection.
+pub(super) struct DAWState {
     encoder_mode: EncoderMode,
     pad_mode: PadMode,
     /// Whether the Shift button is held, tracked from its press and release.
     shift_held: bool,
-    events: EventSink,
-}
-
-/// Responsible for decoding and forwarding messages received on the MIDI connection.
-struct MIDIState {
-    events: EventSink,
-}
-
-/// The sending end of [`Launchkey::events`].
-///
-/// Sends each event, then calls `wake` so that a receiver blocked on
-/// something other than the channel notices it.
-#[derive(Clone)]
-struct EventSink {
-    sender: mpsc::Sender<Event>,
-    wake: Arc<dyn Fn() + Send + Sync>,
-}
-
-impl EventSink {
-    /// Sends `event` on the channel, then wakes its receiver.
-    fn send(&self, event: Event) {
-        match self.sender.send(event) {
-            Ok(()) => (self.wake)(),
-            Err(e) => {
-                log::warn!("Got error sending event: {}", e);
-            }
-        }
-    }
 }
 
 #[derive(Debug)]
 pub enum Event {
-    /// A key pressed on the keys input, stamped when the message arrived.
-    NoteOn {
-        key: u8,
-        velocity: u8,
-        stamp: Instant,
-    },
-    /// A key released on the keys input, stamped when the message arrived.
-    NoteOff {
-        key: u8,
-        stamp: Instant,
-    },
-
     NextTrackDown,
     PreviousTrackDown,
     NextTrackBankDown,
@@ -146,20 +87,6 @@ pub enum Event {
     /// The Undo button, pressed while Shift is held (marked "Redo").
     RedoDown,
     MetronomeDown,
-}
-
-#[derive(Debug, Error)]
-pub enum Error {
-    #[error(transparent)]
-    InitError(#[from] midir::InitError),
-    #[error(transparent)]
-    OutputConnectError(#[from] midir::ConnectError<MidiOutput>),
-    #[error(transparent)]
-    InputConnectError(#[from] midir::ConnectError<MidiInput>),
-    #[error(transparent)]
-    SendError(#[from] midir::SendError),
-    #[error("controller error: {0}")]
-    Other(String),
 }
 
 pub const NUM_ENCODERS: u8 = 8;
@@ -239,235 +166,163 @@ const PAD_RGB_COLOR: [u8; 2] = [1, 67];
 const CONFIGURE_DISPLAY: [u8; 1] = [4];
 const SET_DISPLAY_TEXT_FIELD: [u8; 1] = [6];
 
-impl Launchkey {
-    /// Connects to the Launchkey and puts it into DAW mode.
-    ///
-    /// Decoded input arrives on [`Launchkey::events`]; `wake` is called on
-    /// MIDI's input thread after each event is sent there.
-    pub fn new(wake: impl Fn() + Send + Sync + 'static) -> Result<Self, Error> {
-        // First, find the DAW input channel, connect it to our input, and put the controller into DAW mode
-        let midi_output = MidiOutput::new("tuun sending output")?;
-        let mut daw_output_conn;
-        if let Some(daw_output_port) = midi_output.ports().iter().find(|p| {
-            midi_output.port_name(p).unwrap_or("error".to_string()) == "Launchkey MK4 37 DAW In"
-        }) {
-            daw_output_conn = midi_output.connect(daw_output_port, "tuun-daw-output-port")?;
-            // Enter DAW mode.
-            daw_output_conn.send(&[0x9F, 0x0C, 0x7F])?;
-        } else {
-            return Err(Error::Other(
-                "couldn't find Launchkey DAW In port".to_string(),
-            ));
-        }
+/// Returns the message that enters DAW mode, or exits it when `enabled` is
+/// false.
+pub(super) fn daw_mode(enabled: bool) -> Vec<u8> {
+    vec![0x9F, 0x0C, if enabled { 0x7F } else { 0x00 }]
+}
 
-        // Second, set up the output channels for both "DAW" and "MIDI".
-        let (sender, receiver) = mpsc::channel();
-        let events = EventSink {
-            sender,
-            wake: Arc::new(wake),
-        };
-        let mut daw_state = DAWState {
-            encoder_mode: EncoderMode::Plugin,
-            pad_mode: PadMode::DAW,
-            shift_held: false,
-            events: events.clone(),
-        };
-        let mut daw_input = MidiInput::new("tuun reading DAW input")?;
-        daw_input.ignore(Ignore::Time);
-        let daw_input_conn;
-        if let Some(daw_input_port) = daw_input.ports().iter().find(|p| {
-            daw_input.port_name(p).unwrap_or("error".to_string()) == "Launchkey MK4 37 DAW Out"
-        }) {
-            daw_input_conn = daw_input.connect(
-                daw_input_port,
-                "tuun-daw-input-port",
-                move |stamp, message, data| daw_state.handle_message(stamp, message, data),
-                (),
-            )?;
-        } else {
-            return Err(Error::Other(
-                "couldn't find Launchkey DAW Out port".to_string(),
-            ));
-        }
+/// Returns the message that turns "DAW Encoder Relative output" on or off.
+///
+/// When it is on, the encoders emit deltas instead of absolute positions.
+// TODO use MidiMessage::Controller
+pub(super) fn encoder_relative_output(enabled: bool) -> Vec<u8> {
+    vec![
+        0xB0 | FEATURE_CONTROL_CHANNEL,
+        FEATURE_DAW_ENCODER_RELATIVE,
+        if enabled { 127 } else { 0 },
+    ]
+}
 
-        let mut midi_state = MIDIState { events };
-        let mut midi_input = MidiInput::new("tuun reading MIDI input")?;
-        midi_input.ignore(Ignore::Time);
-        let midi_input_conn;
-        if let Some(midi_input_port) = midi_input.ports().iter().find(|p| {
-            midi_input.port_name(p).unwrap_or("error".to_string()) == "Launchkey MK4 37 MIDI Out"
-        }) {
-            midi_input_conn = midi_input.connect(
-                midi_input_port,
-                "tuun-midi-input-port",
-                move |stamp, message, data| midi_state.handle_message(stamp, message, data),
-                (),
-            )?;
-        } else {
-            return Err(Error::Other(
-                "couldn't find Launchkey midi Out port".to_string(),
-            ));
-        }
+/// Returns the message that sets the color of pad `index` in the DAW
+/// layout's top row.
+pub(super) fn daw_top_pad_color(index: u8, red: u8, green: u8, blue: u8) -> Vec<u8> {
+    pad_color(index + DAW_PAD_TOP_ROW_OFFSET, red, green, blue)
+}
 
-        let mut launchkey = Launchkey {
-            daw_output_conn,
-            daw_input_conn,
-            midi_input_conn,
+/// Returns the message that sets the color of pad `index` in the DAW
+/// layout's bottom row.
+pub(super) fn daw_bottom_pad_color(index: u8, red: u8, green: u8, blue: u8) -> Vec<u8> {
+    pad_color(index + DAW_PAD_BOTTOM_ROW_OFFSET, red, green, blue)
+}
 
-            events: receiver,
-            encoder_mode: EncoderMode::Plugin,
-            // Entering DAW mode resets pads to the DAW layout (see page 10).
-            pad_mode: PadMode::DAW,
-        };
-        launchkey.set_encoder_relative_output();
-        Ok(launchkey)
-    }
+/// Returns the message that sets the color of the pad `pad_id`.
+fn pad_color(pad_id: u8, red: u8, green: u8, blue: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend(&STANDARD_SKU_PREFIX);
+    buf.extend(&PAD_RGB_COLOR);
+    buf.push(pad_id);
+    buf.push(red.min(127));
+    buf.push(green.min(127));
+    buf.push(blue.min(127));
+    sys_ex(&buf)
+}
 
-    fn send_event(&mut self, event: LiveEvent) {
-        let mut buf = Vec::new();
-        event.write(&mut buf).unwrap();
-        //println!("Sending event {:?} as {:?}", &event, &buf);
-        if let Err(e) = self.daw_output_conn.send(&buf) {
-            log::warn!("launchkey: got error on send: {}", e);
-        }
-    }
+/// Returns the message that sets the color of the ">" button's LED.
+pub(super) fn launch_color(color: Color) -> Vec<u8> {
+    event_bytes(LiveEvent::Midi {
+        channel: 0.into(),
+        message: MidiMessage::Controller {
+            controller: LAUNCH_CC.into(),
+            value: (color as u8).into(),
+        },
+    })
+}
 
-    fn send_sys_ex(&mut self, message: &[u8]) {
-        let message: Vec<u7> = message.iter().map(|&x| u7::new(x & 0x7F)).collect();
-        self.send_event(LiveEvent::Common(midly::live::SystemCommon::SysEx(
-            &message,
-        )));
-    }
+/// Returns the message that sets the brightness of the Record button's LED,
+/// from 0 (dim) to 127.
+pub(super) fn record_brightness(brightness: u8) -> Vec<u8> {
+    led_brightness(RECORD_CC, brightness)
+}
 
-    /// (Re-)enables "DAW Encoder Relative output" on the controller. The
-    /// device resets this when the user switches encoder mode (Plugin /
-    /// Mixer), so it has to be re-asserted on every mode change
-    /// to keep encoders emitting deltas instead of absolute positions.
-    pub fn set_encoder_relative_output(&mut self) {
-        if let Err(e) = self.daw_output_conn.send(&[
-            0xB0 | FEATURE_CONTROL_CHANNEL,
-            FEATURE_DAW_ENCODER_RELATIVE,
-            127,
-        ]) {
-            log::warn!("launchkey: failed to enable encoder relative mode: {}", e);
-        }
-    }
+/// Returns the message that sets the brightness of the Loop button's LED, from
+/// 0 (dim) to 127.
+pub(super) fn loop_brightness(brightness: u8) -> Vec<u8> {
+    led_brightness(LOOP_CC, brightness)
+}
 
-    pub fn set_daw_top_pad_color(&mut self, index: u8, red: u8, green: u8, blue: u8) {
-        let pad_id = index + DAW_PAD_TOP_ROW_OFFSET;
-        let mut buf = Vec::new();
-        buf.extend(&STANDARD_SKU_PREFIX);
-        buf.extend(&PAD_RGB_COLOR);
-        buf.push(pad_id);
-        buf.push(red.min(127));
-        buf.push(green.min(127));
-        buf.push(blue.min(127));
-        self.send_sys_ex(&buf);
-    }
+/// Returns the message that sets the brightness of the Metronome button's LED,
+/// from 0 (dim) to 127.
+pub(super) fn metronome_brightness(brightness: u8) -> Vec<u8> {
+    led_brightness(METRONOME_CC, brightness)
+}
 
-    pub fn set_daw_bottom_pad_color(&mut self, index: u8, red: u8, green: u8, blue: u8) {
-        let pad_id = index + DAW_PAD_BOTTOM_ROW_OFFSET;
-        let mut buf = Vec::new();
-        buf.extend(&STANDARD_SKU_PREFIX);
-        buf.extend(&PAD_RGB_COLOR);
-        buf.push(pad_id);
-        buf.push(red.min(127));
-        buf.push(green.min(127));
-        buf.push(blue.min(127));
-        self.send_sys_ex(&buf);
-    }
+/// Returns the message that sets the brightness of the monochrome LED on the
+/// button that sends `cc`, from 0 (dim) to 127.
+fn led_brightness(cc: u8, brightness: u8) -> Vec<u8> {
+    event_bytes(LiveEvent::Midi {
+        channel: BRIGHTNESS_CHANNEL.into(),
+        message: MidiMessage::Controller {
+            controller: cc.into(),
+            value: brightness.min(127).into(),
+        },
+    })
+}
 
-    pub fn set_launch_color(&mut self, color: Color) {
-        self.send_event(LiveEvent::Midi {
-            channel: 0.into(),
-            message: MidiMessage::Controller {
-                controller: LAUNCH_CC.into(),
-                value: (color as u8).into(),
-            },
-        });
-    }
+/// Returns the messages that show `name` above `text` on the device screen.
+pub(super) fn daw_mode_display(name: &str, text: &str) -> Vec<Vec<u8>> {
+    let mut messages = Vec::new();
+    let mut buf = Vec::new();
+    buf.extend(&STANDARD_SKU_PREFIX);
+    buf.extend(&CONFIGURE_DISPLAY);
+    buf.push(DAW_MODE_DISPLAY_TARGET);
+    buf.push(DisplayArrangement::NameAndText as u8);
+    messages.push(sys_ex(&buf));
 
-    /// Sets the brightness of the Record button's LED, from 0 (dim) to 127.
-    pub fn set_record_brightness(&mut self, brightness: u8) {
-        self.set_brightness(RECORD_CC, brightness);
-    }
-
-    /// Sets the brightness of the Loop button's LED, from 0 (dim) to 127.
-    pub fn set_loop_brightness(&mut self, brightness: u8) {
-        self.set_brightness(LOOP_CC, brightness);
-    }
-
-    /// Sets the brightness of the Metronome button's LED, from 0 (dim) to 127.
-    pub fn set_metronome_brightness(&mut self, brightness: u8) {
-        self.set_brightness(METRONOME_CC, brightness);
-    }
-
-    /// Sets the brightness of the monochrome LED on the button that sends
-    /// `cc`, from 0 (dim) to 127.
-    fn set_brightness(&mut self, cc: u8, brightness: u8) {
-        self.send_event(LiveEvent::Midi {
-            channel: BRIGHTNESS_CHANNEL.into(),
-            message: MidiMessage::Controller {
-                controller: cc.into(),
-                value: brightness.min(127).into(),
-            },
-        });
-    }
-
-    /// Shows `name` above `text` on the device screen.
-    pub fn set_daw_mode_display(&mut self, name: &str, text: &str) {
-        let mut buf = Vec::new();
-        buf.extend(&STANDARD_SKU_PREFIX);
-        buf.extend(&CONFIGURE_DISPLAY);
-        buf.push(DAW_MODE_DISPLAY_TARGET);
-        buf.push(DisplayArrangement::NameAndText as u8);
-        self.send_sys_ex(&buf);
-
-        for (field, value) in [name, text].into_iter().enumerate() {
-            buf.clear();
-            buf.extend(&STANDARD_SKU_PREFIX);
-            buf.extend(&SET_DISPLAY_TEXT_FIELD);
-            buf.push(DAW_MODE_DISPLAY_TARGET);
-            buf.push(field as u8);
-            buf.extend(string_to_ascii(value));
-            self.send_sys_ex(&buf);
-        }
-
-        // Trigger a redraw: setting the text above only stores it.
-        buf.clear();
-        buf.extend(&STANDARD_SKU_PREFIX);
-        buf.extend(&CONFIGURE_DISPLAY);
-        buf.push(DAW_MODE_DISPLAY_TARGET);
-        buf.push(DisplayArrangement::TriggerDisplay as u8);
-        self.send_sys_ex(&buf);
-    }
-
-    pub fn set_encoder_display(&mut self, index: u8, name: &str, value: &str) {
-        let target = ENCODER_DISPLAY_TARGET_OFFSET + index;
-
-        let mut buf = Vec::new();
-        buf.extend(&STANDARD_SKU_PREFIX);
-        buf.extend(&CONFIGURE_DISPLAY);
-        buf.push(target);
-        buf.push(DisplayArrangement::NameAndText as u8 | DISPLAY_CONFIG_DISPLAY_ON_CHANGE_OR_TOUCH);
-        self.send_sys_ex(&buf);
-
+    for (field, value) in [name, text].into_iter().enumerate() {
         buf.clear();
         buf.extend(&STANDARD_SKU_PREFIX);
         buf.extend(&SET_DISPLAY_TEXT_FIELD);
-        buf.push(target);
-        buf.push(0); // field 0: name
-        buf.extend(string_to_ascii(name));
-        self.send_sys_ex(&buf);
-
-        buf.clear();
-        buf.extend(&STANDARD_SKU_PREFIX);
-        buf.extend(&SET_DISPLAY_TEXT_FIELD);
-        buf.push(target);
-        buf.push(1); // field 1: value
+        buf.push(DAW_MODE_DISPLAY_TARGET);
+        buf.push(field as u8);
         buf.extend(string_to_ascii(value));
-        self.send_sys_ex(&buf);
+        messages.push(sys_ex(&buf));
     }
+
+    // Trigger a redraw: setting the text above only stores it.
+    buf.clear();
+    buf.extend(&STANDARD_SKU_PREFIX);
+    buf.extend(&CONFIGURE_DISPLAY);
+    buf.push(DAW_MODE_DISPLAY_TARGET);
+    buf.push(DisplayArrangement::TriggerDisplay as u8);
+    messages.push(sys_ex(&buf));
+    messages
+}
+
+/// Returns the messages that show `name` and `value` on the display of
+/// encoder `index`.
+pub(super) fn encoder_display(index: u8, name: &str, value: &str) -> Vec<Vec<u8>> {
+    let target = ENCODER_DISPLAY_TARGET_OFFSET + index;
+    let mut messages = Vec::new();
+
+    let mut buf = Vec::new();
+    buf.extend(&STANDARD_SKU_PREFIX);
+    buf.extend(&CONFIGURE_DISPLAY);
+    buf.push(target);
+    buf.push(DisplayArrangement::NameAndText as u8 | DISPLAY_CONFIG_DISPLAY_ON_CHANGE_OR_TOUCH);
+    messages.push(sys_ex(&buf));
+
+    buf.clear();
+    buf.extend(&STANDARD_SKU_PREFIX);
+    buf.extend(&SET_DISPLAY_TEXT_FIELD);
+    buf.push(target);
+    buf.push(0); // field 0: name
+    buf.extend(string_to_ascii(name));
+    messages.push(sys_ex(&buf));
+
+    buf.clear();
+    buf.extend(&STANDARD_SKU_PREFIX);
+    buf.extend(&SET_DISPLAY_TEXT_FIELD);
+    buf.push(target);
+    buf.push(1); // field 1: value
+    buf.extend(string_to_ascii(value));
+    messages.push(sys_ex(&buf));
+    messages
+}
+
+/// Returns `event` as bytes.
+fn event_bytes(event: LiveEvent) -> Vec<u8> {
+    let mut buf = Vec::new();
+    event.write(&mut buf).unwrap();
+    buf
+}
+
+/// Returns a SysEx message carrying `message`, each byte cut to 7 bits.
+fn sys_ex(message: &[u8]) -> Vec<u8> {
+    let message: Vec<u7> = message.iter().map(|&x| u7::new(x & 0x7F)).collect();
+    event_bytes(LiveEvent::Common(midly::live::SystemCommon::SysEx(
+        &message,
+    )))
 }
 
 fn string_to_ascii(str: &str) -> Vec<u8> {
@@ -477,41 +332,22 @@ fn string_to_ascii(str: &str) -> Vec<u8> {
         .collect()
 }
 
-impl Drop for Launchkey {
-    fn drop(&mut self) {
-        // Revert encoders to absolute output before leaving DAW mode.
-        // TODO use MidiMessage::Controller
-        if let Err(e) = self.daw_output_conn.send(&[
-            0xB0 | FEATURE_CONTROL_CHANNEL,
-            FEATURE_DAW_ENCODER_RELATIVE,
-            0,
-        ]) {
-            log::warn!("launchkey: failed to revert encoder relative mode: {}", e);
-        }
-        // Exit DAW mode.
-        if let Err(e) = self.daw_output_conn.send(&[0x9F, 0x0C, 0x00]) {
-            log::warn!("launchkey: failed to exit from DAW mode: {}", e);
-        }
-    }
-}
-
-impl Launchkey {
-    // XXX
-    pub fn dummy(&self) {
-        _ = self.daw_input_conn;
-        _ = self.midi_input_conn;
-    }
-}
-
 impl DAWState {
-    fn handle_message(&mut self, _stamp: u64, message: &[u8], _info: &mut ()) {
-        if let Some(event) = self.decode(message) {
-            self.events.send(event);
+    /// Returns the state the controller is in on entering DAW mode.
+    pub(super) fn new() -> DAWState {
+        DAWState {
+            encoder_mode: EncoderMode::Plugin,
+            pad_mode: PadMode::DAW,
+            shift_held: false,
         }
     }
 
-    fn decode(&mut self, message: &[u8]) -> Option<Event> {
-        let event = LiveEvent::parse(message).unwrap();
+    /// Returns the event `message` decodes to, or `None` if it carries none.
+    pub(super) fn decode(&mut self, message: &[u8]) -> Option<Event> {
+        let Ok(event) = LiveEvent::parse(message) else {
+            log::debug!("Ignoring malformed message {:02X?} on DAW", message);
+            return None;
+        };
         //println!("Got event on DAW: {:?}", event);
         match event {
             LiveEvent::Midi { channel, message } => match message {
@@ -666,47 +502,6 @@ impl DAWState {
                 MidiMessage::Aftertouch { .. } => {
                     // Don't print anything for now since these are pretty noisy
                     None
-                }
-                _ => {
-                    log::debug!("Ignoring message {:?} on channel {}", message, channel);
-                    None
-                }
-            },
-            _ => {
-                log::debug!("Ignoring event {:?}", event);
-                None
-            }
-        }
-    }
-}
-
-impl MIDIState {
-    fn handle_message(&mut self, _stamp: u64, message: &[u8], _info: &mut ()) {
-        // Stamp on arrival rather than converting midir's own stamp: the
-        // recorder compares note times against `Instant`s from the tracker.
-        let stamp = Instant::now();
-        if let Some(event) = self.decode(message, stamp) {
-            self.events.send(event);
-        }
-    }
-
-    fn decode(&mut self, message: &[u8], stamp: Instant) -> Option<Event> {
-        let event = LiveEvent::parse(message).unwrap();
-        //println!("Got event on MIDI: {:?}", event);
-        match event {
-            LiveEvent::Midi { channel, message } => match message {
-                MidiMessage::NoteOn { key, vel } if vel > 0 => Some(Event::NoteOn {
-                    key: key.into(),
-                    velocity: vel.into(),
-                    stamp,
-                }),
-                // A note-on with velocity zero is a note-off by convention; the
-                // release velocity of a real note-off is ignored.
-                MidiMessage::NoteOn { key, .. } | MidiMessage::NoteOff { key, .. } => {
-                    Some(Event::NoteOff {
-                        key: key.into(),
-                        stamp,
-                    })
                 }
                 _ => {
                     log::debug!("Ignoring message {:?} on channel {}", message, channel);
@@ -1267,84 +1062,35 @@ impl Color {
 mod tests {
     use super::*;
 
-    /// Returns a sink whose receiver is dropped and whose wake does nothing.
-    fn event_sink() -> EventSink {
-        let (sender, _receiver) = mpsc::channel();
-        EventSink {
-            sender,
-            wake: Arc::new(|| ()),
-        }
-    }
-
-    fn midi_state() -> MIDIState {
-        MIDIState {
-            events: event_sink(),
-        }
-    }
-
-    fn daw_state() -> DAWState {
-        DAWState {
-            encoder_mode: EncoderMode::Plugin,
-            pad_mode: PadMode::DAW,
-            shift_held: false,
-            events: event_sink(),
-        }
+    #[test]
+    fn truncated_message_on_daw_is_ignored() {
+        assert!(DAWState::new().decode(&[0x90, 0x3C]).is_none());
     }
 
     #[test]
-    fn sink_wakes_only_after_a_sent_event() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        let (sender, receiver) = mpsc::channel();
-        let wakes = Arc::new(AtomicUsize::new(0));
-        let sink = EventSink {
-            sender,
-            wake: Arc::new({
-                let wakes = wakes.clone();
-                move || {
-                    wakes.fetch_add(1, Ordering::SeqCst);
-                }
-            }),
-        };
-
-        sink.send(Event::PlayDown);
-        assert_eq!(wakes.load(Ordering::SeqCst), 1);
-        assert!(matches!(receiver.try_recv(), Ok(Event::PlayDown)));
-
-        // With the receiver gone the send fails, and nothing is woken.
-        drop(receiver);
-        sink.send(Event::PlayDown);
-        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+    fn pad_color_clamps_components() {
+        assert_eq!(daw_top_pad_color(2, 200, 10, 0)[9..12], [127, 10, 0]);
     }
 
     #[test]
-    fn note_messages_carry_their_stamp() {
-        let stamp = Instant::now();
-        let event = midi_state().decode(&[0x90, 60, 100], stamp);
-        assert!(
-            matches!(event, Some(Event::NoteOn { key: 60, velocity: 100, stamp: s }) if s == stamp),
-            "expected a stamped NoteOn, got {:?}",
-            event
+    fn led_brightness_clamps_brightness() {
+        assert_eq!(record_brightness(200)[2], 127);
+    }
+
+    #[test]
+    fn daw_mode_display_configures_sets_both_fields_and_triggers() {
+        let messages = daw_mode_display("ab", "c");
+        assert_eq!(messages.len(), 4);
+        assert_eq!(
+            messages[1][7..],
+            [DAW_MODE_DISPLAY_TARGET, 0, b'a', b'b', 0xF7]
         );
-    }
-
-    #[test]
-    fn real_note_off_and_zero_velocity_note_on_both_release() {
-        let stamp = Instant::now();
-        for message in [[0x80, 60, 64], [0x90, 60, 0]] {
-            let event = midi_state().decode(&message, stamp);
-            assert!(
-                matches!(event, Some(Event::NoteOff { key: 60, stamp: s }) if s == stamp),
-                "expected a stamped NoteOff for {:02X?}, got {:?}",
-                message,
-                event
-            );
-        }
+        assert_eq!(messages[2][7..], [DAW_MODE_DISPLAY_TARGET, 1, b'c', 0xF7]);
     }
 
     #[test]
     fn record_button_press_decodes_and_release_is_ignored() {
-        let mut state = daw_state();
+        let mut state = DAWState::new();
         assert!(matches!(
             state.decode(&[0xB0, 117, 127]),
             Some(Event::RecordDown)
@@ -1354,7 +1100,7 @@ mod tests {
 
     #[test]
     fn loop_button_press_and_release_both_decode() {
-        let mut state = daw_state();
+        let mut state = DAWState::new();
         assert!(matches!(
             state.decode(&[0xB0, 118, 127]),
             Some(Event::LoopDown)
@@ -1364,7 +1110,7 @@ mod tests {
 
     #[test]
     fn metronome_button_press_decodes_and_release_is_ignored() {
-        let mut state = daw_state();
+        let mut state = DAWState::new();
         assert!(matches!(
             state.decode(&[0xB0, 76, 127]),
             Some(Event::MetronomeDown)
@@ -1374,7 +1120,7 @@ mod tests {
 
     #[test]
     fn undo_decodes_as_redo_while_shift_is_held() {
-        let mut state = daw_state();
+        let mut state = DAWState::new();
         assert!(matches!(
             state.decode(&[0xB0, 77, 127]),
             Some(Event::UndoDown)

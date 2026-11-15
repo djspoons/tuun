@@ -14,7 +14,7 @@ pub mod trace_walk;
 pub mod types;
 pub mod waveform;
 
-// Native-only modules (SDL2-dependent)
+// Native-only modules (SDL2-, MIDI- and hardware-dependent)
 #[cfg(feature = "native")]
 pub mod actions;
 #[cfg(feature = "native")]
@@ -32,7 +32,7 @@ pub mod launchkey;
 #[cfg(feature = "native")]
 pub mod messages;
 #[cfg(feature = "native")]
-pub mod midi_input;
+pub mod midi;
 #[cfg(feature = "native")]
 pub mod player;
 #[cfg(feature = "native")]
@@ -52,6 +52,7 @@ pub mod sequencer;
 #[cfg(feature = "native")]
 pub mod tracker;
 
-// WASM module (only compiled when targeting wasm32 or when wasm feature is enabled for testing)
+// WASM module (only compiled when targeting wasm32 or when wasm feature is
+// enabled for testing)
 #[cfg(any(target_arch = "wasm32", feature = "wasm"))]
 pub mod wasm;

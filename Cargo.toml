@@ -6,6 +6,7 @@ edition = "2024"
 [[bin]]
 name = "tuun"
 bench = false
+required-features = ["native"]
 
 [lib]
 path = "src/lib/mod.rs"
@@ -25,10 +26,11 @@ required-features = ["clap"]
 [[bin]]
 name = "midi_test"
 path = "src/misc/midi_test.rs"
+required-features = ["native"]
 
 [features]
 default = ["native"]
-native = ["sdl2", "clap", "rtrb", "dep:env_logger"]
+native = ["sdl2", "clap", "rtrb", "dep:env_logger", "dep:midir"]
 wasm = ["wasm-bindgen", "js-sys", "web-sys", "console_error_panic_hook"]
 
 [dependencies]
@@ -44,7 +46,7 @@ wasm-bindgen = { version = "0.2", optional = true }
 js-sys = { version = "0.3", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
 midly = "0.5.3"
-midir = "0.11"
+midir = { version = "0.11", optional = true }
 thiserror = "2.0.18"
 rtrb = { version = "0.4", optional = true }
 log = "0.4.34"

@@ -1,8 +1,8 @@
 //! Action / Effect / reducer for app state.
 //!
-//! Handlers (sdl2_input, midi_input) classify raw input events into pure
-//! `Action`s. `apply` then mutates `AppState` and returns `Effect`s, which
-//! the runner in `effects.rs` executes against the outside world.
+//! Handlers (sdl2_input, midi, launchkey) classify raw input events into pure
+//! `Action`s. `apply` then mutates `AppState` and returns `Effect`s, which the
+//! runner in `effects.rs` executes against the outside world.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Range;

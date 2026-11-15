@@ -1,3 +1,6 @@
+//! The mapping between the Launchkey and the app: its events to `Action`s,
+//! and the app state to its LEDs.
+
 use std::time::Instant;
 
 use crate::actions;
@@ -126,20 +129,6 @@ pub fn classify(
         Event::UndoDown => Some(vec![Action::Undo]),
         Event::RedoDown => Some(vec![Action::Redo]),
         Event::MetronomeDown => Some(vec![Action::ToggleMetronome]),
-
-        Event::NoteOn {
-            key,
-            velocity,
-            stamp,
-        } => Some(vec![Action::NoteOn {
-            key: *key,
-            velocity: *velocity,
-            stamp: *stamp,
-        }]),
-        Event::NoteOff { key, stamp } => Some(vec![Action::NoteOff {
-            key: *key,
-            stamp: *stamp,
-        }]),
 
         Event::PadModeChanged { previous, current } => Some(vec![Action::PadModeChanged {
             previous: *previous,
@@ -530,7 +519,7 @@ fn update_pads_sequencer(
 
 #[cfg(test)]
 mod tests {
-    use crate::actions::{Action, AppState, DawPadMode, Transport};
+    use crate::actions::{Action, AppState, DawPadMode};
 
     use super::*;
 
@@ -642,24 +631,6 @@ mod tests {
         let actions = classify(&launchkey::Event::PadPageDownDown, &state)
             .expect("page buttons are swallowed outside sequencer mode");
         assert!(actions.is_empty());
-    }
-
-    #[test]
-    fn classify_transport_buttons_press_the_transport() {
-        let state = test_state(DawPadMode::ClipLauncher);
-        for (event, transport) in [
-            (launchkey::Event::RecordDown, Transport::Record),
-            (launchkey::Event::PlayDown, Transport::Play),
-            (launchkey::Event::StopDown, Transport::Stop),
-        ] {
-            let actions = classify(&event, &state).expect("transport button classifies");
-            assert!(
-                matches!(actions[0], Action::Transport(t) if t == transport),
-                "expected Transport({:?}), got {:?}",
-                transport,
-                actions
-            );
-        }
     }
 
     #[test]

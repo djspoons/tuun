@@ -1260,7 +1260,7 @@ mod tests {
     }
 
     fn known_length(g: &Generator, waveform: &Waveform) -> Option<usize> {
-        g.known_length_at(&waveform, Some(0), &mut vec![])
+        g.known_length_at(waveform, Some(0), &mut vec![])
     }
 
     // Verifies that `known_length` of `waveform` is `expected` and, when finite, that generating
@@ -2613,7 +2613,7 @@ mod tests {
     }
 
     #[test]
-    fn a_finite_shared_read_only_by_its_own_refs_precomputes_to_samples() {
+    fn a_finite_shared_read_only_by_its_own_refs_pre_computes_to_samples() {
         let square = BinaryOp(
             BinaryOperator::Multiply,
             Box::new(reference()),
@@ -2626,7 +2626,7 @@ mod tests {
     }
 
     #[test]
-    fn an_infinite_shared_precomputes_within_a_finite_waveform() {
+    fn an_infinite_shared_pre_computes_within_a_finite_waveform() {
         let w = first_four(shared(Time(()), minus(reference(), Const(1.0))));
         run_tests(&w, &[-1.0, 0.0, 1.0, 2.0]);
         let precomputed = new_test_generator(1).precompute(w);

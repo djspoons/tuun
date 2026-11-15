@@ -1,6 +1,6 @@
 # Tuun
 
-Tuun is a live instrument built around a small functional language: you write expressions that describe sound, then play them from a computer keyboard or a Launchkey controller. This glossary fixes the vocabulary of that domain.
+Tuun is a live instrument built around a small functional language: you write expressions that describe sound, then play them from a computer keyboard or a MIDI keyboard and control them from a Launchkey's control surface. This glossary fixes the vocabulary of that domain.
 
 ## Language
 
@@ -112,6 +112,24 @@ _Avoid_: page, group, set
 How a program is named to the performer when it has no binding name: the bank letter and the 1-based slot within that bank, such as `B:3`. It matches the digit the performer types to select it.
 _Avoid_: index, program number
 
+### MIDI devices
+
+**MIDI keyboard**:
+Any MIDI input that plays the installed keys instrument.
+_Avoid_: controller, device, Launchkey (when you mean its keys)
+
+**Key**:
+A piano key on a MIDI keyboard, or a piano scancode on the computer keyboard in Keys mode.
+_Avoid_: note, pad
+
+**Control surface**:
+The Launchkey's DAW side: its pads, buttons, encoders and display, which select, launch and adjust programs rather than play notes.
+_Avoid_: Launchkey (when you mean only this side), controller
+
+**Launchkey**:
+One piece of hardware that appears as a MIDI keyboard plus a control surface.
+_Avoid_: controller
+
 ### The control surface
 
 **Pad**:
@@ -121,10 +139,6 @@ _Avoid_: button, key
 **Button**:
 A physical Launchkey control that is neither a pad nor a piano key — transport, navigation, `>`.
 _Avoid_: pad
-
-**Key**:
-One of the Launchkey's piano keys.
-_Avoid_: note, pad
 
 **Pending playback**:
 Playback scheduled to begin at a future moment in time (often a measure boundary), not yet sounding. Not armed, which is the recorder waiting for its start boundary.
