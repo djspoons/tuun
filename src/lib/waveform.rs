@@ -315,6 +315,84 @@ impl<M, S> Waveform<M, S> {
         self.any_node(&|w| matches!(w, Waveform::Noise))
     }
 
+    /// Returns true if `self` contains a `Ref` that no `Shared` within `self`
+    /// resolves, so that it reads from a `Shared` around `self`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tuun::waveform::{ShareId, Waveform};
+    ///
+    /// let reference: Waveform<()> = Waveform::Ref(ShareId(0));
+    /// assert!(reference.has_free_refs());
+    /// let shared: Waveform<()> = Waveform::Shared {
+    ///     id: ShareId(0),
+    ///     waveform: Box::new(Waveform::Time(())),
+    ///     body: Box::new(Waveform::Ref(ShareId(0))),
+    /// };
+    /// assert!(!shared.has_free_refs());
+    /// ```
+    pub fn has_free_refs(self: &Waveform<M, S>) -> bool {
+        // `bound` holds the ids of the `Shared` nodes around the waveform being
+        // visited, within `self`.
+        fn free<M, S>(w: &Waveform<M, S>, bound: &mut Vec<ShareId>) -> bool {
+            use Waveform::*;
+            match w {
+                Ref(id) => !bound.contains(id),
+                // A `Ref` in the shared waveform reads a `Shared` around this one.
+                Shared { id, waveform, body } => {
+                    if free(waveform, bound) {
+                        return true;
+                    }
+                    bound.push(*id);
+                    let body_is_free = free(body, bound);
+                    bound.pop();
+                    body_is_free
+                }
+                Const(_) | Time(_) | Noise | Fixed(_, _) => false,
+                UnaryOp(_, a) | Marked { waveform: a, .. } | Captured { waveform: a, .. } => {
+                    free(a, bound)
+                }
+                Fin {
+                    length: a,
+                    waveform: b,
+                    ..
+                }
+                | Append(a, b, _)
+                | Phase {
+                    frequency: a,
+                    offset: b,
+                    ..
+                }
+                | BinaryOp(_, a, b)
+                | Reset {
+                    trigger: a,
+                    waveform: b,
+                    ..
+                } => free(a, bound) || free(b, bound),
+                Filter {
+                    waveform,
+                    feed_forward,
+                    feedback,
+                    ..
+                } => {
+                    free(waveform, bound)
+                        || feed_forward.iter().chain(feedback).any(|w| free(w, bound))
+                }
+                Alt {
+                    trigger,
+                    positive_waveform,
+                    negative_waveform,
+                } => {
+                    free(trigger, bound)
+                        || free(positive_waveform, bound)
+                        || free(negative_waveform, bound)
+                }
+            }
+        }
+        free(self, &mut Vec::new())
+    }
+
     /// Returns true if `matches` holds for `self` or any waveform within it.
     pub fn any_node(self: &Waveform<M, S>, matches: &impl Fn(&Waveform<M, S>) -> bool) -> bool {
         use Waveform::*;

@@ -1202,8 +1202,21 @@ impl<'a> Generator<'a> {
                     waveform: Box::new(waveform),
                     file_stem,
                 }),
-                // TODO a `Shared` whose body is dynamic only because of its own
-                // `Ref`s could be pre-computed as a whole.
+                // A `Shared` that is dynamic only because of its own `Ref`s is
+                // pre-computed as a whole, so that those `Ref`s are generated
+                // with it. Its parts are never generated apart.
+                shared @ Shared { .. }
+                    if !shared.has_free_refs()
+                        && !shared.has_noise()
+                        && !shared.has_marked_or_captured() =>
+                {
+                    // An unknown length might be infinite, so it is left to an
+                    // enclosing waveform to bound it.
+                    match g.known_length_at(&shared, Some(0), &mut Vec::new()) {
+                        Some(usize::MAX) | None => Npc(Infinite, shared),
+                        Some(_) => Pc(shared),
+                    }
+                }
                 Shared { id, waveform, body } => {
                     do_two(g, BoundedBy::First, *body, *waveform, |body, waveform| {
                         Shared {
@@ -1213,9 +1226,8 @@ impl<'a> Generator<'a> {
                         }
                     })
                 }
-                // TODO Figure out of a shared waveform can be precomputed
-                // before we get here. For now: a `Ref` reads from a `Shared` at
-                // run time, and so must never be generated apart from it.
+                // A `Ref` reads from its `Shared`, and so must never be
+                // generated independently of it.
                 Ref(_) => Npc(Dynamic, waveform),
             }
         }
@@ -1237,7 +1249,8 @@ mod tests {
     use crate::optimizer;
     use waveform::UnaryOperator;
     use waveform::Waveform::{
-        Append, BinaryOp, Const, Filter, Fin, Fixed, Phase, Reset, Time, UnaryOp,
+        Alt, Append, BinaryOp, Const, Filter, Fin, Fixed, Marked, Noise, Phase, Ref, Reset, Shared,
+        Time, UnaryOp,
     };
 
     type Waveform = waveform::Waveform<u32>;
@@ -1355,8 +1368,6 @@ mod tests {
 
     #[test]
     fn test_fin_stays_ended() {
-        use waveform::Waveform::Marked;
-
         // At one sample per second, the Fin ends at time 2, merged with 24 samples of zeros.
         let w: Waveform = BinaryOp(
             BinaryOperator::Merge,
@@ -1402,7 +1413,7 @@ mod tests {
                         BinaryOperator::Subtract,
                         Box::new(Time(())),
                         // It's important that the following waveform be dynamic.
-                        Box::new(waveform::Waveform::Marked {
+                        Box::new(Marked {
                             id: 1,
                             waveform: Box::new(Const(4.0)),
                         }),
@@ -1419,7 +1430,6 @@ mod tests {
         // Make sure that the `length` of Fin is advanced so that if it's modified
         // the it picks up where it would have been.
         let mut g = Generator::new(1);
-        use waveform::Waveform::Marked;
         let mark = "mark";
         let mut w = initialize_state(Append(
             Box::new(Fin {
@@ -1836,8 +1846,6 @@ mod tests {
 
     #[test]
     fn ended_operands_read_as_zero() {
-        use waveform::Waveform::Alt;
-
         // Two samples of 2.0, ending partway through a buffer.
         let two_samples = || Fin {
             length: Box::new(BinaryOp(
@@ -1881,8 +1889,6 @@ mod tests {
 
     #[test]
     fn test_alt_precompute() {
-        use waveform::Waveform::{Alt, Marked};
-
         // A finite trigger bounds the alt (even with infinite branches), so the
         // whole waveform pre-computes to Fixed.
         let mut g = new_test_generator(1);
@@ -1992,7 +1998,6 @@ mod tests {
 
     #[test]
     fn appends_after_appended_fins_start_where_those_fins_end() {
-        use waveform::Waveform::Marked;
         // `time - seconds`, marked so that it stays dynamic.
         let minus = |id, seconds| {
             BinaryOp(
@@ -2436,7 +2441,7 @@ mod tests {
 
     // Returns a `Shared` with id 0 holding `waveform` and `body`.
     fn shared(waveform: Waveform, body: Waveform) -> Waveform {
-        waveform::Waveform::Shared {
+        Shared {
             id: ShareId(0),
             waveform: Box::new(waveform),
             body: Box::new(body),
@@ -2444,14 +2449,14 @@ mod tests {
     }
 
     fn reference() -> Waveform {
-        waveform::Waveform::Ref(ShareId(0))
+        Ref(ShareId(0))
     }
 
     #[test]
     fn shared_waveforms_are_generated_once() {
         // Two copies of noise differ, but two references to one agree.
         let w = shared(
-            waveform::Waveform::Noise,
+            Noise,
             BinaryOp(
                 BinaryOperator::Subtract,
                 Box::new(reference()),
@@ -2589,6 +2594,72 @@ mod tests {
         assert_eq!(len, 0);
     }
 
+    // Returns `waveform` truncated to 4 samples at a sample rate of 1.
+    fn first_four(waveform: Waveform) -> Waveform {
+        Fin {
+            length: Box::new(BinaryOp(
+                BinaryOperator::Subtract,
+                Box::new(Time(())),
+                Box::new(Const(4.0)),
+            )),
+            waveform: Box::new(waveform),
+            state: (),
+        }
+    }
+
+    // Returns the difference of `a` and `b`.
+    fn minus(a: Waveform, b: Waveform) -> Waveform {
+        BinaryOp(BinaryOperator::Subtract, Box::new(a), Box::new(b))
+    }
+
+    #[test]
+    fn a_finite_shared_read_only_by_its_own_refs_precomputes_to_samples() {
+        let square = BinaryOp(
+            BinaryOperator::Multiply,
+            Box::new(reference()),
+            Box::new(reference()),
+        );
+        let w = shared(Time(()), first_four(square));
+        run_tests(&w, &[0.0, 1.0, 4.0, 9.0]);
+        let precomputed = new_test_generator(1).precompute(w);
+        assert!(matches!(precomputed, Fixed(..)), "{}", precomputed);
+    }
+
+    #[test]
+    fn an_infinite_shared_precomputes_within_a_finite_waveform() {
+        let w = first_four(shared(Time(()), minus(reference(), Const(1.0))));
+        run_tests(&w, &[-1.0, 0.0, 1.0, 2.0]);
+        let precomputed = new_test_generator(1).precompute(w);
+        assert!(matches!(precomputed, Fixed(..)), "{}", precomputed);
+    }
+
+    #[test]
+    fn a_shared_with_noise_is_not_precomputed() {
+        let w = shared(Noise, first_four(minus(reference(), reference())));
+        run_tests(&w, &[0.0; 4]);
+        let precomputed = new_test_generator(1).precompute(w);
+        assert!(!matches!(precomputed, Fixed(..)), "{}", precomputed);
+    }
+
+    #[test]
+    fn a_shared_that_reads_an_enclosing_shared_is_not_generated_apart_from_it() {
+        // The inner `Shared` reads the outer one's noise, so generating it (and
+        // the finite waveform around it) alone would end at once.
+        let inner = Shared {
+            id: ShareId(1),
+            waveform: Box::new(Time(())),
+            body: Box::new(minus(reference(), reference())),
+        };
+        let w = shared(Noise, first_four(inner));
+        run_tests(&w, &[0.0; 4]);
+        let precomputed = new_test_generator(1).precompute(w);
+        assert!(
+            precomputed.any_node(&|w| matches!(w, Ref(_))),
+            "{}",
+            precomputed
+        );
+    }
+
     #[test]
     fn known_length_of_shared_follows_its_body() {
         let mut g = new_test_generator(1);
@@ -2620,7 +2691,7 @@ mod tests {
         // Where it starts isn't known, so neither is its length.
         let unknown = Fin {
             length: Box::new(Time(())),
-            waveform: Box::new(waveform::Waveform::Noise),
+            waveform: Box::new(Noise),
             state: (),
         };
         assert_eq!(
