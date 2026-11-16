@@ -699,7 +699,11 @@ impl EffectRunner {
                     }
                     Some(evaluated) => {
                         println!("Evaluated form of program {}:", display_name);
-                        println!("{:#?}", evaluated);
+                        match evaluated {
+                            programs::Evaluated::Waveform(w, _) => println!("{:#?}", w),
+                            programs::Evaluated::Sequence(s) => println!("{:#?}", s.step_waveform),
+                            _ => unreachable!(),
+                        };
                         state.messages.post(
                             Severity::Info,
                             format!("Printed program {} to console", display_name),
@@ -797,10 +801,10 @@ mod tests {
     fn reply_to(environment: &environment::Environment, job: processing::Job) -> processing::Reply {
         match job {
             processing::Job::Program(input) => {
-                processing::Reply::Program(processing::process(environment, &input, false))
+                processing::Reply::Program(processing::process(environment, &input))
             }
             processing::Job::Load { source, input_path } => {
-                processing::Reply::Loaded(processing::load(environment, source, input_path, false))
+                processing::Reply::Loaded(processing::load(environment, source, input_path))
             }
         }
     }
@@ -1402,7 +1406,7 @@ mod tests {
             let Ok(processing::Job::Program(input)) = job_receiver.try_recv() else {
                 panic!("expected a job");
             };
-            let outcome = processing::process(&environment, &input, false);
+            let outcome = processing::process(&environment, &input);
             runner.finish(&mut state, &mut world, processing::Reply::Program(outcome));
             assert_eq!(current_message(&state), message);
             assert!(state.programs.programs()[0].waveform().is_some());

@@ -249,7 +249,7 @@ fn played_trees_carry_only_substitution_marks() {
         };
         for index in 0..set.programs().len() {
             let input = set.evaluation_input(index);
-            let outcome = processing::process(&environment, &input, false);
+            let outcome = processing::process(&environment, &input);
             if set.record(index, input.text.into(), outcome).is_err() {
                 continue;
             }

@@ -64,7 +64,7 @@ fn play(
             continue;
         }
         let input = set.evaluation_input(index);
-        let outcome = processing::process(&environment, &input, false);
+        let outcome = processing::process(&environment, &input);
         if set.record(index, input.text.into(), outcome).is_ok()
             && set.programs()[index].is_playable()
         {

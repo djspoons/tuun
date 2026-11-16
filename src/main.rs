@@ -44,15 +44,6 @@ struct Args {
     // each other's captures, so include something like a process id when launching in a loop.
     #[arg(long, default_value = "tuun_%Y-%m-%d_%H-%M-%S")]
     date_format: String,
-    /// Whether the finite parts of each evaluated waveform (and of the Beats
-    /// waveforms) are replaced by their samples before they are played.
-    // TODO probably time for the pre-compute flag to say goodbye
-    #[arg(long,
-        num_args(0..=1), // Allows --flag or --flag=value
-        action = clap::ArgAction::Set,
-        default_value = "true", // Default if the flag is not present
-        default_missing_value = "true")]
-    precompute: bool,
     #[arg(long,
         num_args(0..=1), // Allows --flag or --flag=value
         action = clap::ArgAction::Set,
@@ -137,8 +128,7 @@ pub fn main() {
         // Call the callback to get at least one status update
         tracker.callback(&mut out);
         let status = status_receiver.recv().unwrap();
-        // Parse and send commands to play all of the waveforms, without
-        // precomputing them.
+        // Parse and send commands to play all of the waveforms.
         let mut environment =
             environment::Environment::new(args.sample_rate, args.tempo, args.library_root.clone());
         environment.set_check_mode(args.check);
@@ -154,7 +144,7 @@ pub fn main() {
                 state.programs.programs()[program_index].text()
             );
             let input = state.programs.evaluation_input(program_index);
-            let outcome = processing::process(&environment, &input, false);
+            let outcome = processing::process(&environment, &input);
             match state
                 .programs
                 .record(program_index, input.text.into(), outcome)
@@ -361,7 +351,6 @@ pub fn main() {
         args.tempo,
         args.library_root.clone(),
         args.check,
-        args.precompute,
         environment.module_table(),
         main_loop_waker(&event_subsystem, wake_event_type),
     );

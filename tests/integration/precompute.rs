@@ -46,7 +46,13 @@ fn processed(environment: &Environment, source: &str, precompute: bool) -> Progr
         .expect("test source should parse");
     assert_eq!(warning, "");
     let input = set.evaluation_input(0);
-    let outcome = processing::process(environment, &input, precompute);
+    let outcome = if precompute {
+        processing::process(environment, &input)
+    } else {
+        // `process` always pre-computes samples, so inline the part that
+        // doesn't here.
+        Ok((Some(environment.evaluate_program(&input).unwrap()), vec![]))
+    };
     set.record(0, input.text.into(), outcome)
         .expect("the program evaluates");
     set
@@ -58,7 +64,7 @@ fn processed(environment: &Environment, source: &str, precompute: bool) -> Progr
 #[test]
 fn precomputing_at_evaluation_matches_precomputing_each_play() {
     let environment = Environment::new(SAMPLE_RATE, 90, PathBuf::new());
-    // A finite part that precomputes to samples, then one the slider mark
+    // A finite part that pre-computes to samples, then one the slider mark
     // keeps dynamic.
     let source = "#{sliders=[\"vol:0.5:0:1\"], level_db=-6}\n\
                   _ = (time | fin(time - 0.25) | seq(time - 0.25)) \\ (vol | fin(time - 0.25));\n";
