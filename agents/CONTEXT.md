@@ -83,7 +83,7 @@ The mark on every voice through which it is released or stopped. What is written
 _Avoid_: stop mark, envelope
 
 **Slider**:
-A single value, declared on a binding, that can be changed while sound is playing. Every voice whose waveform uses that binding shares one synchronized view of it. The name the slider binds is visible only inside its declaring binding; other programs reach the slider by referencing that binding, not by naming the slider.
+A single named value that can be changed while sound is playing, read wherever a waveform asks for it by name. Each slider belongs to one owner: among the bindings a sound is built through, the one whose annotation lists that name, or the program being played if none does. Every voice built through the same owner shares one synchronized view of it; voices built through different owners never share one. At most one binding a sound is built through may list a given name.
 _Avoid_: parameter, knob, control
 
 **Capture**:
