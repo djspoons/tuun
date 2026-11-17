@@ -1,0 +1,11 @@
+open std;
+use synth.sub;
+
+#{level_db=0}
+b = sub.kick_drum()(E) | unseq();
+
+#{level_db=0}
+t1 = abs(cos(2 * pi * phase(1/W, 0)));
+
+#{skip_slots=1, loop_after_beats=4, level_db=0}
+_ = share(t1, fn(t) => reset($(8/W), maybe(b, P=t | hold()))) | fin(time - W);
