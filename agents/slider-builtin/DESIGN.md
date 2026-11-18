@@ -129,7 +129,6 @@ encoder order, and it records saved values.
 - A saved value outside the code's range is clamped, with a warning.
 - An entry that the program's sound never reaches gets a warning, but keeps its
   encoder position and its saved value.
-- The web component's `sliders='[…]'` attribute uses the same entry format.
 
 ### Encoders and display
 
@@ -158,6 +157,41 @@ deferred; see below.
   ownership error names both annotations and the user deletes one entry. No
   special handling.
 
+### Web component
+
+The expression's text is the only definition of its sliders. The
+`sliders='[…]'` attribute goes away: on the web there is no file to save
+values into and no encoders to order, the two jobs the annotation keeps in
+the native app.
+
+- A component's single expression owns every slider it reaches, including
+  sliders inside functions from `open`ed or `use`d modules.
+- Controls are listed in the order the expression first reaches their calls,
+  and show real values.
+- Controls appear when the page loads, before anything plays: the component
+  evaluates the expression without audio and draws a control for each slider
+  it reaches. If that evaluation fails, no controls are drawn, and pressing
+  play reports the error as it does today.
+- Each play re-reads the sliders from the current (possibly edited) text. A
+  control whose label is still reached keeps its current value; a newly
+  reached slider starts at its default; a control the expression no longer
+  reaches is removed. Controls don't change while the reader types.
+- Reset restores the original text and redraws the controls from it, at
+  their defaults.
+
+Implementation notes:
+
+- This needs a WASM entry point that evaluates an expression (with its opens
+  and uses) without an audio context and returns each reached slider's label,
+  default, min, max and curve. Today the main-thread `Tuun` is created only
+  on the first play (`TuunRuntime::_doInit` in `docs/tuun/tuun-synth.js`).
+  Hypothesis (unverified): evaluating every component on page load (12 on
+  `docs/instruments.md`) is fast enough; measure it.
+- The browser control moves over 0–1, so the page needs the curve to show and
+  send real values. A small WASM function for the mapping keeps native and
+  web on one formula, replacing the `parseSliders` and `evaluateSlider`
+  exports.
+
 ### Migration
 
 A hard break, with no compatibility mode:
@@ -166,7 +200,9 @@ A hard break, with no compatibility mode:
   mapping) is a parse error whose message says what to write instead.
 - The same change converts every in-repo use: `lib/v0/demos/sliders.tuun` and
   other `.tuun` files, the `docs/` pages and their web components (checked by
-  `check-web-examples.sh`), and the README.
+  `check-web-examples.sh`), and the README. Each web component's `sliders`
+  attribute becomes `slider(…)` calls in its expression, and the attribute
+  handling in `src/misc/web_checker.rs` goes away.
 - `slider::denormalize`'s Tuun-function evaluator goes away; curves are a
   closed set.
 
@@ -186,5 +222,9 @@ sliders rather than a separate structure.
   concern: turning that encoder while `A:2` is selected also changes `A:3`.
   Decide at a later implementation stage; the first stage shows only sliders
   the selected program owns.
+- **Hiding some of a web component's sliders.** A page that opens an
+  instrument with many sliders may want controls for only the one it
+  discusses, e.g. an attribute listing which sliders get controls. Add it if a
+  page needs it.
 - **Removing named arguments from the language**, if the builtin turns out to
   cover the parameter-plumbing case they were meant for. Out of scope here.
