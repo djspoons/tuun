@@ -16,6 +16,7 @@ use crate::ids::MarkId;
 use crate::parser;
 use crate::sequencer;
 use crate::slider;
+use crate::slider_analysis;
 use crate::slider_providers;
 use crate::trace_walk::WaveformMarks;
 use crate::waveform;
@@ -130,7 +131,7 @@ pub struct KeysInstrument {
 #[derive(Debug, Clone)]
 pub struct Evaluated {
     pub plays: Plays,
-    pub sliders: Vec<slider_providers::Reached>,
+    pub sliders: Vec<slider_analysis::Reached>,
 }
 
 /// What evaluating one program reads, copied out of its [`ProgramSet`] so
@@ -1124,7 +1125,7 @@ impl ProgramSet {
     /// A slider already reached keeps its position: its value is unchanged
     /// when its spec is, and otherwise moves to the same position along the
     /// new spec.
-    pub fn reach(&mut self, reached: &[slider_providers::Reached]) {
+    pub fn reach(&mut self, reached: &[slider_analysis::Reached]) {
         for slider in reached {
             let key = (slider.provider, slider.label.clone());
             let value = match self.sliders.get(&key) {
@@ -1934,8 +1935,8 @@ mod tests {
         default: f32,
         min: f32,
         max: f32,
-    ) -> slider_providers::Reached {
-        slider_providers::Reached {
+    ) -> slider_analysis::Reached {
+        slider_analysis::Reached {
             provider,
             label: label.to_string(),
             spec: slider::SliderSpec::new(default, min, max, slider::Curve::Linear).unwrap(),
@@ -1999,11 +2000,7 @@ mod tests {
 
     /// Records an evaluation of the program at `index` that can reach
     /// `sliders`.
-    fn record_reaching(
-        set: &mut ProgramSet,
-        index: usize,
-        sliders: Vec<slider_providers::Reached>,
-    ) {
+    fn record_reaching(set: &mut ProgramSet, index: usize, sliders: Vec<slider_analysis::Reached>) {
         let evaluated = Evaluated {
             plays: Plays::Waveform(waveform::Waveform::Const(1.0), Arc::default()),
             sliders,

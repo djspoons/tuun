@@ -10,6 +10,7 @@ use crate::diagnostics::Source;
 use crate::expr;
 use crate::ids::MarkId;
 use crate::slider;
+use crate::slider_analysis::Reached;
 use crate::waveform;
 
 /// A program slot as a provider of sliders: its name, where its text is, and
@@ -156,15 +157,6 @@ impl Providers {
         }
         warnings
     }
-}
-
-/// A slider a program can reach: the slot that provides it, its label, and its
-/// spec.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Reached {
-    pub provider: usize,
-    pub label: String,
-    pub spec: slider::SliderSpec,
 }
 
 /// Makes `waveform` the program at `program`'s: each slider in it that the

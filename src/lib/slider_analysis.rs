@@ -20,10 +20,13 @@ use crate::slider::{Curve, Listing, Listings, Provider, SliderSpec};
 use crate::trace::{CarriesTrace, Trace};
 use crate::waveform::{ShareId, Waveform};
 
-/// A slider a program can reach: its provider, its label, and its spec.
+/// A slider a program can reach: the id of its provider, its label, and its
+/// spec.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reached {
-    pub provider: Provider,
+    /// The id of the listing binding that provides it, or of the played
+    /// program when none does.
+    pub provider: usize,
     pub label: String,
     pub spec: SliderSpec,
 }
@@ -50,8 +53,11 @@ pub struct Program<'a, M, S> {
     pub keys: bool,
     /// The listing bindings code is written in.
     pub listings: Listings<S>,
-    /// The name of each provider in messages.
-    pub name: &'a dyn Fn(Provider) -> String,
+    /// The id of the played program as a provider. When the program's own
+    /// text lists sliders, its listing has this id too.
+    pub played: usize,
+    /// The name of the provider with each id in messages.
+    pub name: &'a dyn Fn(usize) -> String,
     /// Where the annotation of the listing with each id is.
     pub annotation: &'a dyn Fn(usize) -> Option<Span<S>>,
 }
@@ -88,7 +94,7 @@ const FUEL: u64 = 20_000_000;
 /// use tuun::builtins;
 /// use tuun::expr::Error;
 /// use tuun::parser;
-/// use tuun::slider::{Listings, Provider};
+/// use tuun::slider::Listings;
 /// use tuun::slider_analysis::{self, Program};
 ///
 /// let mut prelude = Vec::new();
@@ -99,13 +105,14 @@ const FUEL: u64 = 20_000_000;
 ///     expr: &expr,
 ///     keys: false,
 ///     listings: Listings::new(|_| None),
+///     played: 7,
 ///     name: &|_| "the program".to_string(),
 ///     annotation: &|_| None,
 /// };
 /// let analysis = slider_analysis::analyze(|_| Err(Error::eval_here("no modules")), &program);
 /// assert!(analysis.errors.is_empty());
 /// assert_eq!(analysis.reached[0].label, "mix");
-/// assert_eq!(analysis.reached[0].provider, Provider::Played);
+/// assert_eq!(analysis.reached[0].provider, 7);
 /// ```
 pub fn analyze<'a, M, S, F>(resolve: F, program: &Program<'a, M, S>) -> Analysis<S>
 where
@@ -125,7 +132,7 @@ where
         fuel: FUEL,
         name: program.name,
         annotation: program.annotation,
-        played: None,
+        played: program.played,
     };
     analyzer.run(program);
     if analyzer.fuel == 0 {
@@ -327,8 +334,8 @@ struct Analyzer<'a, 'n, M, S, F> {
     tops: Vec<Rc<Top<'a, M, S>>>,
     /// Each module's exports, by path, or `None` while it is being built.
     modules: HashMap<Vec<String>, Option<Rc<Entries<'a, M, S>>>>,
-    /// The spec of the first call of each slider.
-    specs: HashMap<(Provider, String), SliderSpec>,
+    /// The spec of the first call of each slider, by its provider's id.
+    specs: HashMap<(usize, String), SliderSpec>,
     /// Each slider the program reaches, with the text order of its first call.
     reached: Vec<(Vec<usize>, Reached)>,
     errors: Vec<Error<S>>,
@@ -336,10 +343,10 @@ struct Analyzer<'a, 'n, M, S, F> {
     /// give it, which those may apply to anything.
     escaped: Vec<Rc<Closure<'a, M, S>>>,
     fuel: u64,
-    name: &'n dyn Fn(Provider) -> String,
+    name: &'n dyn Fn(usize) -> String,
     annotation: &'n dyn Fn(usize) -> Option<Span<S>>,
-    /// The id of the played program as a listing, when it lists sliders.
-    played: Option<usize>,
+    /// The id of the played program as a provider.
+    played: usize,
 }
 
 impl<'a, M, S, F> Analyzer<'a, '_, M, S, F>
@@ -356,9 +363,6 @@ where
         }
         let env = Env::Top(Rc::downgrade(&top), top.len.get());
         let code = program.expr.span.as_ref();
-        self.played = code
-            .and_then(|code| self.listings.find(code))
-            .map(|listing| listing.id);
         let scope = Scope::new(Mode::Program).enter(code, None, &self.listings);
         let Ok(value) = self.eval(program.expr, &env, &scope) else {
             return;
@@ -789,7 +793,7 @@ where
                 let message = format!(
                     "{} provides slider {} here, so it can't apply `{}`, a function its callers \
                      give",
-                    (self.name)(Provider::Listing(listing.id)),
+                    (self.name)(listing.id),
                     labels.join(" and "),
                     name
                 );
@@ -912,6 +916,14 @@ where
         Ok(value)
     }
 
+    /// Returns the id of `provider`.
+    fn id(&self, provider: Provider) -> usize {
+        match provider {
+            Provider::Played => self.played,
+            Provider::Listing(id) => id,
+        }
+    }
+
     /// Returns the provider of a call of the slider `label` in `scope`, or
     /// `None` after reporting two or more listings of it there.
     fn provider(&mut self, label: &str, scope: &Scope) -> Option<Provider> {
@@ -927,10 +939,7 @@ where
             _ => {
                 let mut many = listing;
                 many.sort();
-                let names: Vec<String> = many
-                    .iter()
-                    .map(|&id| (self.name)(Provider::Listing(id)))
-                    .collect();
+                let names: Vec<String> = many.iter().map(|&id| (self.name)(id)).collect();
                 let message = format!(
                     "slider {:?} is listed by {}, and this waveform is built through each of \
                      them; keep only one listing",
@@ -961,10 +970,7 @@ where
                 let error = match origin {
                     // A slider the played program lists is its own, and the
                     // played program is never checked alone.
-                    Origin::Key | Origin::Velocity
-                        if provider == Provider::Played
-                            || Some(provider) == self.played.map(Provider::Listing) =>
-                    {
+                    Origin::Key | Origin::Velocity if self.id(provider) == self.played => {
                         let what = match origin {
                             Origin::Key => "the key a note plays",
                             _ => "the velocity a note plays with",
@@ -984,7 +990,7 @@ where
                             format!(
                                 "{} lists slider {:?}, but its {} depends on `{}`, which its callers \
                              give; list it where `{}` is given instead",
-                                (self.name)(provider),
+                                (self.name)(*listing),
                                 label,
                                 part,
                                 name,
@@ -1022,14 +1028,14 @@ where
         call: &Call<'a, M, S>,
         scope: &Scope,
     ) {
-        let key = (provider, label);
+        let key = (self.id(provider), label);
         match self.specs.get(&key) {
             Some(first) if *first != spec => {
                 let message = format!(
                     "slider {:?} of {} is {} here but {} at another call; calls of one slider \
                      must agree",
                     key.1,
-                    (self.name)(provider),
+                    (self.name)(key.0),
                     spec,
                     first
                 );

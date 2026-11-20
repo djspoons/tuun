@@ -374,6 +374,7 @@ impl Wasm {
                 expr: &parsed_expr,
                 keys: false,
                 listings: slider::Listings::new(|_| None),
+                played: 0,
                 name: &|_| "the expression".to_string(),
                 annotation: &|_| None,
             },

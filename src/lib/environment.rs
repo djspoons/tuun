@@ -97,7 +97,7 @@ pub struct Checked {
     /// The sliders the program can reach, on any branch and any note of a
     /// keys instrument, each with the slot that provides it, in the order the
     /// text reaches their first calls.
-    pub sliders: Vec<slider_providers::Reached>,
+    pub sliders: Vec<slider_analysis::Reached>,
 }
 
 /// What `check_program`'s findings become: errors or warnings.
@@ -550,15 +550,11 @@ impl Environment {
         input: &EvaluationInput,
         bindings: &[expr::SourceBinding<MarkId, Source>],
         expr: &expr::SourceExpr<MarkId, Source>,
-    ) -> (Vec<slider_providers::Reached>, Vec<expr::Error<Source>>) {
+    ) -> (Vec<slider_analysis::Reached>, Vec<expr::Error<Source>>) {
         let slots = &input.providers.slots;
-        let index = |provider: slider::Provider| match provider {
-            slider::Provider::Played => input.index,
-            slider::Provider::Listing(index) => index,
-        };
-        let name = |provider| {
+        let name = |index: usize| {
             slots
-                .get(index(provider))
+                .get(index)
                 .map_or_else(String::new, |slot| slot.name.clone())
         };
         let annotation = |index: usize| slots.get(index)?.listing.clone();
@@ -567,20 +563,12 @@ impl Environment {
             expr,
             keys: input.kind == ProgramKind::Keys,
             listings: input.listings(),
+            played: input.index,
             name: &name,
             annotation: &annotation,
         };
         let analysis = slider_analysis::analyze(|path| self.resolve(path), &program);
-        let reached = analysis
-            .reached
-            .into_iter()
-            .map(|reached| slider_providers::Reached {
-                provider: index(reached.provider),
-                label: reached.label,
-                spec: reached.spec,
-            })
-            .collect();
-        (reached, analysis.errors)
+        (analysis.reached, analysis.errors)
     }
 
     /// Returns the type of the identifier covering `offset` in the program at

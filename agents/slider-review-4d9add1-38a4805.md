@@ -39,6 +39,7 @@ The "list it on a shared helper" pattern that the provider errors steer users to
 ## Simplifications
 
 - **Two `Reached` types.** `slider_analysis::Reached` (with a `Provider`) and `slider_providers::Reached` (with a slot index) differ only by the `index` closure in `analyze_sliders`. If `slider_analysis::Program` took the played slot's index, the analysis could report slot indices directly, and one type and that mapping would go away. `Played` vs `Listing` is still needed in evaluation, as the placeholder for bindings that are evaluated once and shared, but not in what the analysis returns.
+  **Addressed:** `slider_analysis::Program` takes the played program's id, and `slider_analysis::Reached` holds provider ids; `slider_providers::Reached` is gone. Keying specs by id also fixed a missed error: a slider the played program provides both unlisted (from a top-level binding) and through its own listing was two sliders to the analysis but one in evaluation (test: `a_slider_the_played_program_lists_is_the_one_it_provides_unlisted`).
 - **Dead code.** `MarkId::provided_by` (`src/lib/ids.rs:117`) is never called; `slider_providers::provide` does the same job. The doc comment on `PlayedSlider` links to the dead one.
   **Addressed:** removed; `PlayedSlider`'s doc links to `slider_providers::provide`.
 - **`apply_note_function` returns `Vec<Error>` but never more than one error.** That's left over from the runtime resolution. Going back to a single error removes the diagnostic-collecting code in both `effects.rs` callers.
