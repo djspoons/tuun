@@ -1,21 +1,16 @@
 /* tslint:disable */
 /* eslint-disable */
 /**
- * Parses a slider config string like `["volume:0.5:0:1", "freq:0.5:fn(x) => 100 * pow(100, x)"]`
- * and returns a JSON array of slider objects.
- *
- * Linear sliders: `{ type: "linear", label, initial_value, min, max }`
- * User-defined sliders: `{ type: "user-defined", label, normalized_initial_value, function_source, initial_value, value_at_0, value_at_1 }`
- *
- * Returns an error string if parsing fails.
+ * Returns the value at `position`, from 0 at `min` to 1 at `max`, along a
+ * slider with the curve named `curve` (see
+ * [`slider::SliderSpec::denormalize`]).
  */
-export function parseSliders(input: string): string;
+export function sliderValue(min: number, max: number, curve: string, position: number): number;
 /**
- * Evaluates a user-defined slider function at a given normalized value.
- *
- * For example, `evaluateSlider("fn(x) => 100 * pow(100, x)", 0.5)` returns ~1000.
+ * Returns the position of `value` along a slider over `min` to `max` with
+ * the curve named `curve`, the inverse of [`slider_value`].
  */
-export function evaluateSlider(function_source: string, normalized_value: number): number;
+export function sliderPosition(min: number, max: number, curve: string, value: number): number;
 /**
  * Initializes the WASM module.
  * This is called automatically when you import the module.
@@ -33,10 +28,9 @@ export class Tuun {
    */
   is_playing(): boolean;
   /**
-   * Updates a slider value in the current waveform.
-   *
-   * Builds a linear ramp from the last value to the new value and
-   * substitutes it into the playing waveform.
+   * Moves the slider `name` of the playing waveform to `value`, clamped to
+   * its range, ramping from its last value. Does nothing if nothing is
+   * playing or the waveform doesn't reach that slider.
    */
   update_slider(name: string, value: number): void;
   /**
@@ -53,12 +47,15 @@ export class Tuun {
   stop(): void;
   /**
    * Installs an expression as the current waveform: parses it, evaluates
-   * it under the slider bindings and opened modules, and stores the
-   * resulting waveform for [`Wasm::process`] to render.
+   * it under the opened modules, and stores the resulting waveform for
+   * [`Wasm::process`] to render. Returns the sliders it reaches, as
+   * [`Wasm::sliders`] does.
    *
-   * `slider_json` is a JSON object mapping slider names to initial values,
-   * for example, `{"volume": 0.5, "cutoff": 2000}`. Pass `"{}"` for no
-   * sliders.
+   * `value_json` is a JSON object mapping slider labels to the values they
+   * start at, for example `{"volume": 0.5, "cutoff": 2000}`. A value
+   * outside its slider's range is clamped; a slider with no value starts
+   * at its default, and a label the expression doesn't reach is ignored.
+   * Pass `"{}"` for every slider's default.
    *
    * `open_json` is a JSON array of dotted module paths to bring into scope
    * before evaluating, e.g. `["std", "foo.bar"]`. Each entry behaves like an
@@ -76,7 +73,7 @@ export class Tuun {
    * tuun.install("std.square(220) * 0.3", "{}", "[]", '["std"]');
    * ```
    */
-  install(expression: string, slider_json: string, open_json: string, use_json: string): void;
+  install(expression: string, value_json: string, open_json: string, use_json: string): string;
   /**
    * Generates audio samples from the current waveform. Updates the internal
    * state of the waveform so that the next call to `generate()` will continue
@@ -97,6 +94,21 @@ export class Tuun {
    */
   process(out: Float32Array): boolean;
   /**
+   * Returns the sliders `expression` reaches, as a JSON array of `{label,
+   * default, min, max, curve}` objects in the order the expression first
+   * reaches their calls, without installing it.
+   *
+   * `open_json` and `use_json` are as for [`Wasm::install`]. Returns the
+   * error [`Wasm::install`] would.
+   *
+   * # Examples
+   * ```javascript
+   * tuun.sliders('$220 * slider("level", 0.5)', '["std"]', "[]");
+   * // '[{"label":"level","default":0.5,"min":0,"max":1,"curve":"linear"}]'
+   * ```
+   */
+  sliders(expression: string, open_json: string, use_json: string): string;
+  /**
    * Returns the current sample rate.
    */
   readonly sample_rate: number;
@@ -107,13 +119,14 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
   readonly memory: WebAssembly.Memory;
   readonly __wbg_tuun_free: (a: number, b: number) => void;
-  readonly evaluateSlider: (a: number, b: number, c: number) => [number, number, number];
-  readonly parseSliders: (a: number, b: number) => [number, number, number, number];
-  readonly tuun_install: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
+  readonly sliderPosition: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
+  readonly sliderValue: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
+  readonly tuun_install: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
   readonly tuun_is_playing: (a: number) => number;
   readonly tuun_new: (a: number, b: number) => [number, number, number];
   readonly tuun_process: (a: number, b: number, c: number, d: any) => number;
   readonly tuun_sample_rate: (a: number) => number;
+  readonly tuun_sliders: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
   readonly tuun_stop: (a: number) => void;
   readonly tuun_update_slider: (a: number, b: number, c: number, d: number) => void;
   readonly main: () => void;

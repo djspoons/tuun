@@ -94,49 +94,38 @@ function takeFromExternrefTable0(idx) {
     return value;
 }
 /**
- * Parses a slider config string like `["volume:0.5:0:1", "freq:0.5:fn(x) => 100 * pow(100, x)"]`
- * and returns a JSON array of slider objects.
- *
- * Linear sliders: `{ type: "linear", label, initial_value, min, max }`
- * User-defined sliders: `{ type: "user-defined", label, normalized_initial_value, function_source, initial_value, value_at_0, value_at_1 }`
- *
- * Returns an error string if parsing fails.
- * @param {string} input
- * @returns {string}
+ * Returns the value at `position`, from 0 at `min` to 1 at `max`, along a
+ * slider with the curve named `curve` (see
+ * [`slider::SliderSpec::denormalize`]).
+ * @param {number} min
+ * @param {number} max
+ * @param {string} curve
+ * @param {number} position
+ * @returns {number}
  */
-export function parseSliders(input) {
-    let deferred3_0;
-    let deferred3_1;
-    try {
-        const ptr0 = passStringToWasm0(input, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.parseSliders(ptr0, len0);
-        var ptr2 = ret[0];
-        var len2 = ret[1];
-        if (ret[3]) {
-            ptr2 = 0; len2 = 0;
-            throw takeFromExternrefTable0(ret[2]);
-        }
-        deferred3_0 = ptr2;
-        deferred3_1 = len2;
-        return getStringFromWasm0(ptr2, len2);
-    } finally {
-        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+export function sliderValue(min, max, curve, position) {
+    const ptr0 = passStringToWasm0(curve, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.sliderValue(min, max, ptr0, len0, position);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
     }
+    return ret[0];
 }
 
 /**
- * Evaluates a user-defined slider function at a given normalized value.
- *
- * For example, `evaluateSlider("fn(x) => 100 * pow(100, x)", 0.5)` returns ~1000.
- * @param {string} function_source
- * @param {number} normalized_value
+ * Returns the position of `value` along a slider over `min` to `max` with
+ * the curve named `curve`, the inverse of [`slider_value`].
+ * @param {number} min
+ * @param {number} max
+ * @param {string} curve
+ * @param {number} value
  * @returns {number}
  */
-export function evaluateSlider(function_source, normalized_value) {
-    const ptr0 = passStringToWasm0(function_source, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+export function sliderPosition(min, max, curve, value) {
+    const ptr0 = passStringToWasm0(curve, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.evaluateSlider(ptr0, len0, normalized_value);
+    const ret = wasm.sliderPosition(min, max, ptr0, len0, value);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
@@ -205,10 +194,9 @@ export class Tuun {
         return ret;
     }
     /**
-     * Updates a slider value in the current waveform.
-     *
-     * Builds a linear ramp from the last value to the new value and
-     * substitutes it into the playing waveform.
+     * Moves the slider `name` of the playing waveform to `value`, clamped to
+     * its range, ramping from its last value. Does nothing if nothing is
+     * playing or the waveform doesn't reach that slider.
      * @param {string} name
      * @param {number} value
      */
@@ -243,12 +231,15 @@ export class Tuun {
     }
     /**
      * Installs an expression as the current waveform: parses it, evaluates
-     * it under the slider bindings and opened modules, and stores the
-     * resulting waveform for [`Wasm::process`] to render.
+     * it under the opened modules, and stores the resulting waveform for
+     * [`Wasm::process`] to render. Returns the sliders it reaches, as
+     * [`Wasm::sliders`] does.
      *
-     * `slider_json` is a JSON object mapping slider names to initial values,
-     * for example, `{"volume": 0.5, "cutoff": 2000}`. Pass `"{}"` for no
-     * sliders.
+     * `value_json` is a JSON object mapping slider labels to the values they
+     * start at, for example `{"volume": 0.5, "cutoff": 2000}`. A value
+     * outside its slider's range is clamped; a slider with no value starts
+     * at its default, and a label the expression doesn't reach is ignored.
+     * Pass `"{}"` for every slider's default.
      *
      * `open_json` is a JSON array of dotted module paths to bring into scope
      * before evaluating, e.g. `["std", "foo.bar"]`. Each entry behaves like an
@@ -266,22 +257,35 @@ export class Tuun {
      * tuun.install("std.square(220) * 0.3", "{}", "[]", '["std"]');
      * ```
      * @param {string} expression
-     * @param {string} slider_json
+     * @param {string} value_json
      * @param {string} open_json
      * @param {string} use_json
+     * @returns {string}
      */
-    install(expression, slider_json, open_json, use_json) {
-        const ptr0 = passStringToWasm0(expression, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(slider_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(open_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len2 = WASM_VECTOR_LEN;
-        const ptr3 = passStringToWasm0(use_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len3 = WASM_VECTOR_LEN;
-        const ret = wasm.tuun_install(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
-        if (ret[1]) {
-            throw takeFromExternrefTable0(ret[0]);
+    install(expression, value_json, open_json, use_json) {
+        let deferred6_0;
+        let deferred6_1;
+        try {
+            const ptr0 = passStringToWasm0(expression, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passStringToWasm0(value_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len1 = WASM_VECTOR_LEN;
+            const ptr2 = passStringToWasm0(open_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len2 = WASM_VECTOR_LEN;
+            const ptr3 = passStringToWasm0(use_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len3 = WASM_VECTOR_LEN;
+            const ret = wasm.tuun_install(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+            var ptr5 = ret[0];
+            var len5 = ret[1];
+            if (ret[3]) {
+                ptr5 = 0; len5 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred6_0 = ptr5;
+            deferred6_1 = len5;
+            return getStringFromWasm0(ptr5, len5);
+        } finally {
+            wasm.__wbindgen_free(deferred6_0, deferred6_1, 1);
         }
     }
     /**
@@ -309,6 +313,48 @@ export class Tuun {
         var len0 = WASM_VECTOR_LEN;
         const ret = wasm.tuun_process(this.__wbg_ptr, ptr0, len0, out);
         return ret !== 0;
+    }
+    /**
+     * Returns the sliders `expression` reaches, as a JSON array of `{label,
+     * default, min, max, curve}` objects in the order the expression first
+     * reaches their calls, without installing it.
+     *
+     * `open_json` and `use_json` are as for [`Wasm::install`]. Returns the
+     * error [`Wasm::install`] would.
+     *
+     * # Examples
+     * ```javascript
+     * tuun.sliders('$220 * slider("level", 0.5)', '["std"]', "[]");
+     * // '[{"label":"level","default":0.5,"min":0,"max":1,"curve":"linear"}]'
+     * ```
+     * @param {string} expression
+     * @param {string} open_json
+     * @param {string} use_json
+     * @returns {string}
+     */
+    sliders(expression, open_json, use_json) {
+        let deferred5_0;
+        let deferred5_1;
+        try {
+            const ptr0 = passStringToWasm0(expression, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passStringToWasm0(open_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len1 = WASM_VECTOR_LEN;
+            const ptr2 = passStringToWasm0(use_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len2 = WASM_VECTOR_LEN;
+            const ret = wasm.tuun_sliders(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
+            var ptr4 = ret[0];
+            var len4 = ret[1];
+            if (ret[3]) {
+                ptr4 = 0; len4 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred5_0 = ptr4;
+            deferred5_1 = len4;
+            return getStringFromWasm0(ptr4, len4);
+        } finally {
+            wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+        }
     }
 }
 
@@ -468,4 +514,4 @@ export { initSync };
 export default __wbg_init;
 
 // The git revision this build was made from (stamped by build-wasm.sh).
-export const tuunBuild = 'bbef554';
+export const tuunBuild = '38a4805';
