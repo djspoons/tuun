@@ -431,9 +431,14 @@ impl<S> DynamicScope<S> {
         let Some(listing) = listing else {
             return self.clone();
         };
+        let provided =
+            |label: &String| self.provider(label) == slider::Provider::Listing(listing.id);
+        if listing.labels.iter().all(provided) {
+            return self.clone();
+        }
         let mut providers = (*self.providers).clone();
         for label in listing.labels.iter() {
-            if self.provider(label) != slider::Provider::Listing(listing.id) {
+            if !provided(label) {
                 providers.push((label.clone(), listing.id));
             }
         }

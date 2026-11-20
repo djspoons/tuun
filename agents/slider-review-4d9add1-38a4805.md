@@ -44,6 +44,7 @@ The "list it on a shared helper" pattern that the provider errors steer users to
 - **`apply_note_function` returns `Vec<Error>` but never more than one error.** That's left over from the runtime resolution. Going back to a single error removes the diagnostic-collecting code in both `effects.rs` callers.
   **Addressed:** it returns one `expr::Error`.
 - **`DynamicScope::enter`** clones the providers list and allocates the labels on every closure entry into a listing's text, even when the listing already provides them. Return early when nothing changes. This is minor and only shows up with `map` over large lists.
+  **Addressed:** `enter` returns the scope unchanged when the listing already provides all its labels, and `Providers::listings` builds each slot's labels once rather than on each lookup.
 
 ## Docs and claims
 

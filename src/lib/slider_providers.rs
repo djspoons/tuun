@@ -83,21 +83,26 @@ impl Providers {
     /// ```
     pub fn listings(&self, played: usize) -> slider::Listings<Source> {
         let providers = self.clone();
+        // Each slot's listing, built once rather than for each span found.
+        let listings: Vec<Option<slider::Listing>> = self
+            .slots
+            .iter()
+            .enumerate()
+            .map(|(id, slot)| {
+                let labels: Vec<String> = slot
+                    .listed
+                    .iter()
+                    .map(|entry| entry.label.clone())
+                    .collect();
+                (!labels.is_empty()).then(|| slider::Listing {
+                    id,
+                    labels: Arc::from(labels),
+                })
+            })
+            .collect();
         slider::Listings::new(move |span| {
             let id = providers.slot(played, span)?;
-            let slot = providers.slots.get(id)?;
-            if slot.listed.is_empty() {
-                return None;
-            }
-            let labels: Vec<String> = slot
-                .listed
-                .iter()
-                .map(|entry| entry.label.clone())
-                .collect();
-            Some(slider::Listing {
-                id,
-                labels: Arc::from(labels),
-            })
+            listings.get(id)?.clone()
         })
     }
 
