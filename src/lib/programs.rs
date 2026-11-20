@@ -1105,26 +1105,28 @@ impl ProgramSet {
         })
     }
 
-    /// Adds each slider in `reached` that is new, or whose spec has changed,
-    /// at the value its owner's annotation saves (clamped to its range) or,
-    /// when that saves none, at its default. A slider already reached with
-    /// the same spec keeps its value.
+    /// Adds each slider in `reached` that is new at the value its owner's
+    /// annotation saves (clamped to its range) or, when that saves none, at
+    /// its default.
+    ///
+    /// A slider already reached keeps its position: its value is unchanged
+    /// when its spec is, and otherwise moves to the same position along the
+    /// new spec.
     pub fn reach(&mut self, reached: &[slider_owners::Reached]) {
         for slider in reached {
             let key = (slider.owner, slider.label.clone());
-            if self
-                .sliders
-                .get(&key)
-                .is_some_and(|state| state.spec == slider.spec)
-            {
-                continue;
-            }
-            let saved = self
-                .listed(slider.owner)
-                .iter()
-                .find(|entry| entry.label == slider.label)
-                .and_then(|entry| entry.value);
-            let value = saved.map_or(slider.spec.default, |value| slider.spec.clamp(value));
+            let value = match self.sliders.get(&key) {
+                Some(state) if state.spec == slider.spec => continue,
+                Some(state) => slider.spec.denormalize(state.spec.normalize(state.value)),
+                None => {
+                    let saved = self
+                        .listed(slider.owner)
+                        .iter()
+                        .find(|entry| entry.label == slider.label)
+                        .and_then(|entry| entry.value);
+                    saved.map_or(slider.spec.default, |value| slider.spec.clamp(value))
+                }
+            };
             self.sliders.insert(
                 key,
                 SliderState {
@@ -2017,14 +2019,22 @@ mod tests {
     }
 
     #[test]
-    fn a_slider_reached_again_keeps_its_value_unless_its_spec_changed() {
+    fn a_slider_reached_again_keeps_its_position() {
         let mut set = state_from("#{sliders=[\"vol\"]}\ntone = saw(220);");
         set.reach(&[reached(0, "vol", 0.5, 0.0, 1.0)]);
         set.set_slider_normalized(0, 0, 0.75);
         set.reach(&[reached(0, "vol", 0.5, 0.0, 1.0)]);
         assert_eq!(set.slider(0, "vol").unwrap().value, 0.75);
+        // A new default and range: three quarters of the way along it.
         set.reach(&[reached(0, "vol", 2.0, 0.0, 4.0)]);
-        assert_eq!(set.slider(0, "vol").unwrap().value, 2.0);
+        assert_eq!(set.slider(0, "vol").unwrap().value, 3.0);
+    }
+
+    #[test]
+    fn a_slider_reached_for_the_first_time_starts_at_its_saved_value() {
+        let mut set = state_from("#{sliders=[\"vol:0.25\"]}\ntone = saw(220);");
+        set.reach(&[reached(0, "vol", 0.5, 0.0, 1.0)]);
+        assert_eq!(set.slider(0, "vol").unwrap().value, 0.25);
     }
 
     /// Records an evaluation of the program at `index` whose waveform reaches
