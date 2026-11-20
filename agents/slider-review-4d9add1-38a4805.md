@@ -67,6 +67,7 @@ The "list it on a shared helper" pattern that the provider errors steer users to
 ## Minor
 
 - **Sliders are never forgotten.** `ProgramSet::sliders` keeps every slider ever reached. After A:2 stops using `pad`, A:1's encoder still shows and moves a "cutoff" that nothing reads.
+  **Addressed:** recording an outcome forgets each slider that no program's latest evaluation reaches (`ProgramSet::forget_unreached`). The exception is a slider whose providing slot has no evaluation, for example while it fails, which keeps its position. A moved position isn't lost: a splice saves it in the annotation before the edited program is evaluated again, and a slider reached again starts at its saved value. A forgotten slider's encoder does nothing, like a listed slider nothing has reached yet. With the listing-function change above, a slot's listed slider is usually reached by the slot's own evaluation, so this mostly applies to a slot that stops reaching an entry it lists.
 - **False positive on known parts of an unknown list.** `slider("q", nth(0, [0.1, note / 1000]))` is reported as depending on the key a note plays. This is expected under "sound over permissive".
 - **`debug` is recognised by its name** (`name.starts_with("debug(")` in `slider_analysis`). This is string coupling to how `builtins::debug` names its result.
   **Addressed:** `builtins::is_debug_result` sits beside the function that names `debug`'s result, and the analysis calls it.

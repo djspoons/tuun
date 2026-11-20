@@ -1067,6 +1067,8 @@ impl ProgramSet {
     ///
     /// When the program evaluated, the sliders it can reach are reached (see
     /// [`ProgramSet::reach`]). Otherwise any previous result is dropped.
+    /// Either way, sliders nothing reaches any more are forgotten (see
+    /// [`ProgramSet::forget_unreached`]).
     pub fn record(
         &mut self,
         index: usize,
@@ -1074,6 +1076,18 @@ impl ProgramSet {
         outcome: Outcome,
     ) -> Result<Vec<Diagnostic>, Vec<Diagnostic>> {
         self.programs[index].evaluated_text = text;
+        let result = self.record_outcome(index, outcome);
+        self.forget_unreached();
+        result
+    }
+
+    /// Records `outcome` as the result of evaluating the program at `index`
+    /// and returns its diagnostics, as [`ProgramSet::record`] does.
+    fn record_outcome(
+        &mut self,
+        index: usize,
+        outcome: Outcome,
+    ) -> Result<Vec<Diagnostic>, Vec<Diagnostic>> {
         match outcome {
             Outcome::Empty => {
                 self.programs[index].evaluated = None;
@@ -1159,6 +1173,31 @@ impl ProgramSet {
                 },
             );
         }
+    }
+
+    /// Forgets each slider no program's latest evaluation reaches, unless the
+    /// slot that provides it has no evaluation.
+    ///
+    /// A forgotten slider reached again starts over, as [`ProgramSet::reach`]
+    /// describes.
+    pub fn forget_unreached(&mut self) {
+        // A slot that failed to evaluate may be fixed without any change to
+        // what it provides, so its sliders keep their positions meanwhile.
+        let programs = &self.programs;
+        self.sliders.retain(|(provider, label), _| {
+            programs
+                .get(*provider)
+                .is_none_or(|program| program.evaluated.is_none())
+                || programs
+                    .iter()
+                    .filter_map(Program::evaluated)
+                    .any(|evaluated| {
+                        evaluated
+                            .sliders
+                            .iter()
+                            .any(|slider| slider.provider == *provider && slider.label == *label)
+                    })
+        });
     }
 
     /// Returns the labels of the sliders on the encoders of the program at
@@ -2019,6 +2058,37 @@ mod tests {
         let text = set.programs[index].text().into();
         set.record(index, text, Outcome::Evaluated(evaluated, Vec::new()))
             .expect("the evaluation is recorded");
+    }
+
+    #[test]
+    fn a_slider_nothing_reaches_any_more_is_forgotten() {
+        let mut set = state_from(
+            "#{sliders=[\"cutoff\"]}\npad = saw(220);\n\
+             _ = pad;\n\
+             _ = pad;",
+        );
+        record_reaching(&mut set, 0, vec![]);
+        record_reaching(&mut set, 1, vec![reached(0, "cutoff", 0.5, 0.0, 1.0)]);
+        record_reaching(&mut set, 2, vec![reached(0, "cutoff", 0.5, 0.0, 1.0)]);
+        record_reaching(&mut set, 1, vec![]);
+        assert!(set.slider(0, "cutoff").is_some(), "slot 2 still reaches it");
+        let text = set.programs[2].text().into();
+        set.record(2, text, Outcome::Failed(Vec::new()))
+            .expect_err("the failure is recorded");
+        assert!(set.slider(0, "cutoff").is_none());
+        assert!(set.shown_slider(0, 0).is_none());
+    }
+
+    #[test]
+    fn a_slider_whose_provider_has_no_evaluation_is_kept() {
+        let mut set = state_from("#{sliders=[\"q\"]}\n_ = saw(220);\n_ = saw(110);");
+        record_reaching(&mut set, 0, vec![reached(0, "q", 0.5, 0.0, 1.0)]);
+        set.set_slider_normalized(0, 0, 1.0);
+        let text = set.programs[0].text().into();
+        set.record(0, text, Outcome::Failed(Vec::new()))
+            .expect_err("the failure is recorded");
+        record_reaching(&mut set, 1, vec![]);
+        assert_eq!(set.slider(0, "q").unwrap().value, 1.0);
     }
 
     #[test]
