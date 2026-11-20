@@ -4,9 +4,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::diagnostics::Source;
-use crate::expr;
 use crate::ids::MarkId;
+use crate::programs::KeysInstrument;
 use crate::waveform;
 
 /// A program installed to respond to MIDI note-on/-off events.
@@ -15,15 +14,11 @@ pub struct Keys {
     /// keys instrument. The instrument's sliders and level are read live
     /// from that program.
     pub id: usize,
-    /// A function which takes a pair (MIDI note, velocity) and returns a pair
-    /// of Waveforms to be used for note-on and note-off events.
-    ///
-    /// A snapshot from install time — editing the program's text afterwards
-    /// does not change the installed instrument. Should be a closed value
-    /// except for references to sliders.
-    pub function: expr::SourceExpr<MarkId, Source>,
-    /// The program's text that `function` was evaluated from, which the byte
-    /// ranges of its notes' marks index into.
+    /// The instrument, as the program last evaluated before install —
+    /// editing the program's text afterwards does not change it.
+    pub instrument: KeysInstrument,
+    /// The program's text that `instrument` was evaluated from, which the
+    /// byte ranges of its notes' marks index into.
     pub text: Arc<str>,
     /// The note-off waveform captured at note-on time for each held key
     /// (keys are MIDI note numbers).

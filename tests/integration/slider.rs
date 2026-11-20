@@ -429,13 +429,13 @@ fn a_keys_note_provides_its_sliders() {
     ));
     let environment = environment();
     let input = set.evaluation_input(1);
-    let Ok(Plays::KeysInstrument(function)) = environment.evaluate_program(&input) else {
+    let Ok(Plays::KeysInstrument(instrument)) = environment.evaluate_program(&input) else {
         panic!("expected a keys instrument");
     };
     let reached = environment.check_program(&input).sliders;
     let arguments = || vec![SourceExpr::float(60.0), SourceExpr::float(0.5)];
     let (note_on, note_off, _) = environment
-        .apply_note_function(&function, arguments(), &set.slider_providers(), 1)
+        .apply_note_function(&instrument, arguments(), 1)
         .expect("a note should play");
     assert_eq!(sliders(&note_on), ["cutoff of A:1 = 800"]);
     assert_eq!(sliders(&note_off), ["release of A:2 = 0.5"]);
@@ -450,7 +450,7 @@ fn a_keys_note_provides_its_sliders() {
     set.set_slider_normalized(0, 0, 1.0)
         .expect("A:1 lists a slider");
     let (mut note_on, _, _) = environment
-        .apply_note_function(&function, arguments(), &set.slider_providers(), 1)
+        .apply_note_function(&instrument, arguments(), 1)
         .expect("a note should play");
     player::substitute_current_slider_values(&mut note_on, &set);
     assert_eq!(sliders(&note_on), ["cutoff of A:1 = 11000"]);

@@ -488,10 +488,10 @@ impl EffectRunner {
 
             Effect::InstallKeys(program_index) => {
                 let program = &state.programs.programs()[program_index];
-                if let Some(expr) = program.keys_instrument() {
+                if let Some(instrument) = program.keys_instrument() {
                     let new_keys = Keys {
                         id: program_index,
-                        function: expr.clone(),
+                        instrument: instrument.clone(),
                         text: program.evaluated_text().clone(),
                         note_off_waveforms: HashMap::new(),
                     };
@@ -520,9 +520,8 @@ impl EffectRunner {
                 let Some(keys) = state.keys.as_mut() else {
                     return;
                 };
-                // The instrument's sliders and level are read live from the
-                // source program (only the function is an install-time
-                // snapshot).
+                // The instrument's slider values and level are read live from
+                // the source program (only the instrument is a snapshot).
                 if state.programs.program(keys.id).is_none() {
                     return;
                 }
@@ -531,13 +530,10 @@ impl EffectRunner {
                     // TODO use a marked waveform for velocity so we can implement after-touch
                     expr::SourceExpr::float(velocity as f32 / 127.0),
                 ];
-                let providers = state.programs.slider_providers();
-                match self.environment.apply_note_function(
-                    &keys.function,
-                    args,
-                    &providers,
-                    keys.id,
-                ) {
+                match self
+                    .environment
+                    .apply_note_function(&keys.instrument, args, keys.id)
+                {
                     Ok((mut note_on, note_off, marks)) => {
                         keys.note_off_waveforms.insert(key, note_off);
                         // `note_on`'s `Marked(Slider { .. })` nodes hold the
@@ -660,7 +656,7 @@ impl EffectRunner {
                         .ok(),
                 );
                 match plays {
-                    Some(programs::Plays::KeysInstrument(function)) => {
+                    Some(programs::Plays::KeysInstrument(instrument)) => {
                         // The lambda itself is noisy to print, so show what it
                         // computes for one sample note instead.
 
@@ -673,13 +669,10 @@ impl EffectRunner {
                             expr::SourceExpr::float(SAMPLE_KEY),
                             expr::SourceExpr::float(SAMPLE_VELOCITY),
                         ];
-                        let providers = state.programs.slider_providers();
-                        match self.environment.apply_note_function(
-                            &function,
-                            args,
-                            &providers,
-                            program_index,
-                        ) {
+                        match self
+                            .environment
+                            .apply_note_function(&instrument, args, program_index)
+                        {
                             Ok((note_on, note_off, _marks)) => {
                                 println!(
                                     "Keys instrument of program {} applied at key {}, velocity {}:",
@@ -694,7 +687,7 @@ impl EffectRunner {
                             }
                             Err(errors) => {
                                 println!("Keys instrument of program {}:", display_name);
-                                println!("{}", function);
+                                println!("{}", instrument.function);
                                 let diagnostics: Vec<_> = errors
                                     .iter()
                                     .map(|error| {
@@ -1440,7 +1433,10 @@ mod tests {
                 .expect("test source should parse");
         state.keys = Some(Keys {
             id: 0,
-            function: expr::SourceExpr::float(0.0),
+            instrument: programs::KeysInstrument {
+                function: expr::SourceExpr::float(0.0),
+                listings: slider::Listings::new(|_| None),
+            },
             text: Arc::default(),
             note_off_waveforms: HashMap::new(),
         });
@@ -1656,7 +1652,10 @@ mod tests {
             file_backed_state("failed_load", "#{level_db=0}\ntone = 1 | fin(time - 1);\n");
         state.keys = Some(Keys {
             id: 0,
-            function: expr::SourceExpr::float(0.0),
+            instrument: programs::KeysInstrument {
+                function: expr::SourceExpr::float(0.0),
+                listings: slider::Listings::new(|_| None),
+            },
             text: Arc::default(),
             note_off_waveforms: HashMap::new(),
         });

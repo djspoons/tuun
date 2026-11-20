@@ -106,7 +106,21 @@ pub enum Plays {
     /// sequenceable `on_beats` shape, so it plays as the decomposed sequence.
     Sequence(sequencer::Sequence),
     /// The program evaluated to a function usable as a keys instrument.
-    KeysInstrument(expr::SourceExpr<MarkId, Source>),
+    KeysInstrument(KeysInstrument),
+}
+
+/// A function usable as a keys instrument, with the listing bindings its code
+/// was written in.
+#[derive(Debug, Clone)]
+pub struct KeysInstrument {
+    /// A function which takes a pair (MIDI note, velocity) and returns a pair
+    /// of waveforms, for note-on and note-off. A closed value except for
+    /// references to sliders.
+    pub function: expr::SourceExpr<MarkId, Source>,
+    /// The listing bindings the function's code was written in, found with
+    /// the slots' text as it was when the function was evaluated, which its
+    /// spans index into.
+    pub listings: slider::Listings<Source>,
 }
 
 /// The result of successfully evaluating a program's text: what it plays, and
@@ -390,14 +404,14 @@ impl Program {
         )
     }
 
-    /// Returns the keys-instrument function if the last recorded evaluation
-    /// produced one.
-    pub fn keys_instrument(&self) -> Option<&expr::SourceExpr<MarkId, Source>> {
+    /// Returns the keys instrument if the last recorded evaluation produced
+    /// one.
+    pub fn keys_instrument(&self) -> Option<&KeysInstrument> {
         match &self.evaluated {
             Some(Evaluated {
-                plays: Plays::KeysInstrument(expr),
+                plays: Plays::KeysInstrument(instrument),
                 ..
-            }) => Some(expr),
+            }) => Some(instrument),
             _ => None,
         }
     }
@@ -2181,7 +2195,10 @@ mod tests {
         assert!(program.keys_instrument().is_none());
         assert!(program.sequence().is_some());
 
-        program.evaluated = evaluated(Plays::KeysInstrument(expr::SourceExpr::float(1.0)));
+        program.evaluated = evaluated(Plays::KeysInstrument(KeysInstrument {
+            function: expr::SourceExpr::float(1.0),
+            listings: slider::Listings::new(|_| None),
+        }));
         assert!(program.waveform().is_none());
         assert!(!program.is_playable());
         assert!(program.keys_instrument().is_some());

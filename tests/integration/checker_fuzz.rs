@@ -729,12 +729,7 @@ fn slider_soundness_fuzz() {
                         for velocity in [0.0, 0.5, 1.0] {
                             notes += 1;
                             let note = vec![SourceExpr::float(key), SourceExpr::float(velocity)];
-                            match environment.apply_note_function(
-                                instrument,
-                                note,
-                                &input.providers,
-                                input.index,
-                            ) {
+                            match environment.apply_note_function(instrument, note, input.index) {
                                 Ok((note_on, note_off, _)) => {
                                     compare(&note_on, &mut report);
                                     compare(&note_off, &mut report);

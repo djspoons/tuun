@@ -136,12 +136,11 @@ fn played(
         Plays::Sequence(sequence) => {
             format!("{:?} {:?}", sequence.steps, sequence.step_waveform)
         }
-        Plays::KeysInstrument(function) => {
+        Plays::KeysInstrument(instrument) => {
             trace::set_trace_marking(trace_marking);
             let note = environment.apply_note_function(
-                &function,
+                &instrument,
                 vec![SourceExpr::float(60.0), SourceExpr::float(0.7)],
-                &input.providers,
                 input.index,
             );
             trace::set_trace_marking(true);
@@ -261,11 +260,10 @@ fn played_trees_carry_only_substitution_marks() {
                 continue;
             }
             let name = format!("{} {}", path.display(), set.display_name(index));
-            if let Some(function) = set.programs()[index].keys_instrument() {
+            if let Some(instrument) = set.programs()[index].keys_instrument() {
                 let note = environment.apply_note_function(
-                    function,
+                    instrument,
                     vec![SourceExpr::float(60.0), SourceExpr::float(0.7)],
-                    &set.slider_providers(),
                     index,
                 );
                 if let Ok((note_on, note_off, _)) = note {

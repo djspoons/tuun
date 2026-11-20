@@ -10,6 +10,8 @@ Each item below is open unless marked otherwise.
 
 ## Bug: an installed keys instrument loses its helper's slider after an edit elsewhere
 
+**Addressed:** `Plays::KeysInstrument` carries a `programs::KeysInstrument`, the function with the listings from its `EvaluationInput`, and `apply_note_function` takes it in place of the current providers. Test: `keys_instrument_keeps_its_providers_after_an_earlier_slot_grows` in `src/lib/environment.rs`.
+
 Verified with a probe test against `38a4805`.
 
 `PlayNoteOn` (`src/lib/effects.rs`, around line 534) finds providers from the current set (`state.programs.slider_providers()`). The keys function, though, is a snapshot whose closures carry file offsets from when it was evaluated. When an edit earlier in the file is spliced back in, every later slot's text range moves, so the old offsets point into the wrong slot.
