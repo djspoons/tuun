@@ -26,6 +26,7 @@ use crate::parser;
 use crate::programs::{Evaluated, EvaluationInput, Plays, ProgramKind, ProgramSet};
 use crate::sequencer;
 use crate::signatures;
+use crate::slider_analysis;
 use crate::slider_owners;
 use crate::trace::{self, Trace};
 use crate::trace_walk::{self, WaveformMarks};
@@ -453,10 +454,18 @@ impl Environment {
             self.checked_generation.set(self.modules_generation.get());
             break errors;
         };
+        // The slider check expects a program the type checker accepts.
+        let typed = !errors
+            .iter()
+            .any(|e| matches!(e.source(), Some(Source::Program) | Some(Source::File)));
+        let slider_errors = match typed {
+            true => self.analyze_sliders(input, &bindings, &expr).1,
+            false => Vec::new(),
+        };
         log::debug!(
             "Checked program in {:.3}s: {} errors",
             (time::Instant::now() - start).as_secs_f32(),
-            errors.len(),
+            errors.len() + slider_errors.len(),
         );
         // A module finding is not this program's diagnostic — returned, it
         // would repeat on every dependent program's check — but neither may
@@ -486,11 +495,14 @@ impl Environment {
                 }
             }
         }
+        // A slider finding in a module is this program's, since it depends on
+        // how the program uses the module.
         errors
             .iter()
             .filter(|finding| {
                 matches!(finding.source(), Some(Source::Program) | Some(Source::File))
             })
+            .chain(&slider_errors)
             .map(|finding| {
                 let diagnostic = self.diagnose(finding, &input.text, &input.source);
                 match self.check_mode {
@@ -499,6 +511,70 @@ impl Environment {
                 }
             })
             .collect()
+    }
+
+    /// Returns the sliders the program `input` describes can reach, each with
+    /// the slot that provides it, and the errors in how it uses sliders (see
+    /// [`slider_analysis::analyze`]); `None` when the program doesn't parse.
+    ///
+    /// Expects a program [`Environment::check_program`] finds no type errors
+    /// in.
+    pub fn reachable_sliders(
+        &self,
+        input: &EvaluationInput,
+    ) -> Option<(Vec<slider_owners::Reached>, Vec<Diagnostic>)> {
+        let mut bindings = input.bindings.clone();
+        bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
+        let expr = parser::parse_program(&input.text, Source::Program).ok()?;
+        let (reached, errors) = self.analyze_sliders(input, &bindings, &expr);
+        let diagnostics = errors
+            .iter()
+            .map(|error| self.diagnose(error, &input.text, &input.source))
+            .collect();
+        Some((reached, diagnostics))
+    }
+
+    /// Checks how `expr`, the parsed text of the program `input` describes,
+    /// uses sliders under `bindings`, and returns the sliders it can reach,
+    /// each with the slot that provides it, and the errors found.
+    fn analyze_sliders(
+        &self,
+        input: &EvaluationInput,
+        bindings: &[expr::SourceBinding<MarkId, Source>],
+        expr: &expr::SourceExpr<MarkId, Source>,
+    ) -> (Vec<slider_owners::Reached>, Vec<expr::Error<Source>>) {
+        let owners = &input.owners;
+        let slot = |provider: slider_analysis::Provider| match provider {
+            slider_analysis::Provider::Played => Some(&owners.played),
+            slider_analysis::Provider::Binding(index) => {
+                let span = bindings.get(index)?.span.as_ref()?;
+                owners
+                    .preceding
+                    .iter()
+                    .find(|slot| span.range.contains(&slot.text.start))
+            }
+        };
+        let program = slider_analysis::Program {
+            bindings,
+            expr,
+            listed: owners.played.listed.clone(),
+            listing: owners.played.listing.clone(),
+            keys: input.kind == ProgramKind::Keys,
+        };
+        let name = |provider| slot(provider).map_or_else(String::new, |slot| slot.name.clone());
+        let analysis = slider_analysis::analyze(|path| self.resolve(path), &program, &name);
+        let reached = analysis
+            .reached
+            .into_iter()
+            .filter_map(|reached| {
+                Some(slider_owners::Reached {
+                    owner: slot(reached.provider)?.index,
+                    label: reached.label,
+                    spec: reached.spec,
+                })
+            })
+            .collect();
+        (reached, analysis.errors)
     }
 
     /// Returns the type of the identifier covering `offset` in the program at

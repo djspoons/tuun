@@ -609,3 +609,232 @@ fn wide_function_fuzz() {
         "a function too wide to tabulate was accepted and does not run"
     );
 }
+
+/// A sweep of the slider check against evaluation: for each generated file
+/// and each program in it that the checker accepts, evaluating it (and, for a
+/// keys instrument, each note on a grid of keys and velocities) never fails
+/// on a slider, and every slider its resolved marks reach is one the check
+/// found, with the same provider and spec.
+///
+/// Set `SEED` and `COUNT` to sweep further, and `SHOW_REJECTED` to print the
+/// first finding for each program the checker rejects:
+///
+/// ```text
+/// SEED=7 COUNT=5000 cargo test --test integration checker_fuzz::slider_soundness_fuzz -- --nocapture
+/// ```
+#[cfg(feature = "native")]
+#[test]
+fn slider_soundness_fuzz() {
+    use std::path::PathBuf;
+    use tuun::environment::Environment;
+    use tuun::expr::SourceExpr;
+    use tuun::programs::{Plays, ProgramSet};
+    use tuun::slider_owners::Reached;
+
+    let (seed, count) = sweep_bounds(100);
+    let mut rng = Rng(seed);
+    let environment = Environment::new(
+        8000,
+        90,
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lib/v0"),
+    );
+    let (mut accepted, mut rejected, mut notes, mut provided) = (0, 0, 0, 0);
+    let mut found: Vec<String> = Vec::new();
+    for _ in 0..count {
+        let source = slider_file(&mut rng);
+        let Ok((set, _)) = ProgramSet::from_source(source.clone(), PathBuf::new()) else {
+            continue;
+        };
+        for index in 0..set.programs().len() {
+            if set.programs()[index].text().trim().is_empty() {
+                continue;
+            }
+            let input = set.evaluation_input(index);
+            let diagnostics = environment.check_program(&input);
+            if !diagnostics.is_empty() {
+                if std::env::var("SHOW_REJECTED").is_ok() {
+                    println!("REJECTED {}", diagnostics[0]);
+                }
+                rejected += 1;
+                continue;
+            }
+            accepted += 1;
+            let (reached, _) = environment.reachable_sliders(&input).unwrap();
+            if reached.iter().any(|slider| slider.owner != index) {
+                provided += 1;
+            }
+            let mut report = |what: String| {
+                if found.len() < 20 {
+                    println!("UNSOUND {what}\n  program {index} of\n{source}");
+                }
+                found.push(what);
+            };
+            let compare = |sliders: &[Reached], report: &mut dyn FnMut(String)| {
+                for slider in sliders {
+                    if !reached.contains(slider) {
+                        report(format!("reached {slider:?}, not among {reached:?}"));
+                    }
+                }
+            };
+            let evaluated = match environment.evaluate_program(&input) {
+                Ok(evaluated) => evaluated,
+                Err(diagnostics) => {
+                    let shown = format!("{diagnostics:?}");
+                    if shown.contains("slider") {
+                        report(format!("evaluation failed: {shown}"));
+                    }
+                    continue;
+                }
+            };
+            match &evaluated.plays {
+                Plays::KeysInstrument(instrument) => {
+                    for key in [0.0, 59.0, 60.0, 61.0, 100.0, 127.0] {
+                        for velocity in [0.0, 0.5, 1.0] {
+                            notes += 1;
+                            let note = vec![SourceExpr::float(key), SourceExpr::float(velocity)];
+                            match environment.apply_note_function(instrument, note, &input.owners) {
+                                Ok((_, _, _, sliders)) => compare(&sliders, &mut report),
+                                Err(errors) => {
+                                    let shown = format!("{errors:?}");
+                                    if shown.contains("slider") {
+                                        report(format!("note {key} {velocity} failed: {shown}"));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => compare(&evaluated.sliders, &mut report),
+            }
+        }
+    }
+    println!(
+        "sliders: {accepted} programs accepted ({provided} reaching another binding's slider), \
+         {rejected} rejected, {notes} notes played, {} unsound",
+        found.len()
+    );
+    assert!(accepted > count, "too few programs check clean to say much");
+    assert_eq!(found, Vec::<String>::new());
+}
+
+/// The labels generated slider calls use, few enough that calls collide.
+#[cfg(feature = "native")]
+const SLIDER_LABELS: &[&str] = &["a", "b"];
+
+/// The `sliders` annotations generated bindings carry, after another setting.
+#[cfg(feature = "native")]
+const SLIDER_LISTINGS: &[&str] = &[
+    "",
+    "",
+    ", sliders=[\"a\"]",
+    ", sliders=[\"b\"]",
+    ", sliders=[\"a\", \"b\"]",
+];
+
+/// Returns a file of a helper function `h`, a function `l` that calls it, a
+/// program calling both, a keys instrument `k` calling both, and a phrase
+/// played through `k`, each with a random `sliders` annotation.
+#[cfg(feature = "native")]
+fn slider_file(rng: &mut Rng) -> String {
+    let h = slider_wave(rng, 3, &["d"], &[]);
+    let l = slider_wave(rng, 3, &["x"], &["h"]);
+    let played = slider_wave(rng, 3, &[], &["h", "l"]);
+    let keys = slider_wave(rng, 3, &["key", "vel"], &["h", "l"]);
+    let listing = |rng: &mut Rng| rng.pick(SLIDER_LISTINGS);
+    format!(
+        "open std;\n\
+         #{{level_db=0{}}}\n\
+         h = fn(d) => {h};\n\
+         #{{level_db=0{}}}\n\
+         l = fn(x) => {l};\n\
+         #{{level_db=0{}}}\n\
+         _ = {played};\n\
+         #{{keys{}}}\n\
+         k = fn(key, vel) => ({keys}, 0);\n\
+         #{{level_db=0}}\n\
+         _ = [(1, 60, 0.8, 0.5), (2, 72, 0.5, 0.5)] | as_midi_phrase(k);\n",
+        listing(rng),
+        listing(rng),
+        listing(rng),
+        listing(rng),
+    )
+}
+
+/// Returns a waveform expression that may call `slider`, in which `vars` are
+/// numbers and `calls` are functions from a number to a waveform.
+#[cfg(feature = "native")]
+fn slider_wave(rng: &mut Rng, depth: usize, vars: &[&str], calls: &[&str]) -> String {
+    let d = depth.saturating_sub(1);
+    match rng.below(if depth == 0 { 3 } else { 9 }) {
+        0 | 1 => format!("(time * {})", slider_call(rng, vars)),
+        2 => match calls {
+            [] => "time".to_string(),
+            _ => format!("{}({})", rng.pick(calls), slider_number(rng, vars)),
+        },
+        3 | 4 => {
+            let condition = match vars {
+                [] => rng.pick(&["true", "false"]).to_string(),
+                _ => format!("{} > {}", rng.pick(vars), rng.pick(&["0.5", "60"])),
+            };
+            format!(
+                "(if {condition} then {} else {})",
+                slider_wave(rng, d, vars, calls),
+                slider_wave(rng, d, vars, calls)
+            )
+        }
+        5 => format!(
+            "({} + {})",
+            slider_wave(rng, d, vars, calls),
+            slider_wave(rng, d, vars, calls)
+        ),
+        6 => {
+            let mut inner = vars.to_vec();
+            inner.push("n");
+            format!(
+                "reduce(fn(acc, n) => acc + {}, 0, [1, 2])",
+                slider_wave(rng, d, &inner, calls)
+            )
+        }
+        7 => {
+            let mut inner = vars.to_vec();
+            inner.push("m");
+            format!(
+                "(let f = fn(m) => {} in f({}) + f({}))",
+                slider_wave(rng, d, &inner, calls),
+                slider_number(rng, vars),
+                slider_number(rng, vars)
+            )
+        }
+        _ => {
+            let mut inner = vars.to_vec();
+            inner.push("n");
+            format!(
+                "{{map(fn(n) => {}, [1, 2])}}",
+                slider_wave(rng, d, &inner, calls)
+            )
+        }
+    }
+}
+
+/// Returns a number expression over `vars`.
+#[cfg(feature = "native")]
+fn slider_number(rng: &mut Rng, vars: &[&str]) -> String {
+    match (rng.below(3), vars) {
+        (0, [_, ..]) => rng.pick(vars).to_string(),
+        (1, [_, ..]) => format!("{} * 2", rng.pick(vars)),
+        _ => rng.pick(&["110", "220", "60"]).to_string(),
+    }
+}
+
+/// Returns a call of `slider` whose spec may depend on `vars`.
+#[cfg(feature = "native")]
+fn slider_call(rng: &mut Rng, vars: &[&str]) -> String {
+    let label = rng.pick(SLIDER_LABELS);
+    let default = match (rng.below(5), vars) {
+        (0, [_, ..]) => format!("{} / 512", rng.pick(vars)),
+        (1, _) => "0.25".to_string(),
+        _ => "0.5".to_string(),
+    };
+    let range = rng.pick(&["", "", ", 0, 1", ", 0, 2"]);
+    format!("slider(\"{label}\", {default}{range})")
+}

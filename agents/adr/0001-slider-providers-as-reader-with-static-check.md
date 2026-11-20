@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Slider providers are a reader environment, guaranteed by a static check
@@ -17,7 +17,7 @@ A slider's provider is decided during evaluation, by a reader environment carrie
 
 ## Considered Options
 
-- **A second, abstract interpreter (the prototype in `d3fc817`).** Rejected because it reimplemented built-ins by hand and cut off at a fixed depth, which made it unsound. The chosen analysis is also an abstract interpreter, but it is exact on constants, applies the real built-in to known arguments, special-cases only `slider`, `map`, `reduce`, `unfold` and `share`, and needs no depth limit because the language has no recursion.
+- **A second, abstract interpreter (the prototype in `d3fc817`).** Rejected because it reimplemented built-ins by hand and cut off at a fixed depth, which made it unsound. The chosen analysis is also an abstract interpreter, but it is exact on constants, applies the real built-in to known arguments, and needs no depth limit because the language has no recursion. It applies only `slider`, `map`, `reduce`, `unfold` and `share` itself, plus the identity `debug(label)` returns (so checking prints nothing). The only other knowledge of built-ins it needs is which ones can hand back a function they are given, `nth` and `concat`: those with polymorphic signatures, which a test keeps in step.
 - **Running the real evaluator with symbolic values, or tracking binding time in the type checker.** Rejected because neither stays in one self-contained module.
 - **Exactly one provider per call site in a program.** Rejected because it forbids a shared helper with a slider (such as a percussion envelope) inside two instruments in one kit, and the static label rules out passing the label in.
 - **Specs at a listing binding taken from its callers** (one slider for each call of the binding, not one per binding). Deferred: this changes what "one slider" means, and is not something the analysis should allow.

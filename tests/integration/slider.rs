@@ -493,3 +493,339 @@ fn the_slider_demo_loads_and_reaches_what_it_lists() {
         }
     }
 }
+
+/// Returns the messages of the checker's findings for the program at `index`
+/// of `source`.
+fn check(source: &str, index: usize) -> Vec<String> {
+    messages(&environment().check_program(&set(source).evaluation_input(index)))
+}
+
+/// Returns each slider the program at `index` of `source` can reach, as
+/// `"label of A:1 = spec"`, in order.
+fn reachable(source: &str, index: usize) -> Vec<String> {
+    let (reached, _) = environment()
+        .reachable_sliders(&set(source).evaluation_input(index))
+        .expect("test source should parse");
+    reached
+        .iter()
+        .map(|r| format!("{} of {} = {}", r.label, bank_address(r.owner), r.spec))
+        .collect()
+}
+
+#[test]
+fn a_label_must_be_written_in_its_call() {
+    let source = format!("#{{{PLAIN}}}\n_ = let l = \"q\" in time * slider(l, 0.5);\n");
+    assert_eq!(
+        check(&source, 0),
+        ["1:30: a slider's label must be a string written in its `slider` call"]
+    );
+}
+
+#[test]
+fn two_listings_a_call_is_reached_through_are_an_error_before_it_plays() {
+    let source = example(LISTS, LISTS);
+    let message = "slider \"cutoff\" is listed by A:1 (delayed_pad) and A:2, and this \
+                   waveform is built through each of them; keep only one listing";
+    assert_eq!(
+        check(&source, 1),
+        [format!("2:3: {message}"), format!("4:3: {message}")]
+    );
+    assert_eq!(check(&source, 2), Vec::<String>::new());
+    assert_eq!(
+        reachable(&source, 2),
+        ["cutoff of A:1 = 800 (100 to 11000, exp)"]
+    );
+}
+
+#[test]
+fn a_listing_binding_provides_what_is_reached_through_it() {
+    let source = example(LISTS, PLAIN);
+    for index in [1, 2] {
+        assert_eq!(check(&source, index), Vec::<String>::new());
+        assert_eq!(
+            reachable(&source, index),
+            ["cutoff of A:1 = 800 (100 to 11000, exp)"]
+        );
+    }
+    let source = example(PLAIN, PLAIN);
+    assert_eq!(
+        reachable(&source, 2),
+        ["cutoff of A:3 = 800 (100 to 11000, exp)"]
+    );
+}
+
+#[test]
+fn a_listing_function_whose_spec_its_callers_give_is_an_error_at_the_listing() {
+    for (slider, part) in [
+        ("slider(\"q\", d / 4)", "default"),
+        ("slider(\"q\", 0.5, 0, d)", "range"),
+    ] {
+        let source = format!(
+            "#{{sliders=[\"q\"]}}\n\
+             pad = fn(d) => time * {slider};\n\
+             #{{{PLAIN}}}\n\
+             _ = pad(2);\n"
+        );
+        let message = format!(
+            "1:3: A:1 (pad) lists slider \"q\", but its {part} depends on `d`, which its \
+             callers give; list it where `d` is given instead"
+        );
+        assert_eq!(check(&source, 1), [message], "{slider}");
+    }
+}
+
+#[test]
+fn a_named_parameter_a_caller_may_give_is_one_its_callers_give() {
+    let source = format!(
+        "#{{sliders=[\"q\"]}}\n\
+         pad = fn(top = 1) => time * slider(\"q\", 0.5, 0, top);\n\
+         #{{{PLAIN}}}\n\
+         _ = pad();\n"
+    );
+    assert_eq!(
+        check(&source, 1),
+        [
+            "1:3: A:1 (pad) lists slider \"q\", but its range depends on `top`, which its \
+             callers give; list it where `top` is given instead"
+        ]
+    );
+}
+
+#[test]
+fn a_function_returned_by_a_listing_binding_is_checked_alone_too() {
+    let source = format!(
+        "#{{sliders=[\"q\"]}}\n\
+         pad = fn(a) => fn(b) => time * slider(\"q\", b);\n\
+         #{{{PLAIN}}}\n\
+         _ = pad(1)(0.5);\n"
+    );
+    assert_eq!(
+        check(&source, 1),
+        [
+            "1:3: A:1 (pad) lists slider \"q\", but its default depends on `b`, which its \
+             callers give; list it where `b` is given instead"
+        ]
+    );
+}
+
+#[test]
+fn a_spec_its_callers_give_is_the_played_programs_when_nothing_lists_it() {
+    let source = format!(
+        "#{{{PLAIN}}}\n\
+         pad = fn(d) => time * slider(\"q\", d * 2);\n\
+         #{{{PLAIN}}}\n\
+         _ = pad(0.2);\n"
+    );
+    assert_eq!(check(&source, 1), Vec::<String>::new());
+    assert_eq!(reachable(&source, 1), ["q of A:2 = 0.4 (0 to 1, linear)"]);
+    assert_eq!(owner(&source, 1), Ok(vec!["q of A:2 = 0.4".to_string()]));
+}
+
+#[test]
+fn a_listing_binding_may_not_apply_a_function_its_callers_give() {
+    for (apply, column) in [("f(220)", 17), ("{map(f, [220])}", 18)] {
+        let source = format!(
+            "#{{{LISTS}}}\n\
+             play = fn(f) => {apply};\n\
+             #{{{PLAIN}}}\n\
+             _ = play(fn(freq) => (time * freq) * slider(\"cutoff\", 800, 100, 11000));\n"
+        );
+        assert_eq!(
+            check(&source, 1),
+            [format!(
+                "2:{column}: A:1 (play) provides slider \"cutoff\" here, so it can't apply \
+                 `f`, a function its callers give"
+            )],
+            "{apply}"
+        );
+    }
+    // It may pass one along to be applied outside it.
+    let source = format!(
+        "#{{{LISTS}}}\n\
+         play = fn(f) => (f, slider(\"cutoff\", 800, 100, 11000));\n\
+         #{{{PLAIN}}}\n\
+         _ = let (g, c) = play(fn(x) => x * time) in g(c);\n"
+    );
+    assert_eq!(check(&source, 1), Vec::<String>::new());
+}
+
+#[test]
+fn branches_a_note_chooses_between_must_agree() {
+    let source = "#{keys}\n\
+                  k = fn(note, vel) => \
+                  (if note > 60 then slider(\"q\", 0.5) else slider(\"q\", 0.25), 1);\n";
+    assert_eq!(
+        check(source, 0),
+        [
+            "1:59: slider \"q\" of A:1 (k) is 0.25 (0 to 1, linear) here but 0.5 (0 to 1, \
+             linear) at another call; calls of one slider must agree"
+        ]
+    );
+}
+
+#[test]
+fn a_keys_slider_whose_spec_depends_on_the_note_is_an_error() {
+    for (program, what) in [
+        ("slider(\"q\", note / 128)", "the key a note plays"),
+        (
+            "slider(\"q\", 0.5, 0, vel + 1)",
+            "the velocity a note plays with",
+        ),
+    ] {
+        let source = format!("#{{keys}}\nk = fn(note, vel) => ({program}, 1);\n");
+        let part = if program.contains("vel") {
+            "range"
+        } else {
+            "default"
+        };
+        assert_eq!(
+            check(&source, 0),
+            [format!(
+                "1:19: slider \"q\"'s {part} depends on {what}, which isn't known until it plays"
+            )]
+        );
+    }
+}
+
+#[test]
+fn a_keys_instrument_reaches_the_sliders_of_every_note() {
+    let source = "#{keys}\n\
+                  k = fn(note, vel) => \
+                  (if note > 60 then slider(\"hi\", 0.5) else slider(\"lo\", 0.5), 1);\n";
+    assert_eq!(check(source, 0), Vec::<String>::new());
+    assert_eq!(
+        reachable(source, 0),
+        [
+            "hi of A:1 = 0.5 (0 to 1, linear)",
+            "lo of A:1 = 0.5 (0 to 1, linear)"
+        ]
+    );
+}
+
+#[test]
+fn an_invalid_spec_on_a_note_not_played_at_load_is_an_error() {
+    let source = "#{keys}\n\
+                  k = fn(note, vel) => \
+                  (if note > 100 then slider(\"q\", 2) else 0, 1);\n";
+    assert_eq!(
+        check(source, 0),
+        ["1:38: slider \"q\": default 2 is outside its range 0 to 1"]
+    );
+}
+
+#[test]
+fn the_same_spec_under_map_is_one_slider() {
+    let source =
+        format!("#{{{PLAIN}}}\n_ = {{map(fn(f) => (time * f) * slider(\"q\", 0.5), [1, 2])}};\n");
+    assert_eq!(check(&source, 0), Vec::<String>::new());
+    assert_eq!(reachable(&source, 0), ["q of A:1 = 0.5 (0 to 1, linear)"]);
+}
+
+#[test]
+fn the_slider_demo_checks_clean_and_reaches_what_it_lists() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lib/v0/demos/sliders.tuun");
+    let source = fs::read_to_string(&path).unwrap();
+    let set = set(&source);
+    let environment = Environment::new(
+        SAMPLE_RATE,
+        90,
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lib/v0"),
+    );
+    for index in 0..set.programs().len() {
+        if set.programs()[index].text().trim().is_empty() {
+            continue;
+        }
+        let input = set.evaluation_input(index);
+        assert_eq!(
+            messages(&environment.check_program(&input)),
+            Vec::<String>::new(),
+            "{}",
+            set.display_name(index)
+        );
+        let (reached, _) = environment.reachable_sliders(&input).unwrap();
+        let mut labels: Vec<&str> = reached.iter().map(|r| r.label.as_str()).collect();
+        labels.sort();
+        let mut listed: Vec<&str> = set.listed(index).iter().map(|s| s.label.as_str()).collect();
+        listed.sort();
+        assert_eq!(labels, listed, "{}", set.display_name(index));
+        assert!(reached.iter().all(|r| r.owner == index));
+    }
+}
+
+#[test]
+fn a_listing_binding_may_compute_with_what_its_callers_give() {
+    // `seq(time - dur)` is a built-in computed from `dur`, not `dur` itself.
+    let source = format!(
+        "#{{{LISTS}}}\n\
+         play = fn(dur) => (time * slider(\"cutoff\", 800, 100, 11000)) | seq(time - dur);\n\
+         #{{{PLAIN}}}\n\
+         _ = play(1);\n"
+    );
+    assert_eq!(check(&source, 1), Vec::<String>::new());
+    assert_eq!(
+        reachable(&source, 1),
+        ["cutoff of A:1 = 800 (100 to 11000, linear)"]
+    );
+}
+
+#[test]
+fn a_function_a_listing_binding_hands_its_callers_function_is_checked_alone() {
+    let source = "#{level_db=0}\n\
+                  apply_to = fn(f, g) => fn() => f(g);\n\
+                  #{sliders=[\"q\"]}\n\
+                  pad = fn(f) => apply_to(f, fn(x) => time * slider(\"q\", x));\n\
+                  #{level_db=0}\n\
+                  _ = pad(fn(g) => g(0.5))();\n";
+    assert_eq!(
+        check(source, 2),
+        [
+            "3:3: A:2 (pad) lists slider \"q\", but its default depends on `x`, which its \
+             callers give; list it where `x` is given instead"
+        ]
+    );
+}
+
+#[test]
+fn the_built_ins_passing_functions_through_are_those_with_polymorphic_signatures() {
+    use tuun::builtins;
+    use tuun::expr::{Binding, Expr};
+    use tuun::signatures::signature;
+    use tuun::slider_analysis::{PASSING, SPECIAL};
+    use tuun::types::Type;
+
+    let mut bindings = Vec::new();
+    builtins::add_bindings::<u32, u32>(&mut bindings);
+    let mut polymorphic: Vec<String> = bindings
+        .iter()
+        .filter_map(|binding| match &binding.binding {
+            Binding::Definition(_, value) => match &value.expr {
+                Expr::BuiltIn { name, .. } => Some(name.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .filter(|name| matches!(signature(name), Some(Type::Forall(..))))
+        .filter(|name| !SPECIAL.contains(&name.as_str()))
+        .collect();
+    polymorphic.sort();
+    let mut passing: Vec<&str> = PASSING.to_vec();
+    passing.sort();
+    assert_eq!(polymorphic, passing);
+}
+
+#[test]
+fn a_function_handed_through_debug_is_still_the_callers() {
+    let source = format!(
+        "#{{{LISTS}}}\n\
+         play = fn(f) => debug(\"f\")(f)(220);\n\
+         #{{{PLAIN}}}\n\
+         _ = play(fn(freq) => (time * freq) * slider(\"cutoff\", 800, 100, 11000));\n"
+    );
+    assert_eq!(
+        check(&source, 1),
+        [
+            "2:17: A:1 (play) provides slider \"cutoff\" here, so it can't apply `f`, a \
+          function its callers give"
+        ]
+    );
+}
