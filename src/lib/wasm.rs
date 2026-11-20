@@ -6,125 +6,36 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
 use std::time::Duration;
 
 use wasm_bindgen::prelude::*;
 use web_sys::console;
 
 use crate::{
-    builtins, eval, expr, generator, infer, modules, optimizer, parser, signatures, slider, trace,
-    waveform,
+    builtins, eval, expr, generator, infer, modules, optimizer, parser, signatures, slider,
+    slider_analysis, trace, waveform,
 };
 
 #[derive(Clone, Debug, PartialEq)]
 enum MarkId {
     /// A slider, named by its label alone, since the browser plays one
-    /// expression.
+    /// expression, which lists none.
     Slider(String),
-    /// A `slider` call, until [`resolve_sliders`] names its slider.
-    Call(CallRef),
 }
 
 impl fmt::Display for MarkId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             MarkId::Slider(name) => write!(f, "slider({:?})", name),
-            MarkId::Call(call) => write!(f, "slider call({:?})", call.0.label),
         }
-    }
-}
-
-/// A `slider` call as a mark id carries it: equal only to itself, so two mark
-/// ids are the same only if they come from one evaluation of one call.
-#[derive(Clone)]
-struct CallRef(Arc<slider::SliderCall<Source>>);
-
-impl PartialEq for CallRef {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-
-impl fmt::Debug for CallRef {
-    // The label is enough to tell slider calls apart when debugging.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "CallRef({:?})", self.0.label)
     }
 }
 
 // The browser doesn't light program text, so its marks carry no trace and
 // nothing it evaluates has trace marks to strip.
 impl trace::CarriesTrace<Source> for MarkId {
-    fn from_slider(call: slider::SliderCall<Source>) -> Option<Self> {
-        Some(MarkId::Call(CallRef(Arc::new(call))))
-    }
-}
-
-/// A slider an expression reaches: its label and spec.
-#[derive(Debug, PartialEq)]
-struct Reached {
-    label: String,
-    spec: slider::SliderSpec,
-}
-
-/// Rewrites each `slider` call's mark in `waveform` to the [`MarkId::Slider`]
-/// of its label, and returns the sliders reached, each once, in the order the
-/// text reaches their first calls (see [`slider::SliderCall::text_order`]).
-///
-/// Returns an error at each call whose spec differs from that of another call
-/// of the same label visited before it.
-fn resolve_sliders<S>(
-    waveform: &mut waveform::Waveform<MarkId, S>,
-) -> Result<Vec<Reached>, Vec<expr::Error<Source>>> {
-    // Each slider reached, with the text order of its first call.
-    let mut reached: Vec<(Vec<usize>, Reached)> = Vec::new();
-    let mut errors: Vec<expr::Error<Source>> = Vec::new();
-    waveform::for_each_mark_mut(waveform, &mut |id| {
-        let MarkId::Call(call) = id else {
-            return;
-        };
-        let call = call.0.clone();
-        match reached
-            .iter_mut()
-            .find(|(_, slider)| slider.label == call.label)
-        {
-            None => reached.push((
-                call.text_order(),
-                Reached {
-                    label: call.label.clone(),
-                    spec: call.spec.clone(),
-                },
-            )),
-            Some((_, earlier)) if earlier.spec != call.spec => {
-                let error = expr::Error::eval(
-                    format!(
-                        "slider {:?} is {} here but {} at another call; \
-                         calls of one slider must agree",
-                        call.label, call.spec, earlier.spec
-                    ),
-                    call.site.clone(),
-                );
-                // One evaluation of a call can be reached more than once, as
-                // through a shared value.
-                if !errors.contains(&error) {
-                    errors.push(error);
-                }
-            }
-            Some((first, _)) => {
-                let order = call.text_order();
-                if order < *first {
-                    *first = order;
-                }
-            }
-        }
-        *id = MarkId::Slider(call.label.clone());
-    });
-    if errors.is_empty() {
-        reached.sort_by(|(a, _), (b, _)| a.cmp(b));
-        Ok(reached.into_iter().map(|(_, slider)| slider).collect())
-    } else {
-        Err(errors)
+    fn from_slider(label: &str, _provider: slider::Provider) -> Option<Self> {
+        Some(MarkId::Slider(label.to_string()))
     }
 }
 
@@ -151,7 +62,7 @@ fn json_string(text: &str) -> String {
 
 /// Returns `reached` as a JSON array of `{label, default, min, max, curve}`
 /// objects, in order.
-fn sliders_json(reached: &[Reached]) -> String {
+fn sliders_json(reached: &[slider_analysis::Reached]) -> String {
     let entries: Vec<String> = reached
         .iter()
         .map(|slider| {
@@ -390,7 +301,7 @@ impl Wasm {
         expression: &str,
         open_json: &str,
         use_json: &str,
-    ) -> Result<(waveform::Waveform<MarkId>, Vec<Reached>), String> {
+    ) -> Result<(waveform::Waveform<MarkId>, Vec<slider_analysis::Reached>), String> {
         let parsed_expr = parser::parse_program::<MarkId, _>(expression, Source::Expression)
             .map_err(|errors| {
                 let rendered: Vec<String> = errors
@@ -453,13 +364,35 @@ impl Wasm {
                 .collect();
             return Err(format!("Type errors: {}", rendered.join("; ")));
         }
+        // The expression lists no sliders, so it provides all it reaches.
+        // A closure of its own, so the analysis borrows the expression only
+        // for as long as it runs.
+        let analysis = slider_analysis::analyze(
+            |path| resolve(path),
+            &slider_analysis::Program {
+                bindings: &bindings,
+                expr: &parsed_expr,
+                keys: false,
+                listings: slider::Listings::new(|_| None),
+                name: &|_| "the expression".to_string(),
+                annotation: &|_| None,
+            },
+        );
+        if !analysis.errors.is_empty() {
+            let rendered: Vec<String> = analysis
+                .errors
+                .iter()
+                .map(|error| display_error(error, expression))
+                .collect();
+            return Err(format!("Slider errors: {}", rendered.join("; ")));
+        }
 
         let expr = eval::evaluate(resolve, &bindings, parsed_expr)
             .map_err(|e| format!("Evaluate error: {}", display_error(&e, expression)))?;
 
         // TODO Do we want to precompute here?
 
-        let mut waveform = match expr.expr {
+        let waveform = match expr.expr {
             expr::Expr::Waveform(w) => w,
             expr::Expr::Seq { waveform, .. } => match waveform.expr {
                 expr::Expr::Waveform(w) => w,
@@ -473,14 +406,7 @@ impl Wasm {
             }
         };
 
-        let reached = resolve_sliders(&mut waveform).map_err(|errors| {
-            let rendered: Vec<String> = errors
-                .iter()
-                .map(|e| display_error(e, expression))
-                .collect();
-            format!("Evaluate error: {}", rendered.join("; "))
-        })?;
-        Ok((optimizer::optimize(waveform), reached))
+        Ok((optimizer::optimize(waveform), analysis.reached))
     }
 
     /// Drops the current waveform.
@@ -732,7 +658,8 @@ mod tests {
             .sliders("slider(\"a\", 0.5) + slider(\"a\", 2, 0, 4)", "[]", "[]")
             .expect_err("calls that disagree are an error");
         assert!(
-            error.contains("slider \"a\" is") && error.contains("calls of one slider must agree"),
+            error.contains("slider \"a\" of the expression is")
+                && error.contains("calls of one slider must agree"),
             "unexpected message: {}",
             error
         );

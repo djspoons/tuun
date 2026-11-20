@@ -141,13 +141,14 @@ fn played(
             let note = environment.apply_note_function(
                 &function,
                 vec![SourceExpr::float(60.0), SourceExpr::float(0.7)],
-                &input.owners,
+                &input.providers,
+                input.index,
             );
             trace::set_trace_marking(true);
             // The marks differ by design; what plays must not.
             format!(
                 "{:?}",
-                note.map(|(note_on, note_off, _, _)| (note_on, note_off))
+                note.map(|(note_on, note_off, _)| (note_on, note_off))
             )
         }
     }
@@ -160,7 +161,7 @@ fn evaluate(environment: &Environment, input: &EvaluationInput, trace_marking: b
     let evaluated = environment.evaluate_program(input);
     trace::set_trace_marking(true);
     match evaluated {
-        Ok(evaluated) => played(environment, input, evaluated.plays, trace_marking),
+        Ok(plays) => played(environment, input, plays, trace_marking),
         Err(diagnostics) => format!("error: {:?}", diagnostics),
     }
 }
@@ -264,9 +265,10 @@ fn played_trees_carry_only_substitution_marks() {
                 let note = environment.apply_note_function(
                     function,
                     vec![SourceExpr::float(60.0), SourceExpr::float(0.7)],
-                    &set.slider_owners(index),
+                    &set.slider_providers(),
+                    index,
                 );
-                if let Ok((note_on, note_off, _, _)) = note {
+                if let Ok((note_on, note_off, _)) = note {
                     trees.push((format!("{} note-on", name), note_on));
                     trees.push((format!("{} note-off", name), note_off));
                 }

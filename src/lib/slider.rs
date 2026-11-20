@@ -1,6 +1,8 @@
 use std::fmt::{self, Display};
 
-use crate::{eval, expr, waveform};
+use std::sync::Arc;
+
+use crate::{expr, waveform};
 
 // This file defines types and functions related to sliders that are platform-independent.
 
@@ -122,35 +124,54 @@ impl Display for SliderSpec {
     }
 }
 
-/// One `slider` call: its label and spec, where it was written, and the
-/// user-function calls in progress around it.
-#[derive(Debug)]
-pub struct SliderCall<S> {
-    pub label: String,
-    pub spec: SliderSpec,
-    pub site: Option<expr::Span<S>>,
-    pub path: eval::CallPath<S>,
+/// The binding that provides a slider.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Provider {
+    /// The program being played, whichever that is.
+    Played,
+    /// The listing binding with this id (see [`Listing`]).
+    Listing(usize),
 }
 
-impl<S> SliderCall<S> {
-    /// Returns where the call was written, then where each call in progress
-    /// around it was written, innermost first.
-    pub fn spans(&self) -> impl Iterator<Item = &expr::Span<S>> {
-        self.site.iter().chain(self.path.sites())
+/// A binding whose annotation lists sliders: its id and the labels it lists.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Listing {
+    pub id: usize,
+    pub labels: Arc<[String]>,
+}
+
+/// A function from a span to the listing binding, if any, whose text holds
+/// the code written there.
+type FindListing<S> = dyn Fn(&expr::Span<S>) -> Option<Listing> + Send + Sync;
+
+/// Finds the listing binding, if any, whose text holds the code written at a
+/// span.
+pub struct Listings<S>(Arc<FindListing<S>>);
+
+impl<S> Listings<S> {
+    /// Returns the listings `find` finds.
+    pub fn new(
+        find: impl Fn(&expr::Span<S>) -> Option<Listing> + Send + Sync + 'static,
+    ) -> Listings<S> {
+        Listings(Arc::new(find))
     }
 
-    /// Returns the offset where each call in progress around the call was
-    /// written, outermost first, then the offset where the call was written.
-    ///
-    /// Sorting calls by it puts them in the order the text reaches them: by
-    /// where the outermost call in progress was written, then the next one in,
-    /// and so on. Offsets in different texts are compared as they are.
-    // TODO this is a little arbitrary, but at least stable... maybe something
-    // else is better?
-    pub fn text_order(&self) -> Vec<usize> {
-        let mut offsets: Vec<usize> = self.spans().map(|span| span.range.start).collect();
-        offsets.reverse();
-        offsets
+    /// Returns the listing binding whose text holds the code written at
+    /// `span`, if any.
+    pub fn find(&self, span: &expr::Span<S>) -> Option<Listing> {
+        (self.0)(span)
+    }
+}
+
+impl<S> Clone for Listings<S> {
+    fn clone(&self) -> Self {
+        Listings(self.0.clone())
+    }
+}
+
+impl<S> fmt::Debug for Listings<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Listings(...)")
     }
 }
 
@@ -239,35 +260,5 @@ mod tests {
         assert_eq!(spec.denormalize(1.5), 1.0);
         assert_eq!(spec.normalize(-3.0), 0.0);
         assert_eq!(spec.clamp(2.0), 1.0);
-    }
-
-    #[test]
-    fn calls_are_in_text_order_by_their_outermost_call_first() {
-        let call = |site: usize, path: &[usize]| SliderCall {
-            label: "mix".to_string(),
-            spec: SliderSpec::new(0.5, 0.0, 1.0, Curve::Linear).unwrap(),
-            site: Some(expr::Span::new((), site..site + 1)),
-            path: path.iter().fold(eval::CallPath::empty(), |path, &at| {
-                path.enter(expr::Span::new((), at..at + 1))
-            }),
-        };
-        // Written at 30, inside a call at 5 inside a call at 20.
-        let inner = call(30, &[20, 5]);
-        assert_eq!(inner.text_order(), [20, 5, 30]);
-        // A call written at 10, outside any call, comes before it.
-        assert!(call(10, &[]).text_order() < inner.text_order());
-        assert!(call(2, &[20]).text_order() < inner.text_order());
-    }
-
-    #[test]
-    fn a_call_spans_its_site_first() {
-        let call = SliderCall {
-            label: "mix".to_string(),
-            spec: SliderSpec::new(0.5, 0.0, 1.0, Curve::Linear).unwrap(),
-            site: Some(expr::Span::new((), 3..8)),
-            path: eval::CallPath::empty(),
-        };
-        let spans: Vec<_> = call.spans().collect();
-        assert_eq!(spans, [&expr::Span::new((), 3..8)]);
     }
 }

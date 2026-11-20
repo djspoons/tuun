@@ -8,7 +8,7 @@ use std::sync::mpsc;
 use std::thread;
 
 use crate::diagnostics::{Diagnostic, Severity};
-use crate::environment::{CheckMode, Environment, ModuleTable};
+use crate::environment::{CheckMode, Checked, Environment, ModuleTable};
 use crate::generator::Generator;
 use crate::programs::{Evaluated, EvaluationInput, Outcome, Plays, ProgramSet};
 use crate::sequencer;
@@ -90,10 +90,11 @@ pub struct Loaded {
 /// Checks and evaluates the program `input` describes.
 ///
 /// An empty (or blank) program is [`Outcome::Empty`]: it is a deletion, not a
-/// parse error. Otherwise the type checker runs first. Error-severity findings
+/// parse error. Otherwise the checker runs first. Error-severity findings
 /// fail without evaluating; warning-severity findings are the warnings on
 /// success and lead the evaluation's diagnostics on failure, so both views of a
-/// problem show side by side.
+/// problem show side by side. The sliders the program can reach are the ones
+/// the checker finds.
 pub fn process(environment: &Environment, input: &EvaluationInput) -> Outcome {
     process_with(environment, input, || environment.evaluate_program(input))
 }
@@ -103,12 +104,12 @@ pub fn process(environment: &Environment, input: &EvaluationInput) -> Outcome {
 fn process_with(
     environment: &Environment,
     input: &EvaluationInput,
-    evaluate: impl FnOnce() -> Result<Evaluated, Vec<Diagnostic>>,
+    evaluate: impl FnOnce() -> Result<Plays, Vec<Diagnostic>>,
 ) -> Outcome {
     if input.text.trim().is_empty() {
         return Outcome::Empty;
     }
-    let findings = environment.check_program(input);
+    let Checked { findings, sliders } = environment.check_program(input);
     if findings
         .iter()
         .any(|finding| finding.severity == Severity::Error)
@@ -116,10 +117,10 @@ fn process_with(
         return Outcome::Failed(findings);
     }
     match evaluate() {
-        Ok(evaluated) => Outcome::Evaluated(
+        Ok(plays) => Outcome::Evaluated(
             Evaluated {
-                plays: precomputed(evaluated.plays, environment.sample_rate()),
-                ..evaluated
+                plays: precomputed(plays, environment.sample_rate()),
+                sliders,
             },
             findings,
         ),
@@ -171,13 +172,17 @@ pub fn load(
     let mut evaluated = 0;
     let mut failed = Vec::new();
     for index in order {
+        let input = set.evaluation_input(index);
         if let Ok(entries) = &mut context
-            && let Err(error) = environment.extend_context(entries, &used[evaluated..counts[index]])
+            && let Err(error) = environment.extend_context(
+                entries,
+                &used[evaluated..counts[index]],
+                input.listings(),
+            )
         {
             context = Err(error);
         }
         evaluated = counts[index];
-        let input = set.evaluation_input(index);
         let outcome = process_with(environment, &input, || match &mut context {
             Ok(entries) => environment.evaluate_program_in_context(&input, entries),
             // A binding this program uses failed: evaluating from scratch reports

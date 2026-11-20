@@ -16,7 +16,7 @@ use crate::ids::MarkId;
 use crate::parser;
 use crate::sequencer;
 use crate::slider;
-use crate::slider_owners;
+use crate::slider_providers;
 use crate::trace_walk::WaveformMarks;
 use crate::waveform;
 
@@ -110,15 +110,13 @@ pub enum Plays {
 }
 
 /// The result of successfully evaluating a program's text: what it plays, and
-/// the sliders its waveform reaches, in the order their calls are first
-/// reached.
-///
-/// A keys instrument's sliders are those the waveforms of one sample note
-/// reach, since another note's may reach others.
+/// the sliders it can reach, on any branch and any note of a keys instrument,
+/// in the order the text reaches their first calls (see
+/// [`crate::slider_analysis::Analysis::reached`]).
 #[derive(Debug, Clone)]
 pub struct Evaluated {
     pub plays: Plays,
-    pub sliders: Vec<slider_owners::Reached>,
+    pub sliders: Vec<slider_providers::Reached>,
 }
 
 /// What evaluating one program reads, copied out of its [`ProgramSet`] so
@@ -135,8 +133,19 @@ pub struct EvaluationInput {
     /// The backing file's text, which errors located in the file resolve
     /// against.
     pub source: String,
-    /// The slots that can own the sliders the program's waveform reaches.
-    pub owners: slider_owners::Owners,
+    /// The program's index among its set's programs.
+    pub index: usize,
+    /// The file's program slots, which can provide sliders (see
+    /// [`ProgramSet::slider_providers`]).
+    pub providers: slider_providers::Providers,
+}
+
+impl EvaluationInput {
+    /// Returns the listing bindings code is written in when the program is
+    /// played (see [`slider_providers::Providers::listings`]).
+    pub fn listings(&self) -> slider::Listings<Source> {
+        self.providers.listings(self.index)
+    }
 }
 
 /// The result of checking and evaluating one program.
@@ -609,8 +618,8 @@ pub struct ProgramSet {
     /// to detect external edits before overwriting them. `None` when there is
     /// no backing file.
     synced_mtime: Option<time::SystemTime>,
-    /// The state of every slider a program's waveform has reached, by owner
-    /// slot and label.
+    /// The state of every slider a program can reach, by the slot that
+    /// provides it and its label.
     sliders: HashMap<(usize, String), SliderState>,
 }
 
@@ -987,16 +996,17 @@ impl ProgramSet {
             kind: program.kind,
             bindings: self.evaluation_bindings(index),
             source: self.source.clone(),
-            owners: self.slider_owners(index),
+            index,
+            providers: self.slider_providers(),
         }
     }
 
-    /// Returns the slots that can own the sliders the waveform of the program
-    /// at `index` reaches: that program and the programs before it in the
-    /// file.
-    pub fn slider_owners(&self, index: usize) -> slider_owners::Owners {
+    /// Returns the program slots of the file as providers of sliders, by
+    /// index.
+    pub fn slider_providers(&self) -> slider_providers::Providers {
         let slot = |index: usize| {
             let program = &self.programs[index];
+            // The last one wins, as in `listed`.
             let listing = self
                 .bindings
                 .get(program.binding_index)
@@ -1004,28 +1014,19 @@ impl ProgramSet {
                     binding
                         .annotations
                         .iter()
+                        .rev()
                         .find(|a| matches!(a.annotation, expr::Annotation::Sliders(_)))
                 })
                 .and_then(|annotation| annotation.span.clone());
-            slider_owners::OwnerSlot {
-                index,
+            slider_providers::ProviderSlot {
                 name: self.display_name(index),
                 text: program.span.clone(),
-                listed: self
-                    .listed(index)
-                    .iter()
-                    .map(|entry| entry.label.clone())
-                    .collect(),
+                listed: self.listed(index).to_vec(),
                 listing,
             }
         };
-        let binding_index = self.programs[index].binding_index;
-        slider_owners::Owners {
-            played: slot(index),
-            preceding: (0..self.programs.len())
-                .filter(|&other| self.programs[other].binding_index < binding_index)
-                .map(slot)
-                .collect(),
+        slider_providers::Providers {
+            slots: (0..self.programs.len()).map(slot).collect(),
         }
     }
 
@@ -1038,10 +1039,8 @@ impl ProgramSet {
     /// `index`, and returns its diagnostics: the warnings on success (none for
     /// an empty program), the errors (and any warnings) on failure.
     ///
-    /// When the program evaluated, the sliders its waveform reaches are reached
-    /// (see [`ProgramSet::reach`]), and the warnings include those
-    /// [`ProgramSet::slider_warnings`] returns. Otherwise any previous result
-    /// is dropped.
+    /// When the program evaluated, the sliders it can reach are reached (see
+    /// [`ProgramSet::reach`]). Otherwise any previous result is dropped.
     pub fn record(
         &mut self,
         index: usize,
@@ -1054,9 +1053,8 @@ impl ProgramSet {
                 self.programs[index].evaluated = None;
                 Ok(Vec::new())
             }
-            Outcome::Evaluated(evaluated, mut warnings) => {
+            Outcome::Evaluated(evaluated, warnings) => {
                 self.reach(&evaluated.sliders);
-                warnings.extend(self.slider_warnings(index, &evaluated.sliders));
                 self.programs[index].evaluated = Some(evaluated);
                 Ok(warnings)
             }
@@ -1085,10 +1083,10 @@ impl ProgramSet {
             .unwrap_or(&[])
     }
 
-    /// Returns the state of the slider `label` owned by the slot at `owner`,
-    /// once a program's waveform has reached it.
-    pub fn slider(&self, owner: usize, label: &str) -> Option<&SliderState> {
-        self.sliders.get(&(owner, label.to_string()))
+    /// Returns the state of the slider `label` the slot at `provider`
+    /// provides, once a program can reach it.
+    pub fn slider(&self, provider: usize, label: &str) -> Option<&SliderState> {
+        self.sliders.get(&(provider, label.to_string()))
     }
 
     /// Returns the mark and current value of every slider a program's
@@ -1105,26 +1103,28 @@ impl ProgramSet {
         })
     }
 
-    /// Adds each slider in `reached` that is new, or whose spec has changed,
-    /// at the value its owner's annotation saves (clamped to its range) or,
-    /// when that saves none, at its default. A slider already reached with
-    /// the same spec keeps its value.
-    pub fn reach(&mut self, reached: &[slider_owners::Reached]) {
+    /// Adds each slider in `reached` that is new at the value its provider's
+    /// annotation saves (clamped to its range) or, when that saves none, at
+    /// its default.
+    ///
+    /// A slider already reached keeps its position: its value is unchanged
+    /// when its spec is, and otherwise moves to the same position along the
+    /// new spec.
+    pub fn reach(&mut self, reached: &[slider_providers::Reached]) {
         for slider in reached {
-            let key = (slider.owner, slider.label.clone());
-            if self
-                .sliders
-                .get(&key)
-                .is_some_and(|state| state.spec == slider.spec)
-            {
-                continue;
-            }
-            let saved = self
-                .listed(slider.owner)
-                .iter()
-                .find(|entry| entry.label == slider.label)
-                .and_then(|entry| entry.value);
-            let value = saved.map_or(slider.spec.default, |value| slider.spec.clamp(value));
+            let key = (slider.provider, slider.label.clone());
+            let value = match self.sliders.get(&key) {
+                Some(state) if state.spec == slider.spec => continue,
+                Some(state) => slider.spec.denormalize(state.spec.normalize(state.value)),
+                None => {
+                    let saved = self
+                        .listed(slider.provider)
+                        .iter()
+                        .find(|entry| entry.label == slider.label)
+                        .and_then(|entry| entry.value);
+                    saved.map_or(slider.spec.default, |value| slider.spec.clamp(value))
+                }
+            };
             self.sliders.insert(
                 key,
                 SliderState {
@@ -1135,71 +1135,18 @@ impl ProgramSet {
         }
     }
 
-    /// Returns warnings about the sliders of the program at `index`, whose
-    /// waveform reaches `reached`.
-    ///
-    /// There is one for each slider in `reached` whose owner saves a value
-    /// outside its range (so it starts clamped), and one for each entry the
-    /// program lists that neither `reached` nor any earlier evaluation has
-    /// reached.
-    pub fn slider_warnings(
-        &self,
-        index: usize,
-        reached: &[slider_owners::Reached],
-    ) -> Vec<Diagnostic> {
-        let mut warnings = Vec::new();
-        for slider in reached {
-            let saved = self
-                .listed(slider.owner)
-                .iter()
-                .find(|entry| entry.label == slider.label)
-                .and_then(|entry| entry.value);
-            if let Some(saved) = saved
-                && slider.spec.clamp(saved) != saved
-            {
-                warnings.push(format!(
-                    "{} saves slider {:?} at {}, outside its range {} to {}; it starts at {}",
-                    self.display_name(slider.owner),
-                    slider.label,
-                    saved,
-                    slider.spec.min,
-                    slider.spec.max,
-                    slider.spec.clamp(saved),
-                ));
-            }
-        }
-        for entry in self.listed(index) {
-            let reached_now = reached
-                .iter()
-                .any(|slider| slider.owner == index && slider.label == entry.label);
-            if !reached_now && self.slider(index, &entry.label).is_none() {
-                warnings.push(format!(
-                    "{} lists slider {:?}, but nothing has reached it",
-                    self.display_name(index),
-                    entry.label,
-                ));
-            }
-        }
-        warnings
-            .into_iter()
-            .map(|message| Diagnostic::message_only(message).as_warning())
-            .collect()
-    }
-
     /// Returns the labels of the sliders on the encoders of the program at
     /// `index`, in encoder order.
     ///
     /// These are the sliders it lists, in annotation order, then the sliders it
-    /// owns but doesn't list ("auto-shown"), in the order the waveform of its
-    /// last successful evaluation reaches them (see
-    /// [`slider_owners::resolve`]).
+    /// provides but doesn't list ("auto-shown"), in the order its last
+    /// successful evaluation found them (see [`Evaluated::sliders`]).
     pub fn shown(&self, index: usize) -> Vec<&str> {
         let listed = self.listed(index);
         let mut shown: Vec<&str> = listed.iter().map(|entry| entry.label.as_str()).collect();
-        // TODO a keys instrument's evaluation reaches only its sample note's
-        // sliders, so one that only other notes reach is never shown.
-        // TODO maybe also show sliders owned by earlier bindings this program
-        // is built through, labeled with their owner? turning one would also
+        // TODO maybe also show sliders provided by earlier bindings this
+        // program is built through, labeled with their provider? turning one
+        // would also
         // move other programs that share it.
         let reached = self
             .programs
@@ -1207,7 +1154,7 @@ impl ProgramSet {
             .and_then(Program::evaluated)
             .map_or(&[][..], |evaluated| &evaluated.sliders);
         for slider in reached {
-            if slider.owner == index && !shown.contains(&slider.label.as_str()) {
+            if slider.provider == index && !shown.contains(&slider.label.as_str()) {
                 shown.push(&slider.label);
             }
         }
@@ -1596,7 +1543,7 @@ fn sliders_edit(
     let reached = program.evaluated().map_or(&[][..], |e| &e.sliders);
     let mut shown: Vec<expr::Slider> = Vec::new();
     for slider in reached {
-        if slider.owner == index
+        if slider.provider == index
             && !updated
                 .iter()
                 .chain(&shown)
@@ -1904,7 +1851,8 @@ impl ProgramSet {
             let generation = self.programs[program_index].generation;
             self.programs[program_index] = Program::from_string("", new_bindings.len());
             self.programs[program_index].generation = generation;
-            self.sliders.retain(|(owner, _), _| *owner != program_index);
+            self.sliders
+                .retain(|(provider, _), _| *provider != program_index);
         }
 
         // Skip the file write when no path is set — tests use an empty
@@ -1964,17 +1912,17 @@ mod tests {
             .0
     }
 
-    /// Returns the slider `label` of the slot at `owner`, reached with a
-    /// linear spec of `default` over `min` to `max`.
+    /// Returns the slider `label` the slot at `provider` provides, reached
+    /// with a linear spec of `default` over `min` to `max`.
     fn reached(
-        owner: usize,
+        provider: usize,
         label: &str,
         default: f32,
         min: f32,
         max: f32,
-    ) -> slider_owners::Reached {
-        slider_owners::Reached {
-            owner,
+    ) -> slider_providers::Reached {
+        slider_providers::Reached {
+            provider,
             label: label.to_string(),
             spec: slider::SliderSpec::new(default, min, max, slider::Curve::Linear).unwrap(),
         }
@@ -2008,7 +1956,7 @@ mod tests {
             // Slot 1 saves nothing for its own `vol`.
             reached(1, "vol", 0.5, 0.0, 1.0),
         ]);
-        let value = |owner, label| set.slider(owner, label).unwrap().value;
+        let value = |provider, label| set.slider(provider, label).unwrap().value;
         assert_eq!(value(0, "vol"), 0.25);
         assert_eq!(value(0, "pan"), 0.5);
         // A saved value outside the range is clamped.
@@ -2017,33 +1965,38 @@ mod tests {
     }
 
     #[test]
-    fn a_slider_reached_again_keeps_its_value_unless_its_spec_changed() {
+    fn a_slider_reached_again_keeps_its_position() {
         let mut set = state_from("#{sliders=[\"vol\"]}\ntone = saw(220);");
         set.reach(&[reached(0, "vol", 0.5, 0.0, 1.0)]);
         set.set_slider_normalized(0, 0, 0.75);
         set.reach(&[reached(0, "vol", 0.5, 0.0, 1.0)]);
         assert_eq!(set.slider(0, "vol").unwrap().value, 0.75);
+        // A new default and range: three quarters of the way along it.
         set.reach(&[reached(0, "vol", 2.0, 0.0, 4.0)]);
-        assert_eq!(set.slider(0, "vol").unwrap().value, 2.0);
+        assert_eq!(set.slider(0, "vol").unwrap().value, 3.0);
     }
 
-    /// Records an evaluation of the program at `index` whose waveform reaches
-    /// `sliders`, and returns its warnings.
+    #[test]
+    fn a_slider_reached_for_the_first_time_starts_at_its_saved_value() {
+        let mut set = state_from("#{sliders=[\"vol:0.25\"]}\ntone = saw(220);");
+        set.reach(&[reached(0, "vol", 0.5, 0.0, 1.0)]);
+        assert_eq!(set.slider(0, "vol").unwrap().value, 0.25);
+    }
+
+    /// Records an evaluation of the program at `index` that can reach
+    /// `sliders`.
     fn record_reaching(
         set: &mut ProgramSet,
         index: usize,
-        sliders: Vec<slider_owners::Reached>,
-    ) -> Vec<String> {
+        sliders: Vec<slider_providers::Reached>,
+    ) {
         let evaluated = Evaluated {
             plays: Plays::Waveform(waveform::Waveform::Const(1.0), Arc::default()),
             sliders,
         };
         let text = set.programs[index].text().into();
         set.record(index, text, Outcome::Evaluated(evaluated, Vec::new()))
-            .expect("the evaluation is recorded")
-            .into_iter()
-            .map(|warning| warning.message)
-            .collect()
+            .expect("the evaluation is recorded");
     }
 
     #[test]
@@ -2116,28 +2069,13 @@ mod tests {
     }
 
     #[test]
-    fn a_clamped_saved_value_and_an_unreached_entry_are_warnings() {
+    fn a_clamped_saved_value_keeps_its_encoder_and_is_saved_clamped() {
         let mut set = state_from("#{sliders=[\"far:7\", \"gone\"]}\n_ = saw(220);");
-        let warnings = record_reaching(&mut set, 0, vec![reached(0, "far", 0.5, 0.0, 1.0)]);
-        assert_eq!(
-            warnings,
-            [
-                "A:1 saves slider \"far\" at 7, outside its range 0 to 1; it starts at 1",
-                "A:1 lists slider \"gone\", but nothing has reached it",
-            ]
-        );
+        record_reaching(&mut set, 0, vec![reached(0, "far", 0.5, 0.0, 1.0)]);
         // The unreached entry keeps its encoder and its place in the file.
         assert_eq!(set.shown(0), ["far", "gone"]);
         set.splice(0).unwrap();
         assert_eq!(set.source, "#{sliders=[\"far:1\",\"gone\"]}\n_ = saw(220);");
-    }
-
-    #[test]
-    fn an_entry_reached_through_another_program_is_not_a_warning() {
-        let mut set =
-            state_from("#{sliders=[\"cutoff\"]}\npad = saw(220);\n#{level_db=0}\n_ = pad;");
-        record_reaching(&mut set, 1, vec![reached(0, "cutoff", 0.5, 0.0, 1.0)]);
-        assert!(record_reaching(&mut set, 0, Vec::new()).is_empty());
     }
 
     #[test]
@@ -2287,29 +2225,35 @@ mod tests {
     fn a_listed_label_is_not_a_name_in_scope() {
         let set = state_from("#{sliders=[\"mix\"]}\nm = mix;");
         let environment = Environment::new(8000, 90, PathBuf::new());
-        let diagnostics = environment.check_program(&set.evaluation_input(0));
+        let diagnostics = environment.check_program(&set.evaluation_input(0)).findings;
         assert_eq!(diagnostics.len(), 1, "got {:?}", diagnostics);
         assert_eq!(diagnostics[0].to_string(), "1:1: unbound variable 'mix'");
     }
 
     #[test]
-    fn slider_owners_are_the_played_program_and_the_programs_before_it() {
+    fn slider_providers_are_the_files_program_slots() {
         let source = "#{sliders=[\"q:0.5\"]}\nf = fn(x) => x;\n\
                       #{level_db=0}\n_ = f(1);\n\
                       #{level_db=0}\n_ = f(2);\n";
         let (set, _) = ProgramSet::from_source(source.to_string(), PathBuf::new()).unwrap();
-        let owners = set.slider_owners(1);
-        assert_eq!(owners.played.index, 1);
-        assert_eq!(&source[owners.played.text.clone()], "f(1)");
-        assert!(owners.played.listed.is_empty());
-        assert_eq!(owners.played.listing, None);
-        let [first] = &owners.preceding[..] else {
-            panic!("expected one preceding slot, got {:?}", owners.preceding);
+        let providers = set.slider_providers();
+        // A slot for each program, then the empty ones after them.
+        assert_eq!(providers.slots.len(), set.programs().len());
+        let [first, second, ..] = &providers.slots[..] else {
+            panic!("expected a slot per program, got {:?}", providers.slots);
         };
-        assert_eq!(first.index, 0);
+        assert_eq!(&source[second.text.clone()], "f(1)");
+        assert!(second.listed.is_empty());
+        assert_eq!(second.listing, None);
         assert_eq!(first.name, set.display_name(0));
         assert_eq!(&source[first.text.clone()], "fn(x) => x");
-        assert_eq!(first.listed, ["q"]);
+        assert_eq!(
+            first.listed,
+            [expr::Slider {
+                label: "q".to_string(),
+                value: Some(0.5),
+            }]
+        );
         let listing = first.listing.clone().expect("slot 0 lists a slider");
         assert_eq!(listing.source, Source::File);
         assert!(source[listing.range].contains("q:0.5"));

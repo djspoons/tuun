@@ -750,7 +750,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::programs::Outcome;
+    use crate::programs::{Evaluated, Outcome};
 
     fn empty_status() -> tracker::Status<WaveformId> {
         tracker::Status {
@@ -858,9 +858,12 @@ mod tests {
         assert!(message.is_empty(), "{}", message);
         let environment = Environment::new(8000, 90, std::path::PathBuf::new());
         let input = set.evaluation_input(0);
-        let evaluated = environment
-            .evaluate_program(&input)
-            .expect("test program should evaluate");
+        let evaluated = Evaluated {
+            plays: environment
+                .evaluate_program(&input)
+                .expect("test program should evaluate"),
+            sliders: environment.check_program(&input).sliders,
+        };
         set.record(
             0,
             input.text.into(),

@@ -26,9 +26,7 @@ fn evaluate(bindings: &str, program: &str) -> Result<Plays, Vec<Diagnostic>> {
         .expect("a program");
     let library_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lib/v0");
     let environment = Environment::new(SAMPLE_RATE, 90, library_root);
-    environment
-        .evaluate_program(&set.evaluation_input(index))
-        .map(|evaluated| evaluated.plays)
+    environment.evaluate_program(&set.evaluation_input(index))
 }
 
 /// Returns the samples of the program `_ = program`, after `open std;` and

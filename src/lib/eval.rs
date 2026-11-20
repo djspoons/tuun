@@ -12,8 +12,9 @@ use crate::expr::{
     Binding, BuiltInFn, Error, Expr, NamedExpr, NamedExprs, Pattern, SourceBinding, SourceExpr,
     Span,
 };
+use crate::slider;
 use crate::trace::{self, CarriesTrace, Step, Trace, Via};
-use crate::waveform::Waveform;
+use crate::waveform::{ShareId, Waveform};
 
 /// A context entry: a bound name and the closed value it evaluates to.
 pub type ContextEntry<M, S> = NamedExpr<M, S>;
@@ -351,73 +352,150 @@ fn call_site<M, S: Clone>(span: &Option<Span<S>>, function: &SourceExpr<M, S>) -
     })
 }
 
-/// The user-function calls in progress at some point of an evaluation: where
-/// each was written, innermost first.
+/// What an evaluation reads from the point it has reached rather than from
+/// the expression there: which listing binding provides each slider label,
+/// and how many `share` calls are applying their functions.
 ///
-/// Calls with no written site, such as a built-in applying a function it was
-/// passed, are not on the path.
+/// Entering code written in a listing binding's text (see
+/// [`slider::Listings`]) makes that binding the provider of each label it
+/// lists, until that code returns.
 #[derive(Debug)]
-pub struct CallPath<S>(Option<Arc<Frame<S>>>);
-
-/// One call on a [`CallPath`] and the calls it is inside of.
-#[derive(Debug)]
-struct Frame<S> {
-    site: Span<S>,
-    outer: CallPath<S>,
+pub struct DynamicScope<S> {
+    listings: Option<slider::Listings<S>>,
+    /// Each label a listing provides here, with the listing's id, innermost
+    /// last.
+    providers: Arc<Vec<(String, usize)>>,
+    sharing: u32,
 }
 
-impl<S> CallPath<S> {
-    /// Returns the path with no calls in progress.
-    pub fn empty() -> CallPath<S> {
-        CallPath(None)
+impl<S> Clone for DynamicScope<S> {
+    fn clone(&self) -> Self {
+        DynamicScope {
+            listings: self.listings.clone(),
+            providers: self.providers.clone(),
+            sharing: self.sharing,
+        }
+    }
+}
+
+impl<S> Default for DynamicScope<S> {
+    /// Returns the scope where no code is in any listing binding and no
+    /// `share` call is applying its function.
+    fn default() -> Self {
+        DynamicScope {
+            listings: None,
+            providers: Arc::new(Vec::new()),
+            sharing: 0,
+        }
+    }
+}
+
+impl<S> DynamicScope<S> {
+    /// Returns the scope where no listing provides anything yet and code is
+    /// in the listing bindings `listings` finds.
+    pub fn new(listings: slider::Listings<S>) -> DynamicScope<S> {
+        DynamicScope {
+            listings: Some(listings),
+            ..DynamicScope::default()
+        }
     }
 
-    /// Returns this path with the call at `site` in progress inside it.
+    /// Returns this scope with the code written at `code` running inside it.
     ///
     /// # Example
     ///
     /// ```
-    /// use tuun::eval::CallPath;
+    /// use std::sync::Arc;
+    /// use tuun::eval::DynamicScope;
     /// use tuun::expr::Span;
+    /// use tuun::slider::{Listing, Listings, Provider};
     ///
-    /// let path = CallPath::empty().enter(Span::new((), 0..5)).enter(Span::new((), 9..12));
-    /// let sites: Vec<_> = path.sites().map(|span| span.range.clone()).collect();
-    /// assert_eq!(sites, [9..12, 0..5]);
+    /// // Code written in 10..20 is in the binding 3, which lists "mix".
+    /// let listings = Listings::new(|span: &Span<()>| {
+    ///     (10..20).contains(&span.range.start).then(|| Listing {
+    ///         id: 3,
+    ///         labels: Arc::from(["mix".to_string()]),
+    ///     })
+    /// });
+    /// let scope = DynamicScope::new(listings);
+    /// assert_eq!(scope.provider("mix"), Provider::Played);
+    /// let inside = scope.enter(Some(&Span::new((), 12..15)));
+    /// assert_eq!(inside.provider("mix"), Provider::Listing(3));
+    /// assert_eq!(inside.provider("cutoff"), Provider::Played);
     /// ```
-    pub fn enter(&self, site: Span<S>) -> CallPath<S> {
-        CallPath(Some(Arc::new(Frame {
-            site,
-            outer: self.clone(),
-        })))
+    pub fn enter(&self, code: Option<&Span<S>>) -> DynamicScope<S> {
+        let listing = match (&self.listings, code) {
+            (Some(listings), Some(code)) => listings.find(code),
+            _ => None,
+        };
+        let Some(listing) = listing else {
+            return self.clone();
+        };
+        let mut providers = (*self.providers).clone();
+        for label in listing.labels.iter() {
+            if self.provider(label) != slider::Provider::Listing(listing.id) {
+                providers.push((label.clone(), listing.id));
+            }
+        }
+        DynamicScope {
+            listings: self.listings.clone(),
+            providers: Arc::new(providers),
+            sharing: self.sharing,
+        }
     }
 
-    /// Returns where each call in progress was written, innermost first.
-    pub fn sites(&self) -> impl Iterator<Item = &Span<S>> {
-        std::iter::successors(self.0.as_deref(), |frame| frame.outer.0.as_deref())
-            .map(|frame| &frame.site)
+    /// Returns the provider of the slider `label` in this scope: the innermost
+    /// listing binding providing it, or else the program being played.
+    pub fn provider(&self, label: &str) -> slider::Provider {
+        self.providers
+            .iter()
+            .rev()
+            .find(|(l, _)| l == label)
+            .map_or(slider::Provider::Played, |&(_, id)| {
+                slider::Provider::Listing(id)
+            })
     }
-}
 
-impl<S> Clone for CallPath<S> {
-    fn clone(&self) -> Self {
-        CallPath(self.0.clone())
+    /// Returns the id of the `Shared` of a `share` call applying its function
+    /// in this scope, and the scope that function runs in.
+    ///
+    /// Each id is the number of `share` calls already applying theirs, so no
+    /// two calls applying their functions in one scope get the same id.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tuun::eval::DynamicScope;
+    /// use tuun::waveform::ShareId;
+    ///
+    /// let (outer, inside) = DynamicScope::<()>::default().share();
+    /// let (inner, _) = inside.share();
+    /// assert_eq!((outer, inner), (ShareId(0), ShareId(1)));
+    /// ```
+    pub fn share(&self) -> (ShareId, DynamicScope<S>) {
+        let scope = DynamicScope {
+            listings: self.listings.clone(),
+            providers: self.providers.clone(),
+            sharing: self.sharing + 1,
+        };
+        (ShareId(self.sharing), scope)
     }
 }
 
 /// A built-in application as the built-in sees it: where the call was written,
-/// the traces of its function expression and its arguments, and the
-/// user-function calls in progress around it.
+/// the traces of its function expression and its arguments, and the scope it
+/// is evaluated in.
 // TODO is this the right place for this? maybe trace.rs?
 pub struct BuiltInCall<S> {
     span: Option<Span<S>>,
     head: Arc<Trace<S>>,
     parents: Vec<Arc<Trace<S>>>,
-    path: CallPath<S>,
+    scope: DynamicScope<S>,
 }
 
 impl<S: Clone> BuiltInCall<S> {
     /// Returns the call at `span` of a function expression whose trace is
-    /// `head` to `arguments`, with no user-function calls in progress.
+    /// `head` to `arguments`, in the default scope.
     pub fn new<M: CarriesTrace<S>>(
         span: Option<Span<S>>,
         head: Trace<S>,
@@ -430,7 +508,7 @@ impl<S: Clone> BuiltInCall<S> {
                 .iter()
                 .map(|argument| Arc::new(Trace::of(argument)))
                 .collect(),
-            path: CallPath::empty(),
+            scope: DynamicScope::default(),
         }
     }
 
@@ -439,9 +517,9 @@ impl<S: Clone> BuiltInCall<S> {
         self.span.as_ref()
     }
 
-    /// Returns the user-function calls in progress around this call.
-    pub fn path(&self) -> &CallPath<S> {
-        &self.path
+    /// Returns the scope this call is evaluated in.
+    pub fn scope(&self) -> &DynamicScope<S> {
+        &self.scope
     }
 
     /// Returns `expr` as a new value this call computed, one whose audible
@@ -482,20 +560,20 @@ pub fn embed<M: CarriesTrace<S>, S: Clone>(argument: SourceExpr<M, S>) -> Expr<M
 }
 
 /// Applies the built-in `builtin` to `arguments` in a call at `span` whose
-/// function expression has the trace `head` inside the calls on `path`.
+/// function expression has the trace `head` in `scope`.
 fn apply_builtin<M, S>(
     builtin: &BuiltInFn<M, S>,
     arguments: Vec<SourceExpr<M, S>>,
     span: Option<Span<S>>,
     head: Trace<S>,
-    path: &CallPath<S>,
+    scope: &DynamicScope<S>,
 ) -> Result<SourceExpr<M, S>, Error<S>>
 where
     M: CarriesTrace<S>,
     S: Clone,
 {
     let call = BuiltInCall {
-        path: path.clone(),
+        scope: scope.clone(),
         ..BuiltInCall::new(span, head, &arguments)
     };
     // Errors point at the whole `f(x, y)` call site, since built-ins don't
@@ -630,11 +708,12 @@ fn push_step_into_parts<M: CarriesTrace<S>, S: Clone>(
     }
 }
 
-/// Evaluates a closed expression to a value inside the user-function calls on
-/// `path`. Closed expressions do not contain variables.
+/// Evaluates a closed expression to a value in `scope`. Closed expressions do
+/// not contain variables.
 ///
-/// With an empty `path`, equivalent to [`evaluate`] with no bindings and a
-/// resolver that always fails, but skips the needless substitution pass.
+/// In the default scope with only `expr` itself running, equivalent to
+/// [`evaluate`] with no bindings and a resolver that always fails, but skips
+/// the needless substitution pass.
 ///
 /// The result's spans are provenance (see [`SourceExpr`]): an expression that
 /// is already a value keeps its span, an extracted sub-value (a chosen branch,
@@ -643,7 +722,7 @@ fn push_step_into_parts<M: CarriesTrace<S>, S: Clone>(
 /// part of one) the built-in handed back.
 pub fn evaluate_closed<M, S>(
     expr: SourceExpr<M, S>,
-    path: &CallPath<S>,
+    scope: &DynamicScope<S>,
 ) -> Result<SourceExpr<M, S>, Error<S>>
 where
     M: Clone + fmt::Display + fmt::Debug + CarriesTrace<S>,
@@ -671,7 +750,7 @@ where
             // defaults that are already values evaluate to themselves.
             let named = named
                 .into_iter()
-                .map(|(name, value)| Ok((name, evaluate_closed(value, path)?)))
+                .map(|(name, value)| Ok((name, evaluate_closed(value, scope)?)))
                 .collect::<Result<NamedExprs<M, S>, Error<S>>>()?;
             Ok(SourceExpr {
                 expr: Function {
@@ -688,8 +767,8 @@ where
             span,
         )),
         Seq { offset, waveform } => {
-            let offset = evaluate_closed(*offset, path)?;
-            let waveform = evaluate_closed(*waveform, path)?;
+            let offset = evaluate_closed(*offset, scope)?;
+            let waveform = evaluate_closed(*waveform, scope)?;
             Ok(SourceExpr {
                 expr: Seq {
                     offset: Box::new(offset),
@@ -712,9 +791,9 @@ where
             // Evaluation may drop the condition's span, so capture it up
             // front to point the error at the original condition.
             let condition_span = condition.span.clone();
-            match evaluate_closed(*condition, path)?.expr {
-                Bool(true) => evaluate_closed(*then, path),
-                Bool(false) => evaluate_closed(*else_, path),
+            match evaluate_closed(*condition, scope)?.expr {
+                Bool(true) => evaluate_closed(*then, scope),
+                Bool(false) => evaluate_closed(*else_, scope),
                 _ => Err(Error::eval(
                     "Expected boolean condition".to_string(),
                     condition_span,
@@ -727,14 +806,14 @@ where
             named,
         } => {
             let site = call_site(&span, &function);
-            let function = evaluate_closed(*function, path)?;
+            let function = evaluate_closed(*function, scope)?;
             let pos_args = positional
                 .into_iter()
-                .map(|argument| evaluate_closed(argument, path))
+                .map(|argument| evaluate_closed(argument, scope))
                 .collect::<Result<Vec<_>, _>>()?;
             let named = named
                 .into_iter()
-                .map(|(name, value)| Ok((name, evaluate_closed(value, path)?)))
+                .map(|(name, value)| Ok((name, evaluate_closed(value, scope)?)))
                 .collect::<Result<NamedExprs<M, S>, Error<S>>>()?;
             match (function.expr, pos_args) {
                 (
@@ -790,12 +869,10 @@ where
                         context.push((name.clone(), value));
                     }
                     let body = substitute(&mut context, *body)?;
-                    // The body runs with this call in progress. Its arguments
-                    // were evaluated above, outside it.
-                    let result = match &site {
-                        Some(site) => evaluate_closed(body, &path.enter(site.clone()))?,
-                        None => evaluate_closed(body, path)?,
-                    };
+                    // The body runs as code written where the function was,
+                    // whoever applies it. Its arguments were evaluated above,
+                    // outside it.
+                    let result = evaluate_closed(body, &scope.enter(function.span.as_ref()))?;
                     Ok(match site {
                         Some(site) => push_step(result, &Step::Call(site)),
                         None => result,
@@ -818,7 +895,7 @@ where
                         ));
                     }
                     let head = Trace::new::<M>(function.span, function.via);
-                    apply_builtin(&builtin, arguments, span, head, path)
+                    apply_builtin(&builtin, arguments, span, head, scope)
                 }
                 (function, _) => Err(Error::internal(
                     format!("Invalid application: {}", function),
@@ -831,7 +908,7 @@ where
             span,
             via,
         }),
-        Expr::Project { module, name } => match evaluate_closed(*module, path)?.expr {
+        Expr::Project { module, name } => match evaluate_closed(*module, scope)?.expr {
             Expr::BoundModule(entries) => match entries.into_iter().find(|(n, _)| n == &name) {
                 Some((_, value)) => Ok(match span {
                     Some(span) => push_step(value, &Step::UseSite(span)),
@@ -851,7 +928,7 @@ where
             expr: Tuple(
                 exprs
                     .into_iter()
-                    .map(|e| evaluate_closed(e, path))
+                    .map(|e| evaluate_closed(e, scope))
                     .collect::<Result<Vec<_>, _>>()?,
             ),
             span,
@@ -861,7 +938,7 @@ where
             expr: List(
                 exprs
                     .into_iter()
-                    .map(|e| evaluate_closed(e, path))
+                    .map(|e| evaluate_closed(e, scope))
                     .collect::<Result<Vec<_>, _>>()?,
             ),
             span,
@@ -908,7 +985,7 @@ where
     S: Clone + Debug,
 {
     let mut context = evaluate_bindings_cached(resolve, cache, bindings)?;
-    evaluate_with_context(&mut context, expr)
+    evaluate_with_context(&mut context, expr, &DynamicScope::default())
 }
 
 /// Evaluates `bindings` and returns the resulting context: one entry per
@@ -942,13 +1019,20 @@ where
     S: Clone + Debug,
 {
     let mut context = Vec::new();
-    extend_context_cached(resolve, cache, bindings, &mut context)?;
+    extend_context_cached(
+        resolve,
+        cache,
+        bindings,
+        &mut context,
+        &DynamicScope::default(),
+    )?;
     Ok(context)
 }
 
 /// Evaluates `bindings` after the entries already in `context`, appending an
 /// entry to `context` for each bound name, and reusing and updating the
-/// module exports in `cache`.
+/// module exports in `cache`. Each definition is evaluated in `scope`, with
+/// its own code running.
 ///
 /// `context` should be a context [`evaluate_bindings`] or this function
 /// returned. On failure, `context` holds the entries of the bindings before
@@ -958,6 +1042,7 @@ pub fn extend_context_cached<'a, M, S, F>(
     cache: &mut ModuleCache<M, S>,
     bindings: &'a [SourceBinding<M, S>],
     context: &mut Vec<ContextEntry<M, S>>,
+    scope: &DynamicScope<S>,
 ) -> Result<(), Error<S>>
 where
     F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
@@ -969,25 +1054,29 @@ where
         cache,
         open: Vec::new(),
         resolved: Vec::new(),
+        scope,
     };
     build_context(&mut modules, bindings, context)?;
     Ok(())
 }
 
-/// Substitutes `context` into `expr` and reduces the result to a value.
+/// Substitutes `context` into `expr` and reduces the result to a value in
+/// `scope`, with the code of `expr` running.
 ///
 /// `context` should be a context [`evaluate_bindings`] or
 /// [`extend_context_cached`] returned; it holds the same entries afterwards.
 pub fn evaluate_with_context<M, S>(
     context: &mut Vec<(String, SourceExpr<M, S>)>,
     expr: SourceExpr<M, S>,
+    scope: &DynamicScope<S>,
 ) -> Result<SourceExpr<M, S>, Error<S>>
 where
     M: Clone + Display + Debug + CarriesTrace<S>,
     S: Clone + Debug,
 {
+    let code = expr.span.clone();
     let expr = substitute(context, expr)?;
-    evaluate_closed(expr, &CallPath::empty())
+    evaluate_closed(expr, &scope.enter(code.as_ref()))
 }
 
 /// The modules one evaluation of bindings loads: how it resolves them, the
@@ -999,6 +1088,8 @@ struct Modules<'r, 'c, F, M, S> {
     open: Vec<ModuleKey>,
     /// The path and slice of each module resolved so far, in order.
     resolved: Vec<(Vec<String>, ModuleKey)>,
+    /// The scope each definition is evaluated in.
+    scope: &'r DynamicScope<S>,
 }
 
 /// Returns what the module `module`, resolved from `path`, exports: from
@@ -1098,7 +1189,8 @@ where
             }
             Binding::Definition(pattern, def_expr) => {
                 let substituted = substitute(context, def_expr.clone())?;
-                let value = evaluate_closed(substituted, &CallPath::empty())?;
+                let scope = modules.scope.enter(def_expr.span.as_ref());
+                let value = evaluate_closed(substituted, &scope)?;
                 let before = context.len();
                 extend_context(context, pattern, value)?;
                 own.extend(before..context.len());
@@ -1376,10 +1468,11 @@ mod tests {
         let (first, _) = parse_module::<u32, _>("a = 1;", ()).unwrap();
         let (second, _) = parse_module::<u32, _>("b = a;", ()).unwrap();
         let mut context = Vec::new();
-        extend_context_cached(resolve, &mut cache, &first, &mut context).unwrap();
-        extend_context_cached(resolve, &mut cache, &second, &mut context).unwrap();
+        let scope = DynamicScope::default();
+        extend_context_cached(resolve, &mut cache, &first, &mut context, &scope).unwrap();
+        extend_context_cached(resolve, &mut cache, &second, &mut context, &scope).unwrap();
         let b = parse_program::<u32, _>("b", ()).unwrap();
-        let value = evaluate_with_context(&mut context, b).unwrap();
+        let value = evaluate_with_context(&mut context, b, &scope).unwrap();
         assert_eq!(format!("{}", value), "1");
     }
 
@@ -1398,7 +1491,10 @@ mod tests {
             ("fn(y) => fn(z) => nope", false),
         ] {
             let expr = parse_program::<u32, _>(input, ()).unwrap();
-            assert_eq!(evaluate_with_context(&mut context, expr).is_ok(), succeeds);
+            assert_eq!(
+                evaluate_with_context(&mut context, expr, &DynamicScope::default()).is_ok(),
+                succeeds
+            );
             assert_eq!(names(&context), before, "{}", input);
         }
     }
@@ -1559,21 +1655,21 @@ mod tests {
     #[test]
     fn test_application_arity_is_exact() {
         let expr = parse_program::<u32, _>("(fn(x) => x)(2, 3)", ()).unwrap();
-        let error = evaluate_closed(expr, &CallPath::empty()).unwrap_err();
+        let error = evaluate_closed(expr, &DynamicScope::default()).unwrap_err();
         assert_eq!(error.message(), "extra positional parameter");
 
         let expr = parse_program::<u32, _>("(fn(x, y) => x)(2)", ()).unwrap();
-        let error = evaluate_closed(expr, &CallPath::empty()).unwrap_err();
+        let error = evaluate_closed(expr, &DynamicScope::default()).unwrap_err();
         assert_eq!(error.message(), "missing parameter \"y\"");
 
         // A tuple literal is one argument; destructuring params accept it...
         let expr = parse_program::<u32, _>("(fn((y, z)) => (z, y))((4, 5))", ()).unwrap();
-        let evaluated = evaluate_closed(expr, &CallPath::empty()).unwrap();
+        let evaluated = evaluate_closed(expr, &DynamicScope::default()).unwrap();
         assert_eq!(format!("{}", evaluated), "(5, 4)");
 
         // ...and passing two arguments instead is an arity error, not a splat.
         let expr = parse_program::<u32, _>("(fn((y, z)) => y)(4, 5)", ()).unwrap();
-        let error = evaluate_closed(expr, &CallPath::empty()).unwrap_err();
+        let error = evaluate_closed(expr, &DynamicScope::default()).unwrap_err();
         assert_eq!(error.message(), "extra positional parameter");
     }
 
@@ -1582,17 +1678,17 @@ mod tests {
         let input = "(fn(x) => fn(x) => x)(7)(5)";
         let expr = parse_program::<u32, _>(input, ()).unwrap();
         println!("Parsed expression: {}", expr);
-        let evaluated = evaluate_closed(expr, &CallPath::empty()).unwrap();
+        let evaluated = evaluate_closed(expr, &DynamicScope::default()).unwrap();
         assert_eq!(format!("{}", evaluated), "5");
 
         let input = "(fn(x) => fn(y, z) => (x, y, z))(3)(4, 5)";
         let expr = parse_program::<u32, _>(input, ()).unwrap();
-        let evaluated = evaluate_closed(expr, &CallPath::empty()).unwrap();
+        let evaluated = evaluate_closed(expr, &DynamicScope::default()).unwrap();
         assert_eq!(format!("{}", evaluated), "(3, 4, 5)");
 
         let input = "(fn(x, (y, z)) => (x, y, z))(3, (4, 5))";
         let expr = parse_program::<u32, _>(input, ()).unwrap();
-        let evaluated = evaluate_closed(expr, &CallPath::empty()).unwrap();
+        let evaluated = evaluate_closed(expr, &DynamicScope::default()).unwrap();
         assert_eq!(format!("{}", evaluated), "(3, 4, 5)");
     }
 
@@ -1678,9 +1774,11 @@ mod tests {
         }
     }
 
-    /// Tests of the user-function calls in progress that evaluation hands
-    /// built-ins, against stand-in built-ins.
-    mod call_paths {
+    /// Tests of the running code that evaluation hands built-ins, against
+    /// stand-in built-ins.
+    /// Tests of which listing provides a slider label where, against stand-in
+    /// built-ins and stand-in listings.
+    mod providers {
         use super::*;
         use crate::parser::{parse_module, parse_program};
 
@@ -1695,10 +1793,9 @@ mod tests {
 
         type StandIn = fn(Vec<Value>, &BuiltInCall<Text>) -> Result<Value, Error<Text>>;
 
-        /// The stand-in built-ins: `here(x)` returns where each call in
-        /// progress around it was written, as a list of `"Program 3 9"`
-        /// strings; `first(a, b)` hands back `a`; and `apply(f)` applies `f`
-        /// to 1.
+        /// The stand-in built-ins: `who(label)` returns the provider of
+        /// `label` where it is called, `"played"` or a listing's id, and
+        /// `apply(f)` applies `f` to 1.
         fn stand_ins() -> Vec<SourceBinding<u32, Text>> {
             fn def(name: &str, f: StandIn) -> SourceBinding<u32, Text> {
                 SourceBinding::definition(
@@ -1710,107 +1807,98 @@ mod tests {
                 )
             }
             vec![
-                def("here", |_arguments, call| {
-                    let sites = call.path().sites().map(|site| {
-                        let text =
-                            format!("{:?} {} {}", site.source, site.range.start, site.range.end);
-                        call.computed(Expr::String(text))
-                    });
-                    Ok(call.assembled(Expr::List(sites.collect())))
-                }),
-                def("first", |mut arguments, _call| {
-                    arguments.truncate(1);
-                    Ok(arguments.pop().unwrap())
+                def("who", |arguments, call| {
+                    let Expr::String(label) = &arguments[0].expr else {
+                        panic!("expected a label");
+                    };
+                    let provider = match call.scope().provider(label) {
+                        slider::Provider::Played => "played".to_string(),
+                        slider::Provider::Listing(id) => id.to_string(),
+                    };
+                    Ok(call.computed(Expr::String(provider)))
                 }),
                 def("apply", |mut arguments, call| {
                     let function = arguments.pop().unwrap();
                     let application =
                         SourceExpr::application(function, vec![SourceExpr::float(1.0)]);
-                    evaluate_closed(application, call.path())
+                    evaluate_closed(application, call.scope())
                 }),
             ]
         }
 
-        /// A library function that calls `here` in an argument to another
-        /// built-in, and one that calls it.
-        const LIBRARY: &str = "pad = fn(v) => first(here(v), v);\n\
-                               lib_pad = fn(v) => pad(v);\n";
+        /// A library whose line `n` (from 0) is the text of the listing with
+        /// id `n`, each listing `"q"`.
+        const LIBRARY: &str = "pad = fn(v) => who(\"q\");\n\
+                               wrap = fn(f) => f(1);\n\
+                               made = who(\"q\");\n\
+                               keep = fn(v) => v;\n";
 
-        /// Returns the text of each call in progress where `program` calls
-        /// `here`, innermost first, with `lib` standing for library text.
-        fn path_of(program: &str) -> Vec<std::string::String> {
+        /// Returns what `program` evaluates to, under the library.
+        fn provider_of(program: &str) -> std::string::String {
             let prelude = stand_ins();
             let (mut library, errors) = parse_module(LIBRARY, Text::Library).unwrap();
             assert!(errors.is_empty());
             library.insert(0, Binding::Open(vec!["prelude".to_string()]).into());
             let resolve = |path: &[std::string::String]| match path.join(".").as_str() {
                 "prelude" => Ok(&prelude[..]),
-                "lib" => Ok(&library[..]),
-                other => Err(Error::eval_here(format!("no module {}", other))),
+                _ => Err(Error::eval_here("no such module")),
             };
-            let bindings: Vec<SourceBinding<u32, Text>> = vec![
-                Binding::Open(vec!["prelude".to_string()]).into(),
-                Binding::Open(vec!["lib".to_string()]).into(),
-            ];
-            let expr = parse_program(program, Text::Program).unwrap();
-            let Expr::List(sites) = evaluate(resolve, &bindings, expr).unwrap().expr else {
-                panic!("expected here's list of sites");
-            };
-            sites
-                .into_iter()
-                .map(|site| {
-                    let Expr::String(site) = site.expr else {
-                        panic!("expected a site");
-                    };
-                    let parts: Vec<&str> = site.split(' ').collect();
-                    let range = parts[1].parse().unwrap()..parts[2].parse().unwrap();
-                    match parts[0] {
-                        "Program" => program[range].to_string(),
-                        _ => format!("lib {}", &LIBRARY[range]),
-                    }
+            let listings = slider::Listings::new(|span: &Span<Text>| {
+                if span.source != Text::Library {
+                    return None;
+                }
+                let line = LIBRARY[..span.range.start].matches('\n').count();
+                Some(slider::Listing {
+                    id: line,
+                    labels: Arc::from(["q".to_string()]),
                 })
-                .collect()
+            });
+            let scope = DynamicScope::new(listings);
+            let mut context = Vec::new();
+            let mut cache = ModuleCache::default();
+            extend_context_cached(resolve, &mut cache, &library, &mut context, &scope).unwrap();
+            let expr = parse_program(program, Text::Program).unwrap();
+            match evaluate_with_context(&mut context, expr, &scope)
+                .unwrap()
+                .expr
+            {
+                Expr::String(provider) => provider,
+                other => panic!("expected a provider, got {}", other),
+            }
         }
 
         #[test]
-        fn calls_in_progress_are_on_the_path_innermost_first() {
-            // `here` is an argument to `first` inside the library's `pad`.
-            assert_eq!(
-                path_of("let dp = fn(x) => pad(x) in dp(1)"),
-                ["pad(x)", "dp(1)"]
-            );
+        fn code_in_no_listing_is_the_played_programs() {
+            assert_eq!(provider_of("who(\"q\")"), "played");
+            assert_eq!(provider_of("who(\"r\")"), "played");
         }
 
         #[test]
-        fn a_call_has_no_calls_in_progress_at_the_top() {
-            assert!(path_of("here(1)").is_empty());
+        fn a_listings_function_provides_while_it_runs() {
+            assert_eq!(provider_of("pad(1)"), "0");
+            // A function given to it, too, while it runs.
+            assert_eq!(provider_of("wrap(fn(x) => who(\"q\"))"), "1");
+            // The innermost listing wins.
+            assert_eq!(provider_of("wrap(pad)"), "0");
+        }
+
+        #[test]
+        fn a_listings_definition_provides_while_it_is_evaluated() {
+            assert_eq!(provider_of("made"), "2");
         }
 
         #[test]
         fn an_argument_is_evaluated_outside_its_callee() {
-            assert!(path_of("let id = fn(x) => x in id(here(1))").is_empty());
-            assert_eq!(
-                path_of("let f = fn(x) => pad(x) in let id = fn(x) => x in id(f(1))"),
-                ["pad(x)", "f(1)"]
-            );
+            assert_eq!(provider_of("keep(who(\"q\"))"), "played");
         }
 
         #[test]
-        fn a_function_a_built_in_applies_runs_inside_the_built_ins_calls() {
-            // `apply`'s own application of the function is written nowhere,
-            // so it isn't on the path.
+        fn a_function_a_built_in_applies_runs_in_the_built_ins_scope() {
             assert_eq!(
-                path_of("let outer = fn(x) => apply(fn(y) => pad(y)) in outer(1)"),
-                ["pad(y)", "outer(1)"]
+                provider_of("wrap(fn(x) => apply(fn(y) => who(\"q\")))"),
+                "1"
             );
-        }
-
-        #[test]
-        fn a_library_call_is_on_the_path() {
-            assert_eq!(
-                path_of("let wrap = fn(x) => lib_pad(x) in wrap(1)"),
-                ["lib pad(v)", "lib_pad(x)", "wrap(1)"]
-            );
+            assert_eq!(provider_of("apply(pad)"), "0");
         }
     }
 

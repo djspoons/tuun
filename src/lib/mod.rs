@@ -9,6 +9,7 @@ pub mod optimizer;
 pub mod parser;
 pub mod signatures;
 pub mod slider;
+pub mod slider_analysis;
 pub mod trace;
 pub mod trace_walk;
 pub mod types;
@@ -50,7 +51,7 @@ pub mod sdl2_input;
 #[cfg(feature = "native")]
 pub mod sequencer;
 #[cfg(feature = "native")]
-pub mod slider_owners;
+pub mod slider_providers;
 #[cfg(feature = "native")]
 pub mod tracker;
 

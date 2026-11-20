@@ -23,10 +23,12 @@ use crate::ids::MarkId;
 use crate::infer;
 use crate::optimizer;
 use crate::parser;
-use crate::programs::{Evaluated, EvaluationInput, Plays, ProgramKind, ProgramSet};
+use crate::programs::{EvaluationInput, Plays, ProgramKind, ProgramSet};
 use crate::sequencer;
 use crate::signatures;
-use crate::slider_owners;
+use crate::slider;
+use crate::slider_analysis;
+use crate::slider_providers;
 use crate::trace::{self, Trace};
 use crate::trace_walk::{self, WaveformMarks};
 use crate::waveform;
@@ -85,6 +87,17 @@ impl ModuleTable {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+}
+
+/// What [`Environment::check_program`] finds about a program.
+#[derive(Debug, Default)]
+pub struct Checked {
+    /// The findings, as diagnostics.
+    pub findings: Vec<Diagnostic>,
+    /// The sliders the program can reach, on any branch and any note of a
+    /// keys instrument, each with the slot that provides it, in the order the
+    /// text reaches their first calls.
+    pub sliders: Vec<slider_providers::Reached>,
 }
 
 /// What `check_program`'s findings become: errors or warnings.
@@ -398,21 +411,28 @@ impl Environment {
         self.check_mode = mode;
     }
 
-    /// Type-checks the program `input` describes and returns the findings as
-    /// diagnostics.
+    /// Checks the program `input` describes: returns the type checker's and
+    /// the slider check's findings as diagnostics, and the sliders the program
+    /// can reach (see [`slider_analysis::analyze`]).
     ///
     /// Mirrors [`Environment::evaluate_program`]'s setup — same bindings,
-    /// implicit prelude open, and module resolver. Returned findings are
-    /// those located in the program's own text or its source file. A finding
-    /// inside a module belongs to the module, not to any one dependent
-    /// program, so it is printed instead — path-qualified, with its snippet
-    /// — the first time a check surfaces it, and again only after the
-    /// module reloads. Parse failures return no findings.
-    pub fn check_program(&self, input: &EvaluationInput) -> Vec<Diagnostic> {
+    /// implicit prelude open, and module resolver. Returned type findings are
+    /// those located in the program's own text or its source file. A type
+    /// finding inside a module belongs to the module, not to any one
+    /// dependent program, so it is printed instead — path-qualified, with its
+    /// snippet — the first time a check surfaces it, and again only after the
+    /// module reloads. A slider finding is the program's wherever it is,
+    /// since it depends on how the program uses the module. The slider
+    /// check's findings are returned only when the type checker finds nothing
+    /// in the program's text or file, and its warnings about the sliders the
+    /// program lists (see [`slider_providers::Providers::warnings`]) only when
+    /// it finds nothing either. Parse failures return no findings and no
+    /// sliders.
+    pub fn check_program(&self, input: &EvaluationInput) -> Checked {
         let mut bindings = input.bindings.clone();
         bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
         let Ok(expr) = parser::parse_program(&input.text, Source::Program) else {
-            return Vec::new();
+            return Checked::default();
         };
         let expectation = match input.kind {
             ProgramKind::Waveform => infer::Expectation::Playable,
@@ -453,10 +473,25 @@ impl Environment {
             self.checked_generation.set(self.modules_generation.get());
             break errors;
         };
+        // The slider check expects a program the type checker accepts, though
+        // its sliders are the best guess at what plays either way.
+        let typed = !errors
+            .iter()
+            .any(|e| matches!(e.source(), Some(Source::Program) | Some(Source::File)));
+        let (sliders, mut slider_errors) = self.analyze_sliders(input, &bindings, &expr);
+        if !typed {
+            slider_errors.clear();
+        }
+        // A call the slider check finds an error in isn't among the sliders,
+        // so warning about what is missing from them would mislead.
+        let slider_warnings = match typed && slider_errors.is_empty() {
+            true => input.providers.warnings(input.index, &sliders),
+            false => Vec::new(),
+        };
         log::debug!(
             "Checked program in {:.3}s: {} errors",
             (time::Instant::now() - start).as_secs_f32(),
-            errors.len(),
+            errors.len() + slider_errors.len(),
         );
         // A module finding is not this program's diagnostic — returned, it
         // would repeat on every dependent program's check — but neither may
@@ -486,11 +521,12 @@ impl Environment {
                 }
             }
         }
-        errors
+        let findings = errors
             .iter()
             .filter(|finding| {
                 matches!(finding.source(), Some(Source::Program) | Some(Source::File))
             })
+            .chain(&slider_errors)
             .map(|finding| {
                 let diagnostic = self.diagnose(finding, &input.text, &input.source);
                 match self.check_mode {
@@ -498,7 +534,53 @@ impl Environment {
                     CheckMode::Warnings => diagnostic.as_warning(),
                 }
             })
-            .collect()
+            .chain(slider_warnings.iter().map(|warning| {
+                self.diagnose(warning, &input.text, &input.source)
+                    .as_warning()
+            }))
+            .collect();
+        Checked { findings, sliders }
+    }
+
+    /// Checks how `expr`, the parsed text of the program `input` describes,
+    /// uses sliders under `bindings`, and returns the sliders it can reach,
+    /// each with the slot that provides it, and the errors found.
+    fn analyze_sliders(
+        &self,
+        input: &EvaluationInput,
+        bindings: &[expr::SourceBinding<MarkId, Source>],
+        expr: &expr::SourceExpr<MarkId, Source>,
+    ) -> (Vec<slider_providers::Reached>, Vec<expr::Error<Source>>) {
+        let slots = &input.providers.slots;
+        let index = |provider: slider::Provider| match provider {
+            slider::Provider::Played => input.index,
+            slider::Provider::Listing(index) => index,
+        };
+        let name = |provider| {
+            slots
+                .get(index(provider))
+                .map_or_else(String::new, |slot| slot.name.clone())
+        };
+        let annotation = |index: usize| slots.get(index)?.listing.clone();
+        let program = slider_analysis::Program {
+            bindings,
+            expr,
+            keys: input.kind == ProgramKind::Keys,
+            listings: input.listings(),
+            name: &name,
+            annotation: &annotation,
+        };
+        let analysis = slider_analysis::analyze(|path| self.resolve(path), &program);
+        let reached = analysis
+            .reached
+            .into_iter()
+            .map(|reached| slider_providers::Reached {
+                provider: index(reached.provider),
+                label: reached.label,
+                spec: reached.spec,
+            })
+            .collect();
+        (reached, analysis.errors)
     }
 
     /// Returns the type of the identifier covering `offset` in the program at
@@ -577,18 +659,19 @@ impl Environment {
     /// Evaluates a sub-expression of a program in that program's evaluation
     /// context `context`, expecting a waveform result.
     ///
-    /// The waveform's sliders are resolved among `owners` (see
-    /// [`slider_owners::resolve`]), and it is returned as
-    /// [`Environment::prepare_waveform`] returns it, with its marks. Returns
-    /// `None` when evaluation or resolution fails or the result is neither a
+    /// The program is the one `input` describes, and its sliders are provided
+    /// among its providers (see [`slider_providers::provide`]). The waveform is
+    /// returned as [`Environment::prepare_waveform`] returns it, with its
+    /// marks. Returns `None` when evaluation fails or the result is neither a
     /// bare nor a `seq`-wrapped waveform (the `seq` wrapper is stripped).
     fn evaluate_program_waveform_expr(
         &self,
         context: &mut Vec<eval::ContextEntry<MarkId, Source>>,
         expr: &expr::SourceExpr<MarkId, Source>,
-        owners: &slider_owners::Owners,
+        input: &EvaluationInput,
     ) -> Option<(waveform::Waveform<MarkId>, Arc<WaveformMarks>)> {
-        let expr = eval::evaluate_with_context(context, expr.clone()).ok()?;
+        let scope = eval::DynamicScope::new(input.listings());
+        let expr = eval::evaluate_with_context(context, expr.clone(), &scope).ok()?;
         let trace = trace_walk::result_trace(&expr);
         let mut waveform = match expr.expr {
             expr::Expr::Waveform(w) => w,
@@ -598,7 +681,7 @@ impl Environment {
             },
             _ => return None,
         };
-        slider_owners::resolve(&mut waveform, owners).ok()?;
+        slider_providers::provide(&mut waveform, input.index);
         Some(self.prepare_waveform(waveform, &trace, None))
     }
 
@@ -621,19 +704,18 @@ impl Environment {
 
     /// Evaluates the program `input` describes against its declared kind: an
     /// unmarked program must evaluate to a playable waveform, and one marked
-    /// `#{keys}` must evaluate to a keys-instrument note function. Returns the
-    /// user-visible diagnostics as the error otherwise.
+    /// `#{keys}` must evaluate to a keys-instrument note function. Returns what
+    /// the program plays, or the user-visible diagnostics as the error.
     ///
     /// Keys instruments are sanity-checked by actually invoking them with dummy
-    /// note/velocity arguments, and the sliders that note reaches are the
-    /// ones its result records. A waveform program whose text has the sequenceable
-    /// `on_beats` shape evaluates to its decomposed sequence.
-    pub fn evaluate_program(&self, input: &EvaluationInput) -> Result<Evaluated, Vec<Diagnostic>> {
+    /// note/velocity arguments. A waveform program whose text has the
+    /// sequenceable `on_beats` shape evaluates to its decomposed sequence.
+    pub fn evaluate_program(&self, input: &EvaluationInput) -> Result<Plays, Vec<Diagnostic>> {
         let expr = self.parse_program(input)?;
         let mut context = self
             .base_context()
             .and_then(|mut context| {
-                self.extend_context(&mut context, &input.bindings)?;
+                self.extend_context(&mut context, &input.bindings, input.listings())?;
                 Ok(context)
             })
             .map_err(|error| vec![self.diagnose(&error, &input.text, &input.source)])?;
@@ -663,16 +745,20 @@ impl Environment {
         // implicit leading `open __prelude`, the same way modules do (see
         // `resolve`).
         let mut context = Vec::new();
-        self.extend_context(
-            &mut context,
+        eval::extend_context_cached(
+            |path| self.resolve(path),
+            &mut self.module_values.borrow_mut(),
             &[expr::Binding::Open(vec!["__prelude".to_string()]).into()],
+            &mut context,
+            &eval::DynamicScope::default(),
         )?;
         Ok(context)
     }
 
     /// Evaluates `bindings` after the entries already in `context`, appending
     /// an entry for each bound name, with modules resolved through the module
-    /// cache and their evaluated exports reused.
+    /// cache and their evaluated exports reused. Code is in the listing
+    /// bindings `listings` finds.
     ///
     /// `context` should be one [`Environment::base_context`] returned,
     /// possibly already extended. On failure, it holds the entries of the
@@ -681,12 +767,14 @@ impl Environment {
         &self,
         context: &mut Vec<eval::ContextEntry<MarkId, Source>>,
         bindings: &[expr::SourceBinding<MarkId, Source>],
+        listings: slider::Listings<Source>,
     ) -> Result<(), expr::Error<Source>> {
         eval::extend_context_cached(
             |path| self.resolve(path),
             &mut self.module_values.borrow_mut(),
             bindings,
             context,
+            &eval::DynamicScope::new(listings),
         )
     }
 
@@ -700,7 +788,7 @@ impl Environment {
         &self,
         input: &EvaluationInput,
         context: &mut Vec<eval::ContextEntry<MarkId, Source>>,
-    ) -> Result<Evaluated, Vec<Diagnostic>> {
+    ) -> Result<Plays, Vec<Diagnostic>> {
         let expr = self.parse_program(input)?;
         self.evaluate_parsed_program(input, expr, context)
     }
@@ -712,12 +800,13 @@ impl Environment {
         input: &EvaluationInput,
         expr: expr::SourceExpr<MarkId, Source>,
         context: &mut Vec<eval::ContextEntry<MarkId, Source>>,
-    ) -> Result<Evaluated, Vec<Diagnostic>> {
+    ) -> Result<Plays, Vec<Diagnostic>> {
         let kind = input.kind;
         let diagnose =
             |error: &expr::Error<Source>| self.diagnose(error, &input.text, &input.source);
         let start = time::Instant::now();
-        let expr = match eval::evaluate_with_context(context, expr) {
+        let scope = eval::DynamicScope::new(input.listings());
+        let expr = match eval::evaluate_with_context(context, expr, &scope) {
             Err(error) => {
                 return Err(vec![diagnose(&error)]);
             }
@@ -753,12 +842,10 @@ impl Environment {
                     match self.apply_note_function(
                         &expr,
                         vec![expr::SourceExpr::float(60.0), expr::SourceExpr::float(0.7)],
-                        &input.owners,
+                        &input.providers,
+                        input.index,
                     ) {
-                        Ok((_, _, _, sliders)) => Ok(Evaluated {
-                            plays: Plays::KeysInstrument(expr),
-                            sliders,
-                        }),
+                        Ok(_) => Ok(Plays::KeysInstrument(expr)),
                         Err(errors) => Err(errors.iter().map(diagnose).collect()),
                     }
                 }
@@ -777,41 +864,32 @@ impl Environment {
     /// in `context` to `waveform` with the trace `trace`: the decomposed
     /// sequence when the program's text has the sequenceable `on_beats` shape
     /// and its waveform argument evaluates to a waveform, and `waveform`
-    /// otherwise. Either way, sliders are resolved among `input`'s owners (see
-    /// [`slider_owners::resolve`]), and the result records the sliders
-    /// `waveform` reaches; returns the diagnostics when resolution fails.
+    /// otherwise. Either way, its sliders are provided among `input`'s
+    /// providers (see [`slider_providers::provide`]).
     fn evaluated_waveform(
         &self,
         input: &EvaluationInput,
         context: &mut Vec<eval::ContextEntry<MarkId, Source>>,
         mut waveform: waveform::Waveform<MarkId>,
         trace: &Arc<Trace<Source>>,
-    ) -> Result<Evaluated, Vec<Diagnostic>> {
-        // The whole waveform reaches every slider a step does, so its
-        // resolution reports any error and finds every slider.
-        let sliders = slider_owners::resolve(&mut waveform, &input.owners).map_err(|errors| {
-            errors
-                .iter()
-                .map(|error| self.diagnose(error, &input.text, &input.source))
-                .collect::<Vec<_>>()
-        })?;
+    ) -> Result<Plays, Vec<Diagnostic>> {
+        slider_providers::provide(&mut waveform, input.index);
         let sequence = sequencer::analyze(&input.text).and_then(|shape| {
             let (step_waveform, step_marks) =
-                self.evaluate_program_waveform_expr(context, &shape.waveform_expr, &input.owners)?;
+                self.evaluate_program_waveform_expr(context, &shape.waveform_expr, input)?;
             Some(sequencer::Sequence {
                 steps: shape.steps,
                 step_waveform,
                 step_marks,
             })
         });
-        let plays = match sequence {
+        Ok(match sequence {
             Some(sequence) => Plays::Sequence(sequence),
             None => {
                 let (waveform, marks) = self.prepare_waveform(waveform, trace, None);
                 Plays::Waveform(waveform, marks)
             }
-        };
-        Ok(Evaluated { plays, sliders })
+        })
     }
 
     /// Returns the evaluated (name, value) context the program at `index` is
@@ -844,11 +922,11 @@ impl Environment {
     }
 
     /// Applies a note function `expr` to the given `arguments`, expecting a
-    /// pair of (note-on, note-off) waveforms as a result. Returns both
-    /// waveforms with their sliders resolved among `owners` (see
-    /// [`slider_owners::resolve`]), without trace marks, optimized; the
-    /// note-on's marks, which light `expr`'s place wherever nothing else does;
-    /// and the sliders the note reaches, the note-on's first.
+    /// pair of (note-on, note-off) waveforms as a result, as the program at
+    /// `program` plays. Returns both waveforms with their sliders provided
+    /// among `providers` (see [`slider_providers::provide`]), without trace
+    /// marks, optimized; and the note-on's marks, which light `expr`'s place
+    /// wherever nothing else does.
     ///
     /// Both `expr` and `arguments` must be closed.
     #[allow(clippy::type_complexity)]
@@ -856,26 +934,22 @@ impl Environment {
         &self,
         expr: &expr::SourceExpr<MarkId, Source>,
         arguments: Vec<expr::SourceExpr<MarkId, Source>>,
-        owners: &slider_owners::Owners,
+        providers: &slider_providers::Providers,
+        program: usize,
     ) -> Result<
         (
             waveform::Waveform<MarkId>,
             waveform::Waveform<MarkId>,
             Arc<WaveformMarks>,
-            Vec<slider_owners::Reached>,
         ),
         Vec<expr::Error<Source>>,
     > {
         use expr::Expr::{Tuple, Waveform};
         let instrument = Trace::of(expr);
         let expr = expr::SourceExpr::application(expr.clone(), arguments);
-        let bindings = vec![];
-        let resolve = |_: &[String]| {
-            Err(expr::Error::eval_here(
-                "Didn't expect to resolve in apply_note_function".to_string(),
-            ))
-        };
-        let expr = eval::evaluate(resolve, &bindings, expr).map_err(|error| vec![error])?;
+        let scope = eval::DynamicScope::new(providers.listings(program));
+        let expr = eval::evaluate_with_context(&mut Vec::new(), expr, &scope)
+            .map_err(|error| vec![error])?;
         match expr.expr {
             Tuple(mut exprs) => {
                 if exprs.len() != 2 {
@@ -888,21 +962,14 @@ impl Environment {
                 let trace = trace_walk::result_trace(&note_on);
                 match (note_on.expr, exprs.remove(0).expr) {
                     (Waveform(mut note_on), Waveform(mut note_off)) => {
-                        let mut sliders = slider_owners::resolve(&mut note_on, owners)?;
-                        for slider in slider_owners::resolve(&mut note_off, owners)? {
-                            if !sliders
-                                .iter()
-                                .any(|s| (s.owner, &s.label) == (slider.owner, &slider.label))
-                            {
-                                sliders.push(slider);
-                            }
-                        }
+                        slider_providers::provide(&mut note_on, program);
+                        slider_providers::provide(&mut note_off, program);
                         let (note_on, marks) =
                             self.prepare_waveform(note_on, &trace, Some(&instrument));
                         // The note-off is written into the held voice, and
                         // its envelope has no source waveform to light.
                         let note_off = optimizer::optimize(trace::strip_trace_marks(note_off));
-                        Ok((note_on, note_off, marks, sliders))
+                        Ok((note_on, note_off, marks))
                     }
                     (expr, Waveform(_)) => Err(vec![expr::Error::eval_here(format!(
                         "Expected waveform for note-on, got: {}",
@@ -950,20 +1017,20 @@ mod tests {
 
         // The module's finding is not among the program's diagnostics, and
         // the module is marked reported by the first check.
-        let diagnostics = environment.check_program(&set.evaluation_input(0));
+        let diagnostics = environment.check_program(&set.evaluation_input(0)).findings;
         assert_eq!(diagnostics.len(), 0, "got {:?}", diagnostics);
         assert_eq!(environment.reported_modules.borrow().len(), 1);
 
         // A second check re-surfaces the cached finding but the module
         // stays reported — nothing prints twice.
-        let diagnostics = environment.check_program(&set.evaluation_input(0));
+        let diagnostics = environment.check_program(&set.evaluation_input(0)).findings;
         assert_eq!(diagnostics.len(), 0, "got {:?}", diagnostics);
         assert_eq!(environment.reported_modules.borrow().len(), 1);
 
         // Fixing the module clears the reported set with the reload, and no
         // finding refills it.
         fs::write(&module, "v = 440;\n").expect("rewrite module");
-        let diagnostics = environment.check_program(&set.evaluation_input(0));
+        let diagnostics = environment.check_program(&set.evaluation_input(0)).findings;
         assert_eq!(diagnostics.len(), 0, "got {:?}", diagnostics);
         assert!(environment.reported_modules.borrow().is_empty());
 
@@ -988,7 +1055,7 @@ mod tests {
         assert_eq!(warning, "");
         let environment = Environment::new(44100, 90, root.clone());
 
-        let diagnostics = environment.check_program(&set.evaluation_input(0));
+        let diagnostics = environment.check_program(&set.evaluation_input(0)).findings;
         assert_eq!(diagnostics.len(), 0, "got {:?}", diagnostics);
         assert!(!environment.module_types.borrow().is_empty());
 
@@ -996,7 +1063,7 @@ mod tests {
         // the module, clears the type cache, and reports against the new
         // text — `v` is a string now, and `fin` rejects it.
         fs::write(&module, "v = \"s\";\n").expect("rewrite module");
-        let diagnostics = environment.check_program(&set.evaluation_input(0));
+        let diagnostics = environment.check_program(&set.evaluation_input(0)).findings;
         assert_eq!(diagnostics.len(), 1, "got {:?}", diagnostics);
         assert_eq!(
             diagnostics[0].to_string(),
@@ -1005,7 +1072,7 @@ mod tests {
 
         // Unchanged on disk: the cache serves the module and the finding
         // repeats.
-        let diagnostics = environment.check_program(&set.evaluation_input(0));
+        let diagnostics = environment.check_program(&set.evaluation_input(0)).findings;
         assert_eq!(diagnostics.len(), 1, "got {:?}", diagnostics);
 
         fs::remove_dir_all(&root).ok();
@@ -1060,26 +1127,23 @@ mod tests {
         .expect("test source should parse");
         let environment = Environment::new(44100, 90, PathBuf::new());
 
-        // The program classifies as a keys instrument, reaching the slider its
-        // sample note reaches.
-        let Ok(Evaluated {
-            plays: Plays::KeysInstrument(function),
-            sliders,
-        }) = environment.evaluate_program(&set.evaluation_input(0))
-        else {
+        // The program classifies as a keys instrument, reaching its slider.
+        let input = set.evaluation_input(0);
+        let Ok(Plays::KeysInstrument(function)) = environment.evaluate_program(&input) else {
             panic!("expected a keys instrument");
         };
+        let sliders = environment.check_program(&input).sliders;
         let labels: Vec<_> = sliders
             .iter()
-            .map(|s| (s.owner, s.label.as_str()))
+            .map(|s| (s.provider, s.label.as_str()))
             .collect();
         assert_eq!(labels, [(0, "vol")]);
         set.reach(&sliders);
 
         // A note played at the initial slider position carries vol = 0.5.
         let args = vec![expr::SourceExpr::float(60.0), expr::SourceExpr::float(0.5)];
-        let (mut note_on, _note_off, _marks, _sliders) = environment
-            .apply_note_function(&function, args.clone(), &set.slider_owners(0))
+        let (mut note_on, _note_off, _marks) = environment
+            .apply_note_function(&function, args.clone(), &set.slider_providers(), 0)
             .expect("note function should apply");
         substitute_current_slider_values(&mut note_on, &set);
         let mut marks = Vec::new();
@@ -1089,8 +1153,8 @@ mod tests {
         // Move the slider; the next note carries the new value.
         set.set_slider_normalized(0, 0, 1.0)
             .expect("program has a vol slider");
-        let (mut note_on, _note_off, _marks, _sliders) = environment
-            .apply_note_function(&function, args, &set.slider_owners(0))
+        let (mut note_on, _note_off, _marks) = environment
+            .apply_note_function(&function, args, &set.slider_providers(), 0)
             .expect("note function should apply");
         substitute_current_slider_values(&mut note_on, &set);
         let mut marks = Vec::new();
@@ -1111,28 +1175,19 @@ mod tests {
         assert_eq!(warning, "");
         let environment = Environment::new(44100, 90, std::path::PathBuf::from("./lib/v0"));
 
-        let function = match environment.evaluate_program(&set.evaluation_input(0)) {
-            Ok(Evaluated {
-                plays: Plays::KeysInstrument(function),
-                sliders,
-            }) => {
-                set.reach(&sliders);
-                function
-            }
+        let input = set.evaluation_input(0);
+        let function = match environment.evaluate_program(&input) {
+            Ok(Plays::KeysInstrument(function)) => function,
             Err(diagnostics) => panic!("invalid: {:?}", diagnostics),
-            Ok(Evaluated {
-                plays: Plays::Waveform(..) | Plays::Sequence(_),
-                ..
-            }) => {
-                panic!("classified as waveform")
-            }
+            Ok(Plays::Waveform(..) | Plays::Sequence(_)) => panic!("classified as waveform"),
         };
+        set.reach(&environment.check_program(&input).sliders);
         set.set_slider_normalized(0, 0, 1.0)
             .expect("program has a vol slider");
 
         let args = vec![expr::SourceExpr::float(60.0), expr::SourceExpr::float(0.5)];
-        let (mut note_on, _note_off, _marks, _sliders) = environment
-            .apply_note_function(&function, args, &set.slider_owners(0))
+        let (mut note_on, _note_off, _marks) = environment
+            .apply_note_function(&function, args, &set.slider_providers(), 0)
             .expect("note function should apply");
         substitute_current_slider_values(&mut note_on, &set);
         let mut marks = Vec::new();
@@ -1234,10 +1289,8 @@ mod tests {
 
         // The evaluating environment loads `first` then `second`.
         let evaluating = Environment::new(44100, 90, root.clone());
-        let Ok(Evaluated {
-            plays: Plays::KeysInstrument(function),
-            ..
-        }) = evaluating.evaluate_program(&set.evaluation_input(0))
+        let Ok(Plays::KeysInstrument(function)) =
+            evaluating.evaluate_program(&set.evaluation_input(0))
         else {
             panic!("expected a keys instrument");
         };
@@ -1245,7 +1298,8 @@ mod tests {
             .apply_note_function(
                 &function,
                 vec![expr::SourceExpr::float(64.0), expr::SourceExpr::float(0.7)],
-                &set.slider_owners(0),
+                &set.slider_providers(),
+                0,
             )
             .expect_err("note 64 is out of range");
         let [error] = &errors[..] else {
@@ -1312,10 +1366,7 @@ mod tests {
         )
         .expect("test source should parse");
         let environment = Environment::new(8000, 90, PathBuf::new());
-        let Ok(Evaluated {
-            plays: Plays::Sequence(sequence),
-            ..
-        }) = environment.evaluate_program(&set.evaluation_input(0))
+        let Ok(Plays::Sequence(sequence)) = environment.evaluate_program(&set.evaluation_input(0))
         else {
             panic!("expected a sequence");
         };
@@ -1331,10 +1382,7 @@ mod tests {
         .expect("test source should parse");
         let environment = Environment::new(44100, 90, PathBuf::new());
         match environment.evaluate_program(&set.evaluation_input(0)) {
-            Ok(Evaluated {
-                plays: Plays::Waveform(..),
-                ..
-            }) => {}
+            Ok(Plays::Waveform(..)) => {}
             Err(diagnostics) => {
                 panic!("prelude names should resolve, got: {}", diagnostics[0])
             }
