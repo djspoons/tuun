@@ -91,7 +91,7 @@ A slider's default, range and curve, as a `slider` call gives them. Every call o
 _Avoid_: settings, parameters, config
 
 **Provider**:
-The binding that supplies a slider's value: among the bindings a waveform is built through, the one whose annotation lists the slider's name, or the program being played if none does. Each `slider` call in a program has one provider.
+The binding that supplies a slider's value: among the bindings a waveform is built through, the one whose annotation lists the slider's name, or the program being played if none does. At most one binding a waveform is built through may list a given name. The same `slider` call can have different providers when it is reached through different bindings.
 _Avoid_: owner, handler, scope
 
 **Capture**:
