@@ -734,8 +734,8 @@ fn slider_soundness_fuzz() {
                                     compare(&note_on, &mut report);
                                     compare(&note_off, &mut report);
                                 }
-                                Err(errors) => {
-                                    let shown = format!("{errors:?}");
+                                Err(error) => {
+                                    let shown = format!("{error:?}");
                                     if shown.contains("slider") {
                                         report(format!("note {key} {velocity} failed: {shown}"));
                                     }
