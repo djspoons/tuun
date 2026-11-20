@@ -177,7 +177,7 @@ pub fn load(
             && let Err(error) = environment.extend_context(
                 entries,
                 &used[evaluated..counts[index]],
-                &input.providers,
+                input.listings(),
             )
         {
             context = Err(error);

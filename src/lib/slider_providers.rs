@@ -1,7 +1,7 @@
-//! The program slots that can provide the sliders one program's waveform
-//! reaches. Sliders are a sort of reader effect: a slider's value is read from
-//! its provider, the listing binding whose code is running where the slider
-//! is read, or else the program being played.
+//! The program slots of a file that can provide sliders. Sliders are a sort of
+//! reader effect: a slider's value is read from its provider, the listing
+//! binding whose code is running where the slider is read, or else the program
+//! being played.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -12,12 +12,10 @@ use crate::ids::MarkId;
 use crate::slider;
 use crate::waveform;
 
-/// A program slot as a provider of sliders: which slot it is, where its text
-/// is, and the labels its annotation lists.
+/// A program slot as a provider of sliders: its name, where its text is, and
+/// the sliders its annotation lists.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProviderSlot {
-    /// The slot's index among its set's programs.
-    pub index: usize,
     /// The slot's name in user-visible messages.
     pub name: String,
     /// Where the slot's text is in the backing file; empty when it has no
@@ -30,36 +28,33 @@ pub struct ProviderSlot {
     pub listing: Option<expr::Span<Source>>,
 }
 
-/// The slots that can provide the sliders one program's waveform reaches: that
-/// program, and the slots whose bindings it is evaluated under.
-#[derive(Clone, Debug, PartialEq)]
+/// The program slots of a file, each of which can provide sliders, by index.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Providers {
-    /// The program being played.
-    pub played: ProviderSlot,
-    /// The slots before it in the backing file.
-    pub preceding: Vec<ProviderSlot>,
+    pub slots: Vec<ProviderSlot>,
 }
 
 impl Providers {
-    /// Returns the slot whose text holds the code written at `span`, if any.
+    /// Returns the index of the slot whose text holds the code written at
+    /// `span`, when the program at `played` is played, if any.
     ///
     /// A span is in the played program's text when it is in that program's
     /// own text, and in a slot's text when it is in that slot's text in the
     /// backing file. A span in a module is in no slot's text.
-    pub fn slot(&self, span: &expr::Span<Source>) -> Option<&ProviderSlot> {
-        slot(&self.played, &self.preceding, span)
+    pub fn slot(&self, played: usize, span: &expr::Span<Source>) -> Option<usize> {
+        match span.source {
+            Source::Program => Some(played),
+            Source::File => self
+                .slots
+                .iter()
+                .position(|slot| slot.text.contains(&span.range.start)),
+            Source::Module(_) => None,
+        }
     }
 
-    /// Returns the slot at `index`, if it is one of these.
-    pub fn slot_at(&self, index: usize) -> Option<&ProviderSlot> {
-        std::iter::once(&self.played)
-            .chain(&self.preceding)
-            .find(|slot| slot.index == index)
-    }
-
-    /// Returns the listings among these slots: each slot that lists sliders,
-    /// with its index as its id, found for the code written in its text (see
-    /// [`Providers::slot`]).
+    /// Returns the listings among these slots when the program at `played` is
+    /// played: each slot that lists sliders, with its index as its id, found
+    /// for the code written in its text (see [`Providers::slot`]).
     ///
     /// # Example
     ///
@@ -68,9 +63,8 @@ impl Providers {
     /// use tuun::expr::{Slider, Span};
     /// use tuun::slider_providers::{ProviderSlot, Providers};
     ///
-    /// let slot = |index: usize, text: std::ops::Range<usize>, listed: &[&str]| ProviderSlot {
-    ///     index,
-    ///     name: format!("S{index}"),
+    /// let slot = |text: std::ops::Range<usize>, listed: &[&str]| ProviderSlot {
+    ///     name: "slot".to_string(),
     ///     text,
     ///     listed: listed
     ///         .iter()
@@ -79,20 +73,19 @@ impl Providers {
     ///     listing: None,
     /// };
     /// let providers = Providers {
-    ///     played: slot(1, 50..70, &[]),
-    ///     preceding: vec![slot(0, 10..40, &["mix"])],
+    ///     slots: vec![slot(10..40, &["mix"]), slot(50..70, &[])],
     /// };
-    /// let listings = providers.listings();
+    /// let listings = providers.listings(1);
     /// let found = listings.find(&Span::new(Source::File, 20..25)).unwrap();
     /// assert_eq!((found.id, &found.labels[..]), (0, &["mix".to_string()][..]));
     /// // The played program lists nothing.
     /// assert_eq!(listings.find(&Span::new(Source::Program, 0..5)), None);
     /// ```
-    pub fn listings(&self) -> slider::Listings<Source> {
-        let played = self.played.clone();
-        let preceding = self.preceding.clone();
+    pub fn listings(&self, played: usize) -> slider::Listings<Source> {
+        let providers = self.clone();
         slider::Listings::new(move |span| {
-            let slot = slot(&played, &preceding, span)?;
+            let id = providers.slot(played, span)?;
+            let slot = providers.slots.get(id)?;
             if slot.listed.is_empty() {
                 return None;
             }
@@ -102,23 +95,23 @@ impl Providers {
                 .map(|entry| entry.label.clone())
                 .collect();
             Some(slider::Listing {
-                id: slot.index,
+                id,
                 labels: Arc::from(labels),
             })
         })
     }
 
-    /// Returns the warnings about the sliders the played program can reach,
-    /// `reached`, each as an error located at a `sliders` annotation.
+    /// Returns the warnings about the sliders the program at `played` can
+    /// reach, `reached`, each as an error located at a `sliders` annotation.
     ///
     /// There is one at each provider's annotation that saves a value outside
     /// the range of a slider in `reached` (so it starts clamped), and one at
     /// the played program's annotation for each entry it lists that isn't in
     /// `reached`.
-    pub fn warnings(&self, reached: &[Reached]) -> Vec<expr::Error<Source>> {
+    pub fn warnings(&self, played: usize, reached: &[Reached]) -> Vec<expr::Error<Source>> {
         let mut warnings = Vec::new();
         for slider in reached {
-            let Some(slot) = self.slot_at(slider.provider) else {
+            let Some(slot) = self.slots.get(slider.provider) else {
                 continue;
             };
             let saved = slot
@@ -141,36 +134,22 @@ impl Providers {
                 warnings.push(expr::Error::eval(message, slot.listing.clone()));
             }
         }
-        let played = &self.played;
-        for entry in &played.listed {
+        let Some(slot) = self.slots.get(played) else {
+            return warnings;
+        };
+        for entry in &slot.listed {
             if !reached
                 .iter()
-                .any(|slider| slider.provider == played.index && slider.label == entry.label)
+                .any(|slider| slider.provider == played && slider.label == entry.label)
             {
                 let message = format!(
                     "{} lists slider {:?}, but nothing it plays reaches it",
-                    played.name, entry.label,
+                    slot.name, entry.label,
                 );
-                warnings.push(expr::Error::eval(message, played.listing.clone()));
+                warnings.push(expr::Error::eval(message, slot.listing.clone()));
             }
         }
         warnings
-    }
-}
-
-/// Returns the slot among `played` and `preceding` whose text holds the code
-/// written at `span`, as [`Providers::slot`] does.
-fn slot<'s>(
-    played: &'s ProviderSlot,
-    preceding: &'s [ProviderSlot],
-    span: &expr::Span<Source>,
-) -> Option<&'s ProviderSlot> {
-    match span.source {
-        Source::Program => Some(played),
-        Source::File => std::iter::once(played)
-            .chain(preceding)
-            .find(|slot| slot.text.contains(&span.range.start)),
-        Source::Module(_) => None,
     }
 }
 
@@ -207,7 +186,6 @@ mod tests {
     /// text's first byte.
     fn slot(index: usize, text: Range<usize>, listed: &[&str]) -> ProviderSlot {
         ProviderSlot {
-            index,
             name: format!("S{index}"),
             text: text.clone(),
             listed: listed
@@ -227,19 +205,19 @@ mod tests {
         }
     }
 
-    /// Returns providers where slot 1 (file text 50..70) is played and slot 0
-    /// (file text 10..40) precedes it, with each listing the given labels.
-    fn providers(preceding: &[&str], played: &[&str]) -> Providers {
+    /// Returns the providers of a file with slot 0 at text 10..40 and slot 1
+    /// at 50..70, each listing the given labels.
+    fn providers(first: &[&str], second: &[&str]) -> Providers {
         Providers {
-            played: slot(1, 50..70, played),
-            preceding: vec![slot(0, 10..40, preceding)],
+            slots: vec![slot(0, 10..40, first), slot(1, 50..70, second)],
         }
     }
 
-    /// Returns the id of the listing found for code written at `span`.
+    /// Returns the id of the listing found for code written at `span` when
+    /// slot 1 is played.
     fn found(providers: &Providers, source: Source, range: Range<usize>) -> Option<usize> {
         providers
-            .listings()
+            .listings(1)
             .find(&expr::Span::new(source, range))
             .map(|listing| listing.id)
     }
@@ -275,7 +253,7 @@ mod tests {
     #[test]
     fn a_clamped_saved_value_and_an_unreached_entry_are_warnings() {
         let providers = providers(&["far:7"], &["near:0.5", "gone"]);
-        let warnings = providers.warnings(&[reached(0, "far"), reached(1, "near")]);
+        let warnings = providers.warnings(1, &[reached(0, "far"), reached(1, "near")]);
         assert_eq!(
             warnings,
             [
@@ -294,7 +272,7 @@ mod tests {
     #[test]
     fn an_entry_another_slot_lists_is_not_the_played_programs_to_warn_about() {
         let providers = providers(&["unused"], &[]);
-        assert_eq!(providers.warnings(&[]), []);
+        assert_eq!(providers.warnings(1, &[]), []);
     }
 
     #[test]

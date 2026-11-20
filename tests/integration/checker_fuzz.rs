@@ -733,6 +733,7 @@ fn slider_soundness_fuzz() {
                                 instrument,
                                 note,
                                 &input.providers,
+                                input.index,
                             ) {
                                 Ok((note_on, note_off, _)) => {
                                     compare(&note_on, &mut report);

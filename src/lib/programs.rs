@@ -133,8 +133,19 @@ pub struct EvaluationInput {
     /// The backing file's text, which errors located in the file resolve
     /// against.
     pub source: String,
-    /// The slots that can own the sliders the program's waveform reaches.
+    /// The program's index among its set's programs.
+    pub index: usize,
+    /// The file's program slots, which can provide sliders (see
+    /// [`ProgramSet::slider_providers`]).
     pub providers: slider_providers::Providers,
+}
+
+impl EvaluationInput {
+    /// Returns the listing bindings code is written in when the program is
+    /// played (see [`slider_providers::Providers::listings`]).
+    pub fn listings(&self) -> slider::Listings<Source> {
+        self.providers.listings(self.index)
+    }
 }
 
 /// The result of checking and evaluating one program.
@@ -985,16 +996,17 @@ impl ProgramSet {
             kind: program.kind,
             bindings: self.evaluation_bindings(index),
             source: self.source.clone(),
-            providers: self.slider_providers(index),
+            index,
+            providers: self.slider_providers(),
         }
     }
 
-    /// Returns the slots that can own the sliders the waveform of the program
-    /// at `index` reaches: that program and the programs before it in the
-    /// file.
-    pub fn slider_providers(&self, index: usize) -> slider_providers::Providers {
+    /// Returns the program slots of the file as providers of sliders, by
+    /// index.
+    pub fn slider_providers(&self) -> slider_providers::Providers {
         let slot = |index: usize| {
             let program = &self.programs[index];
+            // The last one wins, as in `listed`.
             let listing = self
                 .bindings
                 .get(program.binding_index)
@@ -1002,24 +1014,19 @@ impl ProgramSet {
                     binding
                         .annotations
                         .iter()
+                        .rev()
                         .find(|a| matches!(a.annotation, expr::Annotation::Sliders(_)))
                 })
                 .and_then(|annotation| annotation.span.clone());
             slider_providers::ProviderSlot {
-                index,
                 name: self.display_name(index),
                 text: program.span.clone(),
                 listed: self.listed(index).to_vec(),
                 listing,
             }
         };
-        let binding_index = self.programs[index].binding_index;
         slider_providers::Providers {
-            played: slot(index),
-            preceding: (0..self.programs.len())
-                .filter(|&other| self.programs[other].binding_index < binding_index)
-                .map(slot)
-                .collect(),
+            slots: (0..self.programs.len()).map(slot).collect(),
         }
     }
 
@@ -2224,20 +2231,20 @@ mod tests {
     }
 
     #[test]
-    fn slider_providers_are_the_played_program_and_the_programs_before_it() {
+    fn slider_providers_are_the_files_program_slots() {
         let source = "#{sliders=[\"q:0.5\"]}\nf = fn(x) => x;\n\
                       #{level_db=0}\n_ = f(1);\n\
                       #{level_db=0}\n_ = f(2);\n";
         let (set, _) = ProgramSet::from_source(source.to_string(), PathBuf::new()).unwrap();
-        let providers = set.slider_providers(1);
-        assert_eq!(providers.played.index, 1);
-        assert_eq!(&source[providers.played.text.clone()], "f(1)");
-        assert!(providers.played.listed.is_empty());
-        assert_eq!(providers.played.listing, None);
-        let [first] = &providers.preceding[..] else {
-            panic!("expected one preceding slot, got {:?}", providers.preceding);
+        let providers = set.slider_providers();
+        // A slot for each program, then the empty ones after them.
+        assert_eq!(providers.slots.len(), set.programs().len());
+        let [first, second, ..] = &providers.slots[..] else {
+            panic!("expected a slot per program, got {:?}", providers.slots);
         };
-        assert_eq!(first.index, 0);
+        assert_eq!(&source[second.text.clone()], "f(1)");
+        assert!(second.listed.is_empty());
+        assert_eq!(second.listing, None);
         assert_eq!(first.name, set.display_name(0));
         assert_eq!(&source[first.text.clone()], "fn(x) => x");
         assert_eq!(

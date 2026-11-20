@@ -531,11 +531,13 @@ impl EffectRunner {
                     // TODO use a marked waveform for velocity so we can implement after-touch
                     expr::SourceExpr::float(velocity as f32 / 127.0),
                 ];
-                let providers = state.programs.slider_providers(keys.id);
-                match self
-                    .environment
-                    .apply_note_function(&keys.function, args, &providers)
-                {
+                let providers = state.programs.slider_providers();
+                match self.environment.apply_note_function(
+                    &keys.function,
+                    args,
+                    &providers,
+                    keys.id,
+                ) {
                     Ok((mut note_on, note_off, marks)) => {
                         keys.note_off_waveforms.insert(key, note_off);
                         // `note_on`'s `Marked(Slider { .. })` nodes hold the
@@ -671,11 +673,13 @@ impl EffectRunner {
                             expr::SourceExpr::float(SAMPLE_KEY),
                             expr::SourceExpr::float(SAMPLE_VELOCITY),
                         ];
-                        let providers = state.programs.slider_providers(program_index);
-                        match self
-                            .environment
-                            .apply_note_function(&function, args, &providers)
-                        {
+                        let providers = state.programs.slider_providers();
+                        match self.environment.apply_note_function(
+                            &function,
+                            args,
+                            &providers,
+                            program_index,
+                        ) {
                             Ok((note_on, note_off, _marks)) => {
                                 println!(
                                     "Keys instrument of program {} applied at key {}, velocity {}:",
