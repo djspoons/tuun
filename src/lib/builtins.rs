@@ -1040,8 +1040,9 @@ where
 ///
 /// The value is `default`, marked as a slider when `M` makes slider marks,
 /// with the provider the call's scope gives the label (see
-/// [`eval::DynamicScope::provider`]). Fails if `default` is outside the range, `min` is not less than `max`, an
-/// `"exp"` range is not above zero, or the curve is another name.
+/// [`eval::DynamicScope::provider`]). Fails if `default` is outside the
+/// range, `min` is not less than `max`, an `"exp"` range is not above zero, or
+/// the curve is another name.
 fn slider<M, S>(
     arguments: Vec<SourceExpr<M, S>>,
     call: &BuiltInCall<S>,

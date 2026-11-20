@@ -51,6 +51,7 @@ The "list it on a shared helper" pattern that the provider errors steer users to
 - **The `eval.rs` `providers` test module has two stacked doc summaries.** "Tests of the running code that evaluation hands built-ins…" is left over.
   **Addressed:** removed.
 - **The `slider` built-in's doc comment** has an unwrapped line over 100 characters.
+  **Addressed:** wrapped.
 
 ## Tests
 
