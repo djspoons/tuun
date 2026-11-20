@@ -1177,7 +1177,7 @@ where
             };
             let print = print.clone();
             Ok(call.assembled(BuiltIn {
-                name: format!("debug({})", label),
+                name: debug_result_name(&label),
                 function: BuiltInFn::new(move |arguments, _call| {
                     let [value] = exactly(arguments, "debug")?;
                     // The value prints as it would play, without the
@@ -1189,6 +1189,24 @@ where
             }))
         }),
     })
+}
+
+/// Returns the name of the built-in that `debug` returns for `label`.
+fn debug_result_name(label: &str) -> String {
+    format!("debug({})", label)
+}
+
+/// Returns whether `name` names a built-in that `debug` returns: the identity
+/// function that prints its argument.
+///
+/// # Example
+/// ```
+/// use tuun::builtins::is_debug_result;
+/// assert!(is_debug_result("debug(freq)"));
+/// assert!(!is_debug_result("debug"));
+/// ```
+pub fn is_debug_result(name: &str) -> bool {
+    name.starts_with("debug(")
 }
 
 /// Adds all of the built-ins to `bindings`.
@@ -1394,7 +1412,10 @@ mod tests {
 
         let func = apply(&function, vec![Expr::String("freq".to_string())]);
         let result = match func.unwrap() {
-            BuiltIn { function, .. } => apply(&function, vec![Expr::float(440.0)]),
+            BuiltIn { name, function } => {
+                assert!(is_debug_result(&name));
+                apply(&function, vec![Expr::float(440.0)])
+            }
             _ => panic!("debug applied to label should be a BuiltIn"),
         };
         assert_eq!(format!("{}", result.clone().unwrap()), "440");

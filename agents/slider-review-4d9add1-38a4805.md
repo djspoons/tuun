@@ -65,6 +65,7 @@ The "list it on a shared helper" pattern that the provider errors steer users to
 - **Sliders are never forgotten.** `ProgramSet::sliders` keeps every slider ever reached. After A:2 stops using `pad`, A:1's encoder still shows and moves a "cutoff" that nothing reads.
 - **False positive on known parts of an unknown list.** `slider("q", nth(0, [0.1, note / 1000]))` is reported as depending on the key a note plays. This is expected under "sound over permissive".
 - **`debug` is recognised by its name** (`name.starts_with("debug(")` in `slider_analysis`). This is string coupling to how `builtins::debug` names its result.
+  **Addressed:** `builtins::is_debug_result` sits beside the function that names `debug`'s result, and the analysis calls it.
 
 ## Suggested order
 

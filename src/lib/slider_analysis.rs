@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::rc::{Rc, Weak};
 
+use crate::builtins;
 use crate::eval::BuiltInCall;
 use crate::expr::{Binding, BuiltInFn, Error, Expr, Pattern, SourceBinding, SourceExpr, Span};
 use crate::slider::{Curve, Listing, Listings, Provider, SliderSpec};
@@ -323,7 +324,7 @@ pub const SPECIAL: &[&str] = &["slider", "map", "reduce", "unfold", "share"];
 /// The other built-ins whose result can hold a function an argument holds:
 /// those whose signatures are polymorphic. Any other built-in's result holds
 /// no function that runs user code, except the identity `debug(label)`
-/// returns, which the check applies itself so that nothing prints.
+/// returns (see [`crate::builtins::is_debug_result`]), which the check applies itself so that nothing prints.
 pub const PASSING: &[&str] = &["nth", "concat"];
 
 struct Analyzer<'a, 'n, M, S, F> {
@@ -680,7 +681,7 @@ where
                     "reduce" => self.reduce(positional, call, scope),
                     "unfold" => self.unfold(positional, call, scope),
                     "share" => self.share(positional, call, scope),
-                    _ if name.starts_with("debug(") => {
+                    _ if builtins::is_debug_result(name) => {
                         let [value] = <[_; 1]>::try_from(positional).map_err(|_| Dead)?;
                         Ok(value)
                     }
