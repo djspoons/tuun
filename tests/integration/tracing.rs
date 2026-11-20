@@ -160,7 +160,7 @@ fn evaluate(environment: &Environment, input: &EvaluationInput, trace_marking: b
     let evaluated = environment.evaluate_program(input);
     trace::set_trace_marking(true);
     match evaluated {
-        Ok(evaluated) => played(environment, input, evaluated.plays, trace_marking),
+        Ok(plays) => played(environment, input, plays, trace_marking),
         Err(diagnostics) => format!("error: {:?}", diagnostics),
     }
 }

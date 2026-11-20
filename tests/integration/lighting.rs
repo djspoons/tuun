@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 
 use tuun::environment::Environment;
 use tuun::expr::SourceExpr;
-use tuun::programs::{Evaluated, Plays, ProgramSet};
+use tuun::programs::{Plays, ProgramSet};
 use tuun::trace_walk::{self, WaveformMarks};
 
 /// Samples per second: with `TEMPO`, a quarter note (`Q`) is 500 ms.
@@ -93,21 +93,12 @@ fn voice_after(preamble: &str, annotations: &str, program: &str, sixteenth: u8) 
     let environment = Environment::new(SAMPLE_RATE, TEMPO, library_root().clone());
     let text = set.programs()[index].text().to_string();
     let (marks, extra) = match environment.evaluate_program(&set.evaluation_input(index)) {
-        Ok(Evaluated {
-            plays: Plays::Waveform(_, marks),
-            ..
-        }) => ((*marks).clone(), vec![]),
-        Ok(Evaluated {
-            plays: Plays::Sequence(sequence),
-            ..
-        }) => (
+        Ok(Plays::Waveform(_, marks)) => ((*marks).clone(), vec![]),
+        Ok(Plays::Sequence(sequence)) => (
             (*sequence.step_marks).clone(),
             sequence.step_literal_marks(sixteenth),
         ),
-        Ok(Evaluated {
-            plays: Plays::KeysInstrument(function),
-            ..
-        }) => {
+        Ok(Plays::KeysInstrument(function)) => {
             let arguments = vec![SourceExpr::float(60.0), SourceExpr::float(0.7)];
             let (_, _, marks) = environment
                 .apply_note_function(&function, arguments, &set.slider_providers(index))

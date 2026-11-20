@@ -626,6 +626,7 @@ fn wide_function_fuzz() {
 #[test]
 fn slider_soundness_fuzz() {
     use std::path::PathBuf;
+    use tuun::diagnostics::Severity;
     use tuun::environment::Environment;
     use tuun::expr::SourceExpr;
     use tuun::ids::MarkId;
@@ -670,10 +671,14 @@ fn slider_soundness_fuzz() {
                 continue;
             }
             let input = set.evaluation_input(index);
-            let diagnostics = environment.check_program(&input);
-            if !diagnostics.is_empty() {
+            let checked = environment.check_program(&input);
+            if checked
+                .findings
+                .iter()
+                .any(|finding| finding.severity == Severity::Error)
+            {
                 if std::env::var("SHOW_REJECTED").is_ok() {
-                    println!("REJECTED {}", diagnostics[0]);
+                    println!("REJECTED {}", checked.findings[0]);
                 }
                 rejected += 1;
                 continue;
@@ -685,8 +690,8 @@ fn slider_soundness_fuzz() {
                 }
                 found.push(what);
             };
-            let evaluated = match environment.evaluate_program(&input) {
-                Ok(evaluated) => evaluated,
+            let plays = match environment.evaluate_program(&input) {
+                Ok(plays) => plays,
                 Err(diagnostics) => {
                     let shown = format!("{diagnostics:?}");
                     if shown.contains("slider") {
@@ -695,7 +700,7 @@ fn slider_soundness_fuzz() {
                     continue;
                 }
             };
-            let reached = &evaluated.sliders;
+            let reached = &checked.sliders;
             if reached.iter().any(|slider| slider.provider != index) {
                 provided += 1;
             }
@@ -716,7 +721,7 @@ fn slider_soundness_fuzz() {
                     }
                 }
             };
-            match &evaluated.plays {
+            match &plays {
                 Plays::Waveform(w, _) => compare(w, &mut report),
                 Plays::Sequence(sequence) => compare(&sequence.step_waveform, &mut report),
                 Plays::KeysInstrument(instrument) => {

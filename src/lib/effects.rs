@@ -655,8 +655,7 @@ impl EffectRunner {
                 let plays = state.programs.program(program_index).and(
                     self.environment
                         .evaluate_program(&state.programs.evaluation_input(program_index))
-                        .ok()
-                        .map(|evaluated| evaluated.plays),
+                        .ok(),
                 );
                 match plays {
                     Some(programs::Plays::KeysInstrument(function)) => {

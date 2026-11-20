@@ -23,7 +23,7 @@ use crate::ids::MarkId;
 use crate::infer;
 use crate::optimizer;
 use crate::parser;
-use crate::programs::{Evaluated, EvaluationInput, Plays, ProgramKind, ProgramSet};
+use crate::programs::{EvaluationInput, Plays, ProgramKind, ProgramSet};
 use crate::sequencer;
 use crate::signatures;
 use crate::slider;
@@ -87,6 +87,17 @@ impl ModuleTable {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+}
+
+/// What [`Environment::check_program`] finds about a program.
+#[derive(Debug, Default)]
+pub struct Checked {
+    /// The findings, as diagnostics.
+    pub findings: Vec<Diagnostic>,
+    /// The sliders the program can reach, on any branch and any note of a
+    /// keys instrument, each with the slot that provides it, in the order the
+    /// text reaches their first calls.
+    pub sliders: Vec<slider_providers::Reached>,
 }
 
 /// What `check_program`'s findings become: errors or warnings.
@@ -400,21 +411,28 @@ impl Environment {
         self.check_mode = mode;
     }
 
-    /// Type-checks the program `input` describes and returns the findings as
-    /// diagnostics.
+    /// Checks the program `input` describes: returns the type checker's and
+    /// the slider check's findings as diagnostics, and the sliders the program
+    /// can reach (see [`slider_analysis::analyze`]).
     ///
     /// Mirrors [`Environment::evaluate_program`]'s setup — same bindings,
-    /// implicit prelude open, and module resolver. Returned findings are
-    /// those located in the program's own text or its source file. A finding
-    /// inside a module belongs to the module, not to any one dependent
-    /// program, so it is printed instead — path-qualified, with its snippet
-    /// — the first time a check surfaces it, and again only after the
-    /// module reloads. Parse failures return no findings.
-    pub fn check_program(&self, input: &EvaluationInput) -> Vec<Diagnostic> {
+    /// implicit prelude open, and module resolver. Returned type findings are
+    /// those located in the program's own text or its source file. A type
+    /// finding inside a module belongs to the module, not to any one
+    /// dependent program, so it is printed instead — path-qualified, with its
+    /// snippet — the first time a check surfaces it, and again only after the
+    /// module reloads. A slider finding is the program's wherever it is,
+    /// since it depends on how the program uses the module. The slider
+    /// check's findings are returned only when the type checker finds nothing
+    /// in the program's text or file, and its warnings about the sliders the
+    /// program lists (see [`slider_providers::Providers::warnings`]) only when
+    /// it finds nothing either. Parse failures return no findings and no
+    /// sliders.
+    pub fn check_program(&self, input: &EvaluationInput) -> Checked {
         let mut bindings = input.bindings.clone();
         bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
         let Ok(expr) = parser::parse_program(&input.text, Source::Program) else {
-            return Vec::new();
+            return Checked::default();
         };
         let expectation = match input.kind {
             ProgramKind::Waveform => infer::Expectation::Playable,
@@ -455,12 +473,19 @@ impl Environment {
             self.checked_generation.set(self.modules_generation.get());
             break errors;
         };
-        // The slider check expects a program the type checker accepts.
+        // The slider check expects a program the type checker accepts, though
+        // its sliders are the best guess at what plays either way.
         let typed = !errors
             .iter()
             .any(|e| matches!(e.source(), Some(Source::Program) | Some(Source::File)));
-        let slider_errors = match typed {
-            true => self.analyze_sliders(input, &bindings, &expr).1,
+        let (sliders, mut slider_errors) = self.analyze_sliders(input, &bindings, &expr);
+        if !typed {
+            slider_errors.clear();
+        }
+        // A call the slider check finds an error in isn't among the sliders,
+        // so warning about what is missing from them would mislead.
+        let slider_warnings = match typed && slider_errors.is_empty() {
+            true => input.providers.warnings(&sliders),
             false => Vec::new(),
         };
         log::debug!(
@@ -496,9 +521,7 @@ impl Environment {
                 }
             }
         }
-        // A slider finding in a module is this program's, since it depends on
-        // how the program uses the module.
-        errors
+        let findings = errors
             .iter()
             .filter(|finding| {
                 matches!(finding.source(), Some(Source::Program) | Some(Source::File))
@@ -511,28 +534,12 @@ impl Environment {
                     CheckMode::Warnings => diagnostic.as_warning(),
                 }
             })
-            .collect()
-    }
-
-    /// Returns the sliders the program `input` describes can reach, each with
-    /// the slot that provides it, and the errors in how it uses sliders (see
-    /// [`slider_analysis::analyze`]); `None` when the program doesn't parse.
-    ///
-    /// Expects a program [`Environment::check_program`] finds no type errors
-    /// in.
-    pub fn reachable_sliders(
-        &self,
-        input: &EvaluationInput,
-    ) -> Option<(Vec<slider_providers::Reached>, Vec<Diagnostic>)> {
-        let mut bindings = input.bindings.clone();
-        bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
-        let expr = parser::parse_program(&input.text, Source::Program).ok()?;
-        let (reached, errors) = self.analyze_sliders(input, &bindings, &expr);
-        let diagnostics = errors
-            .iter()
-            .map(|error| self.diagnose(error, &input.text, &input.source))
+            .chain(slider_warnings.iter().map(|warning| {
+                self.diagnose(warning, &input.text, &input.source)
+                    .as_warning()
+            }))
             .collect();
-        Some((reached, diagnostics))
+        Checked { findings, sliders }
     }
 
     /// Checks how `expr`, the parsed text of the program `input` describes,
@@ -695,14 +702,13 @@ impl Environment {
 
     /// Evaluates the program `input` describes against its declared kind: an
     /// unmarked program must evaluate to a playable waveform, and one marked
-    /// `#{keys}` must evaluate to a keys-instrument note function. Returns the
-    /// user-visible diagnostics as the error otherwise.
+    /// `#{keys}` must evaluate to a keys-instrument note function. Returns what
+    /// the program plays, or the user-visible diagnostics as the error.
     ///
     /// Keys instruments are sanity-checked by actually invoking them with dummy
-    /// note/velocity arguments, and the sliders that note reaches are the
-    /// ones its result records. A waveform program whose text has the sequenceable
-    /// `on_beats` shape evaluates to its decomposed sequence.
-    pub fn evaluate_program(&self, input: &EvaluationInput) -> Result<Evaluated, Vec<Diagnostic>> {
+    /// note/velocity arguments. A waveform program whose text has the
+    /// sequenceable `on_beats` shape evaluates to its decomposed sequence.
+    pub fn evaluate_program(&self, input: &EvaluationInput) -> Result<Plays, Vec<Diagnostic>> {
         let expr = self.parse_program(input)?;
         let mut context = self
             .base_context()
@@ -780,7 +786,7 @@ impl Environment {
         &self,
         input: &EvaluationInput,
         context: &mut Vec<eval::ContextEntry<MarkId, Source>>,
-    ) -> Result<Evaluated, Vec<Diagnostic>> {
+    ) -> Result<Plays, Vec<Diagnostic>> {
         let expr = self.parse_program(input)?;
         self.evaluate_parsed_program(input, expr, context)
     }
@@ -792,13 +798,10 @@ impl Environment {
         input: &EvaluationInput,
         expr: expr::SourceExpr<MarkId, Source>,
         context: &mut Vec<eval::ContextEntry<MarkId, Source>>,
-    ) -> Result<Evaluated, Vec<Diagnostic>> {
+    ) -> Result<Plays, Vec<Diagnostic>> {
         let kind = input.kind;
         let diagnose =
             |error: &expr::Error<Source>| self.diagnose(error, &input.text, &input.source);
-        let mut bindings = input.bindings.clone();
-        bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
-        let sliders = self.analyze_sliders(input, &bindings, &expr).0;
         let start = time::Instant::now();
         let scope = eval::DynamicScope::new(input.providers.listings());
         let expr = match eval::evaluate_with_context(context, expr, &scope) {
@@ -815,16 +818,14 @@ impl Environment {
         let trace = trace_walk::result_trace(&expr);
         match expr.expr {
             expr::Expr::Waveform(w) => match kind {
-                ProgramKind::Waveform => {
-                    self.evaluated_waveform(input, context, w, &trace, sliders)
-                }
+                ProgramKind::Waveform => self.evaluated_waveform(input, context, w, &trace),
                 ProgramKind::Keys => Err(message_only(
                     "Program is marked #{keys} but evaluates to a waveform",
                 )),
             },
             expr::Expr::Seq { waveform, .. } => match (kind, waveform.expr) {
                 (ProgramKind::Waveform, expr::Expr::Waveform(w)) => {
-                    self.evaluated_waveform(input, context, w, &trace, sliders)
+                    self.evaluated_waveform(input, context, w, &trace)
                 }
                 (ProgramKind::Keys, expr::Expr::Waveform(_)) => Err(message_only(
                     "Program is marked #{keys} but evaluates to a waveform",
@@ -841,10 +842,7 @@ impl Environment {
                         vec![expr::SourceExpr::float(60.0), expr::SourceExpr::float(0.7)],
                         &input.providers,
                     ) {
-                        Ok(_) => Ok(Evaluated {
-                            plays: Plays::KeysInstrument(expr),
-                            sliders,
-                        }),
+                        Ok(_) => Ok(Plays::KeysInstrument(expr)),
                         Err(errors) => Err(errors.iter().map(diagnose).collect()),
                     }
                 }
@@ -864,16 +862,14 @@ impl Environment {
     /// sequence when the program's text has the sequenceable `on_beats` shape
     /// and its waveform argument evaluates to a waveform, and `waveform`
     /// otherwise. Either way, its sliders are provided among `input`'s
-    /// providers (see [`slider_providers::provide`]), and the result records
-    /// `sliders` as those it reaches.
+    /// providers (see [`slider_providers::provide`]).
     fn evaluated_waveform(
         &self,
         input: &EvaluationInput,
         context: &mut Vec<eval::ContextEntry<MarkId, Source>>,
         mut waveform: waveform::Waveform<MarkId>,
         trace: &Arc<Trace<Source>>,
-        sliders: Vec<slider_providers::Reached>,
-    ) -> Result<Evaluated, Vec<Diagnostic>> {
+    ) -> Result<Plays, Vec<Diagnostic>> {
         slider_providers::provide(&mut waveform, input.providers.played.index);
         let sequence = sequencer::analyze(&input.text).and_then(|shape| {
             let (step_waveform, step_marks) = self.evaluate_program_waveform_expr(
@@ -887,14 +883,13 @@ impl Environment {
                 step_marks,
             })
         });
-        let plays = match sequence {
+        Ok(match sequence {
             Some(sequence) => Plays::Sequence(sequence),
             None => {
                 let (waveform, marks) = self.prepare_waveform(waveform, trace, None);
                 Plays::Waveform(waveform, marks)
             }
-        };
-        Ok(Evaluated { plays, sliders })
+        })
     }
 
     /// Returns the evaluated (name, value) context the program at `index` is
@@ -1020,20 +1015,20 @@ mod tests {
 
         // The module's finding is not among the program's diagnostics, and
         // the module is marked reported by the first check.
-        let diagnostics = environment.check_program(&set.evaluation_input(0));
+        let diagnostics = environment.check_program(&set.evaluation_input(0)).findings;
         assert_eq!(diagnostics.len(), 0, "got {:?}", diagnostics);
         assert_eq!(environment.reported_modules.borrow().len(), 1);
 
         // A second check re-surfaces the cached finding but the module
         // stays reported — nothing prints twice.
-        let diagnostics = environment.check_program(&set.evaluation_input(0));
+        let diagnostics = environment.check_program(&set.evaluation_input(0)).findings;
         assert_eq!(diagnostics.len(), 0, "got {:?}", diagnostics);
         assert_eq!(environment.reported_modules.borrow().len(), 1);
 
         // Fixing the module clears the reported set with the reload, and no
         // finding refills it.
         fs::write(&module, "v = 440;\n").expect("rewrite module");
-        let diagnostics = environment.check_program(&set.evaluation_input(0));
+        let diagnostics = environment.check_program(&set.evaluation_input(0)).findings;
         assert_eq!(diagnostics.len(), 0, "got {:?}", diagnostics);
         assert!(environment.reported_modules.borrow().is_empty());
 
@@ -1058,7 +1053,7 @@ mod tests {
         assert_eq!(warning, "");
         let environment = Environment::new(44100, 90, root.clone());
 
-        let diagnostics = environment.check_program(&set.evaluation_input(0));
+        let diagnostics = environment.check_program(&set.evaluation_input(0)).findings;
         assert_eq!(diagnostics.len(), 0, "got {:?}", diagnostics);
         assert!(!environment.module_types.borrow().is_empty());
 
@@ -1066,7 +1061,7 @@ mod tests {
         // the module, clears the type cache, and reports against the new
         // text — `v` is a string now, and `fin` rejects it.
         fs::write(&module, "v = \"s\";\n").expect("rewrite module");
-        let diagnostics = environment.check_program(&set.evaluation_input(0));
+        let diagnostics = environment.check_program(&set.evaluation_input(0)).findings;
         assert_eq!(diagnostics.len(), 1, "got {:?}", diagnostics);
         assert_eq!(
             diagnostics[0].to_string(),
@@ -1075,7 +1070,7 @@ mod tests {
 
         // Unchanged on disk: the cache serves the module and the finding
         // repeats.
-        let diagnostics = environment.check_program(&set.evaluation_input(0));
+        let diagnostics = environment.check_program(&set.evaluation_input(0)).findings;
         assert_eq!(diagnostics.len(), 1, "got {:?}", diagnostics);
 
         fs::remove_dir_all(&root).ok();
@@ -1131,13 +1126,11 @@ mod tests {
         let environment = Environment::new(44100, 90, PathBuf::new());
 
         // The program classifies as a keys instrument, reaching its slider.
-        let Ok(Evaluated {
-            plays: Plays::KeysInstrument(function),
-            sliders,
-        }) = environment.evaluate_program(&set.evaluation_input(0))
-        else {
+        let input = set.evaluation_input(0);
+        let Ok(Plays::KeysInstrument(function)) = environment.evaluate_program(&input) else {
             panic!("expected a keys instrument");
         };
+        let sliders = environment.check_program(&input).sliders;
         let labels: Vec<_> = sliders
             .iter()
             .map(|s| (s.provider, s.label.as_str()))
@@ -1180,22 +1173,13 @@ mod tests {
         assert_eq!(warning, "");
         let environment = Environment::new(44100, 90, std::path::PathBuf::from("./lib/v0"));
 
-        let function = match environment.evaluate_program(&set.evaluation_input(0)) {
-            Ok(Evaluated {
-                plays: Plays::KeysInstrument(function),
-                sliders,
-            }) => {
-                set.reach(&sliders);
-                function
-            }
+        let input = set.evaluation_input(0);
+        let function = match environment.evaluate_program(&input) {
+            Ok(Plays::KeysInstrument(function)) => function,
             Err(diagnostics) => panic!("invalid: {:?}", diagnostics),
-            Ok(Evaluated {
-                plays: Plays::Waveform(..) | Plays::Sequence(_),
-                ..
-            }) => {
-                panic!("classified as waveform")
-            }
+            Ok(Plays::Waveform(..) | Plays::Sequence(_)) => panic!("classified as waveform"),
         };
+        set.reach(&environment.check_program(&input).sliders);
         set.set_slider_normalized(0, 0, 1.0)
             .expect("program has a vol slider");
 
@@ -1303,10 +1287,8 @@ mod tests {
 
         // The evaluating environment loads `first` then `second`.
         let evaluating = Environment::new(44100, 90, root.clone());
-        let Ok(Evaluated {
-            plays: Plays::KeysInstrument(function),
-            ..
-        }) = evaluating.evaluate_program(&set.evaluation_input(0))
+        let Ok(Plays::KeysInstrument(function)) =
+            evaluating.evaluate_program(&set.evaluation_input(0))
         else {
             panic!("expected a keys instrument");
         };
@@ -1381,10 +1363,7 @@ mod tests {
         )
         .expect("test source should parse");
         let environment = Environment::new(8000, 90, PathBuf::new());
-        let Ok(Evaluated {
-            plays: Plays::Sequence(sequence),
-            ..
-        }) = environment.evaluate_program(&set.evaluation_input(0))
+        let Ok(Plays::Sequence(sequence)) = environment.evaluate_program(&set.evaluation_input(0))
         else {
             panic!("expected a sequence");
         };
@@ -1400,10 +1379,7 @@ mod tests {
         .expect("test source should parse");
         let environment = Environment::new(44100, 90, PathBuf::new());
         match environment.evaluate_program(&set.evaluation_input(0)) {
-            Ok(Evaluated {
-                plays: Plays::Waveform(..),
-                ..
-            }) => {}
+            Ok(Plays::Waveform(..)) => {}
             Err(diagnostics) => {
                 panic!("prelude names should resolve, got: {}", diagnostics[0])
             }

@@ -1009,11 +1009,7 @@ impl ProgramSet {
                 index,
                 name: self.display_name(index),
                 text: program.span.clone(),
-                listed: self
-                    .listed(index)
-                    .iter()
-                    .map(|entry| entry.label.clone())
-                    .collect(),
+                listed: self.listed(index).to_vec(),
                 listing,
             }
         };
@@ -1036,10 +1032,8 @@ impl ProgramSet {
     /// `index`, and returns its diagnostics: the warnings on success (none for
     /// an empty program), the errors (and any warnings) on failure.
     ///
-    /// When the program evaluated, the sliders its waveform reaches are reached
-    /// (see [`ProgramSet::reach`]), and the warnings include those
-    /// [`ProgramSet::slider_warnings`] returns. Otherwise any previous result
-    /// is dropped.
+    /// When the program evaluated, the sliders it can reach are reached (see
+    /// [`ProgramSet::reach`]). Otherwise any previous result is dropped.
     pub fn record(
         &mut self,
         index: usize,
@@ -1052,9 +1046,8 @@ impl ProgramSet {
                 self.programs[index].evaluated = None;
                 Ok(Vec::new())
             }
-            Outcome::Evaluated(evaluated, mut warnings) => {
+            Outcome::Evaluated(evaluated, warnings) => {
                 self.reach(&evaluated.sliders);
-                warnings.extend(self.slider_warnings(index, &evaluated.sliders));
                 self.programs[index].evaluated = Some(evaluated);
                 Ok(warnings)
             }
@@ -1133,57 +1126,6 @@ impl ProgramSet {
                 },
             );
         }
-    }
-
-    /// Returns warnings about the sliders of the program at `index`, whose
-    /// waveform reaches `reached`.
-    ///
-    /// There is one for each slider in `reached` whose provider saves a value
-    /// outside its range (so it starts clamped), and one for each entry the
-    /// program lists that neither `reached` nor any earlier evaluation has
-    /// reached.
-    pub fn slider_warnings(
-        &self,
-        index: usize,
-        reached: &[slider_providers::Reached],
-    ) -> Vec<Diagnostic> {
-        let mut warnings = Vec::new();
-        for slider in reached {
-            let saved = self
-                .listed(slider.provider)
-                .iter()
-                .find(|entry| entry.label == slider.label)
-                .and_then(|entry| entry.value);
-            if let Some(saved) = saved
-                && slider.spec.clamp(saved) != saved
-            {
-                warnings.push(format!(
-                    "{} saves slider {:?} at {}, outside its range {} to {}; it starts at {}",
-                    self.display_name(slider.provider),
-                    slider.label,
-                    saved,
-                    slider.spec.min,
-                    slider.spec.max,
-                    slider.spec.clamp(saved),
-                ));
-            }
-        }
-        for entry in self.listed(index) {
-            let reached_now = reached
-                .iter()
-                .any(|slider| slider.provider == index && slider.label == entry.label);
-            if !reached_now && self.slider(index, &entry.label).is_none() {
-                warnings.push(format!(
-                    "{} lists slider {:?}, but nothing has reached it",
-                    self.display_name(index),
-                    entry.label,
-                ));
-            }
-        }
-        warnings
-            .into_iter()
-            .map(|message| Diagnostic::message_only(message).as_warning())
-            .collect()
     }
 
     /// Returns the labels of the sliders on the encoders of the program at
@@ -2034,23 +1976,20 @@ mod tests {
         assert_eq!(set.slider(0, "vol").unwrap().value, 0.25);
     }
 
-    /// Records an evaluation of the program at `index` whose waveform reaches
-    /// `sliders`, and returns its warnings.
+    /// Records an evaluation of the program at `index` that can reach
+    /// `sliders`.
     fn record_reaching(
         set: &mut ProgramSet,
         index: usize,
         sliders: Vec<slider_providers::Reached>,
-    ) -> Vec<String> {
+    ) {
         let evaluated = Evaluated {
             plays: Plays::Waveform(waveform::Waveform::Const(1.0), Arc::default()),
             sliders,
         };
         let text = set.programs[index].text().into();
         set.record(index, text, Outcome::Evaluated(evaluated, Vec::new()))
-            .expect("the evaluation is recorded")
-            .into_iter()
-            .map(|warning| warning.message)
-            .collect()
+            .expect("the evaluation is recorded");
     }
 
     #[test]
@@ -2123,28 +2062,13 @@ mod tests {
     }
 
     #[test]
-    fn a_clamped_saved_value_and_an_unreached_entry_are_warnings() {
+    fn a_clamped_saved_value_keeps_its_encoder_and_is_saved_clamped() {
         let mut set = state_from("#{sliders=[\"far:7\", \"gone\"]}\n_ = saw(220);");
-        let warnings = record_reaching(&mut set, 0, vec![reached(0, "far", 0.5, 0.0, 1.0)]);
-        assert_eq!(
-            warnings,
-            [
-                "A:1 saves slider \"far\" at 7, outside its range 0 to 1; it starts at 1",
-                "A:1 lists slider \"gone\", but nothing has reached it",
-            ]
-        );
+        record_reaching(&mut set, 0, vec![reached(0, "far", 0.5, 0.0, 1.0)]);
         // The unreached entry keeps its encoder and its place in the file.
         assert_eq!(set.shown(0), ["far", "gone"]);
         set.splice(0).unwrap();
         assert_eq!(set.source, "#{sliders=[\"far:1\",\"gone\"]}\n_ = saw(220);");
-    }
-
-    #[test]
-    fn an_entry_reached_through_another_program_is_not_a_warning() {
-        let mut set =
-            state_from("#{sliders=[\"cutoff\"]}\npad = saw(220);\n#{level_db=0}\n_ = pad;");
-        record_reaching(&mut set, 1, vec![reached(0, "cutoff", 0.5, 0.0, 1.0)]);
-        assert!(record_reaching(&mut set, 0, Vec::new()).is_empty());
     }
 
     #[test]
@@ -2294,7 +2218,7 @@ mod tests {
     fn a_listed_label_is_not_a_name_in_scope() {
         let set = state_from("#{sliders=[\"mix\"]}\nm = mix;");
         let environment = Environment::new(8000, 90, PathBuf::new());
-        let diagnostics = environment.check_program(&set.evaluation_input(0));
+        let diagnostics = environment.check_program(&set.evaluation_input(0)).findings;
         assert_eq!(diagnostics.len(), 1, "got {:?}", diagnostics);
         assert_eq!(diagnostics[0].to_string(), "1:1: unbound variable 'mix'");
     }
@@ -2316,7 +2240,13 @@ mod tests {
         assert_eq!(first.index, 0);
         assert_eq!(first.name, set.display_name(0));
         assert_eq!(&source[first.text.clone()], "fn(x) => x");
-        assert_eq!(first.listed, ["q"]);
+        assert_eq!(
+            first.listed,
+            [expr::Slider {
+                label: "q".to_string(),
+                value: Some(0.5),
+            }]
+        );
         let listing = first.listing.clone().expect("slot 0 lists a slider");
         assert_eq!(listing.source, Source::File);
         assert!(source[listing.range].contains("q:0.5"));

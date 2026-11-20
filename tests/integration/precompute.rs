@@ -12,7 +12,7 @@ use tuun::generator::Generator;
 use tuun::ids::{MarkId, WaveformId};
 use tuun::player::{Player, Start};
 use tuun::processing;
-use tuun::programs::{Outcome, ProgramSet};
+use tuun::programs::{Evaluated, Outcome, ProgramSet};
 use tuun::tracker;
 use tuun::waveform::Waveform;
 
@@ -51,7 +51,13 @@ fn processed(environment: &Environment, source: &str, precompute: bool) -> Progr
     } else {
         // `process` always pre-computes samples, so inline the part that
         // doesn't here.
-        Outcome::Evaluated(environment.evaluate_program(&input).unwrap(), vec![])
+        Outcome::Evaluated(
+            Evaluated {
+                plays: environment.evaluate_program(&input).unwrap(),
+                sliders: environment.check_program(&input).sliders,
+            },
+            vec![],
+        )
     };
     set.record(0, input.text.into(), outcome)
         .expect("the program evaluates");

@@ -23,8 +23,9 @@ pub struct ProviderSlot {
     /// Where the slot's text is in the backing file; empty when it has no
     /// text there.
     pub text: Range<usize>,
-    /// The labels the slot's `sliders` annotation lists.
-    pub listed: Vec<String>,
+    /// The entries of the slot's `sliders` annotation: each label it lists,
+    /// with the value it saves, if any.
+    pub listed: Vec<expr::Slider>,
     /// Where that annotation is, when the slot has one.
     pub listing: Option<expr::Span<Source>>,
 }
@@ -64,14 +65,17 @@ impl Providers {
     ///
     /// ```
     /// use tuun::diagnostics::Source;
-    /// use tuun::expr::Span;
+    /// use tuun::expr::{Slider, Span};
     /// use tuun::slider_providers::{ProviderSlot, Providers};
     ///
     /// let slot = |index: usize, text: std::ops::Range<usize>, listed: &[&str]| ProviderSlot {
     ///     index,
     ///     name: format!("S{index}"),
     ///     text,
-    ///     listed: listed.iter().map(|label| label.to_string()).collect(),
+    ///     listed: listed
+    ///         .iter()
+    ///         .map(|label| Slider { label: label.to_string(), value: None })
+    ///         .collect(),
     ///     listing: None,
     /// };
     /// let providers = Providers {
@@ -92,11 +96,65 @@ impl Providers {
             if slot.listed.is_empty() {
                 return None;
             }
+            let labels: Vec<String> = slot
+                .listed
+                .iter()
+                .map(|entry| entry.label.clone())
+                .collect();
             Some(slider::Listing {
                 id: slot.index,
-                labels: Arc::from(slot.listed.clone()),
+                labels: Arc::from(labels),
             })
         })
+    }
+
+    /// Returns the warnings about the sliders the played program can reach,
+    /// `reached`, each as an error located at a `sliders` annotation.
+    ///
+    /// There is one at each provider's annotation that saves a value outside
+    /// the range of a slider in `reached` (so it starts clamped), and one at
+    /// the played program's annotation for each entry it lists that isn't in
+    /// `reached`.
+    pub fn warnings(&self, reached: &[Reached]) -> Vec<expr::Error<Source>> {
+        let mut warnings = Vec::new();
+        for slider in reached {
+            let Some(slot) = self.slot_at(slider.provider) else {
+                continue;
+            };
+            let saved = slot
+                .listed
+                .iter()
+                .find(|entry| entry.label == slider.label)
+                .and_then(|entry| entry.value);
+            if let Some(saved) = saved
+                && slider.spec.clamp(saved) != saved
+            {
+                let message = format!(
+                    "{} saves slider {:?} at {}, outside its range {} to {}; it starts at {}",
+                    slot.name,
+                    slider.label,
+                    saved,
+                    slider.spec.min,
+                    slider.spec.max,
+                    slider.spec.clamp(saved),
+                );
+                warnings.push(expr::Error::eval(message, slot.listing.clone()));
+            }
+        }
+        let played = &self.played;
+        for entry in &played.listed {
+            if !reached
+                .iter()
+                .any(|slider| slider.provider == played.index && slider.label == entry.label)
+            {
+                let message = format!(
+                    "{} lists slider {:?}, but nothing it plays reaches it",
+                    played.name, entry.label,
+                );
+                warnings.push(expr::Error::eval(message, played.listing.clone()));
+            }
+        }
+        warnings
     }
 }
 
@@ -145,14 +203,27 @@ mod tests {
     use crate::waveform::Waveform::{BinaryOp, Const, Marked};
 
     /// Returns a slot at `index` whose text is `text` in the file, listing
-    /// `listed`.
+    /// `listed`, each entry a label or `label:saved`, in an annotation at the
+    /// text's first byte.
     fn slot(index: usize, text: Range<usize>, listed: &[&str]) -> ProviderSlot {
         ProviderSlot {
             index,
             name: format!("S{index}"),
-            text,
-            listed: listed.iter().map(|label| label.to_string()).collect(),
-            listing: None,
+            text: text.clone(),
+            listed: listed
+                .iter()
+                .map(|entry| match entry.split_once(':') {
+                    Some((label, value)) => expr::Slider {
+                        label: label.to_string(),
+                        value: Some(value.parse().unwrap()),
+                    },
+                    None => expr::Slider {
+                        label: entry.to_string(),
+                        value: None,
+                    },
+                })
+                .collect(),
+            listing: Some(expr::Span::new(Source::File, text.start..text.start + 1)),
         }
     }
 
@@ -190,6 +261,40 @@ mod tests {
         // Text between slots, and a module at a slot's offsets.
         assert_eq!(found(&providers, Source::File, 42..45), None);
         assert_eq!(found(&providers, Source::Module(0), 20..25), None);
+    }
+
+    /// Returns the slider `label` the slot at `provider` provides, over 0 to 1.
+    fn reached(provider: usize, label: &str) -> Reached {
+        Reached {
+            provider,
+            label: label.to_string(),
+            spec: slider::SliderSpec::new(0.5, 0.0, 1.0, slider::Curve::Linear).unwrap(),
+        }
+    }
+
+    #[test]
+    fn a_clamped_saved_value_and_an_unreached_entry_are_warnings() {
+        let providers = providers(&["far:7"], &["near:0.5", "gone"]);
+        let warnings = providers.warnings(&[reached(0, "far"), reached(1, "near")]);
+        assert_eq!(
+            warnings,
+            [
+                expr::Error::eval(
+                    "S0 saves slider \"far\" at 7, outside its range 0 to 1; it starts at 1",
+                    Some(expr::Span::new(Source::File, 10..11)),
+                ),
+                expr::Error::eval(
+                    "S1 lists slider \"gone\", but nothing it plays reaches it",
+                    Some(expr::Span::new(Source::File, 50..51)),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_entry_another_slot_lists_is_not_the_played_programs_to_warn_about() {
+        let providers = providers(&["unused"], &[]);
+        assert_eq!(providers.warnings(&[]), []);
     }
 
     #[test]

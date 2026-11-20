@@ -6,7 +6,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use tuun::diagnostics::Diagnostic;
+use tuun::diagnostics::{Diagnostic, Severity};
 use tuun::environment::Environment;
 use tuun::expr::SourceExpr;
 use tuun::generator::{self, Generator};
@@ -62,10 +62,7 @@ fn process(program: &str) -> Result<Evaluated, Vec<Diagnostic>> {
 
 /// Returns the waveform the program at `index` of `set` evaluates to.
 fn waveform(set: &ProgramSet, index: usize) -> Result<Waveform<MarkId>, Vec<Diagnostic>> {
-    match environment()
-        .evaluate_program(&set.evaluation_input(index))?
-        .plays
-    {
+    match environment().evaluate_program(&set.evaluation_input(index))? {
         Plays::Waveform(waveform, _) => Ok(waveform),
         Plays::Sequence(sequence) => Ok(sequence.step_waveform),
         Plays::KeysInstrument(_) => panic!("expected a waveform"),
@@ -326,7 +323,9 @@ fn calls_that_disagree_are_an_error_naming_both_values() {
     let set = set(&format!(
         "#{{{PLAIN}}}\n_ = slider(\"x\", 0.5) + slider(\"x\", 0.25, 0, 2);\n"
     ));
-    let diagnostics = environment().check_program(&set.evaluation_input(0));
+    let diagnostics = environment()
+        .check_program(&set.evaluation_input(0))
+        .findings;
     assert_eq!(
         messages(&diagnostics),
         [
@@ -347,10 +346,7 @@ fn a_sequence_steps_sliders_are_resolved() {
     ));
     assert!(matches!(
         environment().evaluate_program(&set.evaluation_input(0)),
-        Ok(Evaluated {
-            plays: Plays::Sequence(_),
-            ..
-        })
+        Ok(Plays::Sequence(_))
     ));
     assert_eq!(sliders(&waveform(&set, 0).unwrap()), ["x of A:1 = 0.5"]);
 }
@@ -432,13 +428,11 @@ fn a_keys_note_provides_its_sliders() {
          k = fn(note, vel) => (delayed_pad(note), slider(\"release\", 0.5));\n"
     ));
     let environment = environment();
-    let Ok(Evaluated {
-        plays: Plays::KeysInstrument(function),
-        sliders: reached,
-    }) = environment.evaluate_program(&set.evaluation_input(1))
-    else {
+    let input = set.evaluation_input(1);
+    let Ok(Plays::KeysInstrument(function)) = environment.evaluate_program(&input) else {
         panic!("expected a keys instrument");
     };
+    let reached = environment.check_program(&input).sliders;
     let arguments = || vec![SourceExpr::float(60.0), SourceExpr::float(0.5)];
     let (note_on, note_off, _) = environment
         .apply_note_function(&function, arguments(), &set.slider_providers(1))
@@ -495,16 +489,19 @@ fn the_slider_demo_loads_and_reaches_what_it_lists() {
 /// Returns the messages of the checker's findings for the program at `index`
 /// of `source`.
 fn check(source: &str, index: usize) -> Vec<String> {
-    messages(&environment().check_program(&set(source).evaluation_input(index)))
+    messages(
+        &environment()
+            .check_program(&set(source).evaluation_input(index))
+            .findings,
+    )
 }
 
 /// Returns each slider the program at `index` of `source` can reach, as
 /// `"label of A:1 = spec"`, in order.
 fn reachable(source: &str, index: usize) -> Vec<String> {
-    let (reached, _) = environment()
-        .reachable_sliders(&set(source).evaluation_input(index))
-        .expect("test source should parse");
-    reached
+    environment()
+        .check_program(&set(source).evaluation_input(index))
+        .sliders
         .iter()
         .map(|r| format!("{} of {} = {}", r.label, bank_address(r.provider), r.spec))
         .collect()
@@ -734,13 +731,14 @@ fn the_slider_demo_checks_clean_and_reaches_what_it_lists() {
             continue;
         }
         let input = set.evaluation_input(index);
+        let checked = environment.check_program(&input);
         assert_eq!(
-            messages(&environment.check_program(&input)),
+            messages(&checked.findings),
             Vec::<String>::new(),
             "{}",
             set.display_name(index)
         );
-        let (reached, _) = environment.reachable_sliders(&input).unwrap();
+        let reached = checked.sliders;
         let mut labels: Vec<&str> = reached.iter().map(|r| r.label.as_str()).collect();
         labels.sort();
         let mut listed: Vec<&str> = set.listed(index).iter().map(|s| s.label.as_str()).collect();
@@ -826,4 +824,35 @@ fn a_function_handed_through_debug_is_still_the_callers() {
           function its callers give"
         ]
     );
+}
+
+#[test]
+fn a_clamped_saved_value_and_an_unreached_entry_are_warnings_at_the_listing() {
+    let source = "#{sliders=[\"far:7\", \"gone\"]}\n_ = time * slider(\"far\", 0.5);\n";
+    let findings = environment()
+        .check_program(&set(source).evaluation_input(0))
+        .findings;
+    assert_eq!(
+        messages(&findings),
+        [
+            "1:3: A:1 saves slider \"far\" at 7, outside its range 0 to 1; it starts at 1",
+            "1:3: A:1 lists slider \"gone\", but nothing it plays reaches it",
+        ]
+    );
+    assert!(findings.iter().all(|f| f.severity == Severity::Warning));
+    // They don't keep the program from playing.
+    let outcome = processing::process(&environment(), &set(source).evaluation_input(0));
+    let Outcome::Evaluated(evaluated, warnings) = outcome else {
+        panic!("a program with only warnings evaluates");
+    };
+    assert_eq!(warnings, findings);
+    assert_eq!(evaluated.sliders.len(), 1);
+}
+
+#[test]
+fn a_slider_only_some_notes_reach_is_reached() {
+    let source = "#{sliders=[\"hi\"], keys}\n\
+                  k = fn(note, vel) => (if note > 100 then slider(\"hi\", 0.5) else 0, 0);\n";
+    assert_eq!(check(source, 0), Vec::<String>::new());
+    assert_eq!(reachable(source, 0), ["hi of A:1 = 0.5 (0 to 1, linear)"]);
 }
