@@ -13,7 +13,7 @@ use crate::expr::{
     Span,
 };
 use crate::trace::{self, CarriesTrace, Step, Trace, Via};
-use crate::waveform::Waveform;
+use crate::waveform::{ShareId, Waveform};
 
 /// A context entry: a bound name and the closed value it evaluates to.
 pub type ContextEntry<M, S> = NamedExpr<M, S>;
@@ -428,20 +428,80 @@ impl<S> Clone for CallPath<S> {
     }
 }
 
+/// What an evaluation reads from the point it has reached rather than from
+/// the expression there: the code running (see [`CallPath`]) and how many
+/// `share` calls are applying their functions.
+#[derive(Clone, Debug)]
+pub struct DynamicScope<S> {
+    path: CallPath<S>,
+    sharing: u32,
+}
+
+impl<S> Default for DynamicScope<S> {
+    /// Returns the scope with no code running and no `share` call applying
+    /// its function.
+    fn default() -> Self {
+        DynamicScope {
+            path: CallPath::empty(),
+            sharing: 0,
+        }
+    }
+}
+
+impl<S> DynamicScope<S> {
+    /// Returns the code running in this scope.
+    pub fn path(&self) -> &CallPath<S> {
+        &self.path
+    }
+
+    /// Returns this scope with the code written at `code` running inside it,
+    /// run by a call written at `site` (see [`CallPath::enter`]).
+    pub fn enter(&self, code: Option<Span<S>>, site: Option<Span<S>>) -> DynamicScope<S> {
+        DynamicScope {
+            path: self.path.enter(code, site),
+            sharing: self.sharing,
+        }
+    }
+
+    /// Returns the id of the `Shared` of a `share` call applying its function
+    /// in this scope, and the scope that function runs in.
+    ///
+    /// Each id is the number of `share` calls already applying theirs, so no
+    /// two calls applying their functions in one scope get the same id.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tuun::eval::DynamicScope;
+    /// use tuun::waveform::ShareId;
+    ///
+    /// let (outer, inside) = DynamicScope::<()>::default().share();
+    /// let (inner, _) = inside.share();
+    /// assert_eq!((outer, inner), (ShareId(0), ShareId(1)));
+    /// ```
+    pub fn share(&self) -> (ShareId, DynamicScope<S>) {
+        let scope = DynamicScope {
+            path: self.path.clone(),
+            sharing: self.sharing + 1,
+        };
+        (ShareId(self.sharing), scope)
+    }
+}
+
 /// A built-in application as the built-in sees it: where the call was written,
-/// the traces of its function expression and its arguments, and the code
-/// running around it.
+/// the traces of its function expression and its arguments, and the scope it
+/// is evaluated in.
 // TODO is this the right place for this? maybe trace.rs?
 pub struct BuiltInCall<S> {
     span: Option<Span<S>>,
     head: Arc<Trace<S>>,
     parents: Vec<Arc<Trace<S>>>,
-    path: CallPath<S>,
+    scope: DynamicScope<S>,
 }
 
 impl<S: Clone> BuiltInCall<S> {
     /// Returns the call at `span` of a function expression whose trace is
-    /// `head` to `arguments`, with no code running around it.
+    /// `head` to `arguments`, in the default scope.
     pub fn new<M: CarriesTrace<S>>(
         span: Option<Span<S>>,
         head: Trace<S>,
@@ -454,7 +514,7 @@ impl<S: Clone> BuiltInCall<S> {
                 .iter()
                 .map(|argument| Arc::new(Trace::of(argument)))
                 .collect(),
-            path: CallPath::empty(),
+            scope: DynamicScope::default(),
         }
     }
 
@@ -463,9 +523,9 @@ impl<S: Clone> BuiltInCall<S> {
         self.span.as_ref()
     }
 
-    /// Returns the code running around this call.
-    pub fn path(&self) -> &CallPath<S> {
-        &self.path
+    /// Returns the scope this call is evaluated in.
+    pub fn scope(&self) -> &DynamicScope<S> {
+        &self.scope
     }
 
     /// Returns `expr` as a new value this call computed, one whose audible
@@ -506,20 +566,20 @@ pub fn embed<M: CarriesTrace<S>, S: Clone>(argument: SourceExpr<M, S>) -> Expr<M
 }
 
 /// Applies the built-in `builtin` to `arguments` in a call at `span` whose
-/// function expression has the trace `head` inside the code on `path`.
+/// function expression has the trace `head` in `scope`.
 fn apply_builtin<M, S>(
     builtin: &BuiltInFn<M, S>,
     arguments: Vec<SourceExpr<M, S>>,
     span: Option<Span<S>>,
     head: Trace<S>,
-    path: &CallPath<S>,
+    scope: &DynamicScope<S>,
 ) -> Result<SourceExpr<M, S>, Error<S>>
 where
     M: CarriesTrace<S>,
     S: Clone,
 {
     let call = BuiltInCall {
-        path: path.clone(),
+        scope: scope.clone(),
         ..BuiltInCall::new(span, head, &arguments)
     };
     // Errors point at the whole `f(x, y)` call site, since built-ins don't
@@ -654,10 +714,10 @@ fn push_step_into_parts<M: CarriesTrace<S>, S: Clone>(
     }
 }
 
-/// Evaluates a closed expression to a value inside the code on `path`. Closed
-/// expressions do not contain variables.
+/// Evaluates a closed expression to a value in `scope`. Closed expressions do
+/// not contain variables.
 ///
-/// With a `path` holding only where `expr` was written, equivalent to
+/// In the default scope with only `expr` itself running, equivalent to
 /// [`evaluate`] with no bindings and a resolver that always fails, but skips
 /// the needless substitution pass.
 ///
@@ -668,7 +728,7 @@ fn push_step_into_parts<M: CarriesTrace<S>, S: Clone>(
 /// part of one) the built-in handed back.
 pub fn evaluate_closed<M, S>(
     expr: SourceExpr<M, S>,
-    path: &CallPath<S>,
+    scope: &DynamicScope<S>,
 ) -> Result<SourceExpr<M, S>, Error<S>>
 where
     M: Clone + fmt::Display + fmt::Debug + CarriesTrace<S>,
@@ -696,7 +756,7 @@ where
             // defaults that are already values evaluate to themselves.
             let named = named
                 .into_iter()
-                .map(|(name, value)| Ok((name, evaluate_closed(value, path)?)))
+                .map(|(name, value)| Ok((name, evaluate_closed(value, scope)?)))
                 .collect::<Result<NamedExprs<M, S>, Error<S>>>()?;
             Ok(SourceExpr {
                 expr: Function {
@@ -713,8 +773,8 @@ where
             span,
         )),
         Seq { offset, waveform } => {
-            let offset = evaluate_closed(*offset, path)?;
-            let waveform = evaluate_closed(*waveform, path)?;
+            let offset = evaluate_closed(*offset, scope)?;
+            let waveform = evaluate_closed(*waveform, scope)?;
             Ok(SourceExpr {
                 expr: Seq {
                     offset: Box::new(offset),
@@ -737,9 +797,9 @@ where
             // Evaluation may drop the condition's span, so capture it up
             // front to point the error at the original condition.
             let condition_span = condition.span.clone();
-            match evaluate_closed(*condition, path)?.expr {
-                Bool(true) => evaluate_closed(*then, path),
-                Bool(false) => evaluate_closed(*else_, path),
+            match evaluate_closed(*condition, scope)?.expr {
+                Bool(true) => evaluate_closed(*then, scope),
+                Bool(false) => evaluate_closed(*else_, scope),
                 _ => Err(Error::eval(
                     "Expected boolean condition".to_string(),
                     condition_span,
@@ -752,14 +812,14 @@ where
             named,
         } => {
             let site = call_site(&span, &function);
-            let function = evaluate_closed(*function, path)?;
+            let function = evaluate_closed(*function, scope)?;
             let pos_args = positional
                 .into_iter()
-                .map(|argument| evaluate_closed(argument, path))
+                .map(|argument| evaluate_closed(argument, scope))
                 .collect::<Result<Vec<_>, _>>()?;
             let named = named
                 .into_iter()
-                .map(|(name, value)| Ok((name, evaluate_closed(value, path)?)))
+                .map(|(name, value)| Ok((name, evaluate_closed(value, scope)?)))
                 .collect::<Result<NamedExprs<M, S>, Error<S>>>()?;
             match (function.expr, pos_args) {
                 (
@@ -818,7 +878,7 @@ where
                     // The body runs as code written where the function was,
                     // whoever applies it. Its arguments were evaluated above,
                     // outside it.
-                    let result = evaluate_closed(body, &path.enter(function.span, site.clone()))?;
+                    let result = evaluate_closed(body, &scope.enter(function.span, site.clone()))?;
                     Ok(match site {
                         Some(site) => push_step(result, &Step::Call(site)),
                         None => result,
@@ -841,7 +901,7 @@ where
                         ));
                     }
                     let head = Trace::new::<M>(function.span, function.via);
-                    apply_builtin(&builtin, arguments, span, head, path)
+                    apply_builtin(&builtin, arguments, span, head, scope)
                 }
                 (function, _) => Err(Error::internal(
                     format!("Invalid application: {}", function),
@@ -854,7 +914,7 @@ where
             span,
             via,
         }),
-        Expr::Project { module, name } => match evaluate_closed(*module, path)?.expr {
+        Expr::Project { module, name } => match evaluate_closed(*module, scope)?.expr {
             Expr::BoundModule(entries) => match entries.into_iter().find(|(n, _)| n == &name) {
                 Some((_, value)) => Ok(match span {
                     Some(span) => push_step(value, &Step::UseSite(span)),
@@ -874,7 +934,7 @@ where
             expr: Tuple(
                 exprs
                     .into_iter()
-                    .map(|e| evaluate_closed(e, path))
+                    .map(|e| evaluate_closed(e, scope))
                     .collect::<Result<Vec<_>, _>>()?,
             ),
             span,
@@ -884,7 +944,7 @@ where
             expr: List(
                 exprs
                     .into_iter()
-                    .map(|e| evaluate_closed(e, path))
+                    .map(|e| evaluate_closed(e, scope))
                     .collect::<Result<Vec<_>, _>>()?,
             ),
             span,
@@ -1011,7 +1071,7 @@ where
 {
     let code = expr.span.clone();
     let expr = substitute(context, expr)?;
-    evaluate_closed(expr, &CallPath::empty().enter(code, None))
+    evaluate_closed(expr, &DynamicScope::default().enter(code, None))
 }
 
 /// The modules one evaluation of bindings loads: how it resolves them, the
@@ -1122,8 +1182,8 @@ where
             }
             Binding::Definition(pattern, def_expr) => {
                 let substituted = substitute(context, def_expr.clone())?;
-                let path = CallPath::empty().enter(def_expr.span.clone(), None);
-                let value = evaluate_closed(substituted, &path)?;
+                let scope = DynamicScope::default().enter(def_expr.span.clone(), None);
+                let value = evaluate_closed(substituted, &scope)?;
                 let before = context.len();
                 extend_context(context, pattern, value)?;
                 own.extend(before..context.len());
@@ -1584,21 +1644,21 @@ mod tests {
     #[test]
     fn test_application_arity_is_exact() {
         let expr = parse_program::<u32, _>("(fn(x) => x)(2, 3)", ()).unwrap();
-        let error = evaluate_closed(expr, &CallPath::empty()).unwrap_err();
+        let error = evaluate_closed(expr, &DynamicScope::default()).unwrap_err();
         assert_eq!(error.message(), "extra positional parameter");
 
         let expr = parse_program::<u32, _>("(fn(x, y) => x)(2)", ()).unwrap();
-        let error = evaluate_closed(expr, &CallPath::empty()).unwrap_err();
+        let error = evaluate_closed(expr, &DynamicScope::default()).unwrap_err();
         assert_eq!(error.message(), "missing parameter \"y\"");
 
         // A tuple literal is one argument; destructuring params accept it...
         let expr = parse_program::<u32, _>("(fn((y, z)) => (z, y))((4, 5))", ()).unwrap();
-        let evaluated = evaluate_closed(expr, &CallPath::empty()).unwrap();
+        let evaluated = evaluate_closed(expr, &DynamicScope::default()).unwrap();
         assert_eq!(format!("{}", evaluated), "(5, 4)");
 
         // ...and passing two arguments instead is an arity error, not a splat.
         let expr = parse_program::<u32, _>("(fn((y, z)) => y)(4, 5)", ()).unwrap();
-        let error = evaluate_closed(expr, &CallPath::empty()).unwrap_err();
+        let error = evaluate_closed(expr, &DynamicScope::default()).unwrap_err();
         assert_eq!(error.message(), "extra positional parameter");
     }
 
@@ -1607,17 +1667,17 @@ mod tests {
         let input = "(fn(x) => fn(x) => x)(7)(5)";
         let expr = parse_program::<u32, _>(input, ()).unwrap();
         println!("Parsed expression: {}", expr);
-        let evaluated = evaluate_closed(expr, &CallPath::empty()).unwrap();
+        let evaluated = evaluate_closed(expr, &DynamicScope::default()).unwrap();
         assert_eq!(format!("{}", evaluated), "5");
 
         let input = "(fn(x) => fn(y, z) => (x, y, z))(3)(4, 5)";
         let expr = parse_program::<u32, _>(input, ()).unwrap();
-        let evaluated = evaluate_closed(expr, &CallPath::empty()).unwrap();
+        let evaluated = evaluate_closed(expr, &DynamicScope::default()).unwrap();
         assert_eq!(format!("{}", evaluated), "(3, 4, 5)");
 
         let input = "(fn(x, (y, z)) => (x, y, z))(3, (4, 5))";
         let expr = parse_program::<u32, _>(input, ()).unwrap();
-        let evaluated = evaluate_closed(expr, &CallPath::empty()).unwrap();
+        let evaluated = evaluate_closed(expr, &DynamicScope::default()).unwrap();
         assert_eq!(format!("{}", evaluated), "(3, 4, 5)");
     }
 
@@ -1746,9 +1806,11 @@ mod tests {
                 Ok(call.assembled(Expr::List(spans.collect())))
             }
             vec![
-                def("here", |_arguments, call| spans(call, call.path().sites())),
+                def("here", |_arguments, call| {
+                    spans(call, call.scope().path().sites())
+                }),
                 def("running", |_arguments, call| {
-                    spans(call, call.path().code())
+                    spans(call, call.scope().path().code())
                 }),
                 def("first", |mut arguments, _call| {
                     arguments.truncate(1);
@@ -1758,7 +1820,7 @@ mod tests {
                     let function = arguments.pop().unwrap();
                     let application =
                         SourceExpr::application(function, vec![SourceExpr::float(1.0)]);
-                    evaluate_closed(application, call.path())
+                    evaluate_closed(application, call.scope())
                 }),
             ]
         }

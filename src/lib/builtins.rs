@@ -1,4 +1,3 @@
-use std::cell::Cell;
 use std::fmt::{Debug, Display};
 
 use crate::eval;
@@ -8,7 +7,7 @@ use crate::expr::{BuiltInFn, Error, Expr, SourceExpr};
 use crate::optimizer;
 use crate::slider;
 use crate::trace::{self, CarriesTrace};
-use crate::waveform::{BinaryOperator, ShareId, UnaryOperator, Waveform};
+use crate::waveform::{BinaryOperator, UnaryOperator, Waveform};
 use Expr::{Bool, BuiltIn, List, Seq};
 
 type BuiltinFn<M, S> =
@@ -508,7 +507,7 @@ where
         results.push(
             eval::evaluate_closed(
                 SourceExpr::application(function.clone(), vec![element]),
-                call.path(),
+                call.scope(),
             )
             .map_err(|e| e.or_at(at))?,
         );
@@ -536,7 +535,7 @@ where
         // function's text doesn't light.
         acc = eval::evaluate_closed(
             SourceExpr::application(function.clone(), vec![acc, element]),
-            call.path(),
+            call.scope(),
         )
         .map_err(|e| e.or_at(at))?;
     }
@@ -575,7 +574,7 @@ where
         // function's text doesn't light.
         current = eval::evaluate_closed(
             SourceExpr::application(function.clone(), vec![current]),
-            call.path(),
+            call.scope(),
         )
         .map_err(|e| e.or_at(at))?;
     }
@@ -929,35 +928,6 @@ where
     }
 }
 
-thread_local! {
-    /// The number of `share` calls on this thread that are applying their
-    /// function.
-    static SHARING: Cell<u32> = const { Cell::new(0) };
-}
-
-/// A `share` call applying its function, which holds the id of its `Shared`
-/// until it is dropped.
-///
-/// Each id is the number of calls already applying theirs, so no two calls
-/// applying their functions at once hold the same id.
-struct Sharing(ShareId);
-
-impl Sharing {
-    fn enter() -> Sharing {
-        SHARING.with(|depth| {
-            let id = depth.get();
-            depth.set(id + 1);
-            Sharing(ShareId(id))
-        })
-    }
-}
-
-impl Drop for Sharing {
-    fn drop(&mut self) {
-        SHARING.with(|depth| depth.set(self.0.0));
-    }
-}
-
 /// Returns the waveform or seq that `function` returns when applied to a
 /// reference to the waveform `waveform`, with `waveform` generated once and
 /// read wherever that reference is used, on the clock of the result.
@@ -984,7 +954,7 @@ where
     if waveform.expr.as_const_float().is_some() {
         return eval::evaluate_closed(
             SourceExpr::application(function, vec![waveform]),
-            call.path(),
+            call.scope(),
         );
     }
     // A `Ref` resolves to the nearest `Shared` with its id, so the id only has
@@ -992,8 +962,7 @@ where
     // function is applied. Evaluation is eager and the function returns a
     // waveform or a seq of waveforms, so those are exactly the calls applying
     // theirs.
-    let sharing = Sharing::enter();
-    let id = sharing.0;
+    let (id, scope) = call.scope().share();
     // The reference carries the trace of `waveform`, so where it is heard
     // the text of `waveform` lights along with the parameter's uses.
     let reference = SourceExpr {
@@ -1003,11 +972,7 @@ where
     };
     // TODO as in `map`, this application records no `Call` step, so the
     // function's text doesn't light.
-    let body = eval::evaluate_closed(
-        SourceExpr::application(function, vec![reference]),
-        call.path(),
-    )?;
-    drop(sharing);
+    let body = eval::evaluate_closed(SourceExpr::application(function, vec![reference]), &scope)?;
     if !matches!(body.expr, Expr::Waveform(_) | Seq { .. }) {
         return Err(Error::internal_here(
             "The function passed to share must return a waveform or a seq",
@@ -1124,7 +1089,7 @@ where
         label,
         spec,
         site: call.span().cloned(),
-        path: call.path().clone(),
+        path: call.scope().path().clone(),
     };
     Ok(call.computed(Expr::Waveform(match M::from_slider(slider) {
         Some(id) => Waveform::Marked {
@@ -1305,6 +1270,7 @@ mod tests {
     use super::*;
     use crate::expr::{ErrorKind, boxed};
     use crate::trace::Trace;
+    use crate::waveform::ShareId;
     use Expr::BuiltIn;
 
     /// Applies the built-in function `f` to `arguments`, written nowhere, in a
