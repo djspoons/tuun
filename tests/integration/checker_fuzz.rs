@@ -724,6 +724,8 @@ fn slider_soundness_fuzz() {
             match &plays {
                 Plays::Waveform(w, _) => compare(w, &mut report),
                 Plays::Sequence(sequence) => compare(&sequence.step_waveform, &mut report),
+                // Plays nothing, so nothing it reaches is played.
+                Plays::Provider => {}
                 Plays::KeysInstrument(instrument) => {
                     for key in [0.0, 59.0, 60.0, 61.0, 100.0, 127.0] {
                         for velocity in [0.0, 0.5, 1.0] {

@@ -107,14 +107,10 @@ impl Providers {
         })
     }
 
-    /// Returns the warnings about the sliders the program at `played` can
-    /// reach, `reached`, each as an error located at a `sliders` annotation.
-    ///
-    /// There is one at each provider's annotation that saves a value outside
-    /// the range of a slider in `reached` (so it starts clamped), and one at
-    /// the played program's annotation for each entry it lists that isn't in
-    /// `reached`.
-    pub fn warnings(&self, played: usize, reached: &[Reached]) -> Vec<expr::Error<Source>> {
+    /// Returns the warnings about the sliders a program can reach,
+    /// `reached`: one at each provider's annotation that saves a value outside
+    /// the range of a slider in `reached`, so it starts clamped.
+    pub fn warnings(&self, reached: &[Reached]) -> Vec<expr::Error<Source>> {
         let mut warnings = Vec::new();
         for slider in reached {
             let Some(slot) = self.slots.get(slider.provider) else {
@@ -140,22 +136,48 @@ impl Providers {
                 warnings.push(expr::Error::eval(message, slot.listing.clone()));
             }
         }
-        let Some(slot) = self.slots.get(played) else {
-            return warnings;
-        };
-        for entry in &slot.listed {
-            if !reached
-                .iter()
-                .any(|slider| slider.provider == played && slider.label == entry.label)
-            {
-                let message = format!(
-                    "{} lists slider {:?}, but nothing it plays reaches it",
-                    slot.name, entry.label,
-                );
-                warnings.push(expr::Error::eval(message, slot.listing.clone()));
-            }
-        }
         warnings
+    }
+
+    /// Returns an error at the annotation of the program at `played` for each
+    /// entry it lists that isn't a slider it reaches and provides in
+    /// `reached`, for a program that plays.
+    pub fn unreached(&self, played: usize, reached: &[Reached]) -> Vec<expr::Error<Source>> {
+        self.missing(played, reached, |name, label| {
+            format!("{name} lists slider {label:?}, but nothing it plays reaches it")
+        })
+    }
+
+    /// Returns an error at the annotation of the program at `played` for each
+    /// entry it lists that isn't a slider it provides in `reached`, for a
+    /// function that provides sliders to its callers.
+    pub fn unprovided(&self, played: usize, reached: &[Reached]) -> Vec<expr::Error<Source>> {
+        self.missing(played, reached, |name, label| {
+            format!("{name} lists slider {label:?}, but provides no slider {label:?}")
+        })
+    }
+
+    /// Returns an error at the annotation of the program at `played` for each
+    /// entry it lists that isn't a slider it provides in `reached`, with the
+    /// message `message` gives for the slot's name and the entry's label.
+    fn missing(
+        &self,
+        played: usize,
+        reached: &[Reached],
+        message: impl Fn(&str, &str) -> String,
+    ) -> Vec<expr::Error<Source>> {
+        let Some(slot) = self.slots.get(played) else {
+            return Vec::new();
+        };
+        slot.listed
+            .iter()
+            .filter(|entry| {
+                !reached
+                    .iter()
+                    .any(|slider| slider.provider == played && slider.label == entry.label)
+            })
+            .map(|entry| expr::Error::eval(message(&slot.name, &entry.label), slot.listing.clone()))
+            .collect()
     }
 }
 
@@ -248,28 +270,44 @@ mod tests {
     }
 
     #[test]
-    fn a_clamped_saved_value_and_an_unreached_entry_are_warnings() {
-        let providers = providers(&["far:7"], &["near:0.5", "gone"]);
-        let warnings = providers.warnings(1, &[reached(0, "far"), reached(1, "near")]);
+    fn a_clamped_saved_value_is_a_warning() {
+        let providers = providers(&["far:7"], &["near:0.5"]);
+        let warnings = providers.warnings(&[reached(0, "far"), reached(1, "near")]);
         assert_eq!(
             warnings,
-            [
-                expr::Error::eval(
-                    "S0 saves slider \"far\" at 7, outside its range 0 to 1; it starts at 1",
-                    Some(expr::Span::new(Source::File, 10..11)),
-                ),
-                expr::Error::eval(
-                    "S1 lists slider \"gone\", but nothing it plays reaches it",
-                    Some(expr::Span::new(Source::File, 50..51)),
-                ),
-            ]
+            [expr::Error::eval(
+                "S0 saves slider \"far\" at 7, outside its range 0 to 1; it starts at 1",
+                Some(expr::Span::new(Source::File, 10..11)),
+            )]
         );
     }
 
     #[test]
-    fn an_entry_another_slot_lists_is_not_the_played_programs_to_warn_about() {
+    fn an_entry_the_played_program_lists_but_doesnt_reach_is_unreached() {
+        let providers = providers(&["gone"], &["near", "gone"]);
+        // Another slot's slider by the same label isn't the played program's.
+        let reached = [reached(0, "gone"), reached(1, "near")];
+        assert_eq!(
+            providers.unreached(1, &reached),
+            [expr::Error::eval(
+                "S1 lists slider \"gone\", but nothing it plays reaches it",
+                Some(expr::Span::new(Source::File, 50..51)),
+            )]
+        );
+        assert_eq!(
+            providers.unprovided(1, &reached),
+            [expr::Error::eval(
+                "S1 lists slider \"gone\", but provides no slider \"gone\"",
+                Some(expr::Span::new(Source::File, 50..51)),
+            )]
+        );
+    }
+
+    #[test]
+    fn an_entry_another_slot_lists_is_not_the_played_programs() {
         let providers = providers(&["unused"], &[]);
-        assert_eq!(providers.warnings(1, &[]), []);
+        assert_eq!(providers.unreached(1, &[]), []);
+        assert_eq!(providers.unprovided(1, &[]), []);
     }
 
     #[test]

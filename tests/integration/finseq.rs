@@ -40,6 +40,7 @@ fn adsr_segments_meet_without_gaps_or_overlaps() {
             Err(diagnostics) => panic!("invalid: {:?}", diagnostics),
             Ok(Plays::Sequence(_)) => panic!("classified as a sequence"),
             Ok(Plays::KeysInstrument(_)) => panic!("classified as keys"),
+            Ok(Plays::Provider) => panic!("classified as a provider"),
         };
         let mut out = vec![0.0; 10000];
         let len = Generator::new(sample_rate)

@@ -109,6 +109,8 @@ use crate::waveform;
 pub enum Expectation {
     /// The program must produce a waveform or a seq.
     Playable,
+    /// The program must produce a waveform, a seq, or a function.
+    PlayableOrFunction,
     /// The program must produce a note function: applied to a note number
     /// (int) and a velocity (float), it must produce a pair of waveforms.
     NoteFunction,
@@ -152,6 +154,13 @@ where
         Some(Expectation::Playable) => {
             let ty = checker.infer(&mut context, &mut Vec::new(), expr);
             checker.subtype_check(&ty, &Type::numeric(), &expr.span);
+            ty
+        }
+        Some(Expectation::PlayableOrFunction) => {
+            let ty = checker.infer(&mut context, &mut Vec::new(), expr);
+            if !ty.apply(&checker.subst).is_function() {
+                checker.subtype_check(&ty, &Type::numeric(), &expr.span);
+            }
             ty
         }
         Some(Expectation::NoteFunction) => {
@@ -5070,6 +5079,17 @@ mod tests {
         // A seq qualifies as a waveform program.
         let errors = check_with_expectation("seq(0)(w2(440, 0))", Some(Expectation::Playable));
         assert!(errors.is_empty(), "got {:?}", messages(&errors));
+    }
+
+    #[test]
+    fn playable_or_function_expectation() {
+        let expectation = Some(Expectation::PlayableOrFunction);
+        for program in ["w2(440, 0)", "fn(f) => w2(f, 0)", "w2"] {
+            let errors = check_with_expectation(program, expectation);
+            assert!(errors.is_empty(), "{program}: got {:?}", messages(&errors));
+        }
+        let errors = check_with_expectation("\"hello\"", expectation);
+        assert_eq!(messages(&errors), ["expected numeric, found string"]);
     }
 
     // A keys program is checked by seeding Ψ with (int, float) — the note

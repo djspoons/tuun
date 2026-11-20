@@ -257,6 +257,31 @@ impl Type {
         Type::ground(Sort::TOP)
     }
 
+    /// Returns whether this is a function's type: an arrow or an intersection
+    /// of arrows, possibly quantified.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::rc::Rc;
+    /// use tuun::types::Type;
+    ///
+    /// let identity = Type::Function {
+    ///     positional: Rc::from([Type::numeric()]),
+    ///     named: Rc::from([]),
+    ///     result: Rc::new(Type::numeric()),
+    /// };
+    /// assert!(identity.is_function());
+    /// assert!(!Type::numeric().is_function());
+    /// ```
+    pub fn is_function(&self) -> bool {
+        match self {
+            Type::Function { .. } | Type::And(_) => true,
+            Type::Forall(_, body) => body.is_function(),
+            _ => false,
+        }
+    }
+
     /// Whether any refinement variable appears in this type.
     ///
     /// Syntactic, like the freezing it guards: freezing rewrites exactly these

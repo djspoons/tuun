@@ -143,6 +143,7 @@ fn precomputed(plays: Plays, sample_rate: u32) -> Plays {
             ..sequence
         }),
         Plays::KeysInstrument(instrument) => Plays::KeysInstrument(instrument),
+        Plays::Provider => Plays::Provider,
     }
 }
 

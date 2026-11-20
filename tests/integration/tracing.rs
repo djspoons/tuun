@@ -133,6 +133,7 @@ fn played(
 ) -> String {
     match plays {
         Plays::Waveform(w, _) => format!("Waveform:{:?}", w),
+        Plays::Provider => "Provider".to_string(),
         Plays::Sequence(sequence) => {
             format!("{:?} {:?}", sequence.steps, sequence.step_waveform)
         }

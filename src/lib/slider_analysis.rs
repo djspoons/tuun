@@ -35,7 +35,8 @@ pub struct Reached {
 /// What [`analyze`] finds.
 #[derive(Debug)]
 pub struct Analysis<S> {
-    /// Each slider the program can reach, once, in the order the text reaches
+    /// Each slider the program can reach, or provides when it is a
+    /// [`Role::Provides`] function, once, in the order the text reaches
     /// its first call: by where the outermost call in progress around it was
     /// written, then the next one in, and so on, and last where the `slider`
     /// call itself was written.
@@ -50,8 +51,8 @@ pub struct Program<'a, M, S> {
     pub bindings: &'a [SourceBinding<M, S>],
     /// The program's text, parsed.
     pub expr: &'a SourceExpr<M, S>,
-    /// Whether the program is a keys instrument, to be applied to each note.
-    pub keys: bool,
+    /// What the program's value is for.
+    pub role: Role,
     /// The listing bindings code is written in.
     pub listings: Listings<S>,
     /// The id of the played program as a provider. When the program's own
@@ -61,6 +62,18 @@ pub struct Program<'a, M, S> {
     pub name: &'a dyn Fn(usize) -> String,
     /// Where the annotation of the listing with each id is.
     pub annotation: &'a dyn Fn(usize) -> Option<Span<S>>,
+}
+
+/// What a program's value is for, as [`analyze`] checks it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Role {
+    /// It plays.
+    Plays,
+    /// It is a keys instrument, applied to each note.
+    Keys,
+    /// It is a function that provides the sliders its own listing lists to
+    /// its callers, checked as a listing binding is from its value alone.
+    Provides,
 }
 
 /// The most evaluation steps a check takes before it gives up.
@@ -96,7 +109,7 @@ const FUEL: u64 = 20_000_000;
 /// use tuun::expr::Error;
 /// use tuun::parser;
 /// use tuun::slider::Listings;
-/// use tuun::slider_analysis::{self, Program};
+/// use tuun::slider_analysis::{self, Program, Role};
 ///
 /// let mut prelude = Vec::new();
 /// builtins::add_bindings::<u32, u32>(&mut prelude);
@@ -104,7 +117,7 @@ const FUEL: u64 = 20_000_000;
 /// let program = Program {
 ///     bindings: &prelude,
 ///     expr: &expr,
-///     keys: false,
+///     role: Role::Plays,
 ///     listings: Listings::new(|_| None),
 ///     played: 7,
 ///     name: &|_| "the program".to_string(),
@@ -368,17 +381,25 @@ where
         let Ok(value) = self.eval(program.expr, &env, &scope) else {
             return;
         };
-        if program.keys {
-            // Each note applies the instrument afresh, outside the program's
-            // evaluation.
-            let note = vec![unknown(vec![Origin::Key]), unknown(vec![Origin::Velocity])];
-            let _ = self.apply(
-                value,
-                note,
-                Vec::new(),
-                &Call::nowhere(),
-                &Scope::new(Mode::Program),
-            );
+        match program.role {
+            Role::Plays => {}
+            Role::Keys => {
+                // Each note applies the instrument afresh, outside the
+                // program's evaluation.
+                let note = vec![unknown(vec![Origin::Key]), unknown(vec![Origin::Velocity])];
+                let _ = self.apply(
+                    value,
+                    note,
+                    Vec::new(),
+                    &Call::nowhere(),
+                    &Scope::new(Mode::Program),
+                );
+            }
+            Role::Provides => {
+                if let Some(listing) = code.and_then(|code| self.listings.find(code)) {
+                    self.check_alone(listing, &value);
+                }
+            }
         }
     }
 
@@ -1047,8 +1068,12 @@ where
                 self.specs.insert(key.clone(), spec.clone());
             }
         }
-        if scope.mode != Mode::Program {
-            return;
+        // What the played program provides when checked alone is what it
+        // gives its callers, so it counts too.
+        match &scope.mode {
+            Mode::Program => {}
+            Mode::Alone(listing) if listing.id == self.played => {}
+            Mode::Alone(_) => return,
         }
         let (provider, label) = key;
         let mut order = (*scope.sites).clone();
@@ -1763,7 +1788,7 @@ mod tests {
         let program = Program {
             bindings: &bindings,
             expr: &expr,
-            keys: true,
+            role: Role::Keys,
             listings: Listings::new(|_| None),
             played: 0,
             name: &|_| "the instrument".to_string(),

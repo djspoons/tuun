@@ -65,7 +65,7 @@ fn waveform(set: &ProgramSet, index: usize) -> Result<Waveform<MarkId>, Vec<Diag
     match environment().evaluate_program(&set.evaluation_input(index))? {
         Plays::Waveform(waveform, _) => Ok(waveform),
         Plays::Sequence(sequence) => Ok(sequence.step_waveform),
-        Plays::KeysInstrument(_) => panic!("expected a waveform"),
+        Plays::KeysInstrument(_) | Plays::Provider => panic!("expected a waveform"),
     }
 }
 
@@ -547,6 +547,48 @@ fn a_listing_binding_provides_what_is_reached_through_it() {
         reachable(&source, 2),
         ["cutoff of A:3 = 800 (100 to 11000, exp)"]
     );
+}
+
+#[test]
+fn a_listing_function_provides_its_sliders_and_plays_nothing() {
+    let source = example(LISTS, PLAIN);
+    assert_eq!(check(&source, 0), Vec::<String>::new());
+    assert_eq!(
+        reachable(&source, 0),
+        ["cutoff of A:1 = 800 (100 to 11000, exp)"]
+    );
+    match processing::process(&environment(), &set(&source).evaluation_input(0)) {
+        Outcome::Evaluated(evaluated, _) => assert!(matches!(evaluated.plays, Plays::Provider)),
+        other => panic!("expected a provider: {other:?}"),
+    }
+}
+
+#[test]
+fn a_listing_function_that_doesnt_provide_an_entry_is_an_error() {
+    let source = format!(
+        "open slider_lib;\n\
+         #{{sliders=[\"cutoff\", \"gone\"]}}\n\
+         delayed_pad = fn(freq) => pad(freq);\n\
+         #{{{LISTS}}}\n\
+         alias = pad;\n"
+    );
+    assert_eq!(
+        check(&source, 0),
+        ["2:3: A:1 (delayed_pad) lists slider \"gone\", but provides no slider \"gone\""]
+    );
+    // An alias's code is written elsewhere, so it provides nothing.
+    assert_eq!(
+        check(&source, 1),
+        ["4:3: A:2 (alias) lists slider \"cutoff\", but provides no slider \"cutoff\""]
+    );
+    assert_eq!(reachable(&source, 1), Vec::<String>::new());
+}
+
+#[test]
+fn a_function_that_lists_nothing_doesnt_play() {
+    let source = format!("#{{{PLAIN}}}\nf = fn(x) => x * 2;\n");
+    assert_eq!(check(&source, 0).len(), 1, "{:?}", check(&source, 0));
+    assert!(provider(&source, 0).is_err());
 }
 
 #[test]
