@@ -351,28 +351,33 @@ fn call_site<M, S: Clone>(span: &Option<Span<S>>, function: &SourceExpr<M, S>) -
     })
 }
 
-/// The user-function calls in progress at some point of an evaluation: where
-/// each was written, innermost first.
+/// The code running at some point of an evaluation, innermost first: for each
+/// user-function call in progress, where its function and the call were
+/// written, and then the expression being evaluated.
 ///
-/// Calls with no written site, such as a built-in applying a function it was
-/// passed, are not on the path.
+/// A function a built-in applies is running code like any other, though that
+/// call was written nowhere.
 #[derive(Debug)]
 pub struct CallPath<S>(Option<Arc<Frame<S>>>);
 
-/// One call on a [`CallPath`] and the calls it is inside of.
+/// One piece of running code on a [`CallPath`] and the code it runs inside of.
 #[derive(Debug)]
 struct Frame<S> {
-    site: Span<S>,
+    /// Where the code was written, if it was.
+    code: Option<Span<S>>,
+    /// Where the call that runs it was written, if it was.
+    site: Option<Span<S>>,
     outer: CallPath<S>,
 }
 
 impl<S> CallPath<S> {
-    /// Returns the path with no calls in progress.
+    /// Returns the path with no code running.
     pub fn empty() -> CallPath<S> {
         CallPath(None)
     }
 
-    /// Returns this path with the call at `site` in progress inside it.
+    /// Returns this path with the code written at `code` running inside it,
+    /// run by a call written at `site`.
     ///
     /// # Example
     ///
@@ -380,21 +385,40 @@ impl<S> CallPath<S> {
     /// use tuun::eval::CallPath;
     /// use tuun::expr::Span;
     ///
-    /// let path = CallPath::empty().enter(Span::new((), 0..5)).enter(Span::new((), 9..12));
+    /// // An expression at 0..20 calls the function at 30..40 from 5..9, and
+    /// // that function is applied again by a call written nowhere.
+    /// let path = CallPath::empty()
+    ///     .enter(Some(Span::new((), 0..20)), None)
+    ///     .enter(Some(Span::new((), 30..40)), Some(Span::new((), 5..9)))
+    ///     .enter(Some(Span::new((), 30..40)), None);
+    /// let code: Vec<_> = path.code().map(|span| span.range.clone()).collect();
+    /// assert_eq!(code, [30..40, 30..40, 0..20]);
     /// let sites: Vec<_> = path.sites().map(|span| span.range.clone()).collect();
-    /// assert_eq!(sites, [9..12, 0..5]);
+    /// assert_eq!(sites, [5..9]);
     /// ```
-    pub fn enter(&self, site: Span<S>) -> CallPath<S> {
+    pub fn enter(&self, code: Option<Span<S>>, site: Option<Span<S>>) -> CallPath<S> {
         CallPath(Some(Arc::new(Frame {
+            code,
             site,
             outer: self.clone(),
         })))
     }
 
-    /// Returns where each call in progress was written, innermost first.
+    /// Returns where each piece of running code was written, innermost first,
+    /// skipping any written nowhere.
+    pub fn code(&self) -> impl Iterator<Item = &Span<S>> {
+        self.frames().filter_map(|frame| frame.code.as_ref())
+    }
+
+    /// Returns where each call in progress was written, innermost first,
+    /// skipping any written nowhere.
     pub fn sites(&self) -> impl Iterator<Item = &Span<S>> {
+        self.frames().filter_map(|frame| frame.site.as_ref())
+    }
+
+    /// Returns the frames on the path, innermost first.
+    fn frames(&self) -> impl Iterator<Item = &Frame<S>> {
         std::iter::successors(self.0.as_deref(), |frame| frame.outer.0.as_deref())
-            .map(|frame| &frame.site)
     }
 }
 
@@ -405,8 +429,8 @@ impl<S> Clone for CallPath<S> {
 }
 
 /// A built-in application as the built-in sees it: where the call was written,
-/// the traces of its function expression and its arguments, and the
-/// user-function calls in progress around it.
+/// the traces of its function expression and its arguments, and the code
+/// running around it.
 // TODO is this the right place for this? maybe trace.rs?
 pub struct BuiltInCall<S> {
     span: Option<Span<S>>,
@@ -417,7 +441,7 @@ pub struct BuiltInCall<S> {
 
 impl<S: Clone> BuiltInCall<S> {
     /// Returns the call at `span` of a function expression whose trace is
-    /// `head` to `arguments`, with no user-function calls in progress.
+    /// `head` to `arguments`, with no code running around it.
     pub fn new<M: CarriesTrace<S>>(
         span: Option<Span<S>>,
         head: Trace<S>,
@@ -439,7 +463,7 @@ impl<S: Clone> BuiltInCall<S> {
         self.span.as_ref()
     }
 
-    /// Returns the user-function calls in progress around this call.
+    /// Returns the code running around this call.
     pub fn path(&self) -> &CallPath<S> {
         &self.path
     }
@@ -482,7 +506,7 @@ pub fn embed<M: CarriesTrace<S>, S: Clone>(argument: SourceExpr<M, S>) -> Expr<M
 }
 
 /// Applies the built-in `builtin` to `arguments` in a call at `span` whose
-/// function expression has the trace `head` inside the calls on `path`.
+/// function expression has the trace `head` inside the code on `path`.
 fn apply_builtin<M, S>(
     builtin: &BuiltInFn<M, S>,
     arguments: Vec<SourceExpr<M, S>>,
@@ -630,11 +654,12 @@ fn push_step_into_parts<M: CarriesTrace<S>, S: Clone>(
     }
 }
 
-/// Evaluates a closed expression to a value inside the user-function calls on
-/// `path`. Closed expressions do not contain variables.
+/// Evaluates a closed expression to a value inside the code on `path`. Closed
+/// expressions do not contain variables.
 ///
-/// With an empty `path`, equivalent to [`evaluate`] with no bindings and a
-/// resolver that always fails, but skips the needless substitution pass.
+/// With a `path` holding only where `expr` was written, equivalent to
+/// [`evaluate`] with no bindings and a resolver that always fails, but skips
+/// the needless substitution pass.
 ///
 /// The result's spans are provenance (see [`SourceExpr`]): an expression that
 /// is already a value keeps its span, an extracted sub-value (a chosen branch,
@@ -790,12 +815,10 @@ where
                         context.push((name.clone(), value));
                     }
                     let body = substitute(&mut context, *body)?;
-                    // The body runs with this call in progress. Its arguments
-                    // were evaluated above, outside it.
-                    let result = match &site {
-                        Some(site) => evaluate_closed(body, &path.enter(site.clone()))?,
-                        None => evaluate_closed(body, path)?,
-                    };
+                    // The body runs as code written where the function was,
+                    // whoever applies it. Its arguments were evaluated above,
+                    // outside it.
+                    let result = evaluate_closed(body, &path.enter(function.span, site.clone()))?;
                     Ok(match site {
                         Some(site) => push_step(result, &Step::Call(site)),
                         None => result,
@@ -986,8 +1009,9 @@ where
     M: Clone + Display + Debug + CarriesTrace<S>,
     S: Clone + Debug,
 {
+    let code = expr.span.clone();
     let expr = substitute(context, expr)?;
-    evaluate_closed(expr, &CallPath::empty())
+    evaluate_closed(expr, &CallPath::empty().enter(code, None))
 }
 
 /// The modules one evaluation of bindings loads: how it resolves them, the
@@ -1098,7 +1122,8 @@ where
             }
             Binding::Definition(pattern, def_expr) => {
                 let substituted = substitute(context, def_expr.clone())?;
-                let value = evaluate_closed(substituted, &CallPath::empty())?;
+                let path = CallPath::empty().enter(def_expr.span.clone(), None);
+                let value = evaluate_closed(substituted, &path)?;
                 let before = context.len();
                 extend_context(context, pattern, value)?;
                 own.extend(before..context.len());
@@ -1678,8 +1703,8 @@ mod tests {
         }
     }
 
-    /// Tests of the user-function calls in progress that evaluation hands
-    /// built-ins, against stand-in built-ins.
+    /// Tests of the running code that evaluation hands built-ins, against
+    /// stand-in built-ins.
     mod call_paths {
         use super::*;
         use crate::parser::{parse_module, parse_program};
@@ -1697,8 +1722,9 @@ mod tests {
 
         /// The stand-in built-ins: `here(x)` returns where each call in
         /// progress around it was written, as a list of `"Program 3 9"`
-        /// strings; `first(a, b)` hands back `a`; and `apply(f)` applies `f`
-        /// to 1.
+        /// strings; `running(x)` returns where each piece of code running
+        /// around it was written, in the same form; `first(a, b)` hands back
+        /// `a`; and `apply(f)` applies `f` to 1.
         fn stand_ins() -> Vec<SourceBinding<u32, Text>> {
             fn def(name: &str, f: StandIn) -> SourceBinding<u32, Text> {
                 SourceBinding::definition(
@@ -1709,14 +1735,20 @@ mod tests {
                     }),
                 )
             }
+            fn spans<'a>(
+                call: &BuiltInCall<Text>,
+                spans: impl Iterator<Item = &'a Span<Text>>,
+            ) -> Result<Value, Error<Text>> {
+                let spans = spans.map(|span| {
+                    let text = format!("{:?} {} {}", span.source, span.range.start, span.range.end);
+                    call.computed(Expr::String(text))
+                });
+                Ok(call.assembled(Expr::List(spans.collect())))
+            }
             vec![
-                def("here", |_arguments, call| {
-                    let sites = call.path().sites().map(|site| {
-                        let text =
-                            format!("{:?} {} {}", site.source, site.range.start, site.range.end);
-                        call.computed(Expr::String(text))
-                    });
-                    Ok(call.assembled(Expr::List(sites.collect())))
+                def("here", |_arguments, call| spans(call, call.path().sites())),
+                def("running", |_arguments, call| {
+                    spans(call, call.path().code())
                 }),
                 def("first", |mut arguments, _call| {
                     arguments.truncate(1);
@@ -1732,12 +1764,14 @@ mod tests {
         }
 
         /// A library function that calls `here` in an argument to another
-        /// built-in, and one that calls it.
+        /// built-in, one that calls it, and one that calls `running`.
         const LIBRARY: &str = "pad = fn(v) => first(here(v), v);\n\
-                               lib_pad = fn(v) => pad(v);\n";
+                               lib_pad = fn(v) => pad(v);\n\
+                               run_pad = fn(v) => first(running(v), v);\n";
 
-        /// Returns the text of each call in progress where `program` calls
-        /// `here`, innermost first, with `lib` standing for library text.
+        /// Returns the text at each span the call of `here` or `running`
+        /// that `program` reaches returns, innermost first, with `lib`
+        /// standing for library text.
         fn path_of(program: &str) -> Vec<std::string::String> {
             let prelude = stand_ins();
             let (mut library, errors) = parse_module(LIBRARY, Text::Library).unwrap();
@@ -1802,6 +1836,26 @@ mod tests {
             assert_eq!(
                 path_of("let outer = fn(x) => apply(fn(y) => pad(y)) in outer(1)"),
                 ["pad(y)", "outer(1)"]
+            );
+        }
+
+        #[test]
+        fn running_code_is_on_the_path_innermost_first() {
+            assert_eq!(
+                path_of("let f = fn(x) => run_pad(x) in f(1)"),
+                [
+                    "lib fn(v) => first(running(v), v)",
+                    "fn(x) => run_pad(x)",
+                    "let f = fn(x) => run_pad(x) in f(1)",
+                ]
+            );
+        }
+
+        #[test]
+        fn a_function_a_built_in_applies_is_running_code() {
+            assert_eq!(
+                path_of("apply(fn(y) => running(y))"),
+                ["fn(y) => running(y)", "apply(fn(y) => running(y))"]
             );
         }
 

@@ -43,19 +43,20 @@ pub struct Owners {
 
 impl Owners {
     /// Returns the index of the slot that owns `call`'s slider: the one slot
-    /// on the call's path that lists its label, or the played program if no
-    /// slot on the path does.
+    /// whose text holds the call or code running around it (see
+    /// [`slider::SliderCall::code`]) that lists its label, or the played
+    /// program if no such slot does.
     ///
-    /// A span on the path names the played program when it is in that
-    /// program's own text, and names a slot when it is in that slot's text in
-    /// the backing file. A span in a module names no slot. Returns an error at
-    /// each listing when two or more slots on the path list the label.
+    /// A span names the played program when it is in that program's own text,
+    /// and names a slot when it is in that slot's text in the backing file. A
+    /// span in a module names no slot. Returns an error at each listing when
+    /// two or more such slots list the label.
     pub fn owner(
         &self,
         call: &slider::SliderCall<Source>,
     ) -> Result<usize, Vec<expr::Error<Source>>> {
         let mut listing: Vec<&OwnerSlot> = Vec::new();
-        for slot in call.spans().filter_map(|span| self.slot(span)) {
+        for slot in call.code().filter_map(|span| self.slot(span)) {
             if slot.listed.contains(&call.label) && !listing.iter().any(|s| s.index == slot.index) {
                 listing.push(slot);
             }
@@ -233,7 +234,7 @@ mod tests {
         }
     }
 
-    /// Returns a call of the slider `label` written at `site`, inside calls
+    /// Returns a call of the slider `label` written at `site`, inside code
     /// written at `path`, outermost first.
     fn call(
         label: &str,
@@ -245,14 +246,14 @@ mod tests {
             label: label.to_string(),
             spec: slider::SliderSpec::new(default, 0.0, 1.0, Curve::Linear).unwrap(),
             site: Some(site),
-            path: path
-                .iter()
-                .fold(CallPath::empty(), |path, site| path.enter(site.clone())),
+            path: path.iter().fold(CallPath::empty(), |path, code| {
+                path.enter(Some(code.clone()), None)
+            }),
         }
     }
 
-    /// A slider call written in a module, inside a call in slot 0's text,
-    /// inside a call in the played program's own text.
+    /// A slider call written in a module, inside a function in slot 0's text,
+    /// inside the played program's own text.
     fn through_slot_0(label: &str) -> slider::SliderCall<Source> {
         call(
             label,

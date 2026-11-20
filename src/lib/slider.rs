@@ -122,8 +122,8 @@ impl Display for SliderSpec {
     }
 }
 
-/// One `slider` call: its label and spec, where it was written, and the
-/// user-function calls in progress around it.
+/// One `slider` call: its label and spec, where it was written, and the code
+/// running around it.
 #[derive(Debug)]
 pub struct SliderCall<S> {
     pub label: String,
@@ -133,10 +133,10 @@ pub struct SliderCall<S> {
 }
 
 impl<S> SliderCall<S> {
-    /// Returns where the call was written, then where each call in progress
-    /// around it was written, innermost first.
-    pub fn spans(&self) -> impl Iterator<Item = &expr::Span<S>> {
-        self.site.iter().chain(self.path.sites())
+    /// Returns where the call was written, then where each piece of code
+    /// running around it was written, innermost first.
+    pub fn code(&self) -> impl Iterator<Item = &expr::Span<S>> {
+        self.site.iter().chain(self.path.code())
     }
 
     /// Returns the offset where each call in progress around the call was
@@ -148,7 +148,12 @@ impl<S> SliderCall<S> {
     // TODO this is a little arbitrary, but at least stable... maybe something
     // else is better?
     pub fn text_order(&self) -> Vec<usize> {
-        let mut offsets: Vec<usize> = self.spans().map(|span| span.range.start).collect();
+        let mut offsets: Vec<usize> = self
+            .site
+            .iter()
+            .chain(self.path.sites())
+            .map(|span| span.range.start)
+            .collect();
         offsets.reverse();
         offsets
     }
@@ -248,7 +253,7 @@ mod tests {
             spec: SliderSpec::new(0.5, 0.0, 1.0, Curve::Linear).unwrap(),
             site: Some(expr::Span::new((), site..site + 1)),
             path: path.iter().fold(eval::CallPath::empty(), |path, &at| {
-                path.enter(expr::Span::new((), at..at + 1))
+                path.enter(None, Some(expr::Span::new((), at..at + 1)))
             }),
         };
         // Written at 30, inside a call at 5 inside a call at 20.
@@ -260,14 +265,21 @@ mod tests {
     }
 
     #[test]
-    fn a_call_spans_its_site_first() {
+    fn a_call_is_inside_its_running_code() {
         let call = SliderCall {
             label: "mix".to_string(),
             spec: SliderSpec::new(0.5, 0.0, 1.0, Curve::Linear).unwrap(),
             site: Some(expr::Span::new((), 3..8)),
-            path: eval::CallPath::empty(),
+            path: eval::CallPath::empty()
+                .enter(Some(expr::Span::new((), 0..20)), None)
+                .enter(
+                    Some(expr::Span::new((), 30..40)),
+                    Some(expr::Span::new((), 2..9)),
+                ),
         };
-        let spans: Vec<_> = call.spans().collect();
-        assert_eq!(spans, [&expr::Span::new((), 3..8)]);
+        let code: Vec<_> = call.code().map(|span| span.range.clone()).collect();
+        assert_eq!(code, [3..8, 30..40, 0..20]);
+        // Where calls were written orders the call, not where code was.
+        assert_eq!(call.text_order(), [2, 3]);
     }
 }

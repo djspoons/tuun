@@ -261,6 +261,25 @@ fn a_slider_passed_into_a_listing_binding_is_the_callers() {
 }
 
 #[test]
+fn a_function_a_listing_binding_applies_is_its_own_however_it_applies_it() {
+    // Directly, and through a built-in, whose own application of the function
+    // is written nowhere.
+    for apply in ["f(220)", "{map(f, [220])}"] {
+        let source = format!(
+            "#{{{LISTS}}}\n\
+             play = fn(f) => {apply};\n\
+             #{{{PLAIN}}}\n\
+             _ = play(fn(freq) => (time * freq) * slider(\"cutoff\", 800, 100, 11000));\n"
+        );
+        assert_eq!(
+            owner(&source, 1),
+            Ok(vec!["cutoff of A:1 = 800".to_string()]),
+            "{apply}"
+        );
+    }
+}
+
+#[test]
 fn an_alias_binding_is_not_on_the_path() {
     let source = format!(
         "open slider_lib;\n\
