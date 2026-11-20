@@ -1724,3 +1724,174 @@ fn same_constant<M: CarriesTrace<S>, S>(a: &SourceExpr<M, S>, b: &SourceExpr<M, 
         ),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::parse_program;
+
+    /// Returns a built-in named `name` that returns its first argument.
+    fn stand_in(name: &str) -> SourceBinding<u32, ()> {
+        SourceBinding::definition(
+            Pattern::Identifier(name.to_string()),
+            SourceExpr::from(Expr::BuiltIn {
+                name: name.to_string(),
+                function: BuiltInFn::new(|arguments: Vec<SourceExpr<u32, ()>>, _call| {
+                    arguments
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| Error::internal_here("expected an argument"))
+                }),
+            }),
+        )
+    }
+
+    /// Returns stand-ins for the built-ins the check applies itself, which it
+    /// knows only by name, and for the operators `>` and `*`.
+    fn prelude() -> Vec<SourceBinding<u32, ()>> {
+        ["slider", "map", "reduce", "unfold", ">", "*"]
+            .into_iter()
+            .map(stand_in)
+            .collect()
+    }
+
+    /// Checks the keys instrument `source` under [`prelude`], with no modules
+    /// or listings.
+    fn check_keys(source: &str) -> Analysis<()> {
+        let bindings = prelude();
+        let expr = parse_program::<u32, _>(source, ()).unwrap();
+        let program = Program {
+            bindings: &bindings,
+            expr: &expr,
+            keys: true,
+            listings: Listings::new(|_| None),
+            played: 0,
+            name: &|_| "the instrument".to_string(),
+            annotation: &|_| None,
+        };
+        analyze(|_| Err(Error::eval_here("no modules")), &program)
+    }
+
+    /// Returns the messages of `analysis`'s errors.
+    fn messages(analysis: &Analysis<()>) -> Vec<&str> {
+        analysis.errors.iter().map(Error::message).collect()
+    }
+
+    /// Returns the labels of the sliders `analysis` reached.
+    fn labels(analysis: &Analysis<()>) -> Vec<&str> {
+        analysis.reached.iter().map(|r| r.label.as_str()).collect()
+    }
+
+    const DEPENDS_ON_KEY: &str =
+        "slider \"q\"'s default depends on the key a note plays, which isn't known until it plays";
+
+    #[test]
+    fn reducing_a_list_the_note_chooses_depends_on_the_note() {
+        // The step returns its accumulator unchanged, but the result still
+        // depends on how many steps the note's list takes.
+        let analysis = check_keys("fn(k, v) => slider(\"q\", reduce(fn(acc, x) => acc, 0.5, k))");
+        assert_eq!(messages(&analysis), [DEPENDS_ON_KEY]);
+    }
+
+    #[test]
+    fn a_function_a_later_step_builds_is_applied_with_the_result() {
+        // Only the first step's result holds the closure that calls `slider`.
+        let analysis = check_keys(
+            "fn(k, v) => reduce(fn(f, x) => fn(y) => slider(\"q\", 0.5) * f(y), fn(y) => y, k)(1)",
+        );
+        assert_eq!(messages(&analysis), Vec::<&str>::new());
+        assert_eq!(labels(&analysis), ["q"]);
+    }
+
+    #[test]
+    fn steps_that_build_the_same_function_afresh_stop() {
+        // Each step builds a new closure with the same body, which covers the
+        // last; otherwise the steps would go on until the check ran out of
+        // fuel.
+        let analysis = check_keys(
+            "fn(k, v) => unfold(fn(f) => fn(y) => f(y) * slider(\"q\", 0.5), fn(y) => y, k)",
+        );
+        assert_eq!(messages(&analysis), Vec::<&str>::new());
+    }
+
+    /// Returns a new closure of no parameters with `body`.
+    fn closure<'a>(body: &'a SourceExpr<u32, ()>) -> Rc<Closure<'a, u32, ()>> {
+        Rc::new(Closure {
+            positional: &[],
+            named: Vec::new(),
+            body,
+            env: Env::Top(Weak::new(), 0),
+            code: None,
+        })
+    }
+
+    /// Returns an unknown value from `origins` that may be any of `closures`.
+    fn calling<'a>(
+        origins: &[Origin],
+        closures: &[&Rc<Closure<'a, u32, ()>>],
+    ) -> Value<'a, u32, ()> {
+        Value::Unknown(Rc::new(Unknown {
+            origins: origins.to_vec(),
+            callees: closures
+                .iter()
+                .map(|&closure| Callee::Closure(closure.clone()))
+                .collect(),
+        }))
+    }
+
+    #[test]
+    fn covering_compares_closures_by_where_they_were_written() {
+        let (one, two) = (SourceExpr::float(1.0), SourceExpr::float(2.0));
+        let (first, again, other) = (closure(&one), closure(&one), closure(&two));
+        let acc = calling(&[Origin::Key], &[&first]);
+        assert!(covers(&acc, &calling(&[Origin::Key], &[&again])));
+        assert!(!covers(&acc, &calling(&[Origin::Key], &[&other])));
+        assert!(!covers(&acc, &calling(&[Origin::Velocity], &[&again])));
+        assert!(covers(
+            &calling(&[Origin::Key, Origin::Velocity], &[&first, &other]),
+            &acc
+        ));
+    }
+
+    #[test]
+    fn branches_the_note_chooses_between_that_agree_are_known() {
+        let analysis = check_keys("fn(k, v) => slider(\"q\", if k > 60 then 0.5 else 0.5)");
+        assert_eq!(messages(&analysis), Vec::<&str>::new());
+        assert_eq!(labels(&analysis), ["q"]);
+    }
+
+    #[test]
+    fn branches_the_note_chooses_between_that_differ_depend_on_the_note() {
+        let analysis = check_keys("fn(k, v) => slider(\"q\", if k > 60 then 0.4 else 0.5)");
+        assert_eq!(messages(&analysis), [DEPENDS_ON_KEY]);
+    }
+
+    #[test]
+    fn a_failing_branch_leaves_the_other_branch() {
+        let analysis = check_keys("fn(k, v) => slider(\"q\", if k > 60 then 0.4 else missing)");
+        assert_eq!(messages(&analysis), Vec::<&str>::new());
+        assert_eq!(labels(&analysis), ["q"]);
+    }
+
+    #[test]
+    fn branches_merge_part_by_part() {
+        let pair = "if k > 60 then (0.5, 0.1) else (0.5, 0.2)";
+        let agreeing = check_keys(&format!(
+            "fn(k, v) => let (a, b) = {pair} in slider(\"q\", a)"
+        ));
+        assert_eq!(messages(&agreeing), Vec::<&str>::new());
+        let differing = check_keys(&format!(
+            "fn(k, v) => let (a, b) = {pair} in slider(\"q\", b)"
+        ));
+        assert_eq!(messages(&differing), [DEPENDS_ON_KEY]);
+    }
+
+    #[test]
+    fn branches_the_note_chooses_between_apply_each_function() {
+        let analysis = check_keys(
+            "fn(k, v) => (if k > 60 then fn(x) => slider(\"a\", x) else fn(x) => slider(\"b\", x))(0.5)",
+        );
+        assert_eq!(messages(&analysis), Vec::<&str>::new());
+        assert_eq!(labels(&analysis), ["a", "b"]);
+    }
+}

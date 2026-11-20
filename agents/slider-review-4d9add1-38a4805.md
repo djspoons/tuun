@@ -60,6 +60,8 @@ The "list it on a shared helper" pattern that the provider errors steer users to
 
 `src/lib/slider_analysis.rs` (about 1,700 lines) has no unit tests. Its coverage is the integration tests (`tests/integration/slider.rs`), the soundness fuzz (`slider_soundness_fuzz` in `tests/integration/checker_fuzz.rs`) and one doc example, all using the real built-ins. The repeat-until-stable logic (`iterate` / `covers`) and `join` / `merge` are the subtle parts. A few unit tests with stand-in built-ins would pin them down independently of the prelude, per CLAUDE.md.
 
+**Addressed:** `slider_analysis` has unit tests of `covers`, `iterate` (through `reduce` and `unfold`), and `join`/`merge` (through `if` on a note), with stand-ins for the built-ins and operators the check knows by name. Each test was checked to fail when the logic it pins is broken.
+
 ## Minor
 
 - **Sliders are never forgotten.** `ProgramSet::sliders` keeps every slider ever reached. After A:2 stops using `pad`, A:1's encoder still shows and moves a "cutoff" that nothing reads.
