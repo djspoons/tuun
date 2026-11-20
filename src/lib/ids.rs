@@ -100,7 +100,7 @@ pub enum MarkId {
         label: String,
     },
     /// A slider the program being played provides, until the waveform
-    /// becomes a program's (see [`MarkId::provided_by`]).
+    /// becomes a program's (see [`crate::slider_providers::provide`]).
     PlayedSlider {
         label: String,
     },
@@ -109,17 +109,6 @@ pub enum MarkId {
     MetronomeAmplitude, // used to set the level of the metronome click
     /// Records which program text built the waveform it marks.
     Trace(TraceRef),
-}
-
-impl MarkId {
-    /// Returns this mark id as it is in a waveform the program at `program`
-    /// plays: a slider the played program provides is that program's.
-    pub fn provided_by(self, program: usize) -> MarkId {
-        match self {
-            MarkId::PlayedSlider { label } => MarkId::Slider { program, label },
-            id => id,
-        }
-    }
 }
 
 impl fmt::Display for MarkId {

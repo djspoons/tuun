@@ -40,6 +40,7 @@ The "list it on a shared helper" pattern that the provider errors steer users to
 
 - **Two `Reached` types.** `slider_analysis::Reached` (with a `Provider`) and `slider_providers::Reached` (with a slot index) differ only by the `index` closure in `analyze_sliders`. If `slider_analysis::Program` took the played slot's index, the analysis could report slot indices directly, and one type and that mapping would go away. `Played` vs `Listing` is still needed in evaluation, as the placeholder for bindings that are evaluated once and shared, but not in what the analysis returns.
 - **Dead code.** `MarkId::provided_by` (`src/lib/ids.rs:117`) is never called; `slider_providers::provide` does the same job. The doc comment on `PlayedSlider` links to the dead one.
+  **Addressed:** removed; `PlayedSlider`'s doc links to `slider_providers::provide`.
 - **`apply_note_function` returns `Vec<Error>` but never more than one error.** That's left over from the runtime resolution. Going back to a single error removes the diagnostic-collecting code in both `effects.rs` callers.
 - **`DynamicScope::enter`** clones the providers list and allocates the labels on every closure entry into a listing's text, even when the listing already provides them. Return early when nothing changes. This is minor and only shows up with `map` over large lists.
 
