@@ -46,9 +46,10 @@ It can also be useful to hear the same note repeated, while one or more paramete
 
 <div class="container">
   <tuun-synth description="An instrument with vibrato played every two seconds"
-      sliders='["vibrato_rate:6:2:10"]' open='["std"]' expanded>
+      open='["std"]' expanded>
     <script type="text/tuun">
       let
+        vibrato_rate = slider("vibrato_rate", 6, 2, 10),
         inst = fn(dur, freq_hz) =>
           sine(2 * pi * freq_hz, pow(2, 1/24) * $vibrato_rate)
           | fin(time - dur)
@@ -108,10 +109,13 @@ The example below is configured with an envelope that matches the flute sample. 
   <tuun-synth
     description="ADSR envelope example"
     expanded
-    open='["std", "env.finseq"]'
-    sliders='["attack_dur:0.32:0.0:1.0","decay_dur:0.0:0.0:1.0","sustain_level_db:0.0:-36.0:2.0","release_dur:0.18:0.0:2.0"]'>
+    open='["std", "env.finseq"]'>
     <script type="text/tuun">
       let
+        attack_dur = slider("attack_dur", 0.32, 0, 1),
+        decay_dur = slider("decay_dur", 0, 0, 1),
+        sustain_level_db = slider("sustain_level_db", 0, -36, 2),
+        release_dur = slider("release_dur", 0.18, 0, 2),
         inst = fn(dur, freq_hz) =>
           $freq_hz
           | ADSR(dur, attack_dur, decay_dur, db2amp(sustain_level_db), release_dur)
@@ -132,14 +136,14 @@ The example below mixes two kick-drum-like instruments. Both use a 60 Hz triangl
     description="Exponential decay envelope example"
     expanded
     open='["std"]'
-    use='["env.finseq", "env.expfil"]'
-    sliders='["mix:0:0:1"]'>
+    use='["env.finseq", "env.expfil"]'>
     <script type="text/tuun">
       let
         inst_lin = fn(dur, freq_hz) =>
           triangle(freq_hz) | finseq.R(dur, 1.0),
         inst_exp = fn(dur, freq_hz) =>
           triangle(freq_hz) | expfil.R(dur, 1.0),
+        mix = slider("mix", 0),
       in
         reset($1, (1 - mix) * inst_lin(0.1, 60) + mix * inst_exp(0.1, 60))
     </script>
@@ -167,8 +171,7 @@ The example below uses the amplitude envelope from above and adds in harmonics w
 <div class="container">
   <tuun-synth
     description="Flute using additive synthesis"
-    open='["std", "env.finseq"]'
-    sliders='["fundamental_db:-8.1:-60:6","second_harmonic_db:-11.6:-60:6","third_harmonic_db:-22.9:-60:6","fourth_harmonic_db:-31.7:-60:6","fifth_harmonic_db:-44.1:-60:6","sixth_harmonic_db:-47.8:-60:6"]'>
+    open='["std", "env.finseq"]'>
     <script type="text/tuun">
       let
         flute = fn(dur, freq_hz) => let
@@ -176,12 +179,12 @@ The example below uses the amplitude envelope from above and adds in harmonics w
           release_dur = 0.17,
 
           level_dbs = [
-            fundamental_db,
-            second_harmonic_db,
-            third_harmonic_db,
-            fourth_harmonic_db,
-            fifth_harmonic_db,
-            sixth_harmonic_db
+            slider("fundamental_db", -8.1, -60, 6),
+            slider("second_harmonic_db", -11.6, -60, 6),
+            slider("third_harmonic_db", -22.9, -60, 6),
+            slider("fourth_harmonic_db", -31.7, -60, 6),
+            slider("fifth_harmonic_db", -44.1, -60, 6),
+            slider("sixth_harmonic_db", -47.8, -60, 6)
           ],
           level_amps = map(db2amp, level_dbs),
           level_amps = normalize(1.0)(level_amps),
@@ -211,10 +214,10 @@ As noted above, flutes produce all of the harmonics, so we need to start with a 
   <tuun-synth
     description="Synthesized sawtooth oscillator"
     expanded
-    open='["std"]'
-    sliders='["harmonics:1:1:20"]'>
+    open='["std"]'>
     <script type="text/tuun">
       let
+        harmonics = slider("harmonics", 1, 1, 20),
         over = fn(freq_hz) => fn(n) => clamp01(harmonics - abs(n) + 1) * $(freq_hz * abs(n)) / n,
         // Creates a "synthetic" sawtooth from its Fourier series
         sawtooth = fn(freq_hz) => (2 / pi) * {map(over(freq_hz), [-1, 2, -3, 4, -5, 6, -7, 8, -9, 10, -11, 12, -13, 14, -15, 16, -17, 18, -19, 20])}
@@ -230,10 +233,10 @@ We can then use to to generate a flute instrument by applying an amplitude envel
   <tuun-synth
     description="Flute using &quot;subtractive&quot; synthesis; harmonics control"
     open='["std", "env.finseq"]'
-    use='["filters.rbj"]'
-    sliders='["harmonics:10:1:20"]'>
+    use='["filters.rbj"]'>
     <script type="text/tuun">
       let
+        harmonics = slider("harmonics", 10, 1, 20),
         over = fn(freq_hz) => fn(n) => clamp01(harmonics - abs(n) + 1) * $(freq_hz * abs(n)) / n,
         // Creates a "synthetic" sawtooth from its Fourier series
         sawtooth = fn(freq_hz) => (2 / pi) * {map(over(freq_hz), [-1, 2, -3, 4, -5, 6, -7, 8, -9, 10, -11, 12, -13, 14, -15, 16, -17, 18, -19, 20])},
@@ -265,14 +268,19 @@ Above, the example of a flute synthesized using a sawtooth oscillator "cheats" b
     description="Flute using subtractive synthesis; filter controls"
     expanded
     open='["std", "env.finseq"]'
-    use='["filters.rbj"]'
-    sliders='["low_pass_filter_Q:0.75293773:0.1:1.1","low_pass_filter_cutoff:0.43753:fn(x)=> 200 * pow(100, x)","high_pass_filter_Q:0.69140625:0.1:1.1","high_pass_filter_cutoff:0.41015625:fn(x)=> 100 * pow(100, x)"]'>
+    use='["filters.rbj"]'>
     <script type="text/tuun">
       let
         sawtooth = fn(freq_hz) => 1 - 2 * phase(freq_hz, 0),
         flute = fn(dur, freq_hz) => let
           attack_dur = 0.27,
           release_dur = 0.17,
+
+          low_pass_filter_Q = slider("low_pass_filter_Q", 0.753, 0.1, 1.1),
+          low_pass_filter_cutoff = slider("low_pass_filter_cutoff", 1500, 200, 20000, "exp"),
+
+          high_pass_filter_Q = slider("high_pass_filter_Q", 0.691, 0.1, 1.1),
+          high_pass_filter_cutoff = slider("high_pass_filter_cutoff", 661, 100, 10000, "exp"),
         in
           sawtooth(freq_hz)
           | rbj.lpf2(low_pass_filter_Q, low_pass_filter_cutoff)
@@ -365,15 +373,18 @@ The example below offers two ways to add transients to a short drum sound. The f
     description="Transients example"
     expanded
     open='["std"]'
-    use='["env.expfil"]'
-    sliders='["freq_multiplier:3:1:8","noise_level_db:-60.0:-60.0:2.0","noise_dur:0.0:0.0:1.0"]'>
+    use='["env.expfil"]'>
     <script type="text/tuun">
       let
         inst = fn(dur, freq_hz) => let
             freq_env_dur = 0.02,
+            freq_multiplier = slider("freq_multiplier", 3, 1, 8),
+
             freq_env = max(linear(freq_multiplier, -1/freq_env_dur), 1),
 
+            noise_dur = slider("noise_dur", 0, 0, 1),
             noise_hit = noise | expfil.R(noise_dur, 1.0),
+            noise_level_db = slider("noise_level_db", -60, -60, 2),
           in
             1.5 * triangle(freq_hz * freq_env)
               & db2amp(noise_level_db) * noise_hit

@@ -17,10 +17,10 @@ Square waves are a textbook application of the `Alt` waveform combinator. Using 
 <div class="container">
   <tuun-synth description="Square wave"
       open='["std"]'
-      sliders='["frequency:0.3424:fn(x) => 100 * pow(10, x)"]'
       expanded>
     let
-      square = fn(freq_hz) => alt(phase(freq_hz, 0) - 0.5, -1, 1)
+      square = fn(freq_hz) => alt(phase(freq_hz, 0) - 0.5, -1, 1),
+      frequency = slider("frequency", 220, 100, 1000, "exp"),
     in
       0.2 * square(frequency)
   </tuun-synth>
@@ -40,10 +40,10 @@ You can use the slider to adjust the mix between the two oscillators. (Though ev
 <div class="container">
   <tuun-synth description="Synchronized oscillator" 
       open='["std"]' 
-      sliders='["mix:0.5:0:1"]'
       expanded>
     <script type="text/tuun">
       let
+        mix = slider("mix", 0.5),
         dual = fn(freq_hz) => let 
           osc1 = $(freq_hz),
           osc2 = reset(osc1, $(add_semitones(freq_hz, 8))),
@@ -83,10 +83,10 @@ The example below synchronizes a 10-second frequency sweep to a fixed oscillator
 <div class="container">
   <tuun-synth description="Synchronized oscillator with variable frequency" 
       open='["std"]' 
-      sliders='["mix:1:0:1"]'
       expanded>
     <script type="text/tuun">
       let
+        mix = slider("mix", 1),
         dual = fn(freq_hz) =>
           share(freq_hz + 100 * time, fn(osc2_freq_hz) =>
           // Replace the above line to hear a version without `share`
@@ -109,11 +109,11 @@ Sometimes is useful to repeat a waveform. `Reset` can also be used with a trigge
 <div class="container">
   <tuun-synth description="Repeated waveform" 
       open='["std"]' 
-      sliders='["period_secs:1:0.25:2"]'
       expanded>
     <script type="text/tuun">
       let
-        inst = fn(dur, freq_hz) => $freq_hz | fin(time - dur)
+        inst = fn(dur, freq_hz) => $freq_hz | fin(time - dur),
+        period_secs = slider("period_secs", 1, 0.25, 2),
       in
         reset($(1/period_secs), inst(0.2, 220))
     </script>

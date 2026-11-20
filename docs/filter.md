@@ -87,13 +87,14 @@ It's very easy to provide feedback parameters which cause the output to diverge!
 
 A simple example that uses a feedback filter is an exponential decay envelope. Exponential decay is useful in creating percussion instruments where you want a short, intense burst of sound followed by a fast but smooth drop in amplitude. You can create exponential decay using the exponential function `exp` but it can be computationally cheaper to do so with `filter` instead.
 
- In this example, we create an envelope by combining an impulse with a filter that has a single feedback parameter. You can control `f` with the slider below. (Due to rounding in the display, it will sometimes show "1.00" when the actual value is slightly less than 1.0.) The slider is limited to values less than 1.0, since the filter output diverges when `f` is greater than 1.0.
+ In this example, we create an envelope by combining an impulse with a filter that has a single feedback parameter. You can control `f` with the slider below, which sets `n`, the number of samples it takes the envelope to fall to about a third of its starting value, so that `f = 1 - 1/n`. This keeps `f` less than 1.0, since the filter output diverges when `f` is greater than 1.0.
 
 <div class="container">
   <tuun-synth
-    open='["std"]'
-    sliders='["f:0.5:fn(x) => 1 - pow(10000, -(x+1)/2)"]'>
+    open='["std"]'>
   let
+    n = slider("n", 1000, 100, 10000, "exp"),
+    f = 1 - 1/n,
     env = append(fixed([1]), 0) | filter([1], [-f])
   in
     reset($(1/2), triangle(60) * env | fin(time - 1))
@@ -167,8 +168,7 @@ The example below uses a sample-and-hold filter and `Noise` to generate a random
 
 <div class="container">
   <tuun-synth
-    open='["std"]'
-    sliders='["frequency:0.5:fn(x) => 100 * pow(100, x)"]'>
+    open='["std"]'>
     let
       // RBJ Cookbook low-pass filter
       lpf = fn(Q, f_c) =>
@@ -183,8 +183,9 @@ The example below uses a sample-and-hold filter and `Noise` to generate a random
           a2 =  1 - alpha,
         in
           filter([b0/a0, b1/a0, b2/a0], [a1/a0, a2/a0]),
-      in
-        0.5 * square(220) | lpf(0.707, frequency)
+      frequency = slider("frequency", 1000, 100, 10000, "exp"),
+    in
+      0.5 * square(220) | lpf(0.707, frequency)
   </tuun-synth>
 </div>
 

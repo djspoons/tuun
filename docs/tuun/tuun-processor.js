@@ -22,7 +22,7 @@ class TuunProcessor extends AudioWorkletProcessor {
                     try {
                         this.tuun.install(
                             event.data.expression,
-                            event.data.sliders,
+                            event.data.values,
                             event.data.opens,
                             event.data.uses,
                         );

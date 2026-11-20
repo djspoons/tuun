@@ -229,7 +229,7 @@ sine(w_c + I * w_m * sine(w_m, pi / 2), 0)
 
 The following is an example of an FM tone where the index of modulation `I` is controlled by the slider below. Notice how the number of harmonics generally increases as `I` increases, and some harmonics fade in and out over time.
 <div class="container">
-  <tuun-synth description="FM synthesis tone (index of modulation)" open='["std"]' sliders='["index:0:0:10"]'>
+  <tuun-synth description="FM synthesis tone (index of modulation)" open='["std"]'>
     let
       f_c = 440,
       w_c = 2 * pi * f_c,
@@ -238,7 +238,7 @@ The following is an example of an FM tone where the index of modulation `I` is c
       f_m = D/2 * f_c,
       w_m = 2 * pi * f_m,
 
-      I = index,
+      I = slider("index", 0, 0, 10),
     in
       sine(w_c + I * w_m * sine(w_m, pi / 2), 0)
   </tuun-synth>
@@ -247,7 +247,7 @@ The following is an example of an FM tone where the index of modulation `I` is c
 Though phase offset is difficult to perceive audibly in general, the choice of the phase offset *in the modulator* can have significant effects on the relative strength of the sideband frequencies. (See "The Effect of Modulator Phase on Timbres in FM Synthesis." John A. Bate, in _Computer Music Journal_, Vol. 14 (1990) for a discussion of this and other variations of FM synthesis.) In the following, the index of modulation `I` is held constant while the modulator phase varies over time.
 
 <div class="container">
-  <tuun-synth description="FM synthesis tone (modulator phase)" open='["std"]' sliders='["phi:1.57:0:1.57"]'>
+  <tuun-synth description="FM synthesis tone (modulator phase)" open='["std"]'>
     let
       f_c = 440,
       w_c = 2 * pi * f_c,
@@ -257,6 +257,7 @@ Though phase offset is difficult to perceive audibly in general, the choice of t
       w_m = 2 * pi * f_m,
 
       I = 5,
+      phi = slider("phi", 1.57, 0, 1.57),
     in
       sine(w_c + I * w_m * sine(w_m, phi), 0)
   </tuun-synth>
@@ -279,8 +280,7 @@ First, FM with pulse modulator: `sine(w_c + I * w_m * pulse(width, w_m / (2 * pi
 <!-- TODO use level in db instead of amplitude -->
 <div class="container">
   <tuun-synth description="FM synthesis tone with pulse modulator"
-      open='["std"]'
-      sliders='["width:0.6:0:1"]'>
+      open='["std"]'>
     <script type="text/tuun">
       let
         f_c = 440,
@@ -291,6 +291,7 @@ First, FM with pulse modulator: `sine(w_c + I * w_m * pulse(width, w_m / (2 * pi
         w_m = 2 * pi * f_m,
 
         I = 6,
+        width = slider("width", 0.6),
       in
         sine(w_c + I * w_m * pulse(width, f_m), 0) * 0.5
     </script>
@@ -301,8 +302,7 @@ Second, PM with pulse modulator: `sine(w_c, I * pulse(width, w_m / (2 * pi)))`
 
 <div class="container">
   <tuun-synth description="PM synthesis tone with pulse modulator"
-      open='["std"]'
-      sliders='["width:0.6:0:1"]'>
+      open='["std"]'>
     <script type="text/tuun">
       let
         f_c = 440,
@@ -312,6 +312,7 @@ Second, PM with pulse modulator: `sine(w_c, I * pulse(width, w_m / (2 * pi)))`
         f_m = D/2 * f_c,
 
         I = 6,
+        width = slider("width", 0.6),
       in
         // Use naive_pulse here, since we don't want to do polyBLEP before sin.
         sine(w_c, I * naive_pulse(width, f_m)) * 0.5
