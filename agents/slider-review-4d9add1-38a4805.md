@@ -47,6 +47,7 @@ The "list it on a shared helper" pattern that the provider errors steer users to
 ## Docs and claims
 
 - **The ADR overstates one claim.** Its consequences say "Evaluation never fails on a slider." The `slider` built-in still fails on an invalid spec (`src/lib/builtins.rs`, "A program may be evaluated without the slider check"), so in warnings mode an invalid spec does fail evaluation. The claim needs a carve-out for invalid specs.
+  **Addressed:** the consequence now says evaluation fails on a slider only when its spec is invalid.
 - **The `eval.rs` `providers` test module has two stacked doc summaries.** "Tests of the running code that evaluation hands built-ins…" is left over.
 - **The `slider` built-in's doc comment** has an unwrapped line over 100 characters.
 
