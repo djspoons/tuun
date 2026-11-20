@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::diagnostics::Source;
 use crate::expr::Span;
 use crate::programs;
-use crate::slider::SliderCall;
+use crate::slider::Provider;
 use crate::trace::{CarriesTrace, Trace};
 use crate::tracker;
 
@@ -94,9 +94,14 @@ impl tracker::Id for WaveformId {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum MarkId {
-    /// One slider, qualified by the program slot whose binding declares it.
+    /// One slider, qualified by the program slot that provides it.
     Slider {
         program: usize,
+        label: String,
+    },
+    /// A slider the program being played provides, until the waveform
+    /// becomes a program's (see [`MarkId::provided_by`]).
+    PlayedSlider {
         label: String,
     },
     Amplitude,          // use to set top-level amplitude
@@ -104,8 +109,17 @@ pub enum MarkId {
     MetronomeAmplitude, // used to set the level of the metronome click
     /// Records which program text built the waveform it marks.
     Trace(TraceRef),
-    /// A `slider` call whose owner is not yet known.
-    SliderCall(SliderCallRef),
+}
+
+impl MarkId {
+    /// Returns this mark id as it is in a waveform the program at `program`
+    /// plays: a slider the played program provides is that program's.
+    pub fn provided_by(self, program: usize) -> MarkId {
+        match self {
+            MarkId::PlayedSlider { label } => MarkId::Slider { program, label },
+            id => id,
+        }
+    }
 }
 
 impl fmt::Display for MarkId {
@@ -123,7 +137,7 @@ impl fmt::Display for MarkId {
             MarkId::Terminator => write!(f, "terminator"),
             MarkId::MetronomeAmplitude => write!(f, "metronome"),
             MarkId::Trace(_) => write!(f, "trace"),
-            MarkId::SliderCall(call) => write!(f, "slider(?, {:?})", call.0.label),
+            MarkId::PlayedSlider { label } => write!(f, "slider(played, {:?})", label),
         }
     }
 }
@@ -174,35 +188,12 @@ impl CarriesTrace<Source> for MarkId {
         span.source == Source::Program
     }
 
-    fn from_slider(call: SliderCall<Source>) -> Option<Self> {
-        Some(MarkId::SliderCall(SliderCallRef(Arc::new(call))))
-    }
-}
-
-/// A `slider` call as a mark id carries it: equal and hashed by pointer, so
-/// two mark ids are the same only if they come from one evaluation of one
-/// call.
-#[derive(Clone)]
-pub struct SliderCallRef(pub Arc<SliderCall<Source>>);
-
-impl PartialEq for SliderCallRef {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-
-impl Eq for SliderCallRef {}
-
-impl Hash for SliderCallRef {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        Arc::as_ptr(&self.0).hash(state)
-    }
-}
-
-impl fmt::Debug for SliderCallRef {
-    // The label is enough to tell slider calls apart when debugging.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SliderCall({:?})", self.0.label)
+    fn from_slider(label: &str, provider: Provider) -> Option<Self> {
+        let label = label.to_string();
+        Some(match provider {
+            Provider::Played => MarkId::PlayedSlider { label },
+            Provider::Listing(program) => MarkId::Slider { program, label },
+        })
     }
 }
 

@@ -531,16 +531,13 @@ impl EffectRunner {
                     // TODO use a marked waveform for velocity so we can implement after-touch
                     expr::SourceExpr::float(velocity as f32 / 127.0),
                 ];
-                let owners = state.programs.slider_owners(keys.id);
+                let providers = state.programs.slider_providers(keys.id);
                 match self
                     .environment
-                    .apply_note_function(&keys.function, args, &owners)
+                    .apply_note_function(&keys.function, args, &providers)
                 {
-                    Ok((mut note_on, note_off, marks, sliders)) => {
+                    Ok((mut note_on, note_off, marks)) => {
                         keys.note_off_waveforms.insert(key, note_off);
-                        // Another note may reach sliders the sample note
-                        // didn't.
-                        state.programs.reach(&sliders);
                         // `note_on`'s `Marked(Slider { .. })` nodes hold the
                         // sliders' defaults, so swap in the current values.
                         player::substitute_current_slider_values(&mut note_on, &state.programs);
@@ -675,12 +672,12 @@ impl EffectRunner {
                             expr::SourceExpr::float(SAMPLE_KEY),
                             expr::SourceExpr::float(SAMPLE_VELOCITY),
                         ];
-                        let owners = state.programs.slider_owners(program_index);
+                        let providers = state.programs.slider_providers(program_index);
                         match self
                             .environment
-                            .apply_note_function(&function, args, &owners)
+                            .apply_note_function(&function, args, &providers)
                         {
-                            Ok((note_on, note_off, _marks, _sliders)) => {
+                            Ok((note_on, note_off, _marks)) => {
                                 println!(
                                     "Keys instrument of program {} applied at key {}, velocity {}:",
                                     display_name, SAMPLE_KEY, SAMPLE_VELOCITY

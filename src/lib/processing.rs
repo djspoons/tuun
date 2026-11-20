@@ -171,13 +171,17 @@ pub fn load(
     let mut evaluated = 0;
     let mut failed = Vec::new();
     for index in order {
+        let input = set.evaluation_input(index);
         if let Ok(entries) = &mut context
-            && let Err(error) = environment.extend_context(entries, &used[evaluated..counts[index]])
+            && let Err(error) = environment.extend_context(
+                entries,
+                &used[evaluated..counts[index]],
+                &input.providers,
+            )
         {
             context = Err(error);
         }
         evaluated = counts[index];
-        let input = set.evaluation_input(index);
         let outcome = process_with(environment, &input, || match &mut context {
             Ok(entries) => environment.evaluate_program_in_context(&input, entries),
             // A binding this program uses failed: evaluating from scratch reports

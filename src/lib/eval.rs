@@ -12,6 +12,7 @@ use crate::expr::{
     Binding, BuiltInFn, Error, Expr, NamedExpr, NamedExprs, Pattern, SourceBinding, SourceExpr,
     Span,
 };
+use crate::slider;
 use crate::trace::{self, CarriesTrace, Step, Trace, Via};
 use crate::waveform::{ShareId, Waveform};
 
@@ -351,116 +352,108 @@ fn call_site<M, S: Clone>(span: &Option<Span<S>>, function: &SourceExpr<M, S>) -
     })
 }
 
-/// The code running at some point of an evaluation, innermost first: for each
-/// user-function call in progress, where its function and the call were
-/// written, and then the expression being evaluated.
-///
-/// A function a built-in applies is running code like any other, though that
-/// call was written nowhere.
-#[derive(Debug)]
-pub struct CallPath<S>(Option<Arc<Frame<S>>>);
-
-/// One piece of running code on a [`CallPath`] and the code it runs inside of.
-#[derive(Debug)]
-struct Frame<S> {
-    /// Where the code was written, if it was.
-    code: Option<Span<S>>,
-    /// Where the call that runs it was written, if it was.
-    site: Option<Span<S>>,
-    outer: CallPath<S>,
-}
-
-impl<S> CallPath<S> {
-    /// Returns the path with no code running.
-    pub fn empty() -> CallPath<S> {
-        CallPath(None)
-    }
-
-    /// Returns this path with the code written at `code` running inside it,
-    /// run by a call written at `site`.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use tuun::eval::CallPath;
-    /// use tuun::expr::Span;
-    ///
-    /// // An expression at 0..20 calls the function at 30..40 from 5..9, and
-    /// // that function is applied again by a call written nowhere.
-    /// let path = CallPath::empty()
-    ///     .enter(Some(Span::new((), 0..20)), None)
-    ///     .enter(Some(Span::new((), 30..40)), Some(Span::new((), 5..9)))
-    ///     .enter(Some(Span::new((), 30..40)), None);
-    /// let code: Vec<_> = path.code().map(|span| span.range.clone()).collect();
-    /// assert_eq!(code, [30..40, 30..40, 0..20]);
-    /// let sites: Vec<_> = path.sites().map(|span| span.range.clone()).collect();
-    /// assert_eq!(sites, [5..9]);
-    /// ```
-    pub fn enter(&self, code: Option<Span<S>>, site: Option<Span<S>>) -> CallPath<S> {
-        CallPath(Some(Arc::new(Frame {
-            code,
-            site,
-            outer: self.clone(),
-        })))
-    }
-
-    /// Returns where each piece of running code was written, innermost first,
-    /// skipping any written nowhere.
-    pub fn code(&self) -> impl Iterator<Item = &Span<S>> {
-        self.frames().filter_map(|frame| frame.code.as_ref())
-    }
-
-    /// Returns where each call in progress was written, innermost first,
-    /// skipping any written nowhere.
-    pub fn sites(&self) -> impl Iterator<Item = &Span<S>> {
-        self.frames().filter_map(|frame| frame.site.as_ref())
-    }
-
-    /// Returns the frames on the path, innermost first.
-    fn frames(&self) -> impl Iterator<Item = &Frame<S>> {
-        std::iter::successors(self.0.as_deref(), |frame| frame.outer.0.as_deref())
-    }
-}
-
-impl<S> Clone for CallPath<S> {
-    fn clone(&self) -> Self {
-        CallPath(self.0.clone())
-    }
-}
-
 /// What an evaluation reads from the point it has reached rather than from
-/// the expression there: the code running (see [`CallPath`]) and how many
-/// `share` calls are applying their functions.
-#[derive(Clone, Debug)]
+/// the expression there: which listing binding provides each slider label,
+/// and how many `share` calls are applying their functions.
+///
+/// Entering code written in a listing binding's text (see
+/// [`slider::Listings`]) makes that binding the provider of each label it
+/// lists, until that code returns.
+#[derive(Debug)]
 pub struct DynamicScope<S> {
-    path: CallPath<S>,
+    listings: Option<slider::Listings<S>>,
+    /// Each label a listing provides here, with the listing's id, innermost
+    /// last.
+    providers: Arc<Vec<(String, usize)>>,
     sharing: u32,
 }
 
+impl<S> Clone for DynamicScope<S> {
+    fn clone(&self) -> Self {
+        DynamicScope {
+            listings: self.listings.clone(),
+            providers: self.providers.clone(),
+            sharing: self.sharing,
+        }
+    }
+}
+
 impl<S> Default for DynamicScope<S> {
-    /// Returns the scope with no code running and no `share` call applying
-    /// its function.
+    /// Returns the scope where no code is in any listing binding and no
+    /// `share` call is applying its function.
     fn default() -> Self {
         DynamicScope {
-            path: CallPath::empty(),
+            listings: None,
+            providers: Arc::new(Vec::new()),
             sharing: 0,
         }
     }
 }
 
 impl<S> DynamicScope<S> {
-    /// Returns the code running in this scope.
-    pub fn path(&self) -> &CallPath<S> {
-        &self.path
+    /// Returns the scope where no listing provides anything yet and code is
+    /// in the listing bindings `listings` finds.
+    pub fn new(listings: slider::Listings<S>) -> DynamicScope<S> {
+        DynamicScope {
+            listings: Some(listings),
+            ..DynamicScope::default()
+        }
     }
 
-    /// Returns this scope with the code written at `code` running inside it,
-    /// run by a call written at `site` (see [`CallPath::enter`]).
-    pub fn enter(&self, code: Option<Span<S>>, site: Option<Span<S>>) -> DynamicScope<S> {
+    /// Returns this scope with the code written at `code` running inside it.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use tuun::eval::DynamicScope;
+    /// use tuun::expr::Span;
+    /// use tuun::slider::{Listing, Listings, Provider};
+    ///
+    /// // Code written in 10..20 is in the binding 3, which lists "mix".
+    /// let listings = Listings::new(|span: &Span<()>| {
+    ///     (10..20).contains(&span.range.start).then(|| Listing {
+    ///         id: 3,
+    ///         labels: Arc::from(["mix".to_string()]),
+    ///     })
+    /// });
+    /// let scope = DynamicScope::new(listings);
+    /// assert_eq!(scope.provider("mix"), Provider::Played);
+    /// let inside = scope.enter(Some(&Span::new((), 12..15)));
+    /// assert_eq!(inside.provider("mix"), Provider::Listing(3));
+    /// assert_eq!(inside.provider("cutoff"), Provider::Played);
+    /// ```
+    pub fn enter(&self, code: Option<&Span<S>>) -> DynamicScope<S> {
+        let listing = match (&self.listings, code) {
+            (Some(listings), Some(code)) => listings.find(code),
+            _ => None,
+        };
+        let Some(listing) = listing else {
+            return self.clone();
+        };
+        let mut providers = (*self.providers).clone();
+        for label in listing.labels.iter() {
+            if self.provider(label) != slider::Provider::Listing(listing.id) {
+                providers.push((label.clone(), listing.id));
+            }
+        }
         DynamicScope {
-            path: self.path.enter(code, site),
+            listings: self.listings.clone(),
+            providers: Arc::new(providers),
             sharing: self.sharing,
         }
+    }
+
+    /// Returns the provider of the slider `label` in this scope: the innermost
+    /// listing binding providing it, or else the program being played.
+    pub fn provider(&self, label: &str) -> slider::Provider {
+        self.providers
+            .iter()
+            .rev()
+            .find(|(l, _)| l == label)
+            .map_or(slider::Provider::Played, |&(_, id)| {
+                slider::Provider::Listing(id)
+            })
     }
 
     /// Returns the id of the `Shared` of a `share` call applying its function
@@ -481,7 +474,8 @@ impl<S> DynamicScope<S> {
     /// ```
     pub fn share(&self) -> (ShareId, DynamicScope<S>) {
         let scope = DynamicScope {
-            path: self.path.clone(),
+            listings: self.listings.clone(),
+            providers: self.providers.clone(),
             sharing: self.sharing + 1,
         };
         (ShareId(self.sharing), scope)
@@ -878,7 +872,7 @@ where
                     // The body runs as code written where the function was,
                     // whoever applies it. Its arguments were evaluated above,
                     // outside it.
-                    let result = evaluate_closed(body, &scope.enter(function.span, site.clone()))?;
+                    let result = evaluate_closed(body, &scope.enter(function.span.as_ref()))?;
                     Ok(match site {
                         Some(site) => push_step(result, &Step::Call(site)),
                         None => result,
@@ -991,7 +985,7 @@ where
     S: Clone + Debug,
 {
     let mut context = evaluate_bindings_cached(resolve, cache, bindings)?;
-    evaluate_with_context(&mut context, expr)
+    evaluate_with_context(&mut context, expr, &DynamicScope::default())
 }
 
 /// Evaluates `bindings` and returns the resulting context: one entry per
@@ -1025,13 +1019,20 @@ where
     S: Clone + Debug,
 {
     let mut context = Vec::new();
-    extend_context_cached(resolve, cache, bindings, &mut context)?;
+    extend_context_cached(
+        resolve,
+        cache,
+        bindings,
+        &mut context,
+        &DynamicScope::default(),
+    )?;
     Ok(context)
 }
 
 /// Evaluates `bindings` after the entries already in `context`, appending an
 /// entry to `context` for each bound name, and reusing and updating the
-/// module exports in `cache`.
+/// module exports in `cache`. Each definition is evaluated in `scope`, with
+/// its own code running.
 ///
 /// `context` should be a context [`evaluate_bindings`] or this function
 /// returned. On failure, `context` holds the entries of the bindings before
@@ -1041,6 +1042,7 @@ pub fn extend_context_cached<'a, M, S, F>(
     cache: &mut ModuleCache<M, S>,
     bindings: &'a [SourceBinding<M, S>],
     context: &mut Vec<ContextEntry<M, S>>,
+    scope: &DynamicScope<S>,
 ) -> Result<(), Error<S>>
 where
     F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
@@ -1052,18 +1054,21 @@ where
         cache,
         open: Vec::new(),
         resolved: Vec::new(),
+        scope,
     };
     build_context(&mut modules, bindings, context)?;
     Ok(())
 }
 
-/// Substitutes `context` into `expr` and reduces the result to a value.
+/// Substitutes `context` into `expr` and reduces the result to a value in
+/// `scope`, with the code of `expr` running.
 ///
 /// `context` should be a context [`evaluate_bindings`] or
 /// [`extend_context_cached`] returned; it holds the same entries afterwards.
 pub fn evaluate_with_context<M, S>(
     context: &mut Vec<(String, SourceExpr<M, S>)>,
     expr: SourceExpr<M, S>,
+    scope: &DynamicScope<S>,
 ) -> Result<SourceExpr<M, S>, Error<S>>
 where
     M: Clone + Display + Debug + CarriesTrace<S>,
@@ -1071,7 +1076,7 @@ where
 {
     let code = expr.span.clone();
     let expr = substitute(context, expr)?;
-    evaluate_closed(expr, &DynamicScope::default().enter(code, None))
+    evaluate_closed(expr, &scope.enter(code.as_ref()))
 }
 
 /// The modules one evaluation of bindings loads: how it resolves them, the
@@ -1083,6 +1088,8 @@ struct Modules<'r, 'c, F, M, S> {
     open: Vec<ModuleKey>,
     /// The path and slice of each module resolved so far, in order.
     resolved: Vec<(Vec<String>, ModuleKey)>,
+    /// The scope each definition is evaluated in.
+    scope: &'r DynamicScope<S>,
 }
 
 /// Returns what the module `module`, resolved from `path`, exports: from
@@ -1182,7 +1189,7 @@ where
             }
             Binding::Definition(pattern, def_expr) => {
                 let substituted = substitute(context, def_expr.clone())?;
-                let scope = DynamicScope::default().enter(def_expr.span.clone(), None);
+                let scope = modules.scope.enter(def_expr.span.as_ref());
                 let value = evaluate_closed(substituted, &scope)?;
                 let before = context.len();
                 extend_context(context, pattern, value)?;
@@ -1461,10 +1468,11 @@ mod tests {
         let (first, _) = parse_module::<u32, _>("a = 1;", ()).unwrap();
         let (second, _) = parse_module::<u32, _>("b = a;", ()).unwrap();
         let mut context = Vec::new();
-        extend_context_cached(resolve, &mut cache, &first, &mut context).unwrap();
-        extend_context_cached(resolve, &mut cache, &second, &mut context).unwrap();
+        let scope = DynamicScope::default();
+        extend_context_cached(resolve, &mut cache, &first, &mut context, &scope).unwrap();
+        extend_context_cached(resolve, &mut cache, &second, &mut context, &scope).unwrap();
         let b = parse_program::<u32, _>("b", ()).unwrap();
-        let value = evaluate_with_context(&mut context, b).unwrap();
+        let value = evaluate_with_context(&mut context, b, &scope).unwrap();
         assert_eq!(format!("{}", value), "1");
     }
 
@@ -1483,7 +1491,10 @@ mod tests {
             ("fn(y) => fn(z) => nope", false),
         ] {
             let expr = parse_program::<u32, _>(input, ()).unwrap();
-            assert_eq!(evaluate_with_context(&mut context, expr).is_ok(), succeeds);
+            assert_eq!(
+                evaluate_with_context(&mut context, expr, &DynamicScope::default()).is_ok(),
+                succeeds
+            );
             assert_eq!(names(&context), before, "{}", input);
         }
     }
@@ -1765,7 +1776,9 @@ mod tests {
 
     /// Tests of the running code that evaluation hands built-ins, against
     /// stand-in built-ins.
-    mod call_paths {
+    /// Tests of which listing provides a slider label where, against stand-in
+    /// built-ins and stand-in listings.
+    mod providers {
         use super::*;
         use crate::parser::{parse_module, parse_program};
 
@@ -1780,11 +1793,9 @@ mod tests {
 
         type StandIn = fn(Vec<Value>, &BuiltInCall<Text>) -> Result<Value, Error<Text>>;
 
-        /// The stand-in built-ins: `here(x)` returns where each call in
-        /// progress around it was written, as a list of `"Program 3 9"`
-        /// strings; `running(x)` returns where each piece of code running
-        /// around it was written, in the same form; `first(a, b)` hands back
-        /// `a`; and `apply(f)` applies `f` to 1.
+        /// The stand-in built-ins: `who(label)` returns the provider of
+        /// `label` where it is called, `"played"` or a listing's id, and
+        /// `apply(f)` applies `f` to 1.
         fn stand_ins() -> Vec<SourceBinding<u32, Text>> {
             fn def(name: &str, f: StandIn) -> SourceBinding<u32, Text> {
                 SourceBinding::definition(
@@ -1795,26 +1806,16 @@ mod tests {
                     }),
                 )
             }
-            fn spans<'a>(
-                call: &BuiltInCall<Text>,
-                spans: impl Iterator<Item = &'a Span<Text>>,
-            ) -> Result<Value, Error<Text>> {
-                let spans = spans.map(|span| {
-                    let text = format!("{:?} {} {}", span.source, span.range.start, span.range.end);
-                    call.computed(Expr::String(text))
-                });
-                Ok(call.assembled(Expr::List(spans.collect())))
-            }
             vec![
-                def("here", |_arguments, call| {
-                    spans(call, call.scope().path().sites())
-                }),
-                def("running", |_arguments, call| {
-                    spans(call, call.scope().path().code())
-                }),
-                def("first", |mut arguments, _call| {
-                    arguments.truncate(1);
-                    Ok(arguments.pop().unwrap())
+                def("who", |arguments, call| {
+                    let Expr::String(label) = &arguments[0].expr else {
+                        panic!("expected a label");
+                    };
+                    let provider = match call.scope().provider(label) {
+                        slider::Provider::Played => "played".to_string(),
+                        slider::Provider::Listing(id) => id.to_string(),
+                    };
+                    Ok(call.computed(Expr::String(provider)))
                 }),
                 def("apply", |mut arguments, call| {
                     let function = arguments.pop().unwrap();
@@ -1825,108 +1826,79 @@ mod tests {
             ]
         }
 
-        /// A library function that calls `here` in an argument to another
-        /// built-in, one that calls it, and one that calls `running`.
-        const LIBRARY: &str = "pad = fn(v) => first(here(v), v);\n\
-                               lib_pad = fn(v) => pad(v);\n\
-                               run_pad = fn(v) => first(running(v), v);\n";
+        /// A library whose line `n` (from 0) is the text of the listing with
+        /// id `n`, each listing `"q"`.
+        const LIBRARY: &str = "pad = fn(v) => who(\"q\");\n\
+                               wrap = fn(f) => f(1);\n\
+                               made = who(\"q\");\n\
+                               keep = fn(v) => v;\n";
 
-        /// Returns the text at each span the call of `here` or `running`
-        /// that `program` reaches returns, innermost first, with `lib`
-        /// standing for library text.
-        fn path_of(program: &str) -> Vec<std::string::String> {
+        /// Returns what `program` evaluates to, under the library.
+        fn provider_of(program: &str) -> std::string::String {
             let prelude = stand_ins();
             let (mut library, errors) = parse_module(LIBRARY, Text::Library).unwrap();
             assert!(errors.is_empty());
             library.insert(0, Binding::Open(vec!["prelude".to_string()]).into());
             let resolve = |path: &[std::string::String]| match path.join(".").as_str() {
                 "prelude" => Ok(&prelude[..]),
-                "lib" => Ok(&library[..]),
-                other => Err(Error::eval_here(format!("no module {}", other))),
+                _ => Err(Error::eval_here("no such module")),
             };
-            let bindings: Vec<SourceBinding<u32, Text>> = vec![
-                Binding::Open(vec!["prelude".to_string()]).into(),
-                Binding::Open(vec!["lib".to_string()]).into(),
-            ];
-            let expr = parse_program(program, Text::Program).unwrap();
-            let Expr::List(sites) = evaluate(resolve, &bindings, expr).unwrap().expr else {
-                panic!("expected here's list of sites");
-            };
-            sites
-                .into_iter()
-                .map(|site| {
-                    let Expr::String(site) = site.expr else {
-                        panic!("expected a site");
-                    };
-                    let parts: Vec<&str> = site.split(' ').collect();
-                    let range = parts[1].parse().unwrap()..parts[2].parse().unwrap();
-                    match parts[0] {
-                        "Program" => program[range].to_string(),
-                        _ => format!("lib {}", &LIBRARY[range]),
-                    }
+            let listings = slider::Listings::new(|span: &Span<Text>| {
+                if span.source != Text::Library {
+                    return None;
+                }
+                let line = LIBRARY[..span.range.start].matches('\n').count();
+                Some(slider::Listing {
+                    id: line,
+                    labels: Arc::from(["q".to_string()]),
                 })
-                .collect()
+            });
+            let scope = DynamicScope::new(listings);
+            let mut context = Vec::new();
+            let mut cache = ModuleCache::default();
+            extend_context_cached(resolve, &mut cache, &library, &mut context, &scope).unwrap();
+            let expr = parse_program(program, Text::Program).unwrap();
+            match evaluate_with_context(&mut context, expr, &scope)
+                .unwrap()
+                .expr
+            {
+                Expr::String(provider) => provider,
+                other => panic!("expected a provider, got {}", other),
+            }
         }
 
         #[test]
-        fn calls_in_progress_are_on_the_path_innermost_first() {
-            // `here` is an argument to `first` inside the library's `pad`.
-            assert_eq!(
-                path_of("let dp = fn(x) => pad(x) in dp(1)"),
-                ["pad(x)", "dp(1)"]
-            );
+        fn code_in_no_listing_is_the_played_programs() {
+            assert_eq!(provider_of("who(\"q\")"), "played");
+            assert_eq!(provider_of("who(\"r\")"), "played");
         }
 
         #[test]
-        fn a_call_has_no_calls_in_progress_at_the_top() {
-            assert!(path_of("here(1)").is_empty());
+        fn a_listings_function_provides_while_it_runs() {
+            assert_eq!(provider_of("pad(1)"), "0");
+            // A function given to it, too, while it runs.
+            assert_eq!(provider_of("wrap(fn(x) => who(\"q\"))"), "1");
+            // The innermost listing wins.
+            assert_eq!(provider_of("wrap(pad)"), "0");
+        }
+
+        #[test]
+        fn a_listings_definition_provides_while_it_is_evaluated() {
+            assert_eq!(provider_of("made"), "2");
         }
 
         #[test]
         fn an_argument_is_evaluated_outside_its_callee() {
-            assert!(path_of("let id = fn(x) => x in id(here(1))").is_empty());
-            assert_eq!(
-                path_of("let f = fn(x) => pad(x) in let id = fn(x) => x in id(f(1))"),
-                ["pad(x)", "f(1)"]
-            );
+            assert_eq!(provider_of("keep(who(\"q\"))"), "played");
         }
 
         #[test]
-        fn a_function_a_built_in_applies_runs_inside_the_built_ins_calls() {
-            // `apply`'s own application of the function is written nowhere,
-            // so it isn't on the path.
+        fn a_function_a_built_in_applies_runs_in_the_built_ins_scope() {
             assert_eq!(
-                path_of("let outer = fn(x) => apply(fn(y) => pad(y)) in outer(1)"),
-                ["pad(y)", "outer(1)"]
+                provider_of("wrap(fn(x) => apply(fn(y) => who(\"q\")))"),
+                "1"
             );
-        }
-
-        #[test]
-        fn running_code_is_on_the_path_innermost_first() {
-            assert_eq!(
-                path_of("let f = fn(x) => run_pad(x) in f(1)"),
-                [
-                    "lib fn(v) => first(running(v), v)",
-                    "fn(x) => run_pad(x)",
-                    "let f = fn(x) => run_pad(x) in f(1)",
-                ]
-            );
-        }
-
-        #[test]
-        fn a_function_a_built_in_applies_is_running_code() {
-            assert_eq!(
-                path_of("apply(fn(y) => running(y))"),
-                ["fn(y) => running(y)", "apply(fn(y) => running(y))"]
-            );
-        }
-
-        #[test]
-        fn a_library_call_is_on_the_path() {
-            assert_eq!(
-                path_of("let wrap = fn(x) => lib_pad(x) in wrap(1)"),
-                ["lib pad(v)", "lib_pad(x)", "wrap(1)"]
-            );
+            assert_eq!(provider_of("apply(pad)"), "0");
         }
     }
 

@@ -109,8 +109,8 @@ fn voice_after(preamble: &str, annotations: &str, program: &str, sixteenth: u8) 
             ..
         }) => {
             let arguments = vec![SourceExpr::float(60.0), SourceExpr::float(0.7)];
-            let (_, _, marks, _) = environment
-                .apply_note_function(&function, arguments, &set.slider_owners(index))
+            let (_, _, marks) = environment
+                .apply_note_function(&function, arguments, &set.slider_providers(index))
                 .expect("a note should play");
             ((*marks).clone(), vec![])
         }

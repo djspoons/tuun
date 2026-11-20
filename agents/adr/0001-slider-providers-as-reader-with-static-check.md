@@ -27,3 +27,4 @@ A slider's provider is decided during evaluation, by a reader environment carrie
 - Hypothesis (unverified): a spec that would vary per voice can always be rewritten as a static spec plus arithmetic (for example `freq_hz * slider("ratio", 4, 1, 16, "exp")`), with only the number shown on the panel changing.
 - Because one evaluation of a top-level binding is reused by many programs, the fallback provider is a placeholder, replaced by the program's slot when the waveform becomes that program's.
 - The analysis counts a slider in a branch of `alt` that a constant trigger drops, even though evaluation never reaches it.
+- Evaluation never fails on a slider. When checker findings are only warnings, a program the check rejects still plays: a call reached through two listings reads the innermost one, and the panel shows the spec of a slider's first call.

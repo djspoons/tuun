@@ -51,7 +51,7 @@ pub mod sdl2_input;
 #[cfg(feature = "native")]
 pub mod sequencer;
 #[cfg(feature = "native")]
-pub mod slider_owners;
+pub mod slider_providers;
 #[cfg(feature = "native")]
 pub mod tracker;
 

@@ -613,8 +613,8 @@ fn wide_function_fuzz() {
 /// A sweep of the slider check against evaluation: for each generated file
 /// and each program in it that the checker accepts, evaluating it (and, for a
 /// keys instrument, each note on a grid of keys and velocities) never fails
-/// on a slider, and every slider its resolved marks reach is one the check
-/// found, with the same provider and spec.
+/// on a slider, and every slider mark in what it plays is one the check found,
+/// with the same provider and default.
 ///
 /// Set `SEED` and `COUNT` to sweep further, and `SHOW_REJECTED` to print the
 /// first finding for each program the checker rejects:
@@ -628,8 +628,28 @@ fn slider_soundness_fuzz() {
     use std::path::PathBuf;
     use tuun::environment::Environment;
     use tuun::expr::SourceExpr;
+    use tuun::ids::MarkId;
     use tuun::programs::{Plays, ProgramSet};
-    use tuun::slider_owners::Reached;
+    use tuun::waveform::Waveform;
+
+    /// Returns each slider mark in `w`, with the constant it marks, if it
+    /// marks one.
+    fn slider_marks(w: &Waveform<MarkId>) -> Vec<(MarkId, Option<f32>)> {
+        let marks = std::cell::RefCell::new(Vec::new());
+        w.any_node(&|node| {
+            if let Waveform::Marked { id, waveform } = node
+                && matches!(id, MarkId::Slider { .. } | MarkId::PlayedSlider { .. })
+            {
+                let value = match **waveform {
+                    Waveform::Const(value) => Some(value),
+                    _ => None,
+                };
+                marks.borrow_mut().push((id.clone(), value));
+            }
+            false
+        });
+        marks.into_inner()
+    }
 
     let (seed, count) = sweep_bounds(100);
     let mut rng = Rng(seed);
@@ -659,22 +679,11 @@ fn slider_soundness_fuzz() {
                 continue;
             }
             accepted += 1;
-            let (reached, _) = environment.reachable_sliders(&input).unwrap();
-            if reached.iter().any(|slider| slider.owner != index) {
-                provided += 1;
-            }
             let mut report = |what: String| {
                 if found.len() < 20 {
                     println!("UNSOUND {what}\n  program {index} of\n{source}");
                 }
                 found.push(what);
-            };
-            let compare = |sliders: &[Reached], report: &mut dyn FnMut(String)| {
-                for slider in sliders {
-                    if !reached.contains(slider) {
-                        report(format!("reached {slider:?}, not among {reached:?}"));
-                    }
-                }
             };
             let evaluated = match environment.evaluate_program(&input) {
                 Ok(evaluated) => evaluated,
@@ -686,14 +695,44 @@ fn slider_soundness_fuzz() {
                     continue;
                 }
             };
+            let reached = &evaluated.sliders;
+            if reached.iter().any(|slider| slider.provider != index) {
+                provided += 1;
+            }
+            let compare = |w: &Waveform<MarkId>, report: &mut dyn FnMut(String)| {
+                for (mark, value) in slider_marks(w) {
+                    let known = match &mark {
+                        MarkId::Slider { program, label } => reached.iter().any(|slider| {
+                            slider.provider == *program
+                                && slider.label == *label
+                                && value.is_none_or(|value| value == slider.spec.default)
+                        }),
+                        _ => false,
+                    };
+                    if !known {
+                        report(format!(
+                            "reached {mark:?} at {value:?}, not among {reached:?}"
+                        ));
+                    }
+                }
+            };
             match &evaluated.plays {
+                Plays::Waveform(w, _) => compare(w, &mut report),
+                Plays::Sequence(sequence) => compare(&sequence.step_waveform, &mut report),
                 Plays::KeysInstrument(instrument) => {
                     for key in [0.0, 59.0, 60.0, 61.0, 100.0, 127.0] {
                         for velocity in [0.0, 0.5, 1.0] {
                             notes += 1;
                             let note = vec![SourceExpr::float(key), SourceExpr::float(velocity)];
-                            match environment.apply_note_function(instrument, note, &input.owners) {
-                                Ok((_, _, _, sliders)) => compare(&sliders, &mut report),
+                            match environment.apply_note_function(
+                                instrument,
+                                note,
+                                &input.providers,
+                            ) {
+                                Ok((note_on, note_off, _)) => {
+                                    compare(&note_on, &mut report);
+                                    compare(&note_off, &mut report);
+                                }
                                 Err(errors) => {
                                     let shown = format!("{errors:?}");
                                     if shown.contains("slider") {
@@ -704,7 +743,6 @@ fn slider_soundness_fuzz() {
                         }
                     }
                 }
-                _ => compare(&evaluated.sliders, &mut report),
             }
         }
     }

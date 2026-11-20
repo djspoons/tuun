@@ -15,21 +15,10 @@ use std::fmt::{Debug, Display};
 use std::rc::{Rc, Weak};
 
 use crate::eval::BuiltInCall;
-use crate::expr::{
-    Annotation, Binding, BuiltInFn, Error, Expr, Pattern, SourceBinding, SourceExpr, Span,
-};
-use crate::slider::{Curve, SliderSpec};
+use crate::expr::{Binding, BuiltInFn, Error, Expr, Pattern, SourceBinding, SourceExpr, Span};
+use crate::slider::{Curve, Listing, Listings, Provider, SliderSpec};
 use crate::trace::{CarriesTrace, Trace};
 use crate::waveform::{ShareId, Waveform};
-
-/// The binding that provides a slider.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Provider {
-    /// The binding at this index among those the program is checked under.
-    Binding(usize),
-    /// The program being played.
-    Played,
-}
 
 /// A slider a program can reach: its provider, its label, and its spec.
 #[derive(Clone, Debug, PartialEq)]
@@ -53,28 +42,30 @@ pub struct Analysis<S> {
 
 /// A program as [`analyze`] checks it.
 pub struct Program<'a, M, S> {
-    /// The bindings the program is evaluated under. Those with a `sliders`
-    /// annotation are listing bindings.
+    /// The bindings the program is evaluated under.
     pub bindings: &'a [SourceBinding<M, S>],
     /// The program's text, parsed.
     pub expr: &'a SourceExpr<M, S>,
-    /// The labels the program's own `sliders` annotation lists.
-    pub listed: Vec<String>,
-    /// Where that annotation is, when the program has one.
-    pub listing: Option<Span<S>>,
     /// Whether the program is a keys instrument, to be applied to each note.
     pub keys: bool,
+    /// The listing bindings code is written in.
+    pub listings: Listings<S>,
+    /// The name of each provider in messages.
+    pub name: &'a dyn Fn(Provider) -> String,
+    /// Where the annotation of the listing with each id is.
+    pub annotation: &'a dyn Fn(usize) -> Option<Span<S>>,
 }
 
 /// The most evaluation steps a check takes before it gives up.
 const FUEL: u64 = 20_000_000;
 
 /// Returns the sliders `program` can reach and the errors in how it uses
-/// them, naming providers in messages with `name`.
+/// them.
 ///
 /// A slider's provider is the listing binding whose code, or code it runs, is
 /// running at the call and which lists the call's label, or the played program
-/// when none does. The errors are:
+/// when none does, as in evaluation (see
+/// [`crate::eval::DynamicScope::provider`]). The errors are:
 ///
 /// - a call whose label isn't a string written in it;
 /// - a call reached through two listings of its label, reported at each
@@ -97,7 +88,8 @@ const FUEL: u64 = 20_000_000;
 /// use tuun::builtins;
 /// use tuun::expr::Error;
 /// use tuun::parser;
-/// use tuun::slider_analysis::{self, Program, Provider};
+/// use tuun::slider::{Listings, Provider};
+/// use tuun::slider_analysis::{self, Program};
 ///
 /// let mut prelude = Vec::new();
 /// builtins::add_bindings::<u32, u32>(&mut prelude);
@@ -105,55 +97,25 @@ const FUEL: u64 = 20_000_000;
 /// let program = Program {
 ///     bindings: &prelude,
 ///     expr: &expr,
-///     listed: Vec::new(),
-///     listing: None,
 ///     keys: false,
+///     listings: Listings::new(|_| None),
+///     name: &|_| "the program".to_string(),
+///     annotation: &|_| None,
 /// };
-/// let analysis = slider_analysis::analyze(
-///     |_| Err(Error::eval_here("no modules")),
-///     &program,
-///     &|_| "the program".to_string(),
-/// );
+/// let analysis = slider_analysis::analyze(|_| Err(Error::eval_here("no modules")), &program);
 /// assert!(analysis.errors.is_empty());
 /// assert_eq!(analysis.reached[0].label, "mix");
 /// assert_eq!(analysis.reached[0].provider, Provider::Played);
 /// ```
-pub fn analyze<'a, M, S, F>(
-    resolve: F,
-    program: &Program<'a, M, S>,
-    name: &dyn Fn(Provider) -> String,
-) -> Analysis<S>
+pub fn analyze<'a, M, S, F>(resolve: F, program: &Program<'a, M, S>) -> Analysis<S>
 where
     F: Fn(&[String]) -> Result<&'a [SourceBinding<M, S>], Error<S>>,
     M: Clone + Display + Debug + CarriesTrace<S>,
     S: Clone + Debug + PartialEq,
 {
-    let mut listings = HashMap::new();
-    for (index, binding) in program.bindings.iter().enumerate() {
-        // The last `sliders` annotation wins, as the parser reads repeats.
-        let listing =
-            binding
-                .annotations
-                .iter()
-                .rev()
-                .find_map(|annotation| match &annotation.annotation {
-                    Annotation::Sliders(sliders) => Some((sliders, annotation.span.clone())),
-                    _ => None,
-                });
-        if let Some((sliders, span)) = listing {
-            let labels = sliders.iter().map(|slider| slider.label.clone()).collect();
-            listings.insert(Provider::Binding(index), (labels, span));
-        }
-    }
-    if !program.listed.is_empty() {
-        listings.insert(
-            Provider::Played,
-            (program.listed.clone(), program.listing.clone()),
-        );
-    }
     let mut analyzer = Analyzer {
         resolve,
-        listings,
+        listings: program.listings.clone(),
         tops: Vec::new(),
         modules: HashMap::new(),
         specs: HashMap::new(),
@@ -161,7 +123,9 @@ where
         errors: Vec::new(),
         escaped: Vec::new(),
         fuel: FUEL,
-        name,
+        name: program.name,
+        annotation: program.annotation,
+        played: None,
     };
     analyzer.run(program);
     if analyzer.fuel == 0 {
@@ -188,9 +152,9 @@ enum Origin {
     Key,
     /// The velocity a keys instrument's note plays with.
     Velocity,
-    /// The parameter `name` of a function written in the binding `listing`,
-    /// which that binding's callers give.
-    Parameter { listing: Provider, name: String },
+    /// The parameter `name` of a function written in the listing binding with
+    /// id `listing`, which that binding's callers give.
+    Parameter { listing: usize, name: String },
     /// Something the check doesn't compute, though it is known when the
     /// program loads.
     Opaque,
@@ -230,32 +194,22 @@ enum Callee<'a, M, S> {
     Closure(Rc<Closure<'a, M, S>>),
     /// A built-in the check applies itself (see [`SPECIAL`]).
     BuiltIn(Rc<SourceExpr<M, S>>),
-    /// A function the callers of the listing binding `listing` give it for its
-    /// parameter `name`.
+    /// A function the callers of the listing binding with id `listing` give
+    /// it for its parameter `name`.
     Caller {
-        listing: Provider,
+        listing: usize,
         name: String,
     },
 }
 
 /// A user function: its parameters, with named defaults evaluated, its body,
-/// the environment it was written in, and the binding whose text holds it.
+/// the environment it was written in, and where it was written.
 struct Closure<'a, M, S> {
     positional: &'a [Pattern],
     named: Vec<(String, Value<'a, M, S>)>,
     body: &'a SourceExpr<M, S>,
     env: Env<'a, M, S>,
-    home: Home,
-}
-
-/// The text a piece of code is written in.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Home {
-    Played,
-    /// The binding at this index among the program's bindings.
-    Binding(usize),
-    /// A module.
-    Module,
+    code: Option<Span<S>>,
 }
 
 /// The names visible to a piece of code.
@@ -302,7 +256,6 @@ enum ThunkState<'a, M, S> {
     Pending {
         expr: &'a SourceExpr<M, S>,
         env: Env<'a, M, S>,
-        home: Home,
     },
     Forcing,
     Done(Outcome<'a, M, S>),
@@ -313,18 +266,19 @@ enum ThunkState<'a, M, S> {
 /// it checks the whole program or one listing binding alone.
 #[derive(Clone)]
 struct Scope {
-    providers: Rc<Vec<(String, Vec<Provider>)>>,
+    /// The ids of the listings that provide each label here, outermost first.
+    providers: Rc<Vec<(String, Vec<usize>)>>,
     sites: Rc<Vec<usize>>,
     mode: Mode,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 enum Mode {
     /// Checking the program: every slider reached counts.
     Program,
     /// Checking a listing binding from its definition alone: only the sliders
     /// it provides count.
-    Alone(Provider),
+    Alone(Listing),
 }
 
 /// An application as the check sees it: where it was written, the label
@@ -367,8 +321,8 @@ pub const PASSING: &[&str] = &["nth", "concat"];
 
 struct Analyzer<'a, 'n, M, S, F> {
     resolve: F,
-    /// The labels each listing lists, and where its annotation is.
-    listings: HashMap<Provider, (Vec<String>, Option<Span<S>>)>,
+    /// The listing bindings code is written in.
+    listings: Listings<S>,
     /// Every top level built, kept alive for environments that refer to it.
     tops: Vec<Rc<Top<'a, M, S>>>,
     /// Each module's exports, by path, or `None` while it is being built.
@@ -383,6 +337,9 @@ struct Analyzer<'a, 'n, M, S, F> {
     escaped: Vec<Rc<Closure<'a, M, S>>>,
     fuel: u64,
     name: &'n dyn Fn(Provider) -> String,
+    annotation: &'n dyn Fn(usize) -> Option<Span<S>>,
+    /// The id of the played program as a listing, when it lists sliders.
+    played: Option<usize>,
 }
 
 impl<'a, M, S, F> Analyzer<'a, '_, M, S, F>
@@ -394,15 +351,16 @@ where
     /// Checks `program`, gathering what it finds.
     fn run(&mut self, program: &Program<'a, M, S>) {
         let top = self.top();
-        if self
-            .build(program.bindings, &top, &Home::Binding, None)
-            .is_err()
-        {
+        if self.build(program.bindings, &top, None).is_err() {
             return;
         }
         let env = Env::Top(Rc::downgrade(&top), top.len.get());
-        let scope = Scope::new(Mode::Program).enter(Home::Played, None, &self.listings);
-        let Ok(value) = self.eval(program.expr, &env, Home::Played, &scope) else {
+        let code = program.expr.span.as_ref();
+        self.played = code
+            .and_then(|code| self.listings.find(code))
+            .map(|listing| listing.id);
+        let scope = Scope::new(Mode::Program).enter(code, None, &self.listings);
+        let Ok(value) = self.eval(program.expr, &env, &scope) else {
             return;
         };
         if program.keys {
@@ -429,17 +387,15 @@ where
         top
     }
 
-    /// Adds the entries `bindings` define and open to `top`, the definitions
-    /// written in the text `home` gives for each binding's index. Adds the
-    /// entries of the definitions themselves to `own` too.
+    /// Adds the entries `bindings` define and open to `top`. Adds the entries
+    /// of the definitions themselves to `own` too.
     fn build(
         &mut self,
         bindings: &'a [SourceBinding<M, S>],
         top: &Rc<Top<'a, M, S>>,
-        home: &dyn Fn(usize) -> Home,
         mut own: Option<&mut Entries<'a, M, S>>,
     ) -> Result<(), Dead> {
-        for (index, binding) in bindings.iter().enumerate() {
+        for binding in bindings {
             match &binding.binding {
                 Binding::Open(path) => {
                     for (name, entry) in self.module(path)?.iter() {
@@ -464,7 +420,6 @@ where
                         state: RefCell::new(ThunkState::Pending {
                             expr,
                             env: Env::Top(Rc::downgrade(top), top.len.get()),
-                            home: home(index),
                         }),
                     });
                     let mut names = Vec::new();
@@ -495,7 +450,7 @@ where
         self.modules.insert(path.to_vec(), None);
         let top = self.top();
         let mut own = Vec::new();
-        self.build(bindings, &top, &|_| Home::Module, Some(&mut own))?;
+        self.build(bindings, &top, Some(&mut own))?;
         let exports = Rc::new(own);
         self.modules.insert(path.to_vec(), Some(exports.clone()));
         Ok(exports)
@@ -510,12 +465,11 @@ where
         Ok(())
     }
 
-    /// Evaluates `expr`, written in `home`, in `env` and `scope`.
+    /// Evaluates `expr` in `env` and `scope`.
     fn eval(
         &mut self,
         expr: &'a SourceExpr<M, S>,
         env: &Env<'a, M, S>,
-        home: Home,
         scope: &Scope,
     ) -> Outcome<'a, M, S> {
         self.tick()?;
@@ -532,14 +486,14 @@ where
             } => {
                 let mut defaults = Vec::with_capacity(named.len());
                 for (name, default) in named {
-                    defaults.push((name.clone(), self.eval(default, env, home, scope)?));
+                    defaults.push((name.clone(), self.eval(default, env, scope)?));
                 }
                 Ok(Value::Closure(Rc::new(Closure {
                     positional,
                     named: defaults,
                     body,
                     env: env.clone(),
-                    home,
+                    code: expr.span.clone(),
                 })))
             }
             Expr::Variable(name) => {
@@ -547,8 +501,8 @@ where
                 self.entry(&entry)
             }
             Expr::Seq { offset, waveform } => {
-                let offset = self.eval(offset, env, home, scope)?;
-                let waveform = self.eval(waveform, env, home, scope)?;
+                let offset = self.eval(offset, env, scope)?;
+                let waveform = self.eval(waveform, env, scope)?;
                 Ok(match (exact(&offset), exact(&waveform)) {
                     (Some(offset), Some(waveform)) => known(Expr::Seq {
                         offset: Box::new(offset),
@@ -557,7 +511,7 @@ where
                     _ => widen(&[offset, waveform], &[]),
                 })
             }
-            Expr::Project { module, name } => match self.eval(module, env, home, scope)? {
+            Expr::Project { module, name } => match self.eval(module, env, scope)? {
                 Value::Module(entries) => {
                     let (_, entry) = entries.iter().find(|(n, _)| n == name).ok_or(Dead)?;
                     self.entry(entry)
@@ -577,15 +531,15 @@ where
                 condition,
                 then,
                 else_,
-            } => match self.eval(condition, env, home, scope)? {
+            } => match self.eval(condition, env, scope)? {
                 Value::Known(condition) => match condition.expr {
-                    Expr::Bool(true) => self.eval(then, env, home, scope),
-                    Expr::Bool(false) => self.eval(else_, env, home, scope),
+                    Expr::Bool(true) => self.eval(then, env, scope),
+                    Expr::Bool(false) => self.eval(else_, env, scope),
                     _ => Err(Dead),
                 },
                 Value::Unknown(condition) => {
-                    let then = self.eval(then, env, home, scope);
-                    let else_ = self.eval(else_, env, home, scope);
+                    let then = self.eval(then, env, scope);
+                    let else_ = self.eval(else_, env, scope);
                     Ok(join(then, else_, &condition.origins)?)
                 }
                 _ => Err(Dead),
@@ -595,14 +549,14 @@ where
                 positional,
                 named,
             } => {
-                let f = self.eval(function, env, home, scope)?;
+                let f = self.eval(function, env, scope)?;
                 let mut arguments = Vec::with_capacity(positional.len());
                 for argument in positional {
-                    arguments.push(self.eval(argument, env, home, scope)?);
+                    arguments.push(self.eval(argument, env, scope)?);
                 }
                 let mut named_arguments = Vec::with_capacity(named.len());
                 for (name, argument) in named {
-                    named_arguments.push((name.clone(), self.eval(argument, env, home, scope)?));
+                    named_arguments.push((name.clone(), self.eval(argument, env, scope)?));
                 }
                 let call = Call {
                     span: expr.span.clone(),
@@ -614,7 +568,7 @@ where
             Expr::Tuple(exprs) | Expr::List(exprs) => {
                 let mut values = Vec::with_capacity(exprs.len());
                 for expr in exprs {
-                    values.push(self.eval(expr, env, home, scope)?);
+                    values.push(self.eval(expr, env, scope)?);
                 }
                 Ok(match &expr.expr {
                     Expr::Tuple(_) => Value::Tuple(Rc::new(values)),
@@ -650,18 +604,17 @@ where
                 ThunkState::Pending { .. } => std::mem::replace(&mut *state, ThunkState::Forcing),
             }
         };
-        let ThunkState::Pending { expr, env, home } = pending else {
+        let ThunkState::Pending { expr, env } = pending else {
             unreachable!("the state was pending");
         };
         // A top-level definition is evaluated once, whoever reads it, so it
         // runs in no one's scope.
-        let scope = Scope::new(Mode::Program).enter(home, None, &self.listings);
-        let outcome = self.eval(expr, &env, home, &scope);
+        let code = expr.span.as_ref();
+        let scope = Scope::new(Mode::Program).enter(code, None, &self.listings);
+        let outcome = self.eval(expr, &env, &scope);
         *thunk.state.borrow_mut() = ThunkState::Done(outcome.clone());
-        if let (Ok(value), Home::Binding(index)) = (&outcome, home)
-            && self.listings.contains_key(&Provider::Binding(index))
-        {
-            self.check_alone(Provider::Binding(index), value);
+        if let (Ok(value), Some(listing)) = (&outcome, code.and_then(|c| self.listings.find(c))) {
+            self.check_alone(listing, value);
         }
         outcome
     }
@@ -669,7 +622,7 @@ where
     /// Checks the listing binding `listing` from its value `value` alone:
     /// applies each function it holds, and each function those return, to
     /// parameters its callers give.
-    fn check_alone(&mut self, listing: Provider, value: &Value<'a, M, S>) {
+    fn check_alone(&mut self, listing: Listing, value: &Value<'a, M, S>) {
         // Another listing may be checked alone while this one is.
         let outer = std::mem::take(&mut self.escaped);
         let mut queue = Vec::new();
@@ -683,14 +636,14 @@ where
             let arguments = closure
                 .positional
                 .iter()
-                .map(|pattern| parameter(pattern, listing))
+                .map(|pattern| parameter(pattern, listing.id))
                 .collect();
             let named = closure
                 .named
                 .iter()
-                .map(|(name, _)| (name.clone(), given(listing, name)))
+                .map(|(name, _)| (name.clone(), given(listing.id, name)))
                 .collect();
-            let scope = Scope::new(Mode::Alone(listing));
+            let scope = Scope::new(Mode::Alone(listing.clone()));
             if let Ok(result) = self.enter(&closure, arguments, named, &Call::nowhere(), &scope) {
                 exposed(&result, &mut queue);
             }
@@ -805,8 +758,8 @@ where
         }
         // The body runs as code written where the function was, whoever
         // applies it.
-        let scope = scope.enter(closure.home, call.site, &self.listings);
-        self.eval(closure.body, &env, closure.home, &scope)
+        let scope = scope.enter(closure.code.as_ref(), call.site, &self.listings);
+        self.eval(closure.body, &env, &scope)
     }
 
     /// Reports applying `f` when it may be a function a listing binding's
@@ -817,30 +770,30 @@ where
         call: &Call<'a, M, S>,
         scope: &Scope,
     ) {
-        let Mode::Alone(listing) = scope.mode else {
+        let Mode::Alone(listing) = &scope.mode else {
             return;
         };
         if !scope
             .providers
             .iter()
-            .any(|(_, providers)| providers.contains(&listing))
+            .any(|(_, providers)| providers.contains(&listing.id))
         {
             return;
         }
         for callee in &f.callees {
             if let Callee::Caller { listing: l, name } = callee
-                && *l == listing
+                && *l == listing.id
             {
-                let (labels, span) = &self.listings[&listing];
-                let labels: Vec<String> = labels.iter().map(|l| format!("{:?}", l)).collect();
+                let labels: Vec<String> =
+                    listing.labels.iter().map(|l| format!("{:?}", l)).collect();
                 let message = format!(
                     "{} provides slider {} here, so it can't apply `{}`, a function its callers \
                      give",
-                    (self.name)(listing),
+                    (self.name)(Provider::Listing(listing.id)),
                     labels.join(" and "),
                     name
                 );
-                let span = call.span.clone().or_else(|| span.clone());
+                let span = call.span.clone().or_else(|| (self.annotation)(listing.id));
                 self.report(Error::eval(message, span));
                 return;
             }
@@ -909,8 +862,8 @@ where
             None => None,
         };
         // Checked alone, a listing binding answers only for what it provides.
-        if let Mode::Alone(listing) = scope.mode
-            && provider != Some(listing)
+        if let Mode::Alone(listing) = &scope.mode
+            && provider != Some(Provider::Listing(listing.id))
         {
             return Ok(value);
         }
@@ -970,19 +923,22 @@ where
             .unwrap_or_default();
         match listing[..] {
             [] => Some(Provider::Played),
-            [one] => Some(one),
+            [one] => Some(Provider::Listing(one)),
             _ => {
                 let mut many = listing;
                 many.sort();
-                let names: Vec<String> = many.iter().map(|&p| (self.name)(p)).collect();
+                let names: Vec<String> = many
+                    .iter()
+                    .map(|&id| (self.name)(Provider::Listing(id)))
+                    .collect();
                 let message = format!(
                     "slider {:?} is listed by {}, and this waveform is built through each of \
                      them; keep only one listing",
                     label,
                     names.join(" and ")
                 );
-                for provider in many {
-                    let span = self.listings[&provider].1.clone();
+                for id in many {
+                    let span = (self.annotation)(id);
                     self.report(Error::eval(message.clone(), span));
                 }
                 None
@@ -1003,7 +959,12 @@ where
         for (part, origins) in open {
             for origin in origins {
                 let error = match origin {
-                    Origin::Key | Origin::Velocity if provider == Provider::Played => {
+                    // A slider the played program lists is its own, and the
+                    // played program is never checked alone.
+                    Origin::Key | Origin::Velocity
+                        if provider == Provider::Played
+                            || Some(provider) == self.played.map(Provider::Listing) =>
+                    {
                         let what = match origin {
                             Origin::Key => "the key a note plays",
                             _ => "the velocity a note plays with",
@@ -1016,18 +977,22 @@ where
                             call.span.clone(),
                         )
                     }
-                    Origin::Parameter { listing, name } if *listing == provider => Error::eval(
-                        format!(
-                            "{} lists slider {:?}, but its {} depends on `{}`, which its callers \
+                    Origin::Parameter { listing, name }
+                        if Provider::Listing(*listing) == provider =>
+                    {
+                        Error::eval(
+                            format!(
+                                "{} lists slider {:?}, but its {} depends on `{}`, which its callers \
                              give; list it where `{}` is given instead",
-                            (self.name)(provider),
-                            label,
-                            part,
-                            name,
-                            name
-                        ),
-                        self.listings[&provider].1.clone(),
-                    ),
+                                (self.name)(provider),
+                                label,
+                                part,
+                                name,
+                                name
+                            ),
+                            (self.annotation)(*listing),
+                        )
+                    }
                     Origin::Opaque => Error::eval(
                         format!(
                             "slider {:?}'s {} isn't known when the program loads",
@@ -1297,14 +1262,15 @@ impl Scope {
         }
     }
 
-    /// Returns this scope with code written in `home` running inside it, run by
-    /// a call written at the offset `site`: the listing `home` is, if any, now
-    /// provides each label it lists.
+    /// Returns this scope with the code written at `code` running inside it,
+    /// run by a call written at the offset `site`: the listing binding
+    /// `listings` finds for the code, if any, now provides each label it
+    /// lists.
     fn enter<S>(
         &self,
-        home: Home,
+        code: Option<&Span<S>>,
         site: Option<usize>,
-        listings: &HashMap<Provider, (Vec<String>, Option<Span<S>>)>,
+        listings: &Listings<S>,
     ) -> Scope {
         let mut scope = self.clone();
         if let Some(site) = site {
@@ -1312,23 +1278,18 @@ impl Scope {
             sites.push(site);
             scope.sites = Rc::new(sites);
         }
-        let provider = match home {
-            Home::Played => Provider::Played,
-            Home::Binding(index) => Provider::Binding(index),
-            Home::Module => return scope,
-        };
-        let Some((labels, _)) = listings.get(&provider) else {
+        let Some(listing) = code.and_then(|code| listings.find(code)) else {
             return scope;
         };
         let mut providers = (*self.providers).clone();
-        for label in labels {
+        for label in listing.labels.iter() {
             match providers.iter_mut().find(|(l, _)| l == label) {
-                Some((_, listing)) => {
-                    if !listing.contains(&provider) {
-                        listing.push(provider);
+                Some((_, ids)) => {
+                    if !ids.contains(&listing.id) {
+                        ids.push(listing.id);
                     }
                 }
-                None => providers.push((label.clone(), vec![provider])),
+                None => providers.push((label.clone(), vec![listing.id])),
             }
         }
         scope.providers = Rc::new(providers);
@@ -1491,7 +1452,7 @@ fn pattern_names<'p>(pattern: &'p Pattern, names: &mut Vec<&'p str>) {
 }
 
 /// Returns a value standing for what a listing's caller gives for `pattern`.
-fn parameter<'a, M, S>(pattern: &Pattern, listing: Provider) -> Value<'a, M, S> {
+fn parameter<'a, M, S>(pattern: &Pattern, listing: usize) -> Value<'a, M, S> {
     match pattern {
         Pattern::Identifier(name) => given(listing, name),
         Pattern::Tuple(patterns) => Value::Tuple(Rc::new(
@@ -1502,7 +1463,7 @@ fn parameter<'a, M, S>(pattern: &Pattern, listing: Provider) -> Value<'a, M, S> 
 
 /// Returns a value standing for what the callers of `listing` give for its
 /// parameter `name`: anything, maybe a function.
-fn given<'a, M, S>(listing: Provider, name: &str) -> Value<'a, M, S> {
+fn given<'a, M, S>(listing: usize, name: &str) -> Value<'a, M, S> {
     let name = name.to_string();
     Value::Unknown(Rc::new(Unknown {
         origins: vec![Origin::Parameter {

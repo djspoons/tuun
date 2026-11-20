@@ -2746,7 +2746,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::slider;
-    use crate::slider_owners;
+    use crate::slider_providers;
 
     /// Returns the text of `state`'s current message, or "" when there is none.
     fn current_message(state: &AppState) -> &str {
@@ -3803,8 +3803,8 @@ _ = saw(220);";
             std::path::PathBuf::new(),
         )
         .expect("test source should parse");
-        state.programs.reach(&[slider_owners::Reached {
-            owner: 0,
+        state.programs.reach(&[slider_providers::Reached {
+            provider: 0,
             label: "vol".to_string(),
             spec: slider::SliderSpec::new(0.5, 0.0, 1.0, slider::Curve::Linear).unwrap(),
         }]);

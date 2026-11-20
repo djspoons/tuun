@@ -1038,8 +1038,9 @@ where
 /// `slider(label, default, min, max, curve)` over `min` to `max` along `curve`,
 /// `"linear"` or `"exp"`.
 ///
-/// The value is `default`, marked as a slider when `M` makes slider marks.
-/// Fails if `default` is outside the range, `min` is not less than `max`, an
+/// The value is `default`, marked as a slider when `M` makes slider marks,
+/// with the provider the call's scope gives the label (see
+/// [`eval::DynamicScope::provider`]). Fails if `default` is outside the range, `min` is not less than `max`, an
 /// `"exp"` range is not above zero, or the curve is another name.
 fn slider<M, S>(
     arguments: Vec<SourceExpr<M, S>>,
@@ -1082,22 +1083,21 @@ where
         })?,
         Some(_) => return Err(Error::internal_here("Expected a string curve for slider")),
     };
-    let spec = slider::SliderSpec::new(default, min, max, curve)
+    // A program may be evaluated without the slider check, so the spec is
+    // checked here too.
+    slider::SliderSpec::new(default, min, max, curve)
         .map_err(|message| Error::eval_here(format!("slider {:?}: {}", label, message)))?;
     let value = Waveform::Const(default);
-    let slider = slider::SliderCall {
-        label,
-        spec,
-        site: call.span().cloned(),
-        path: call.scope().path().clone(),
-    };
-    Ok(call.computed(Expr::Waveform(match M::from_slider(slider) {
-        Some(id) => Waveform::Marked {
-            id,
-            waveform: Box::new(value),
-        },
-        None => value,
-    })))
+    let provider = call.scope().provider(&label);
+    Ok(
+        call.computed(Expr::Waveform(match M::from_slider(&label, provider) {
+            Some(id) => Waveform::Marked {
+                id,
+                waveform: Box::new(value),
+            },
+            None => value,
+        })),
+    )
 }
 
 pub fn chord<M, S>(
@@ -1714,19 +1714,19 @@ mod tests {
         assert!(matches!(result, Expr::Waveform(Waveform::Fixed(v, ())) if v.is_empty()));
     }
 
-    /// A mark id that marks slider calls and nothing else.
-    #[derive(Clone, Debug)]
-    struct SliderMark(Arc<slider::SliderCall<()>>);
+    /// A mark id that marks sliders, by label and provider, and nothing else.
+    #[derive(Clone, Debug, PartialEq)]
+    struct SliderMark(String, slider::Provider);
 
     impl Display for SliderMark {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "slider({:?})", self.0.label)
+            write!(f, "slider({:?})", self.0)
         }
     }
 
     impl CarriesTrace<()> for SliderMark {
-        fn from_slider(call: slider::SliderCall<()>) -> Option<Self> {
-            Some(SliderMark(Arc::new(call)))
+        fn from_slider(label: &str, provider: slider::Provider) -> Option<Self> {
+            Some(SliderMark(label.to_string(), provider))
         }
     }
 
@@ -1734,19 +1734,19 @@ mod tests {
         Expr::String(text.to_string())
     }
 
-    /// Returns the slider call that `slider` marks when applied to
-    /// `arguments`, checking that the mark holds its default.
-    fn slider_call(arguments: Vec<Expr<SliderMark, ()>>) -> Arc<slider::SliderCall<()>> {
+    /// Returns the mark `slider` makes when applied to `arguments` and the
+    /// value it marks.
+    fn slider_mark(arguments: Vec<Expr<SliderMark, ()>>) -> (SliderMark, f32) {
         match call(slider::<SliderMark, ()>, arguments).unwrap() {
-            Expr::Waveform(Waveform::Marked { id, waveform }) => {
-                assert!(matches!(*waveform, Waveform::Const(v) if v == id.0.spec.default));
-                id.0
-            }
+            Expr::Waveform(Waveform::Marked { id, waveform }) => match *waveform {
+                Waveform::Const(value) => (id, value),
+                other => panic!("expected a constant, got {:?}", other),
+            },
             other => panic!("expected a marked waveform, got {}", other),
         }
     }
 
-    /// Returns the message of the evaluation error `slider` fails with on
+    /// Returns the message of the error `slider` fails with when applied to
     /// `arguments`.
     fn slider_error(arguments: Vec<Expr<SliderMark, ()>>) -> String {
         let error = call(slider::<SliderMark, ()>, arguments).unwrap_err();
@@ -1755,12 +1755,13 @@ mod tests {
     }
 
     #[test]
-    fn slider_ranges_over_zero_to_one_without_a_range() {
-        let call = slider_call(vec![label("mix"), Expr::float(0.25)]);
-        assert_eq!(call.label, "mix");
+    fn slider_marks_its_default_with_its_label() {
         assert_eq!(
-            call.spec,
-            slider::SliderSpec::new(0.25, 0.0, 1.0, slider::Curve::Linear).unwrap()
+            slider_mark(vec![label("mix"), Expr::float(0.25)]),
+            (
+                SliderMark("mix".to_string(), slider::Provider::Played),
+                0.25
+            )
         );
     }
 
@@ -1772,10 +1773,7 @@ mod tests {
             Expr::float(0.1),
             Expr::float(1.1),
         ];
-        assert_eq!(
-            slider_call(range).spec,
-            slider::SliderSpec::new(0.7, 0.1, 1.1, slider::Curve::Linear).unwrap()
-        );
+        assert_eq!(slider_mark(range).1, 0.7);
         let curve = vec![
             label("cutoff"),
             Expr::float(800.0),
@@ -1783,10 +1781,7 @@ mod tests {
             Expr::float(11000.0),
             label("exp"),
         ];
-        assert_eq!(
-            slider_call(curve).spec,
-            slider::SliderSpec::new(800.0, 100.0, 11000.0, slider::Curve::Exp).unwrap()
-        );
+        assert_eq!(slider_mark(curve).1, 800.0);
     }
 
     #[test]
@@ -1817,21 +1812,31 @@ mod tests {
     }
 
     #[test]
-    fn slider_records_where_it_was_written() {
-        let arguments: Vec<SourceExpr<SliderMark, ()>> =
-            vec![SourceExpr::from(label("mix")), SourceExpr::float(0.5)];
-        let site = expr::Span::new((), 4..20);
-        let call = BuiltInCall::new(
-            Some(site.clone()),
-            Trace::new::<SliderMark>(None, None),
-            &arguments,
-        );
-        let result = slider(arguments, &call).unwrap();
-        let Expr::Waveform(Waveform::Marked { id, .. }) = result.expr else {
-            panic!("expected a marked waveform");
+    fn slider_is_provided_by_the_listing_its_scope_names() {
+        // Code written in 0..100 is in the listing 7, which lists "mix".
+        let listings = slider::Listings::new(|span: &expr::Span<()>| {
+            (span.range.start < 100).then(|| slider::Listing {
+                id: 7,
+                labels: Arc::from(["mix".to_string()]),
+            })
+        });
+        let scope = eval::DynamicScope::new(listings).enter(Some(&expr::Span::new((), 0..10)));
+        let builtin = SourceExpr::from(BuiltIn {
+            name: "slider".to_string(),
+            function: BuiltInFn::new(slider::<SliderMark, ()>),
+        });
+        let apply = |name: &str| {
+            let application = SourceExpr::application(
+                builtin.clone(),
+                vec![SourceExpr::from(label(name)), SourceExpr::float(0.5)],
+            );
+            match eval::evaluate_closed(application, &scope).unwrap().expr {
+                Expr::Waveform(Waveform::Marked { id, .. }) => id.1,
+                other => panic!("expected a marked waveform, got {}", other),
+            }
         };
-        assert_eq!(id.0.site, Some(site));
-        assert_eq!(id.0.path.sites().count(), 0);
+        assert_eq!(apply("mix"), slider::Provider::Listing(7));
+        assert_eq!(apply("cutoff"), slider::Provider::Played);
     }
 
     /// A mark id that carries a trace and nothing else.

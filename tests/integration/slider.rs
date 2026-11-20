@@ -1,5 +1,5 @@
 //! Checks of the `slider` built-in, from source text through the checker and
-//! evaluation to the owners its sliders resolve to.
+//! evaluation to the providers of its sliders.
 #![cfg(feature = "native")]
 
 use std::fs;
@@ -81,9 +81,7 @@ fn sliders(w: &Waveform<MarkId>) -> Vec<String> {
                     (MarkId::Slider { program, label }, Waveform::Const(value)) => {
                         out.push(format!("{label} of {} = {value}", bank_address(*program)));
                     }
-                    (MarkId::SliderCall(call), _) => {
-                        out.push(format!("{} unresolved", call.0.label))
-                    }
+                    (MarkId::PlayedSlider { label }, _) => out.push(format!("{label} unprovided")),
                     _ => {}
                 }
                 walk(waveform, out);
@@ -166,7 +164,7 @@ fn an_unlisted_slider_is_the_played_programs_and_plays_its_default() {
     assert!(out.iter().all(|&x| x == 0.25), "{out:?}");
 }
 
-/// Returns the source of the design's ownership example: `A:1` defines
+/// Returns the source of the design's provider example: `A:1` defines
 /// `delayed_pad`, which calls the library's `pad`, and `A:2` and `A:3` call
 /// it, with the given annotations.
 fn example(a1: &str, a2: &str) -> String {
@@ -181,9 +179,9 @@ fn example(a1: &str, a2: &str) -> String {
     )
 }
 
-/// Returns who owns the `cutoff` that the program at `index` of `source`
-/// reaches, or its errors.
-fn owner(source: &str, index: usize) -> Result<Vec<String>, Vec<String>> {
+/// Returns each slider mark the program at `index` of `source` evaluates to,
+/// with its provider, or its errors.
+fn provider(source: &str, index: usize) -> Result<Vec<String>, Vec<String>> {
     let set = set(source);
     waveform(&set, index)
         .map(|w| sliders(&w))
@@ -191,14 +189,14 @@ fn owner(source: &str, index: usize) -> Result<Vec<String>, Vec<String>> {
 }
 
 #[test]
-fn without_a_listing_each_played_program_owns_its_own() {
+fn without_a_listing_each_played_program_provides_its_own() {
     let source = example(PLAIN, PLAIN);
     assert_eq!(
-        owner(&source, 1),
+        provider(&source, 1),
         Ok(vec!["cutoff of A:2 = 800".to_string()])
     );
     assert_eq!(
-        owner(&source, 2),
+        provider(&source, 2),
         Ok(vec!["cutoff of A:3 = 800".to_string()])
     );
 }
@@ -207,11 +205,11 @@ fn without_a_listing_each_played_program_owns_its_own() {
 fn a_listing_on_a_shared_binding_shares_its_slider() {
     let source = example(LISTS, PLAIN);
     assert_eq!(
-        owner(&source, 1),
+        provider(&source, 1),
         Ok(vec!["cutoff of A:1 = 800".to_string()])
     );
     assert_eq!(
-        owner(&source, 2),
+        provider(&source, 2),
         Ok(vec!["cutoff of A:1 = 800".to_string()])
     );
 }
@@ -220,28 +218,28 @@ fn a_listing_on_a_shared_binding_shares_its_slider() {
 fn a_listing_on_a_played_program_is_its_own() {
     let source = example(PLAIN, LISTS);
     assert_eq!(
-        owner(&source, 1),
+        provider(&source, 1),
         Ok(vec!["cutoff of A:2 = 800".to_string()])
     );
     assert_eq!(
-        owner(&source, 2),
+        provider(&source, 2),
         Ok(vec!["cutoff of A:3 = 800".to_string()])
     );
 }
 
 #[test]
-fn two_listings_on_one_path_are_an_error_at_both() {
+fn evaluating_through_two_listings_reads_the_inner_one() {
+    // The checker rejects this (see
+    // `two_listings_a_call_is_reached_through_are_an_error_before_it_plays`),
+    // but a program whose findings are only warnings still evaluates.
     let source = example(LISTS, LISTS);
-    let message = "slider \"cutoff\" is listed by A:1 (delayed_pad) and A:2, and this \
-                   waveform is built through each of them; keep only one listing";
-    // The annotations are on lines 2 and 4 of the file.
     assert_eq!(
-        owner(&source, 1),
-        Err(vec![format!("2:3: {message}"), format!("4:3: {message}")])
+        provider(&source, 1),
+        Ok(vec!["cutoff of A:1 = 800".to_string()])
     );
     // A program that reaches only one listing is unaffected.
     assert_eq!(
-        owner(&source, 2),
+        provider(&source, 2),
         Ok(vec!["cutoff of A:1 = 800".to_string()])
     );
 }
@@ -255,13 +253,16 @@ fn a_slider_passed_into_a_listing_binding_is_the_callers() {
          _ = wrap(slider(\"cutoff\", 800, 100, 11000));\n"
     );
     assert_eq!(
-        owner(&source, 1),
+        provider(&source, 1),
         Ok(vec!["cutoff of A:2 = 800".to_string()])
     );
 }
 
 #[test]
 fn a_function_a_listing_binding_applies_is_its_own_however_it_applies_it() {
+    // The checker rejects this (see
+    // `a_listing_binding_may_not_apply_a_function_its_callers_give`), but a
+    // program whose findings are only warnings still evaluates.
     // Directly, and through a built-in, whose own application of the function
     // is written nowhere.
     for apply in ["f(220)", "{map(f, [220])}"] {
@@ -272,7 +273,7 @@ fn a_function_a_listing_binding_applies_is_its_own_however_it_applies_it() {
              _ = play(fn(freq) => (time * freq) * slider(\"cutoff\", 800, 100, 11000));\n"
         );
         assert_eq!(
-            owner(&source, 1),
+            provider(&source, 1),
             Ok(vec!["cutoff of A:1 = 800".to_string()]),
             "{apply}"
         );
@@ -289,13 +290,13 @@ fn an_alias_binding_is_not_on_the_path() {
          _ = alias(220);\n"
     );
     assert_eq!(
-        owner(&source, 1),
+        provider(&source, 1),
         Ok(vec!["cutoff of A:2 = 800".to_string()])
     );
 }
 
 #[test]
-fn a_listing_binding_whose_value_is_built_owns_it() {
+fn a_listing_binding_whose_value_is_built_provides_it() {
     let source = format!(
         "open slider_lib;\n\
          #{{{LISTS}}}\n\
@@ -304,7 +305,7 @@ fn a_listing_binding_whose_value_is_built_owns_it() {
          _ = built;\n"
     );
     assert_eq!(
-        owner(&source, 1),
+        provider(&source, 1),
         Ok(vec!["cutoff of A:1 = 800".to_string()])
     );
 }
@@ -325,7 +326,7 @@ fn calls_that_disagree_are_an_error_naming_both_values() {
     let set = set(&format!(
         "#{{{PLAIN}}}\n_ = slider(\"x\", 0.5) + slider(\"x\", 0.25, 0, 2);\n"
     ));
-    let diagnostics = waveform(&set, 0).unwrap_err();
+    let diagnostics = environment().check_program(&set.evaluation_input(0));
     assert_eq!(
         messages(&diagnostics),
         [
@@ -388,28 +389,28 @@ fn a_listed_slider_moves_along_its_curve() {
 }
 
 #[test]
-fn a_slider_starts_at_the_value_its_owner_saves() {
+fn a_slider_starts_at_the_value_its_provider_saves() {
     let set = loaded(&example("sliders=[\"cutoff:1200\"]", PLAIN));
     assert_eq!(sliders(&played(&set, 1)), ["cutoff of A:1 = 1200"]);
     assert_eq!(sliders(&played(&set, 2)), ["cutoff of A:1 = 1200"]);
 }
 
 #[test]
-fn an_unlisted_slider_is_on_its_owners_encoders() {
+fn an_unlisted_slider_is_on_its_providers_encoders() {
     let mut set = loaded(&example(PLAIN, PLAIN));
     assert_eq!(set.slider(1, "cutoff").unwrap().value, 800.0);
     assert_eq!(set.slider(2, "cutoff").unwrap().value, 800.0);
-    // Each playing program owns its own, on its own first encoder.
+    // Each playing program provides its own, on its own first encoder.
     assert_eq!(set.shown(1), ["cutoff"]);
     set.set_slider_normalized(1, 0, 1.0).unwrap();
     assert_eq!(set.slider(1, "cutoff").unwrap().value, 11000.0);
     assert_eq!(set.slider(2, "cutoff").unwrap().value, 800.0);
-    // The function binding plays nothing, so it owns nothing to show.
+    // The function binding plays nothing, so it provides nothing to show.
     assert!(set.shown(0).is_empty());
 }
 
 #[test]
-fn programs_owning_one_label_separately_need_not_agree() {
+fn programs_providing_one_label_separately_need_not_agree() {
     let set = loaded(&format!(
         "#{{{PLAIN}}}
 _ = slider(\"x\", 0.5);
@@ -422,7 +423,7 @@ _ = slider(\"x\", 2, 0, 4);
 }
 
 #[test]
-fn a_keys_note_resolves_its_sliders() {
+fn a_keys_note_provides_its_sliders() {
     let mut set = set(&format!(
         "open slider_lib;\n\
          #{{{LISTS}}}\n\
@@ -439,26 +440,23 @@ fn a_keys_note_resolves_its_sliders() {
         panic!("expected a keys instrument");
     };
     let arguments = || vec![SourceExpr::float(60.0), SourceExpr::float(0.5)];
-    let (note_on, note_off, _, note_reached) = environment
-        .apply_note_function(&function, arguments(), &set.slider_owners(1))
+    let (note_on, note_off, _) = environment
+        .apply_note_function(&function, arguments(), &set.slider_providers(1))
         .expect("a note should play");
     assert_eq!(sliders(&note_on), ["cutoff of A:1 = 800"]);
     assert_eq!(sliders(&note_off), ["release of A:2 = 0.5"]);
-    // The instrument reaches what its sample note reaches, the note-on's
-    // first.
-    let owned: Vec<_> = reached
+    let provided: Vec<_> = reached
         .iter()
-        .map(|r| (r.owner, r.label.as_str()))
+        .map(|r| (r.provider, r.label.as_str()))
         .collect();
-    assert_eq!(owned, [(0, "cutoff"), (1, "release")]);
-    assert_eq!(note_reached, reached);
+    assert_eq!(provided, [(0, "cutoff"), (1, "release")]);
     set.reach(&reached);
 
     // A note played after the shared slider moves carries its new value.
     set.set_slider_normalized(0, 0, 1.0)
         .expect("A:1 lists a slider");
-    let (mut note_on, _, _, _) = environment
-        .apply_note_function(&function, arguments(), &set.slider_owners(1))
+    let (mut note_on, _, _) = environment
+        .apply_note_function(&function, arguments(), &set.slider_providers(1))
         .expect("a note should play");
     player::substitute_current_slider_values(&mut note_on, &set);
     assert_eq!(sliders(&note_on), ["cutoff of A:1 = 11000"]);
@@ -508,7 +506,7 @@ fn reachable(source: &str, index: usize) -> Vec<String> {
         .expect("test source should parse");
     reached
         .iter()
-        .map(|r| format!("{} of {} = {}", r.label, bank_address(r.owner), r.spec))
+        .map(|r| format!("{} of {} = {}", r.label, bank_address(r.provider), r.spec))
         .collect()
 }
 
@@ -618,7 +616,7 @@ fn a_spec_its_callers_give_is_the_played_programs_when_nothing_lists_it() {
     );
     assert_eq!(check(&source, 1), Vec::<String>::new());
     assert_eq!(reachable(&source, 1), ["q of A:2 = 0.4 (0 to 1, linear)"]);
-    assert_eq!(owner(&source, 1), Ok(vec!["q of A:2 = 0.4".to_string()]));
+    assert_eq!(provider(&source, 1), Ok(vec!["q of A:2 = 0.4".to_string()]));
 }
 
 #[test]
@@ -748,7 +746,7 @@ fn the_slider_demo_checks_clean_and_reaches_what_it_lists() {
         let mut listed: Vec<&str> = set.listed(index).iter().map(|s| s.label.as_str()).collect();
         listed.sort();
         assert_eq!(labels, listed, "{}", set.display_name(index));
-        assert!(reached.iter().all(|r| r.owner == index));
+        assert!(reached.iter().all(|r| r.provider == index));
     }
 }
 
