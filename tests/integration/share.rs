@@ -7,13 +7,13 @@ use std::path::PathBuf;
 use tuun::diagnostics::Diagnostic;
 use tuun::environment::Environment;
 use tuun::generator::{self, Generator};
-use tuun::programs::{Evaluated, ProgramSet};
+use tuun::programs::{Plays, ProgramSet};
 
 const SAMPLE_RATE: u32 = 8000;
 
-/// Returns the result of evaluating the program `_ = program`, after `open
-/// std;` and `bindings`.
-fn evaluate(bindings: &str, program: &str) -> Result<Evaluated, Vec<Diagnostic>> {
+/// Returns what the program `_ = program` plays, after `open std;` and
+/// `bindings`.
+fn evaluate(bindings: &str, program: &str) -> Result<Plays, Vec<Diagnostic>> {
     let source = format!(
         "open std;\n{}\n#{{level_db=0}}\n_ = {};\n",
         bindings, program
@@ -26,14 +26,16 @@ fn evaluate(bindings: &str, program: &str) -> Result<Evaluated, Vec<Diagnostic>>
         .expect("a program");
     let library_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lib/v0");
     let environment = Environment::new(SAMPLE_RATE, 90, library_root);
-    environment.evaluate_program(&set.evaluation_input(index))
+    environment
+        .evaluate_program(&set.evaluation_input(index))
+        .map(|evaluated| evaluated.plays)
 }
 
 /// Returns the samples of the program `_ = program`, after `open std;` and
 /// `bindings`, up to `seconds` long.
 fn render(bindings: &str, program: &str, seconds: f32) -> Vec<f32> {
     let waveform = match evaluate(bindings, program) {
-        Ok(Evaluated::Waveform(waveform, _)) => waveform,
+        Ok(Plays::Waveform(waveform, _)) => waveform,
         Err(diagnostics) => panic!("{}: {:?}", program, diagnostics),
         Ok(_) => panic!("{}: not a waveform", program),
     };

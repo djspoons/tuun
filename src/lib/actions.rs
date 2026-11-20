@@ -837,9 +837,9 @@ pub fn apply(state: &mut AppState, ctx: &Context, action: Action) -> Vec<Effect>
             let program = state.active_program();
             let cursor = program.text().len();
             let errors = parse_program_errors(program.text());
-            let sliders = program
-                .sliders()
-                .slider_display()
+            let sliders = state
+                .programs
+                .slider_display(state.active_program_index)
                 .iter()
                 .map(|s| format!("{}", s))
                 .collect::<Vec<_>>()
@@ -2639,11 +2639,9 @@ fn next_word_end(suffix: &str) -> usize {
 
 fn apply_mouse_slider(state: &mut AppState, axis: usize, delta: f32) -> Vec<Effect> {
     let program_index = state.active_program_index;
-    let program = &state.programs.programs()[program_index];
-    if axis >= program.sliders().configs().len() {
+    let Some(current) = state.programs.slider_normalized(program_index, axis) else {
         return vec![];
-    }
-    let current = program.sliders().normalized_values()[axis];
+    };
     let new = (current + delta).clamp(0.0, 1.0);
     apply_slider(state, program_index, axis, new)
 }
@@ -2654,11 +2652,11 @@ fn apply_slider(
     slider_index: usize,
     normalized: f32,
 ) -> Vec<Effect> {
-    let program = match state.programs.program_mut(program_index) {
-        Some(p) => p,
-        None => return vec![],
-    };
-    let Some(change) = program.set_slider_normalized(slider_index, normalized) else {
+    let Some(change) =
+        state
+            .programs
+            .set_slider_normalized(program_index, slider_index, normalized)
+    else {
         return vec![Effect::ShowMessage(
             Severity::Info,
             format!("No slider with index {}", slider_index),
@@ -2746,6 +2744,9 @@ fn apply_level_db(state: &mut AppState, program_index: usize, level_db: f32) -> 
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    use crate::slider;
+    use crate::slider_owners;
 
     /// Returns the text of `state`'s current message, or "" when there is none.
     fn current_message(state: &AppState) -> &str {
@@ -3793,15 +3794,20 @@ _ = saw(220);";
     }
 
     /// A slider move emits exactly one update, addressed by a mark that
-    /// names the declaring program. The single update is what reaches key
+    /// names the owning program. The single update is what reaches key
     /// voices too — no separate mirror onto the keys family.
     #[test]
-    fn slider_change_emits_one_update_keyed_by_the_declaring_program() {
+    fn slider_change_emits_one_update_keyed_by_the_owning_program() {
         let mut state = AppState::from_source(
-            "#{sliders=[\"vol:0.5:0:1\"]}\nk = fn(note, vel) => (vol, vol);".to_string(),
+            "#{sliders=[\"vol\"]}\nk = fn(note, vel) => (1, 1);".to_string(),
             std::path::PathBuf::new(),
         )
         .expect("test source should parse");
+        state.programs.reach(&[slider_owners::Reached {
+            owner: 0,
+            label: "vol".to_string(),
+            spec: slider::SliderSpec::new(0.5, 0.0, 1.0, slider::Curve::Linear).unwrap(),
+        }]);
         install_test_keys(&mut state);
         let effects = apply_with_empty_status(
             &mut state,

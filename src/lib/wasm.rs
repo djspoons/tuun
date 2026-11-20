@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use wasm_bindgen::prelude::*;
@@ -18,21 +19,154 @@ use crate::{
 
 #[derive(Clone, Debug, PartialEq)]
 enum MarkId {
-    // We currently only support marked waveforms as part of the slider implementation.
+    /// A slider, named by its label alone, since the browser plays one
+    /// expression.
     Slider(String),
+    /// A `slider` call, until [`resolve_sliders`] names its slider.
+    Call(CallRef),
 }
 
 impl fmt::Display for MarkId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             MarkId::Slider(name) => write!(f, "slider({:?})", name),
+            MarkId::Call(call) => write!(f, "slider call({:?})", call.0.label),
         }
+    }
+}
+
+/// A `slider` call as a mark id carries it: equal only to itself, so two mark
+/// ids are the same only if they come from one evaluation of one call.
+#[derive(Clone)]
+struct CallRef(Arc<slider::SliderCall<Source>>);
+
+impl PartialEq for CallRef {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl fmt::Debug for CallRef {
+    // The label is enough to tell slider calls apart when debugging.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CallRef({:?})", self.0.label)
     }
 }
 
 // The browser doesn't light program text, so its marks carry no trace and
 // nothing it evaluates has trace marks to strip.
-impl<S> trace::CarriesTrace<S> for MarkId {}
+impl trace::CarriesTrace<Source> for MarkId {
+    fn from_slider(call: slider::SliderCall<Source>) -> Option<Self> {
+        Some(MarkId::Call(CallRef(Arc::new(call))))
+    }
+}
+
+/// A slider an expression reaches: its label and spec.
+#[derive(Debug, PartialEq)]
+struct Reached {
+    label: String,
+    spec: slider::SliderSpec,
+}
+
+/// Rewrites each `slider` call's mark in `waveform` to the [`MarkId::Slider`]
+/// of its label, and returns the sliders reached, each once, in the order the
+/// text reaches their first calls (see [`slider::SliderCall::text_order`]).
+///
+/// Returns an error at each call whose spec differs from that of another call
+/// of the same label visited before it.
+fn resolve_sliders<S>(
+    waveform: &mut waveform::Waveform<MarkId, S>,
+) -> Result<Vec<Reached>, Vec<expr::Error<Source>>> {
+    // Each slider reached, with the text order of its first call.
+    let mut reached: Vec<(Vec<usize>, Reached)> = Vec::new();
+    let mut errors: Vec<expr::Error<Source>> = Vec::new();
+    waveform::for_each_mark_mut(waveform, &mut |id| {
+        let MarkId::Call(call) = id else {
+            return;
+        };
+        let call = call.0.clone();
+        match reached
+            .iter_mut()
+            .find(|(_, slider)| slider.label == call.label)
+        {
+            None => reached.push((
+                call.text_order(),
+                Reached {
+                    label: call.label.clone(),
+                    spec: call.spec.clone(),
+                },
+            )),
+            Some((_, earlier)) if earlier.spec != call.spec => {
+                let error = expr::Error::eval(
+                    format!(
+                        "slider {:?} is {} here but {} at another call; \
+                         calls of one slider must agree",
+                        call.label, call.spec, earlier.spec
+                    ),
+                    call.site.clone(),
+                );
+                // One evaluation of a call can be reached more than once, as
+                // through a shared value.
+                if !errors.contains(&error) {
+                    errors.push(error);
+                }
+            }
+            Some((first, _)) => {
+                let order = call.text_order();
+                if order < *first {
+                    *first = order;
+                }
+            }
+        }
+        *id = MarkId::Slider(call.label.clone());
+    });
+    if errors.is_empty() {
+        reached.sort_by(|(a, _), (b, _)| a.cmp(b));
+        Ok(reached.into_iter().map(|(_, slider)| slider).collect())
+    } else {
+        Err(errors)
+    }
+}
+
+/// A slider of the playing waveform: its spec and current value.
+struct PlayingSlider {
+    spec: slider::SliderSpec,
+    value: f32,
+}
+
+/// Returns `text` as a JSON string literal.
+fn json_string(text: &str) -> String {
+    let mut out = String::from("\"");
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Returns `reached` as a JSON array of `{label, default, min, max, curve}`
+/// objects, in order.
+fn sliders_json(reached: &[Reached]) -> String {
+    let entries: Vec<String> = reached
+        .iter()
+        .map(|slider| {
+            format!(
+                r#"{{"label":{},"default":{},"min":{},"max":{},"curve":"{}"}}"#,
+                json_string(&slider.label),
+                slider.spec.default,
+                slider.spec.min,
+                slider.spec.max,
+                slider.spec.curve
+            )
+        })
+        .collect();
+    format!("[{}]", entries.join(","))
+}
 
 /// Identifies which text a span's byte range indexes in the wasm runtime.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -77,7 +211,9 @@ pub struct Wasm {
     /// binding is processed.
     modules: HashMap<String, Vec<expr::SourceBinding<MarkId, Source>>>,
     waveform: Option<generator::Waveform<MarkId>>,
-    last_slider_values: HashMap<String, f32>,
+    /// The current value of each slider the playing waveform reaches, by label,
+    /// with its spec.
+    sliders: HashMap<String, PlayingSlider>,
     buffer_duration: Duration,
     /// Module export types and findings, carried between installs. The
     /// embedded modules never change within an instance, so entries stay
@@ -91,16 +227,6 @@ fn def_binding(
     expr: expr::SourceExpr<MarkId, Source>,
 ) -> expr::SourceBinding<MarkId, Source> {
     expr::Binding::Definition(expr::Pattern::Identifier(id.to_string()), expr).into()
-}
-
-/// Joins parse errors into a single user-visible string of messages,
-/// without positions.
-fn join_errors<S>(errors: &[expr::Error<S>]) -> String {
-    errors
-        .iter()
-        .map(|e| e.to_string())
-        .collect::<Vec<_>>()
-        .join("; ")
 }
 
 #[wasm_bindgen(js_class = "Tuun")]
@@ -170,19 +296,44 @@ impl Wasm {
             prelude,
             modules,
             waveform: None,
-            last_slider_values: HashMap::new(),
+            sliders: HashMap::new(),
             buffer_duration: Duration::from_secs_f32(128.0 / sample_rate as f32),
             module_types: infer::ModuleCache::default(),
         })
     }
 
-    /// Installs an expression as the current waveform: parses it, evaluates
-    /// it under the slider bindings and opened modules, and stores the
-    /// resulting waveform for [`Wasm::process`] to render.
+    /// Returns the sliders `expression` reaches, as a JSON array of `{label,
+    /// default, min, max, curve}` objects in the order the expression first
+    /// reaches their calls, without installing it.
     ///
-    /// `slider_json` is a JSON object mapping slider names to initial values,
-    /// for example, `{"volume": 0.5, "cutoff": 2000}`. Pass `"{}"` for no
-    /// sliders.
+    /// `open_json` and `use_json` are as for [`Wasm::install`]. Returns the
+    /// error [`Wasm::install`] would.
+    ///
+    /// # Examples
+    /// ```javascript
+    /// tuun.sliders('$220 * slider("level", 0.5)', '["std"]', "[]");
+    /// // '[{"label":"level","default":0.5,"min":0,"max":1,"curve":"linear"}]'
+    /// ```
+    pub fn sliders(
+        &mut self,
+        expression: &str,
+        open_json: &str,
+        use_json: &str,
+    ) -> Result<String, String> {
+        let (_, reached) = self.evaluate(expression, open_json, use_json)?;
+        Ok(sliders_json(&reached))
+    }
+
+    /// Installs an expression as the current waveform: parses it, evaluates
+    /// it under the opened modules, and stores the resulting waveform for
+    /// [`Wasm::process`] to render. Returns the sliders it reaches, as
+    /// [`Wasm::sliders`] does.
+    ///
+    /// `value_json` is a JSON object mapping slider labels to the values they
+    /// start at, for example `{"volume": 0.5, "cutoff": 2000}`. A value
+    /// outside its slider's range is clamped; a slider with no value starts
+    /// at its default, and a label the expression doesn't reach is ignored.
+    /// Pass `"{}"` for every slider's default.
     ///
     /// `open_json` is a JSON array of dotted module paths to bring into scope
     /// before evaluating, e.g. `["std", "foo.bar"]`. Each entry behaves like an
@@ -202,10 +353,44 @@ impl Wasm {
     pub fn install(
         &mut self,
         expression: &str,
-        slider_json: &str,
+        value_json: &str,
         open_json: &str,
         use_json: &str,
-    ) -> Result<(), String> {
+    ) -> Result<String, String> {
+        let values = parse_json(value_json)?;
+        let (mut waveform, reached) = self.evaluate(expression, open_json, use_json)?;
+        let mut sliders = HashMap::new();
+        for slider in &reached {
+            let value = values
+                .get(&slider.label)
+                .map_or(slider.spec.default, |&value| slider.spec.clamp(value));
+            let id = MarkId::Slider(slider.label.clone());
+            let marked = waveform::Waveform::Marked {
+                id: id.clone(),
+                waveform: Box::new(waveform::Waveform::Const(value)),
+            };
+            waveform::substitute(&mut waveform, &id, &marked);
+            sliders.insert(
+                slider.label.clone(),
+                PlayingSlider {
+                    spec: slider.spec.clone(),
+                    value,
+                },
+            );
+        }
+        self.waveform = Some(generator::initialize_state(waveform));
+        self.sliders = sliders;
+        Ok(sliders_json(&reached))
+    }
+
+    /// Returns the optimized waveform `expression` evaluates to, under the
+    /// modules `open_json` and `use_json` name, and the sliders it reaches.
+    fn evaluate(
+        &mut self,
+        expression: &str,
+        open_json: &str,
+        use_json: &str,
+    ) -> Result<(waveform::Waveform<MarkId>, Vec<Reached>), String> {
         let parsed_expr = parser::parse_program::<MarkId, _>(expression, Source::Expression)
             .map_err(|errors| {
                 let rendered: Vec<String> = errors
@@ -214,14 +399,13 @@ impl Wasm {
                     .collect();
                 format!("Parse errors: {}", rendered.join("; "))
             })?;
-        let sliders = parse_json(slider_json)?;
         let opens = modules::parse_module_paths_json(open_json)?;
         let uses = modules::parse_module_paths_json(use_json)?;
 
         // Build the bindings vec passed to `evaluate`. Implicit
         // `open __prelude` first so the user expression can reference
         // prelude names directly (same prefix each embedded module
-        // gets). Then user-requested opens and uses, then slider bindings.
+        // gets). Then user-requested opens and uses.
         let mut bindings: Vec<expr::SourceBinding<MarkId, Source>> = Vec::new();
         bindings.push(expr::Binding::Open(vec!["__prelude".to_string()]).into());
         for path in opens {
@@ -230,16 +414,6 @@ impl Wasm {
         for path in uses {
             bindings.push(expr::Binding::Use(path).into());
         }
-        for (name, value) in &sliders {
-            bindings.push(def_binding(
-                name,
-                expr::SourceExpr::from(expr::Expr::Waveform(waveform::Waveform::Marked {
-                    id: MarkId::Slider(name.clone()),
-                    waveform: Box::new(waveform::Waveform::Const(*value)),
-                })),
-            ));
-        }
-
         // Resolve `Open(path)` either to the in-memory prelude (for the
         // special `__prelude` path used by modules) or to a dotted entry
         // in the embedded module table. Borrowed for the duration of
@@ -285,7 +459,7 @@ impl Wasm {
 
         // TODO Do we want to precompute here?
 
-        let waveform = match expr.expr {
+        let mut waveform = match expr.expr {
             expr::Expr::Waveform(w) => w,
             expr::Expr::Seq { waveform, .. } => match waveform.expr {
                 expr::Expr::Waveform(w) => w,
@@ -299,32 +473,32 @@ impl Wasm {
             }
         };
 
-        let waveform = optimizer::optimize(waveform);
-        let waveform = generator::initialize_state(waveform);
-
-        self.waveform = Some(waveform);
-        self.last_slider_values = sliders;
-
-        Ok(())
+        let reached = resolve_sliders(&mut waveform).map_err(|errors| {
+            let rendered: Vec<String> = errors
+                .iter()
+                .map(|e| display_error(e, expression))
+                .collect();
+            format!("Evaluate error: {}", rendered.join("; "))
+        })?;
+        Ok((optimizer::optimize(waveform), reached))
     }
 
     /// Drops the current waveform.
     pub fn stop(&mut self) {
         self.waveform = None;
-        self.last_slider_values.clear();
+        self.sliders.clear();
     }
 
-    /// Updates a slider value in the current waveform.
-    ///
-    /// Builds a linear ramp from the last value to the new value and
-    /// substitutes it into the playing waveform.
+    /// Moves the slider `name` of the playing waveform to `value`, clamped to
+    /// its range, ramping from its last value. Does nothing if nothing is
+    /// playing or the waveform doesn't reach that slider.
     pub fn update_slider(&mut self, name: &str, value: f32) {
-        let waveform = match &mut self.waveform {
-            Some(w) => w,
-            None => return,
+        let (Some(waveform), Some(state)) = (&mut self.waveform, self.sliders.get_mut(name)) else {
+            return;
         };
-
-        let last_value = self.last_slider_values.get(name).copied().unwrap_or(value);
+        let value = state.spec.clamp(value);
+        let last_value = state.value;
+        state.value = value;
 
         let mark_id = MarkId::Slider(name.to_string());
         let ramp = slider::make_ramp(
@@ -335,8 +509,6 @@ impl Wasm {
         );
         let ramp = generator::initialize_state(ramp);
         waveform::substitute(waveform, &mark_id, &ramp);
-
-        self.last_slider_values.insert(name.to_string(), value);
     }
 
     /// Generates audio samples from the current waveform. Updates the internal
@@ -412,65 +584,27 @@ fn parse_json(json: &str) -> Result<HashMap<String, f32>, String> {
     Ok(result)
 }
 
-/// Parses a slider config string like `["volume:0.5:0:1", "freq:0.5:fn(x) => 100 * pow(100, x)"]`
-/// and returns a JSON array of slider objects.
-///
-/// Linear sliders: `{ type: "linear", label, initial_value, min, max }`
-/// User-defined sliders: `{ type: "user-defined", label, normalized_initial_value, function_source, initial_value, value_at_0, value_at_1 }`
-///
-/// Returns an error string if parsing fails.
-#[wasm_bindgen(js_name = "parseSliders")]
-pub fn parse_sliders(input: &str) -> Result<String, String> {
-    let sliders = parser::parse_sliders(&format!("sliders={}", input))
-        .map_err(|errors| join_errors(&errors))?;
-
-    // Manually build JSON since we don't have serde
-    let entries: Vec<String> = sliders
-        .iter()
-        .map(|s| match &s.function {
-            expr::SliderFunction::Linear {
-                initial_value,
-                min,
-                max,
-            } => {
-                format!(
-                    r#"{{"type":"linear","label":"{}","initial_value":{},"min":{},"max":{}}}"#,
-                    s.label, initial_value, min, max
-                )
-            }
-            expr::SliderFunction::UserDefined {
-                normalized_initial_value,
-                function_source,
-            } => {
-                let initial_value =
-                    slider::denormalize(&s.function, *normalized_initial_value).unwrap_or(0.0);
-                let value_at_0 = slider::denormalize(&s.function, 0.0).unwrap_or(0.0);
-                let value_at_1 = slider::denormalize(&s.function, 1.0).unwrap_or(0.0);
-                format!(
-                    r#"{{"type":"user-defined","label":"{}","normalized_initial_value":{},"function_source":"{}","initial_value":{},"value_at_0":{},"value_at_1":{}}}"#,
-                    s.label,
-                    normalized_initial_value,
-                    function_source.replace('\\', "\\\\").replace('"', "\\\""),
-                    initial_value,
-                    value_at_0,
-                    value_at_1
-                )
-            }
-        })
-        .collect();
-    Ok(format!("[{}]", entries.join(",")))
+/// Returns the spec of a slider over `min` to `max` with the curve named
+/// `curve`, or why there is none.
+fn range_spec(min: f32, max: f32, curve: &str) -> Result<slider::SliderSpec, String> {
+    let curve = slider::Curve::named(curve)
+        .ok_or_else(|| format!("the curve must be \"linear\" or \"exp\", not {:?}", curve))?;
+    slider::SliderSpec::new(min, min, max, curve)
 }
 
-/// Evaluates a user-defined slider function at a given normalized value.
-///
-/// For example, `evaluateSlider("fn(x) => 100 * pow(100, x)", 0.5)` returns ~1000.
-#[wasm_bindgen(js_name = "evaluateSlider")]
-pub fn evaluate_slider(function_source: &str, normalized_value: f32) -> Result<f32, String> {
-    let function = expr::SliderFunction::UserDefined {
-        normalized_initial_value: 0.0, // unused for evaluation
-        function_source: function_source.to_string(),
-    };
-    slider::denormalize(&function, normalized_value)
+/// Returns the value at `position`, from 0 at `min` to 1 at `max`, along a
+/// slider with the curve named `curve` (see
+/// [`slider::SliderSpec::denormalize`]).
+#[wasm_bindgen(js_name = "sliderValue")]
+pub fn slider_value(min: f32, max: f32, curve: &str, position: f32) -> Result<f32, String> {
+    Ok(range_spec(min, max, curve)?.denormalize(position))
+}
+
+/// Returns the position of `value` along a slider over `min` to `max` with
+/// the curve named `curve`, the inverse of [`slider_value`].
+#[wasm_bindgen(js_name = "sliderPosition")]
+pub fn slider_position(min: f32, max: f32, curve: &str, value: f32) -> Result<f32, String> {
+    Ok(range_spec(min, max, curve)?.normalize(value))
 }
 
 /// Initializes the WASM module.
@@ -544,16 +678,106 @@ mod tests {
         );
         // A slider is a marked waveform: usable anywhere a waveform is,
         // gated where a waveform is not.
-        tuun.install("$220 * volume", r#"{"volume": 0.5}"#, "[\"std\"]", "[]")
+        tuun.install("$220 * slider(\"volume\", 0.5)", "{}", "[\"std\"]", "[]")
             .expect("a slider-scaled tone should install");
         let error = tuun
-            .install("nth(volume, [1, 2, 3])", r#"{"volume": 0.5}"#, "[]", "[]")
+            .install("nth(slider(\"volume\", 0.5), [1, 2, 3])", "{}", "[]", "[]")
             .expect_err("a slider index should gate the install");
         assert!(
             error.contains("expected int, found waveform"),
             "unexpected message: {}",
             error
         );
+    }
+
+    /// A `slider` call in the expression is the slider of that label, which
+    /// `update_slider` moves.
+    #[test]
+    fn test_slider_builtin_is_live() {
+        let mut tuun = Wasm::new(44100, 120.0).expect("Failed to create Tuun instance");
+        tuun.install("slider(\"level\", 0.25)", "{}", "[]", "[]")
+            .expect("a slider should install");
+        let mut out = vec![0.0; 4];
+        tuun.process(&mut out);
+        assert_eq!(out, [0.25; 4]);
+        // The move ramps from the value the slider started at, over one
+        // buffer, then holds.
+        tuun.update_slider("level", 1.0);
+        tuun.process(&mut out);
+        assert_eq!(out[0], 0.25);
+        tuun.process(&mut out);
+        assert!(out.iter().all(|x| (x - 1.0).abs() < 1e-5), "{:?}", out);
+    }
+
+    /// The sliders an expression reaches are listed once each, in the order
+    /// its text reaches their calls (here, not the order the waveform holds
+    /// them), without installing anything.
+    #[test]
+    fn test_sliders_lists_each_reached_slider_once_in_order() {
+        let mut tuun = Wasm::new(44100, 120.0).expect("Failed to create Tuun instance");
+        let sliders = tuun
+            .sliders(
+                "let level = slider(\"level\", 0.5) in \
+                 $(slider(\"freq\", 200, 50, 1000, \"exp\")) * level * level",
+                "[\"std\"]",
+                "[]",
+            )
+            .expect("the expression evaluates");
+        assert_eq!(
+            sliders,
+            r#"[{"label":"level","default":0.5,"min":0,"max":1,"curve":"linear"},{"label":"freq","default":200,"min":50,"max":1000,"curve":"exp"}]"#
+        );
+        assert!(!tuun.is_playing());
+        let error = tuun
+            .sliders("slider(\"a\", 0.5) + slider(\"a\", 2, 0, 4)", "[]", "[]")
+            .expect_err("calls that disagree are an error");
+        assert!(
+            error.contains("slider \"a\" is") && error.contains("calls of one slider must agree"),
+            "unexpected message: {}",
+            error
+        );
+    }
+
+    /// An install starts each slider at its value in `value_json`, clamped to
+    /// its range, or at its default, and returns the sliders it reaches.
+    #[test]
+    fn test_install_starts_sliders_at_the_given_values() {
+        let mut tuun = Wasm::new(44100, 120.0).expect("Failed to create Tuun instance");
+        let sliders = tuun
+            .install(
+                "slider(\"a\", 0.25) + slider(\"b\", 0.5, 0, 2) + slider(\"c\", 0.125)",
+                r#"{"a": 0.5, "b": 3, "gone": 1}"#,
+                "[]",
+                "[]",
+            )
+            .expect("the expression installs");
+        assert!(sliders.starts_with(r#"[{"label":"a","#), "{}", sliders);
+        let mut out = vec![0.0; 4];
+        tuun.process(&mut out);
+        // 0.5 as given, 2 clamped from 3, and c's default.
+        assert_eq!(out, [2.625; 4]);
+        // A move ramps from the value the slider started at.
+        tuun.update_slider("b", 0.0);
+        tuun.process(&mut out);
+        assert!(out[0] > 0.625 && out[3] < out[0], "{:?}", out);
+        // A move is clamped to the slider's range, and a label the waveform
+        // doesn't reach moves nothing.
+        tuun.update_slider("a", 5.0);
+        tuun.update_slider("gone", 5.0);
+        tuun.process(&mut out);
+        tuun.process(&mut out);
+        assert!((out[3] - 1.125).abs() < 1e-5, "{:?}", out);
+    }
+
+    /// The exported mapping follows the slider's curve both ways.
+    #[test]
+    fn test_slider_value_and_position_follow_the_curve() {
+        assert_eq!(slider_value(0.0, 10.0, "linear", 0.5), Ok(5.0));
+        let value = slider_value(100.0, 10000.0, "exp", 0.5).unwrap();
+        assert!((value - 1000.0).abs() < 0.1, "{}", value);
+        let position = slider_position(100.0, 10000.0, "exp", 1000.0).unwrap();
+        assert!((position - 0.5).abs() < 1e-4, "{}", position);
+        assert!(slider_value(0.0, 1.0, "log", 0.5).is_err());
     }
 
     /// Test that invalid expressions produce appropriate errors

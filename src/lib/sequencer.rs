@@ -38,7 +38,7 @@ pub struct Sequence {
     /// its literal, in source order.
     pub steps: Vec<(f32, Range<usize>)>,
     /// The waveform argument `w`, evaluated in the program's context and
-    /// optimized; slider values and the level wrap are applied per play.
+    /// optimized; wrappers like level are applied per play.
     pub step_waveform: waveform::Waveform<MarkId>,
     /// The step waveform's marks, shared by every step.
     pub step_marks: Arc<WaveformMarks>,

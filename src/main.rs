@@ -227,7 +227,7 @@ pub fn main() {
 
     // Seed each slider's ramp baseline where the slider currently sits, so its
     // first move ramps instead of stepping to the target.
-    let last_slider_values = effects::slider_values(&state.programs);
+    let last_slider_values: HashMap<_, _> = state.programs.slider_values().collect();
     // Spawn a thread that batches slider updates, sending them approximately once per audio buffer
     let buffer_duration =
         Duration::from_secs_f32(args.buffer_size as f32 / args.sample_rate as f32);

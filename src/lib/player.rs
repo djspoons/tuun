@@ -13,9 +13,8 @@ use crate::expr;
 use crate::generator;
 use crate::ids::{ANCHOR_SIXTEENTH, MarkId, WaveformId, WaveformSelector};
 use crate::optimizer;
-use crate::programs::{Evaluated, Program, ProgramSet};
+use crate::programs::{Plays, Program, ProgramSet};
 use crate::sequencer;
-use crate::slider;
 use crate::trace_walk::{self, WaveformMarks};
 use crate::tracker;
 use crate::waveform;
@@ -95,26 +94,18 @@ pub fn db_to_amplitude(db: f32) -> f32 {
 /// Substitutes every slider's current value into the matching `Marked { id:
 /// Slider { .. }, … }` nodes of `waveform`.
 ///
-/// Sliders of every program in `set` are applied, not just those of the program
-/// the waveform came from.
+/// Every slider the waveforms of `set`'s programs have reached is applied, not
+/// just those the waveform's own program owns.
 pub fn substitute_current_slider_values(
     waveform: &mut waveform::Waveform<MarkId>,
     set: &ProgramSet,
 ) {
-    for (program_index, program) in set.programs().iter().enumerate() {
-        let sliders = program.sliders();
-        for (config, &normalized) in sliders.configs().iter().zip(sliders.normalized_values()) {
-            let value = slider::denormalize(&config.function, normalized).unwrap_or(0.0);
-            let mark_id = MarkId::Slider {
-                program: program_index,
-                label: config.label.clone(),
-            };
-            let marked = waveform::Waveform::Marked {
-                id: mark_id.clone(),
-                waveform: Box::new(waveform::Waveform::Const(value)),
-            };
-            waveform::substitute(waveform, &mark_id, &marked);
-        }
+    for (mark_id, value) in set.slider_values() {
+        let marked = waveform::Waveform::Marked {
+            id: mark_id.clone(),
+            waveform: Box::new(waveform::Waveform::Const(value)),
+        };
+        waveform::substitute(waveform, &mark_id, &marked);
     }
 }
 
@@ -257,7 +248,7 @@ impl Player {
         waveform_marks: &mut HashMap<WaveformId, PlayedMarks>,
     ) -> Option<String> {
         let program = set.program(program_index)?;
-        let Some(Evaluated::Waveform(waveform, marks)) = program.evaluated() else {
+        let Some(Plays::Waveform(waveform, marks)) = program.evaluated().map(|e| &e.plays) else {
             return None;
         };
         let message = play_message(
@@ -759,6 +750,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::programs::Outcome;
 
     fn empty_status() -> tracker::Status<WaveformId> {
         tracker::Status {
@@ -869,8 +861,12 @@ mod tests {
         let evaluated = environment
             .evaluate_program(&input)
             .expect("test program should evaluate");
-        set.record(0, input.text.into(), Ok((Some(evaluated), Vec::new())))
-            .expect("a success records");
+        set.record(
+            0,
+            input.text.into(),
+            Outcome::Evaluated(evaluated, Vec::new()),
+        )
+        .expect("a success records");
         set
     }
 

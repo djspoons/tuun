@@ -12,7 +12,7 @@ use tuun::generator::Generator;
 use tuun::ids::{MarkId, WaveformId};
 use tuun::player::{Player, Start};
 use tuun::processing;
-use tuun::programs::ProgramSet;
+use tuun::programs::{Outcome, ProgramSet};
 use tuun::tracker;
 use tuun::waveform::Waveform;
 
@@ -51,7 +51,7 @@ fn processed(environment: &Environment, source: &str, precompute: bool) -> Progr
     } else {
         // `process` always pre-computes samples, so inline the part that
         // doesn't here.
-        Ok((Some(environment.evaluate_program(&input).unwrap()), vec![]))
+        Outcome::Evaluated(environment.evaluate_program(&input).unwrap(), vec![])
     };
     set.record(0, input.text.into(), outcome)
         .expect("the program evaluates");
@@ -66,8 +66,9 @@ fn precomputing_at_evaluation_matches_precomputing_each_play() {
     let environment = Environment::new(SAMPLE_RATE, 90, PathBuf::new());
     // A finite part that pre-computes to samples, then one the slider mark
     // keeps dynamic.
-    let source = "#{sliders=[\"vol:0.5:0:1\"], level_db=-6}\n\
-                  _ = (time | fin(time - 0.25) | seq(time - 0.25)) \\ (vol | fin(time - 0.25));\n";
+    let source = "#{sliders=[\"vol\"], level_db=-6}\n\
+                  _ = (time | fin(time - 0.25) | seq(time - 0.25)) \\ \
+                  (slider(\"vol\", 0.5) | fin(time - 0.25));\n";
     let mut at_evaluation = processed(&environment, source, true);
     let mut per_play = processed(&environment, source, false);
     let (sender, commands) = mpsc::channel();
@@ -75,9 +76,7 @@ fn precomputing_at_evaluation_matches_precomputing_each_play() {
 
     for (normalized, value) in [(0.5, 0.5), (1.0, 1.0)] {
         for set in [&mut at_evaluation, &mut per_play] {
-            set.program_mut(0)
-                .unwrap()
-                .set_slider_normalized(0, normalized)
+            set.set_slider_normalized(0, 0, normalized)
                 .expect("the program has a slider");
         }
         let precomputed_once = played(&player, &commands, &at_evaluation);

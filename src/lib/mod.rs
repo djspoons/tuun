@@ -50,6 +50,8 @@ pub mod sdl2_input;
 #[cfg(feature = "native")]
 pub mod sequencer;
 #[cfg(feature = "native")]
+pub mod slider_owners;
+#[cfg(feature = "native")]
 pub mod tracker;
 
 // WASM module (only compiled when targeting wasm32 or when wasm feature is

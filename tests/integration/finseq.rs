@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use tuun::environment::Environment;
 use tuun::generator::{self, Generator};
 use tuun::ids::MarkId;
-use tuun::programs::{Evaluated, ProgramSet};
+use tuun::programs::{Evaluated, Plays, ProgramSet};
 use tuun::waveform::Waveform;
 
 #[test]
@@ -36,10 +36,19 @@ fn adsr_segments_meet_without_gaps_or_overlaps() {
         assert_eq!(warning, "");
         let environment = Environment::new(sample_rate, 90, library_root.clone());
         let waveform = match environment.evaluate_program(&set.evaluation_input(0)) {
-            Ok(Evaluated::Waveform(waveform, _)) => waveform,
+            Ok(Evaluated {
+                plays: Plays::Waveform(waveform, _),
+                ..
+            }) => waveform,
             Err(diagnostics) => panic!("invalid: {:?}", diagnostics),
-            Ok(Evaluated::Sequence(_)) => panic!("classified as a sequence"),
-            Ok(Evaluated::KeysInstrument(_)) => panic!("classified as keys"),
+            Ok(Evaluated {
+                plays: Plays::Sequence(_),
+                ..
+            }) => panic!("classified as a sequence"),
+            Ok(Evaluated {
+                plays: Plays::KeysInstrument(_),
+                ..
+            }) => panic!("classified as keys"),
         };
         let mut out = vec![0.0; 10000];
         let len = Generator::new(sample_rate)
@@ -62,7 +71,10 @@ fn evaluate(sample_rate: u32, program: &str) -> Result<Waveform<MarkId>, Vec<Str
     let library_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lib/v0");
     let environment = Environment::new(sample_rate, 90, library_root);
     match environment.evaluate_program(&set.evaluation_input(0)) {
-        Ok(Evaluated::Waveform(waveform, _)) => Ok(waveform),
+        Ok(Evaluated {
+            plays: Plays::Waveform(waveform, _),
+            ..
+        }) => Ok(waveform),
         Err(diagnostics) => Err(diagnostics.into_iter().map(|d| d.message).collect()),
         Ok(_) => panic!("{}: not a waveform", program),
     }

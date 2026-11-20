@@ -707,23 +707,12 @@ pub(crate) fn stamp_errors<S: Copy>(errors: Vec<Error>, source: S) -> Vec<Error<
         .collect()
 }
 
-#[derive(Debug, Clone)]
+/// An entry of a `sliders` annotation: a slider's label and, optionally, its
+/// saved value in the slider's own units.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Slider {
     pub label: String,
-    pub function: SliderFunction,
-}
-
-#[derive(Debug, Clone)]
-pub enum SliderFunction {
-    Linear {
-        initial_value: f32, // In the output range
-        min: f32,
-        max: f32,
-    },
-    UserDefined {
-        normalized_initial_value: f32, // In [0, 1]
-        function_source: String,       // Tuun function expression, e.g. "fn(x) => 20 * pow(500, x)"
-    },
+    pub value: Option<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -741,8 +730,8 @@ pub enum Annotation {
     LoopAfterBeats(u32),
 }
 
-/// Renders a parameter value (`level_db`, slider `initial`/`min`/`max`, slider
-/// `normalized_initial_value`) as it should appear source annotations.
+/// Renders a parameter value (`level_db`, a slider's saved value) as it should
+/// appear in source annotations.
 pub fn format_param(value: f32) -> String {
     // Default `{}` Display: shortest round-trip representation. Trims `5.0` →
     // `5` and avoids unrolling noise from float arithmetic.
@@ -750,30 +739,11 @@ pub fn format_param(value: f32) -> String {
 }
 
 impl Display for Slider {
+    // As in `"cutoff"` or `"cutoff:1200"`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.function {
-            SliderFunction::Linear {
-                initial_value,
-                min,
-                max,
-            } => write!(
-                f,
-                "\"{}:{}:{}:{}\"",
-                self.label,
-                format_param(*initial_value),
-                format_param(*min),
-                format_param(*max)
-            ),
-            SliderFunction::UserDefined {
-                normalized_initial_value,
-                function_source,
-            } => write!(
-                f,
-                "\"{}:{}:{}\"",
-                self.label,
-                format_param(*normalized_initial_value),
-                function_source
-            ),
+        match self.value {
+            Some(value) => write!(f, "\"{}:{}\"", self.label, format_param(value)),
+            None => write!(f, "\"{}\"", self.label),
         }
     }
 }

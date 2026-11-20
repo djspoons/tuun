@@ -10,7 +10,7 @@ use std::thread;
 use crate::diagnostics::{Diagnostic, Severity};
 use crate::environment::{CheckMode, Environment, ModuleTable};
 use crate::generator::Generator;
-use crate::programs::{Evaluated, EvaluationInput, Outcome, ProgramSet};
+use crate::programs::{Evaluated, EvaluationInput, Outcome, Plays, ProgramSet};
 use crate::sequencer;
 
 /// Work for the processing thread.
@@ -89,11 +89,11 @@ pub struct Loaded {
 
 /// Checks and evaluates the program `input` describes.
 ///
-/// An empty (or blank) program succeeds with no result: it is a deletion,
-/// not a parse error. Otherwise the type checker runs first. Error-severity
-/// findings fail without evaluating; warning-severity findings are the
-/// warnings on success and lead the evaluation's diagnostics on failure, so
-/// both views of a problem show side by side.
+/// An empty (or blank) program is [`Outcome::Empty`]: it is a deletion, not a
+/// parse error. Otherwise the type checker runs first. Error-severity findings
+/// fail without evaluating; warning-severity findings are the warnings on
+/// success and lead the evaluation's diagnostics on failure, so both views of a
+/// problem show side by side.
 pub fn process(environment: &Environment, input: &EvaluationInput) -> Outcome {
     process_with(environment, input, || environment.evaluate_program(input))
 }
@@ -106,41 +106,42 @@ fn process_with(
     evaluate: impl FnOnce() -> Result<Evaluated, Vec<Diagnostic>>,
 ) -> Outcome {
     if input.text.trim().is_empty() {
-        return Ok((None, Vec::new()));
+        return Outcome::Empty;
     }
     let findings = environment.check_program(input);
     if findings
         .iter()
         .any(|finding| finding.severity == Severity::Error)
     {
-        return Err(findings);
+        return Outcome::Failed(findings);
     }
     match evaluate() {
-        Ok(evaluated) => Ok((
-            Some(precomputed(evaluated, environment.sample_rate())),
+        Ok(evaluated) => Outcome::Evaluated(
+            Evaluated {
+                plays: precomputed(evaluated.plays, environment.sample_rate()),
+                ..evaluated
+            },
             findings,
-        )),
+        ),
         Err(diagnostics) => {
             let mut all = findings;
             all.extend(diagnostics);
-            Err(all)
+            Outcome::Failed(all)
         }
     }
 }
 
-/// Returns `evaluated` with the finite parts of the waveform it plays replaced
-/// by their samples generated at `sample_rate`.
-fn precomputed(evaluated: Evaluated, sample_rate: u32) -> Evaluated {
+/// Returns `plays` with the finite parts of the waveform it plays replaced by
+/// their samples generated at `sample_rate`.
+fn precomputed(plays: Plays, sample_rate: u32) -> Plays {
     let mut generator = Generator::new(sample_rate);
-    match evaluated {
-        Evaluated::Waveform(waveform, marks) => {
-            Evaluated::Waveform(generator.precompute(waveform), marks)
-        }
-        Evaluated::Sequence(sequence) => Evaluated::Sequence(sequencer::Sequence {
+    match plays {
+        Plays::Waveform(waveform, marks) => Plays::Waveform(generator.precompute(waveform), marks),
+        Plays::Sequence(sequence) => Plays::Sequence(sequencer::Sequence {
             step_waveform: generator.precompute(sequence.step_waveform),
             ..sequence
         }),
-        Evaluated::KeysInstrument(function) => Evaluated::KeysInstrument(function),
+        Plays::KeysInstrument(function) => Plays::KeysInstrument(function),
     }
 }
 
@@ -178,22 +179,14 @@ pub fn load(
         evaluated = counts[index];
         let input = set.evaluation_input(index);
         let outcome = process_with(environment, &input, || match &mut context {
-            Ok(entries) => {
-                let len = entries.len();
-                let result =
-                    match environment.extend_context(entries, &set.own_slider_bindings(index)) {
-                        Ok(()) => environment.evaluate_program_in_context(&input, entries),
-                        // Evaluating from scratch reports the failure as it
-                        // would for this program alone.
-                        Err(_) => environment.evaluate_program(&input),
-                    };
-                entries.truncate(len);
-                result
-            }
+            Ok(entries) => environment.evaluate_program_in_context(&input, entries),
             // A binding this program uses failed: evaluating from scratch reports
             // it as it would for this program alone.
             Err(_) => environment.evaluate_program(&input),
         });
+        // TODO the warnings of a program that evaluates are dropped, including
+        // slider warnings (a clamped saved value, an unreached listing), so
+        // they only show once the program is evaluated again.
         if let Err(diagnostics) = set.record(index, input.text.into(), outcome) {
             failed.push((index, diagnostics));
         }
@@ -209,7 +202,6 @@ pub fn load(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::programs::Evaluated;
     use std::fs;
     use std::path::PathBuf;
 
@@ -261,11 +253,20 @@ mod tests {
         let Ok(Reply::Program(first)) = replies.recv_timeout(timeout) else {
             panic!("expected the first program's reply");
         };
-        assert!(matches!(first, Ok((Some(Evaluated::Waveform(..)), _))));
+        assert!(matches!(
+            first,
+            Outcome::Evaluated(
+                Evaluated {
+                    plays: Plays::Waveform(..),
+                    ..
+                },
+                _
+            )
+        ));
         let Ok(Reply::Program(second)) = replies.recv_timeout(timeout) else {
             panic!("expected the second program's reply");
         };
-        assert!(second.is_err(), "got {:?}", second);
+        assert!(matches!(second, Outcome::Failed(_)), "got {:?}", second);
         let Ok(Reply::Loaded(Ok(loaded))) = replies.recv_timeout(timeout) else {
             panic!("expected the load's reply");
         };
@@ -276,6 +277,15 @@ mod tests {
             thread::yield_now();
         }
         assert_eq!(wakes.load(Ordering::SeqCst), 3);
+    }
+
+    /// Returns the diagnostics of `outcome`, which must have failed for the
+    /// reason `why`.
+    fn failed(outcome: Outcome, why: &str) -> Vec<Diagnostic> {
+        match outcome {
+            Outcome::Failed(diagnostics) => diagnostics,
+            other => panic!("{why}: got {other:?}"),
+        }
     }
 
     /// Returns the set for `source`, which must parse cleanly.
@@ -301,7 +311,7 @@ mod tests {
         set.program_mut(0).unwrap().set_text("  ".to_string());
         let input = set.evaluation_input(0);
         let outcome = process(&environment, &input);
-        assert!(matches!(outcome, Ok((None, ref warnings)) if warnings.is_empty()));
+        assert!(matches!(outcome, Outcome::Empty));
         assert!(set.record(0, input.text.into(), outcome).is_ok());
         assert!(set.programs()[0].evaluated().is_none());
     }
@@ -314,8 +324,10 @@ mod tests {
         // Default mode: findings are errors, positioned in the program's
         // own text (`"a"` starts at column 12), and they gate — evaluation
         // is never attempted, so the checker's finding stands alone.
-        let diagnostics = process(&environment, &set.evaluation_input(0))
-            .expect_err("error findings gate evaluation");
+        let diagnostics = failed(
+            process(&environment, &set.evaluation_input(0)),
+            "error findings gate evaluation",
+        );
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].severity, Severity::Error);
         assert_eq!(
@@ -327,8 +339,10 @@ mod tests {
         // Warnings mode: the same finding reports as a warning, first, and
         // evaluation proceeds to its own error — side by side.
         environment.set_check_mode(CheckMode::Warnings);
-        let diagnostics = process(&environment, &set.evaluation_input(0))
-            .expect_err("fin(\"a\") fails at evaluation");
+        let diagnostics = failed(
+            process(&environment, &set.evaluation_input(0)),
+            "fin(\"a\") fails at evaluation",
+        );
         assert_eq!(diagnostics.len(), 2);
         assert_eq!(diagnostics[0].severity, Severity::Warning);
         assert_eq!(
@@ -343,7 +357,13 @@ mod tests {
         for text in ["time", "fin(nth(1 + 2, [1, 2, 4, 8]))(time)"] {
             set.program_mut(0).unwrap().set_text(text.to_string());
             match process(&environment, &set.evaluation_input(0)) {
-                Ok((Some(Evaluated::Waveform(..)), warnings)) => assert!(warnings.is_empty()),
+                Outcome::Evaluated(
+                    Evaluated {
+                        plays: Plays::Waveform(..),
+                        ..
+                    },
+                    warnings,
+                ) => assert!(warnings.is_empty()),
                 outcome => panic!("{} should evaluate cleanly, got {:?}", text, outcome),
             }
         }
@@ -353,8 +373,10 @@ mod tests {
         set.program_mut(0)
             .unwrap()
             .set_text("fin(nth(2.5, [1, 2, 4, 8]))(time)".to_string());
-        let diagnostics = process(&environment, &set.evaluation_input(0))
-            .expect_err("the fractional index gates");
+        let diagnostics = failed(
+            process(&environment, &set.evaluation_input(0)),
+            "the fractional index gates",
+        );
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].severity, Severity::Error);
         assert_eq!(diagnostics[0].to_string(), "1:9: expected int, found float");
@@ -365,15 +387,18 @@ mod tests {
         set.program_mut(0)
             .unwrap()
             .set_text("let f = fn(x) => nth(2.5, [1, 2]) in time".to_string());
-        let diagnostics = process(&environment, &set.evaluation_input(0))
-            .expect_err("the unused function's finding gates");
+        let diagnostics = failed(
+            process(&environment, &set.evaluation_input(0)),
+            "the unused function's finding gates",
+        );
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
             diagnostics[0].to_string(),
             "1:22: expected int, found float"
         );
         environment.set_check_mode(CheckMode::Warnings);
-        let Ok((Some(_), warnings)) = process(&environment, &set.evaluation_input(0)) else {
+        let Outcome::Evaluated(_, warnings) = process(&environment, &set.evaluation_input(0))
+        else {
             panic!("the unused function body never evaluates");
         };
         assert_eq!(warnings.len(), 1);
@@ -391,13 +416,13 @@ mod tests {
         let evaluated = |source: &str| {
             let set = set_from(source);
             match process(&environment, &set.evaluation_input(0)) {
-                Ok((Some(evaluated), _)) => evaluated,
+                Outcome::Evaluated(evaluated, _) => evaluated.plays,
                 outcome => panic!("{} should evaluate, got {:?}", source, outcome),
             }
         };
 
         let source = "#{level_db=0}\n_ = 1 | fin(time - 1);\n";
-        let Evaluated::Waveform(Waveform::Fixed(samples, ()), _) = evaluated(source) else {
+        let Plays::Waveform(Waveform::Fixed(samples, ()), _) = evaluated(source) else {
             panic!("expected samples for {}", source);
         };
         assert_eq!(samples, vec![1.0; 8000]);
@@ -405,7 +430,7 @@ mod tests {
         let source = "on_beats = fn(w) => fn(bs) => w;\n\
                       #{level_db=0}\n\
                       _ = [1, 2.5] | on_beats(1 | fin(time - 1));\n";
-        let Evaluated::Sequence(sequence) = evaluated(source) else {
+        let Plays::Sequence(sequence) = evaluated(source) else {
             panic!("expected a sequence for {}", source);
         };
         assert_eq!(sequence.step_beats().collect::<Vec<_>>(), vec![1.0, 2.5]);
@@ -442,14 +467,17 @@ mod tests {
         let environment = Environment::new(44100, 90, root.clone());
 
         // A program using only the module's healthy exports is untouched.
-        let Ok((Some(_), warnings)) = process(&environment, &set.evaluation_input(0)) else {
+        let Outcome::Evaluated(_, warnings) = process(&environment, &set.evaluation_input(0))
+        else {
             panic!("healthy exports evaluate");
         };
         assert!(warnings.is_empty(), "got {:?}", warnings);
 
         // The use site carries the diagnostic and the gate fires.
-        let diagnostics = process(&environment, &set.evaluation_input(1))
-            .expect_err("a use of a broken definition gates evaluation");
+        let diagnostics = failed(
+            process(&environment, &set.evaluation_input(1)),
+            "a use of a broken definition gates evaluation",
+        );
         assert_eq!(diagnostics.len(), 1, "got {:?}", diagnostics);
         assert_eq!(
             diagnostics[0].to_string(),
@@ -492,13 +520,13 @@ mod tests {
         // sequenceable program, a keys instrument, and a broken binding that
         // only the programs after it read.
         let source = "\
-#{sliders=[\"gain:0.5:0:1\"]}
-base = time * gain | fin(time - 1);
+#{sliders=[\"gain\"]}
+base = time * slider(\"gain\", 0.5) | fin(time - 1);
 on_beats = fn(w) => fn(beats) => w;
 #{level_db=0}
 _ = base;
-#{level_db=0, sliders=[\"depth:0.25:0:1\"]}
-twice = base * depth;
+#{level_db=0, sliders=[\"depth\"]}
+twice = base * slider(\"depth\", 0.25);
 #{level_db=0}
 _ = [1, 3] | on_beats(twice);
 #{keys}
@@ -519,13 +547,13 @@ _ = twice;
             let alone = process(&environment, &set.evaluation_input(index));
             let failure = loaded.failed.iter().find(|(i, _)| *i == index);
             match (alone, failure) {
-                (Ok((evaluated, _)), None) => assert_eq!(
+                (Outcome::Evaluated(evaluated, _), None) => assert_eq!(
                     format!("{:?}", program.evaluated()),
-                    format!("{:?}", evaluated.as_ref()),
+                    format!("{:?}", Some(evaluated)),
                     "program {}",
                     index
                 ),
-                (Err(alone), Some((_, loaded))) => {
+                (Outcome::Failed(alone), Some((_, loaded))) => {
                     assert_eq!(loaded, &alone, "program {}", index)
                 }
                 (alone, failure) => panic!(
@@ -537,7 +565,10 @@ _ = twice;
         assert_eq!(live, 6);
         assert!(matches!(
             loaded.set.programs()[3].evaluated(),
-            Some(Evaluated::Sequence(_))
+            Some(Evaluated {
+                plays: Plays::Sequence(_),
+                ..
+            })
         ));
         assert_eq!(loaded.failed.len(), 1);
     }

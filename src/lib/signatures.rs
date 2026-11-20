@@ -214,6 +214,21 @@ pub fn signature(name: &str) -> Option<Type> {
             ),
         ]),
         "capture" => Type::function(vec![Type::String], waveform_filter()),
+        // One conjunct per arity: label and default, then min and max, then a
+        // curve. A slider's value is a waveform even at its default, since it
+        // changes while it plays, so it is never a plain number.
+        "slider" => {
+            let label_default_range =
+                vec![Type::String, Type::float(), Type::float(), Type::float()];
+            Type::intersection(vec![
+                Type::function(label_default_range[..2].to_vec(), Type::non_const_wave()),
+                Type::function(label_default_range.clone(), Type::non_const_wave()),
+                Type::function(
+                    [label_default_range, vec![Type::String]].concat(),
+                    Type::non_const_wave(),
+                ),
+            ])
+        }
         "__chord" => Type::function(
             vec![Type::List(Box::new(Type::waveform()))],
             Type::non_const_wave(),

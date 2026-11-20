@@ -440,6 +440,82 @@ impl<M, S> Waveform<M, S> {
     }
 }
 
+/// Calls `f` on the id of each mark in `waveform`: a mark before the marks
+/// inside it and the marks in each operand before those in the operands after
+/// it.
+///
+/// # Example
+///
+/// ```
+/// use tuun::waveform::{self, BinaryOperator, Waveform::{self, BinaryOp, Const, Marked}};
+///
+/// let marked = |id, w: Waveform<u32>| Box::new(Marked { id, waveform: Box::new(w) });
+/// let mut w = BinaryOp(BinaryOperator::Add, marked(1, Const(1.0)), marked(2, Const(2.0)));
+/// let mut seen = Vec::new();
+/// waveform::for_each_mark_mut(&mut w, &mut |id: &mut u32| {
+///     seen.push(*id);
+///     *id *= 10;
+/// });
+/// assert_eq!(seen, [1, 2]);
+/// assert_eq!(w, BinaryOp(BinaryOperator::Add, marked(10, Const(1.0)), marked(20, Const(2.0))));
+/// ```
+pub fn for_each_mark_mut<M, S>(waveform: &mut Waveform<M, S>, f: &mut impl FnMut(&mut M)) {
+    use Waveform::*;
+    match waveform {
+        Const(_) | Time(_) | Noise | Fixed(_, _) | Ref(_) => {}
+        Marked { id, waveform } => {
+            f(id);
+            for_each_mark_mut(waveform, f);
+        }
+        UnaryOp(_, a) | Captured { waveform: a, .. } => for_each_mark_mut(a, f),
+        Fin {
+            length: a,
+            waveform: b,
+            ..
+        }
+        | Append(a, b, _)
+        | Phase {
+            frequency: a,
+            offset: b,
+            ..
+        }
+        | BinaryOp(_, a, b)
+        | Reset {
+            trigger: a,
+            waveform: b,
+            ..
+        }
+        | Shared {
+            waveform: a,
+            body: b,
+            ..
+        } => {
+            for_each_mark_mut(a, f);
+            for_each_mark_mut(b, f);
+        }
+        Filter {
+            waveform,
+            feed_forward,
+            feedback,
+            ..
+        } => {
+            for_each_mark_mut(waveform, f);
+            for w in feed_forward.iter_mut().chain(feedback) {
+                for_each_mark_mut(w, f);
+            }
+        }
+        Alt {
+            trigger,
+            positive_waveform,
+            negative_waveform,
+        } => {
+            for_each_mark_mut(trigger, f);
+            for_each_mark_mut(positive_waveform, f);
+            for_each_mark_mut(negative_waveform, f);
+        }
+    }
+}
+
 /// Replaces the state of `waveform` and every component with `state`.
 pub fn initialize_state<M, S, T>(waveform: Waveform<M, S>, state: T) -> Waveform<M, T>
 where

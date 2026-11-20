@@ -351,18 +351,73 @@ fn call_site<M, S: Clone>(span: &Option<Span<S>>, function: &SourceExpr<M, S>) -
     })
 }
 
-/// A built-in application as the built-in sees it: where the call was
-/// written, and the traces of its function expression and its arguments.
+/// The user-function calls in progress at some point of an evaluation: where
+/// each was written, innermost first.
+///
+/// Calls with no written site, such as a built-in applying a function it was
+/// passed, are not on the path.
+#[derive(Debug)]
+pub struct CallPath<S>(Option<Arc<Frame<S>>>);
+
+/// One call on a [`CallPath`] and the calls it is inside of.
+#[derive(Debug)]
+struct Frame<S> {
+    site: Span<S>,
+    outer: CallPath<S>,
+}
+
+impl<S> CallPath<S> {
+    /// Returns the path with no calls in progress.
+    pub fn empty() -> CallPath<S> {
+        CallPath(None)
+    }
+
+    /// Returns this path with the call at `site` in progress inside it.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tuun::eval::CallPath;
+    /// use tuun::expr::Span;
+    ///
+    /// let path = CallPath::empty().enter(Span::new((), 0..5)).enter(Span::new((), 9..12));
+    /// let sites: Vec<_> = path.sites().map(|span| span.range.clone()).collect();
+    /// assert_eq!(sites, [9..12, 0..5]);
+    /// ```
+    pub fn enter(&self, site: Span<S>) -> CallPath<S> {
+        CallPath(Some(Arc::new(Frame {
+            site,
+            outer: self.clone(),
+        })))
+    }
+
+    /// Returns where each call in progress was written, innermost first.
+    pub fn sites(&self) -> impl Iterator<Item = &Span<S>> {
+        std::iter::successors(self.0.as_deref(), |frame| frame.outer.0.as_deref())
+            .map(|frame| &frame.site)
+    }
+}
+
+impl<S> Clone for CallPath<S> {
+    fn clone(&self) -> Self {
+        CallPath(self.0.clone())
+    }
+}
+
+/// A built-in application as the built-in sees it: where the call was written,
+/// the traces of its function expression and its arguments, and the
+/// user-function calls in progress around it.
 // TODO is this the right place for this? maybe trace.rs?
 pub struct BuiltInCall<S> {
     span: Option<Span<S>>,
     head: Arc<Trace<S>>,
     parents: Vec<Arc<Trace<S>>>,
+    path: CallPath<S>,
 }
 
 impl<S: Clone> BuiltInCall<S> {
     /// Returns the call at `span` of a function expression whose trace is
-    /// `head` to `arguments`.
+    /// `head` to `arguments`, with no user-function calls in progress.
     pub fn new<M: CarriesTrace<S>>(
         span: Option<Span<S>>,
         head: Trace<S>,
@@ -375,7 +430,18 @@ impl<S: Clone> BuiltInCall<S> {
                 .iter()
                 .map(|argument| Arc::new(Trace::of(argument)))
                 .collect(),
+            path: CallPath::empty(),
         }
+    }
+
+    /// Returns where this call was written, if it was.
+    pub fn span(&self) -> Option<&Span<S>> {
+        self.span.as_ref()
+    }
+
+    /// Returns the user-function calls in progress around this call.
+    pub fn path(&self) -> &CallPath<S> {
+        &self.path
     }
 
     /// Returns `expr` as a new value this call computed, one whose audible
@@ -416,18 +482,22 @@ pub fn embed<M: CarriesTrace<S>, S: Clone>(argument: SourceExpr<M, S>) -> Expr<M
 }
 
 /// Applies the built-in `builtin` to `arguments` in a call at `span` whose
-/// function expression has the trace `head`.
+/// function expression has the trace `head` inside the calls on `path`.
 fn apply_builtin<M, S>(
     builtin: &BuiltInFn<M, S>,
     arguments: Vec<SourceExpr<M, S>>,
     span: Option<Span<S>>,
     head: Trace<S>,
+    path: &CallPath<S>,
 ) -> Result<SourceExpr<M, S>, Error<S>>
 where
     M: CarriesTrace<S>,
     S: Clone,
 {
-    let call = BuiltInCall::new(span, head, &arguments);
+    let call = BuiltInCall {
+        path: path.clone(),
+        ..BuiltInCall::new(span, head, &arguments)
+    };
     // Errors point at the whole `f(x, y)` call site, since built-ins don't
     // report spans. An error that already has a span came from a function the
     // built-in applied (e.g. `map`'s), and that span is more precise, so keep
@@ -560,18 +630,21 @@ fn push_step_into_parts<M: CarriesTrace<S>, S: Clone>(
     }
 }
 
-/// Evaluates a closed expression to a value. Closed expressions do not contain
-/// variables.
+/// Evaluates a closed expression to a value inside the user-function calls on
+/// `path`. Closed expressions do not contain variables.
 ///
-/// Equivalent to [`evaluate`] with no bindings and a resolver that always
-/// fails, but skips the needless substitution pass.
+/// With an empty `path`, equivalent to [`evaluate`] with no bindings and a
+/// resolver that always fails, but skips the needless substitution pass.
 ///
 /// The result's spans are provenance (see [`SourceExpr`]): an expression that
 /// is already a value keeps its span, an extracted sub-value (a chosen branch,
 /// an applied function's body) keeps its own, and a built-in application's
 /// result carries the span of the call site, unless it is an argument (or a
 /// part of one) the built-in handed back.
-pub fn evaluate_closed<M, S>(expr: SourceExpr<M, S>) -> Result<SourceExpr<M, S>, Error<S>>
+pub fn evaluate_closed<M, S>(
+    expr: SourceExpr<M, S>,
+    path: &CallPath<S>,
+) -> Result<SourceExpr<M, S>, Error<S>>
 where
     M: Clone + fmt::Display + fmt::Debug + CarriesTrace<S>,
     S: Clone + fmt::Debug,
@@ -598,7 +671,7 @@ where
             // defaults that are already values evaluate to themselves.
             let named = named
                 .into_iter()
-                .map(|(name, value)| Ok((name, evaluate_closed(value)?)))
+                .map(|(name, value)| Ok((name, evaluate_closed(value, path)?)))
                 .collect::<Result<NamedExprs<M, S>, Error<S>>>()?;
             Ok(SourceExpr {
                 expr: Function {
@@ -615,8 +688,8 @@ where
             span,
         )),
         Seq { offset, waveform } => {
-            let offset = evaluate_closed(*offset)?;
-            let waveform = evaluate_closed(*waveform)?;
+            let offset = evaluate_closed(*offset, path)?;
+            let waveform = evaluate_closed(*waveform, path)?;
             Ok(SourceExpr {
                 expr: Seq {
                     offset: Box::new(offset),
@@ -639,9 +712,9 @@ where
             // Evaluation may drop the condition's span, so capture it up
             // front to point the error at the original condition.
             let condition_span = condition.span.clone();
-            match evaluate_closed(*condition)?.expr {
-                Bool(true) => evaluate_closed(*then),
-                Bool(false) => evaluate_closed(*else_),
+            match evaluate_closed(*condition, path)?.expr {
+                Bool(true) => evaluate_closed(*then, path),
+                Bool(false) => evaluate_closed(*else_, path),
                 _ => Err(Error::eval(
                     "Expected boolean condition".to_string(),
                     condition_span,
@@ -654,14 +727,14 @@ where
             named,
         } => {
             let site = call_site(&span, &function);
-            let function = evaluate_closed(*function)?;
+            let function = evaluate_closed(*function, path)?;
             let pos_args = positional
                 .into_iter()
-                .map(evaluate_closed)
+                .map(|argument| evaluate_closed(argument, path))
                 .collect::<Result<Vec<_>, _>>()?;
             let named = named
                 .into_iter()
-                .map(|(name, value)| Ok((name, evaluate_closed(value)?)))
+                .map(|(name, value)| Ok((name, evaluate_closed(value, path)?)))
                 .collect::<Result<NamedExprs<M, S>, Error<S>>>()?;
             match (function.expr, pos_args) {
                 (
@@ -717,7 +790,12 @@ where
                         context.push((name.clone(), value));
                     }
                     let body = substitute(&mut context, *body)?;
-                    let result = evaluate_closed(body)?;
+                    // The body runs with this call in progress. Its arguments
+                    // were evaluated above, outside it.
+                    let result = match &site {
+                        Some(site) => evaluate_closed(body, &path.enter(site.clone()))?,
+                        None => evaluate_closed(body, path)?,
+                    };
                     Ok(match site {
                         Some(site) => push_step(result, &Step::Call(site)),
                         None => result,
@@ -740,7 +818,7 @@ where
                         ));
                     }
                     let head = Trace::new::<M>(function.span, function.via);
-                    apply_builtin(&builtin, arguments, span, head)
+                    apply_builtin(&builtin, arguments, span, head, path)
                 }
                 (function, _) => Err(Error::internal(
                     format!("Invalid application: {}", function),
@@ -753,7 +831,7 @@ where
             span,
             via,
         }),
-        Expr::Project { module, name } => match evaluate_closed(*module)?.expr {
+        Expr::Project { module, name } => match evaluate_closed(*module, path)?.expr {
             Expr::BoundModule(entries) => match entries.into_iter().find(|(n, _)| n == &name) {
                 Some((_, value)) => Ok(match span {
                     Some(span) => push_step(value, &Step::UseSite(span)),
@@ -773,7 +851,7 @@ where
             expr: Tuple(
                 exprs
                     .into_iter()
-                    .map(|e| evaluate_closed(e))
+                    .map(|e| evaluate_closed(e, path))
                     .collect::<Result<Vec<_>, _>>()?,
             ),
             span,
@@ -783,7 +861,7 @@ where
             expr: List(
                 exprs
                     .into_iter()
-                    .map(|e| evaluate_closed(e))
+                    .map(|e| evaluate_closed(e, path))
                     .collect::<Result<Vec<_>, _>>()?,
             ),
             span,
@@ -909,7 +987,7 @@ where
     S: Clone + Debug,
 {
     let expr = substitute(context, expr)?;
-    evaluate_closed(expr)
+    evaluate_closed(expr, &CallPath::empty())
 }
 
 /// The modules one evaluation of bindings loads: how it resolves them, the
@@ -1020,7 +1098,7 @@ where
             }
             Binding::Definition(pattern, def_expr) => {
                 let substituted = substitute(context, def_expr.clone())?;
-                let value = evaluate_closed(substituted)?;
+                let value = evaluate_closed(substituted, &CallPath::empty())?;
                 let before = context.len();
                 extend_context(context, pattern, value)?;
                 own.extend(before..context.len());
@@ -1481,21 +1559,21 @@ mod tests {
     #[test]
     fn test_application_arity_is_exact() {
         let expr = parse_program::<u32, _>("(fn(x) => x)(2, 3)", ()).unwrap();
-        let error = evaluate_closed(expr).unwrap_err();
+        let error = evaluate_closed(expr, &CallPath::empty()).unwrap_err();
         assert_eq!(error.message(), "extra positional parameter");
 
         let expr = parse_program::<u32, _>("(fn(x, y) => x)(2)", ()).unwrap();
-        let error = evaluate_closed(expr).unwrap_err();
+        let error = evaluate_closed(expr, &CallPath::empty()).unwrap_err();
         assert_eq!(error.message(), "missing parameter \"y\"");
 
         // A tuple literal is one argument; destructuring params accept it...
         let expr = parse_program::<u32, _>("(fn((y, z)) => (z, y))((4, 5))", ()).unwrap();
-        let evaluated = evaluate_closed(expr).unwrap();
+        let evaluated = evaluate_closed(expr, &CallPath::empty()).unwrap();
         assert_eq!(format!("{}", evaluated), "(5, 4)");
 
         // ...and passing two arguments instead is an arity error, not a splat.
         let expr = parse_program::<u32, _>("(fn((y, z)) => y)(4, 5)", ()).unwrap();
-        let error = evaluate_closed(expr).unwrap_err();
+        let error = evaluate_closed(expr, &CallPath::empty()).unwrap_err();
         assert_eq!(error.message(), "extra positional parameter");
     }
 
@@ -1504,17 +1582,17 @@ mod tests {
         let input = "(fn(x) => fn(x) => x)(7)(5)";
         let expr = parse_program::<u32, _>(input, ()).unwrap();
         println!("Parsed expression: {}", expr);
-        let evaluated = evaluate_closed(expr).unwrap();
+        let evaluated = evaluate_closed(expr, &CallPath::empty()).unwrap();
         assert_eq!(format!("{}", evaluated), "5");
 
         let input = "(fn(x) => fn(y, z) => (x, y, z))(3)(4, 5)";
         let expr = parse_program::<u32, _>(input, ()).unwrap();
-        let evaluated = evaluate_closed(expr).unwrap();
+        let evaluated = evaluate_closed(expr, &CallPath::empty()).unwrap();
         assert_eq!(format!("{}", evaluated), "(3, 4, 5)");
 
         let input = "(fn(x, (y, z)) => (x, y, z))(3, (4, 5))";
         let expr = parse_program::<u32, _>(input, ()).unwrap();
-        let evaluated = evaluate_closed(expr).unwrap();
+        let evaluated = evaluate_closed(expr, &CallPath::empty()).unwrap();
         assert_eq!(format!("{}", evaluated), "(3, 4, 5)");
     }
 
@@ -1597,6 +1675,142 @@ mod tests {
             assert_eq!(run(), "2");
             assert_eq!(run(), "2");
             assert_eq!(count.load(Ordering::SeqCst), 2);
+        }
+    }
+
+    /// Tests of the user-function calls in progress that evaluation hands
+    /// built-ins, against stand-in built-ins.
+    mod call_paths {
+        use super::*;
+        use crate::parser::{parse_module, parse_program};
+
+        /// Which text a test span indexes.
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum Text {
+            Program,
+            Library,
+        }
+
+        type Value = SourceExpr<u32, Text>;
+
+        type StandIn = fn(Vec<Value>, &BuiltInCall<Text>) -> Result<Value, Error<Text>>;
+
+        /// The stand-in built-ins: `here(x)` returns where each call in
+        /// progress around it was written, as a list of `"Program 3 9"`
+        /// strings; `first(a, b)` hands back `a`; and `apply(f)` applies `f`
+        /// to 1.
+        fn stand_ins() -> Vec<SourceBinding<u32, Text>> {
+            fn def(name: &str, f: StandIn) -> SourceBinding<u32, Text> {
+                SourceBinding::definition(
+                    Pattern::Identifier(name.to_string()),
+                    SourceExpr::from(Expr::BuiltIn {
+                        name: name.to_string(),
+                        function: BuiltInFn::new(f),
+                    }),
+                )
+            }
+            vec![
+                def("here", |_arguments, call| {
+                    let sites = call.path().sites().map(|site| {
+                        let text =
+                            format!("{:?} {} {}", site.source, site.range.start, site.range.end);
+                        call.computed(Expr::String(text))
+                    });
+                    Ok(call.assembled(Expr::List(sites.collect())))
+                }),
+                def("first", |mut arguments, _call| {
+                    arguments.truncate(1);
+                    Ok(arguments.pop().unwrap())
+                }),
+                def("apply", |mut arguments, call| {
+                    let function = arguments.pop().unwrap();
+                    let application =
+                        SourceExpr::application(function, vec![SourceExpr::float(1.0)]);
+                    evaluate_closed(application, call.path())
+                }),
+            ]
+        }
+
+        /// A library function that calls `here` in an argument to another
+        /// built-in, and one that calls it.
+        const LIBRARY: &str = "pad = fn(v) => first(here(v), v);\n\
+                               lib_pad = fn(v) => pad(v);\n";
+
+        /// Returns the text of each call in progress where `program` calls
+        /// `here`, innermost first, with `lib` standing for library text.
+        fn path_of(program: &str) -> Vec<std::string::String> {
+            let prelude = stand_ins();
+            let (mut library, errors) = parse_module(LIBRARY, Text::Library).unwrap();
+            assert!(errors.is_empty());
+            library.insert(0, Binding::Open(vec!["prelude".to_string()]).into());
+            let resolve = |path: &[std::string::String]| match path.join(".").as_str() {
+                "prelude" => Ok(&prelude[..]),
+                "lib" => Ok(&library[..]),
+                other => Err(Error::eval_here(format!("no module {}", other))),
+            };
+            let bindings: Vec<SourceBinding<u32, Text>> = vec![
+                Binding::Open(vec!["prelude".to_string()]).into(),
+                Binding::Open(vec!["lib".to_string()]).into(),
+            ];
+            let expr = parse_program(program, Text::Program).unwrap();
+            let Expr::List(sites) = evaluate(resolve, &bindings, expr).unwrap().expr else {
+                panic!("expected here's list of sites");
+            };
+            sites
+                .into_iter()
+                .map(|site| {
+                    let Expr::String(site) = site.expr else {
+                        panic!("expected a site");
+                    };
+                    let parts: Vec<&str> = site.split(' ').collect();
+                    let range = parts[1].parse().unwrap()..parts[2].parse().unwrap();
+                    match parts[0] {
+                        "Program" => program[range].to_string(),
+                        _ => format!("lib {}", &LIBRARY[range]),
+                    }
+                })
+                .collect()
+        }
+
+        #[test]
+        fn calls_in_progress_are_on_the_path_innermost_first() {
+            // `here` is an argument to `first` inside the library's `pad`.
+            assert_eq!(
+                path_of("let dp = fn(x) => pad(x) in dp(1)"),
+                ["pad(x)", "dp(1)"]
+            );
+        }
+
+        #[test]
+        fn a_call_has_no_calls_in_progress_at_the_top() {
+            assert!(path_of("here(1)").is_empty());
+        }
+
+        #[test]
+        fn an_argument_is_evaluated_outside_its_callee() {
+            assert!(path_of("let id = fn(x) => x in id(here(1))").is_empty());
+            assert_eq!(
+                path_of("let f = fn(x) => pad(x) in let id = fn(x) => x in id(f(1))"),
+                ["pad(x)", "f(1)"]
+            );
+        }
+
+        #[test]
+        fn a_function_a_built_in_applies_runs_inside_the_built_ins_calls() {
+            // `apply`'s own application of the function is written nowhere,
+            // so it isn't on the path.
+            assert_eq!(
+                path_of("let outer = fn(x) => apply(fn(y) => pad(y)) in outer(1)"),
+                ["pad(y)", "outer(1)"]
+            );
+        }
+
+        #[test]
+        fn a_library_call_is_on_the_path() {
+            assert_eq!(
+                path_of("let wrap = fn(x) => lib_pad(x) in wrap(1)"),
+                ["lib pad(v)", "lib_pad(x)", "wrap(1)"]
+            );
         }
     }
 

@@ -23,7 +23,7 @@ use tuun::ids::MarkId;
 use tuun::optimizer;
 use tuun::player::{Player, Start};
 use tuun::processing;
-use tuun::programs::{Evaluated, EvaluationInput, ProgramSet};
+use tuun::programs::{EvaluationInput, Plays, ProgramSet};
 use tuun::trace;
 use tuun::tracker::{self, Status};
 use tuun::waveform::Waveform;
@@ -123,25 +123,31 @@ fn substitutes(id: &MarkId) -> bool {
     )
 }
 
-/// Returns a printable form of `evaluated`, playing a keys instrument's note
-/// to get waveforms, with trace marks made or not as `trace_marking` says.
-fn played(environment: &Environment, evaluated: Evaluated, trace_marking: bool) -> String {
-    match evaluated {
-        Evaluated::Waveform(w, _) => format!("Waveform:{:?}", w),
-        Evaluated::Sequence(sequence) => {
+/// Returns a printable form of `plays`, playing a keys instrument's note to get
+/// waveforms, with trace marks made or not as `trace_marking` says.
+fn played(
+    environment: &Environment,
+    input: &EvaluationInput,
+    plays: Plays,
+    trace_marking: bool,
+) -> String {
+    match plays {
+        Plays::Waveform(w, _) => format!("Waveform:{:?}", w),
+        Plays::Sequence(sequence) => {
             format!("{:?} {:?}", sequence.steps, sequence.step_waveform)
         }
-        Evaluated::KeysInstrument(function) => {
+        Plays::KeysInstrument(function) => {
             trace::set_trace_marking(trace_marking);
             let note = environment.apply_note_function(
                 &function,
                 vec![SourceExpr::float(60.0), SourceExpr::float(0.7)],
+                &input.owners,
             );
             trace::set_trace_marking(true);
             // The marks differ by design; what plays must not.
             format!(
                 "{:?}",
-                note.map(|(note_on, note_off, _)| (note_on, note_off))
+                note.map(|(note_on, note_off, _, _)| (note_on, note_off))
             )
         }
     }
@@ -154,7 +160,7 @@ fn evaluate(environment: &Environment, input: &EvaluationInput, trace_marking: b
     let evaluated = environment.evaluate_program(input);
     trace::set_trace_marking(true);
     match evaluated {
-        Ok(evaluated) => played(environment, evaluated, trace_marking),
+        Ok(evaluated) => played(environment, input, evaluated.plays, trace_marking),
         Err(diagnostics) => format!("error: {:?}", diagnostics),
     }
 }
@@ -254,12 +260,13 @@ fn played_trees_carry_only_substitution_marks() {
                 continue;
             }
             let name = format!("{} {}", path.display(), set.display_name(index));
-            if let Some(Evaluated::KeysInstrument(function)) = set.programs()[index].evaluated() {
+            if let Some(function) = set.programs()[index].keys_instrument() {
                 let note = environment.apply_note_function(
                     function,
                     vec![SourceExpr::float(60.0), SourceExpr::float(0.7)],
+                    &set.slider_owners(index),
                 );
-                if let Ok((note_on, note_off, _)) = note {
+                if let Ok((note_on, note_off, _, _)) = note {
                     trees.push((format!("{} note-on", name), note_on));
                     trees.push((format!("{} note-off", name), note_off));
                 }

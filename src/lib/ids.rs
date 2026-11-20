@@ -10,6 +10,7 @@ use std::sync::Arc;
 use crate::diagnostics::Source;
 use crate::expr::Span;
 use crate::programs;
+use crate::slider::SliderCall;
 use crate::trace::{CarriesTrace, Trace};
 use crate::tracker;
 
@@ -103,6 +104,8 @@ pub enum MarkId {
     MetronomeAmplitude, // used to set the level of the metronome click
     /// Records which program text built the waveform it marks.
     Trace(TraceRef),
+    /// A `slider` call whose owner is not yet known.
+    SliderCall(SliderCallRef),
 }
 
 impl fmt::Display for MarkId {
@@ -120,6 +123,7 @@ impl fmt::Display for MarkId {
             MarkId::Terminator => write!(f, "terminator"),
             MarkId::MetronomeAmplitude => write!(f, "metronome"),
             MarkId::Trace(_) => write!(f, "trace"),
+            MarkId::SliderCall(call) => write!(f, "slider(?, {:?})", call.0.label),
         }
     }
 }
@@ -168,6 +172,37 @@ impl CarriesTrace<Source> for MarkId {
 
     fn in_program(span: &Span<Source>) -> bool {
         span.source == Source::Program
+    }
+
+    fn from_slider(call: SliderCall<Source>) -> Option<Self> {
+        Some(MarkId::SliderCall(SliderCallRef(Arc::new(call))))
+    }
+}
+
+/// A `slider` call as a mark id carries it: equal and hashed by pointer, so
+/// two mark ids are the same only if they come from one evaluation of one
+/// call.
+#[derive(Clone)]
+pub struct SliderCallRef(pub Arc<SliderCall<Source>>);
+
+impl PartialEq for SliderCallRef {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for SliderCallRef {}
+
+impl Hash for SliderCallRef {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Arc::as_ptr(&self.0).hash(state)
+    }
+}
+
+impl fmt::Debug for SliderCallRef {
+    // The label is enough to tell slider calls apart when debugging.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SliderCall({:?})", self.0.label)
     }
 }
 

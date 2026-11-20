@@ -5,7 +5,7 @@ use std::ops::Range;
 use nom::{
     Parser,
     branch::alt,
-    bytes::complete::{tag, take_till, take_while, take_while1},
+    bytes::complete::{tag, take_till, take_while},
     character::complete as character,
     character::complete::{alpha1, alphanumeric1, char},
     combinator::{all_consuming, not, opt, peek, recognize, verify},
@@ -15,8 +15,8 @@ use nom::{
 };
 
 use crate::expr::{
-    self, Annotation, Binding, Error, Expr, NamedExprs, Pattern, Slider, SliderFunction,
-    SourceAnnotation, SourceBinding, SourceExpr, Span,
+    self, Annotation, Binding, Error, Expr, NamedExprs, Pattern, Slider, SourceAnnotation,
+    SourceBinding, SourceExpr, Span,
 };
 
 type Input<'a> = nom_locate::LocatedSpan<&'a str, ParseState<'a>>;
@@ -996,80 +996,60 @@ fn parse_module_unstamped<M>(input: &str) -> Result<ParsedModule<M>, Vec<Error>>
     translate_parse_result(result)
 }
 
-/// Parses a slider config entry.
-fn parse_slider(input: Input) -> IResult<Slider> {
-    // TODO this is a bit of a mess... and also could first parse the whole thing as a string literal.
-    let label_char = |c: char| c != ':' && c != '"' && c != ',' && c != ']' && !c.is_whitespace();
-    // Parse the quoted opening, label, and first float (shared prefix)
-    #[rustfmt::skip]
-    let (rest, (_, label, (initial_input, initial_value), _)) = (
-        char('"'),
-        expect(take_while1(label_char), "expected slider label"),
-        preceded(
-            expect(char(':'), "expected ':'"),
-            (peek(recognize(number::float)), expect(number::float, "expected initial value"))),
-        expect(char(':'), "expected ':'"),
-    ).parse(input)?;
-
-    let label = label.unwrap().fragment().to_string();
-    let initial_value = initial_value.unwrap_or_default();
-
-    // Peek to discriminate: digit/'-'/'.' → linear (min field), otherwise → user-defined function
-    let next_char = rest.fragment().chars().next().unwrap_or('"');
-    let is_numeric_start = next_char.is_ascii_digit() || next_char == '-' || next_char == '.';
-
-    if is_numeric_start {
-        // Linear: parse min and max
-        #[rustfmt::skip]
-        let (rest, (min, max)) = (
-            expect(number::float, "expected minimum slider value"),
-            preceded(
-                expect(char(':'), "expected ':'"),
-                expect(number::float, "expected maximum slider value")),
-        ).parse(rest)?;
-
-        let min = min.unwrap_or_default();
-        let max = max.unwrap_or_default();
-        if min > initial_value || max < initial_value {
-            initial_input.extra.report_error(error_from_input(
-                &initial_input,
-                format!(
-                    "initial value {} is not between min {} and max {}",
-                    initial_value, min, max
-                ),
-            ));
-            return Err(nom::Err::Failure(nom::error::Error::new(
-                initial_input,
-                nom::error::ErrorKind::Verify,
-            )));
+/// Parses a `sliders` annotation entry: a quoted label, optionally followed by
+/// `:` and the slider's saved value, as in `"cutoff"` or `"cutoff:1200"`.
+///
+/// Returns `None` for an entry whose error has been reported, such as one in
+/// the old `label:initial:min:max` or `label:position:fn(x) => …` form, whose
+/// error says what to write instead.
+fn parse_slider(input: Input) -> IResult<Option<Slider>> {
+    let (rest, content) =
+        delimited(char('"'), take_while(|c: char| c != '"'), char('"')).parse(input)?;
+    let fail = |message: String| {
+        content
+            .extra
+            .report_error(error_from_input(&content, message));
+        Ok((rest, None))
+    };
+    let text = *content.fragment();
+    let fields: Vec<&str> = text.split(':').collect();
+    let label = fields[0];
+    if label.is_empty() || label.contains(|c: char| c.is_whitespace() || c == ',') {
+        return fail(format!("expected a slider label, got {:?}", label));
+    }
+    let number = |field: &str| field.trim().parse::<f32>().ok();
+    match fields[1..] {
+        [] => Ok((
+            rest,
+            Some(Slider {
+                label: label.to_string(),
+                value: None,
+            }),
+        )),
+        [value] => match number(value) {
+            Some(value) => Ok((
+                rest,
+                Some(Slider {
+                    label: label.to_string(),
+                    value: Some(value),
+                }),
+            )),
+            None => fail(format!(
+                "expected a saved value after \"{}:\", got {:?}",
+                label, value
+            )),
+        },
+        // TODO remove this case once we've converted the old annotations
+        [value, min, max] if [value, min, max].into_iter().all(|f| number(f).is_some()) => {
+            fail(format!(
+                "old slider entry \"{text}\": the range now goes in the code; write \"{label}:{value}\" \
+                 here and call slider(\"{label}\", {value}, {min}, {max}) where the code uses it"
+            ))
         }
-
-        let (rest, _) = char('"').parse(rest)?;
-        Ok((
-            rest,
-            Slider {
-                label,
-                function: SliderFunction::Linear {
-                    initial_value,
-                    min,
-                    max,
-                },
-            },
-        ))
-    } else {
-        // User-defined: everything until closing quote is the function expression
-        let (rest, function_source) = take_while(|c: char| c != '"').parse(rest)?;
-        let (rest, _) = char('"').parse(rest)?;
-        Ok((
-            rest,
-            Slider {
-                label,
-                function: SliderFunction::UserDefined {
-                    normalized_initial_value: initial_value,
-                    function_source: function_source.fragment().trim().to_string(),
-                },
-            },
-        ))
+        _ => fail(format!(
+            "old slider entry \"{text}\": the mapping now goes in the code; write \"{label}\" here \
+             and call slider(\"{label}\", default, min, max, \"exp\") where the code uses it"
+        )),
     }
 }
 
@@ -1083,11 +1063,11 @@ fn parse_sliders_internal(input: Input) -> IResult<Vec<Slider>> {
         ),
     )
     .parse(input)?;
-    Ok((rest, sliders))
+    Ok((rest, sliders.into_iter().flatten().collect()))
 }
 
-/// Parses a bracket-delimited, comma-separated list of slider configs.
-/// Example: `["volume:0.5:0:1", "cutoff:2000:200:8000"]`
+/// Parses a `sliders` annotation, a bracket-delimited, comma-separated list of
+/// entries, as in `sliders=["volume:0.5", "cutoff"]`.
 pub fn parse_sliders(input: &str) -> Result<Vec<Slider>, Vec<Error>> {
     let errors = RefCell::new(Vec::new());
     let input = Input::new_extra(input, ParseState(&errors));
@@ -1892,7 +1872,7 @@ x = 1;";
 #{color=rgb(255,0,128)}
 #{level_db=-6}
 kick = pulse(60);
-#{sliders=[\"cutoff:800:200:4000\"]}
+#{sliders=[\"cutoff:800\"]}
 synth = saw(220);";
         let bindings = parse_module_successfully(input);
         assert_eq!(bindings.len(), 2);
@@ -2032,76 +2012,60 @@ synth = saw(220);";
 
     #[test]
     fn test_parse_sliders() {
-        // Empty list
-        let result = parse_sliders("sliders=[]");
-        assert!(result.is_ok());
-        let configs = result.unwrap();
-        assert_eq!(configs.len(), 0);
+        assert_eq!(parse_sliders("sliders=[]").unwrap(), []);
+        let entries = parse_sliders(r#"sliders=[ "volume:0.75" , "cutoff" ]"#).unwrap();
+        assert_eq!(
+            entries,
+            [
+                Slider {
+                    label: "volume".to_string(),
+                    value: Some(0.75)
+                },
+                Slider {
+                    label: "cutoff".to_string(),
+                    value: None
+                },
+            ]
+        );
+        assert!(parse_sliders(r#"sliders=["gain:-6"]"#).is_ok());
+        assert!(parse_sliders("not a list").is_err());
+        assert!(parse_sliders(r#"sliders=["gain:loud"]"#).is_err());
+        assert!(parse_sliders(r#"sliders=[":1"]"#).is_err());
+    }
 
-        // Single slider
-        let result = parse_sliders(r#"sliders=["volume:0.75:0:1"]"#);
-        assert!(result.is_ok());
-        let configs = result.unwrap();
-        assert_eq!(configs.len(), 1);
-        assert_eq!(configs[0].label, "volume");
-        match &configs[0].function {
-            SliderFunction::Linear {
-                initial_value,
-                min,
-                max,
-            } => {
-                assert_eq!(*initial_value, 0.75);
-                assert_eq!(*min, 0.0);
-                assert_eq!(*max, 1.0);
-            }
-            other => unreachable!("expected Linear, got {:?}", other),
-        }
+    #[test]
+    fn a_module_with_an_old_slider_entry_parses_with_the_error() {
+        let (bindings, errors) =
+            parse_module_unstamped::<u32>("#{sliders=[\"q:1:0:2\", \"mix\"]}\nx = 1;").unwrap();
+        let [Annotation::Sliders(entries)] = &bindings[0]
+            .annotations
+            .iter()
+            .map(|a| a.annotation.clone())
+            .collect::<Vec<_>>()[..]
+        else {
+            panic!("expected one sliders annotation");
+        };
+        let labels: Vec<_> = entries.iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(labels, ["mix"]);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].message().starts_with("old slider entry"));
+    }
 
-        // Multiple sliders
-        let result = parse_sliders(r#"sliders=[ "volume:0.5:0:1" , "cutoff:2000:200:8000" ]"#);
-        assert!(result.is_ok());
-        let configs = result.unwrap();
-
-        assert_eq!(configs.len(), 2);
-        assert_eq!(configs[0].label, "volume");
-        assert_eq!(configs[1].label, "cutoff");
-        match &configs[1].function {
-            SliderFunction::Linear {
-                initial_value,
-                min,
-                max,
-            } => {
-                assert_eq!(*initial_value, 2000.0);
-                assert_eq!(*min, 200.0);
-                assert_eq!(*max, 8000.0);
-            }
-            other => unreachable!("expected Linear, got {:?}", other),
-        }
-
-        // Mixed linear and user-defined sliders
-        let result =
-            parse_sliders(r#"sliders=["volume:0.5:0:1", "freq:0.5:fn(x) => 100 * pow(100, x)"]"#);
-        assert!(result.is_ok());
-        let configs = result.unwrap();
-        assert_eq!(configs.len(), 2);
-        match &configs[0].function {
-            SliderFunction::Linear { .. } => {}
-            other => unreachable!("expected Linear, got {:?}", other),
-        }
-        match &configs[1].function {
-            SliderFunction::UserDefined {
-                function_source, ..
-            } => {
-                assert_eq!(function_source, "fn(x) => 100 * pow(100, x)");
-            }
-            other => unreachable!("expected UserDefined, got {:?}", other),
-        }
-
-        let result = parse_sliders("not a list");
-        assert!(result.is_err());
-
-        let result = parse_sliders(r#"sliders=["gain:-0.5:0:1"]"#);
-        assert!(result.is_err());
+    #[test]
+    fn an_old_slider_entry_says_what_to_write_instead() {
+        let message = |input: &str| parse_sliders(input).unwrap_err()[0].message().to_string();
+        assert_eq!(
+            message(r#"sliders=["cutoff:800:100:11000"]"#),
+            "old slider entry \"cutoff:800:100:11000\": the range now goes in the code; \
+             write \"cutoff:800\" here and call slider(\"cutoff\", 800, 100, 11000) where the \
+             code uses it"
+        );
+        assert_eq!(
+            message(r#"sliders=["freq:0.5:fn(x) => 100 * pow(100, x)"]"#),
+            "old slider entry \"freq:0.5:fn(x) => 100 * pow(100, x)\": the mapping now goes in \
+             the code; write \"freq\" here and call slider(\"freq\", default, min, max, \"exp\") \
+             where the code uses it"
+        );
     }
 
     /// Test helper: run `parse_annotation_set` on `input` and either
@@ -2122,13 +2086,12 @@ synth = saw(220);";
     #[test]
     fn test_parse_annotation_set() {
         // Single slider annotation.
-        let annos = parse_one_annotation_set(r#"#{sliders=["volume:0.75:0:1"]}"#).unwrap();
+        let annos = parse_one_annotation_set(r#"#{sliders=["volume:0.75"]}"#).unwrap();
         assert_eq!(annos.len(), 1);
         assert!(matches!(annos[0], Annotation::Sliders(_)));
 
         // Two annotations on one line.
-        let annos =
-            parse_one_annotation_set(r#"#{sliders=["volume:0.75:0:1"],skip_slots=2}"#).unwrap();
+        let annos = parse_one_annotation_set(r#"#{sliders=["volume:0.75"],skip_slots=2}"#).unwrap();
         assert_eq!(annos.len(), 2);
         assert!(matches!(annos[1], Annotation::SkipSlots(2)));
 

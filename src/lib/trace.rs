@@ -7,6 +7,7 @@ use std::fmt::{self, Debug, Display};
 use std::sync::Arc;
 
 use crate::expr::{Expr, SourceExpr, Span};
+use crate::slider::SliderCall;
 use crate::waveform::Waveform;
 
 /// A value's provenance: the payload of a trace mark id, and the head and
@@ -163,10 +164,11 @@ fn write_span<S: Debug>(f: &mut fmt::Formatter<'_>, span: &Span<S>) -> fmt::Resu
     write!(f, "{:?}@{:?}", span.source, span.range)
 }
 
-/// Mark id types that may carry a trace.
+/// Mark id types that may carry a trace and that may mark a `slider` call.
 ///
 /// Every method has a default for a mark id type that carries none: it makes
-/// no trace mark ids, reads none, and treats no text as program text.
+/// no trace mark ids, reads none, treats no text as program text, and makes
+/// no slider marks.
 pub trait CarriesTrace<S>: Sized {
     /// Returns a mark id carrying `trace`, or `None` if this type carries
     /// none.
@@ -183,6 +185,12 @@ pub trait CarriesTrace<S>: Sized {
     /// being evaluated (as opposed to a library function).
     fn in_program(_span: &Span<S>) -> bool {
         false
+    }
+
+    /// Returns a mark id for the slider that `call` reads, or `None` if this
+    /// type makes no slider marks.
+    fn from_slider(_call: SliderCall<S>) -> Option<Self> {
+        None
     }
 }
 

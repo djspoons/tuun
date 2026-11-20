@@ -35,24 +35,6 @@ pub enum SliderEvent {
     SetBaselines(HashMap<MarkId, f32>),
 }
 
-/// Returns the current value of every slider in `set`, keyed by its mark.
-pub fn slider_values(set: &programs::ProgramSet) -> HashMap<MarkId, f32> {
-    let mut values = HashMap::new();
-    for (program_index, program) in set.programs().iter().enumerate() {
-        let sliders = program.sliders();
-        for (config, &normalized) in sliders.configs().iter().zip(sliders.normalized_values()) {
-            values.insert(
-                MarkId::Slider {
-                    program: program_index,
-                    label: config.label.clone(),
-                },
-                slider::denormalize(&config.function, normalized).unwrap_or(0.0),
-            );
-        }
-    }
-    values
-}
-
 /// Converts one coalesced batch of slider targets into tracker ramp commands,
 /// ramping each from its last flushed value.
 pub fn flush_slider_updates(
@@ -162,7 +144,9 @@ impl EffectRunner {
             processing::Reply::Loaded(loaded) => {
                 match state.processing.pop_front() {
                     Some(PendingJob::Load { startup, select }) => {
-                        self.install(state, loaded, startup, select)
+                        self.install(state, loaded, startup, select);
+                        // The new set's programs may show other sliders.
+                        self.run_one(state, world, Effect::SyncEncoders);
                     }
                     _ => log::warn!("Got a load reply with no load waiting for it"),
                 }
@@ -230,6 +214,11 @@ impl EffectRunner {
                     *errors = diagnostics;
                 }
             }
+        }
+        // An evaluation decides which sliders the program shows (see
+        // `ProgramSet::shown`).
+        if index == state.active_program_index {
+            self.run_one(state, world, Effect::SyncEncoders);
         }
     }
 
@@ -305,9 +294,9 @@ impl EffectRunner {
         // Baselines are re-seeded from the new set rather than kept since a
         // slider mark names a program slot, which the new set may fill with an
         // entirely different binding.
-        let _ = self
-            .slider_sender
-            .send(SliderEvent::SetBaselines(slider_values(&state.programs)));
+        let _ = self.slider_sender.send(SliderEvent::SetBaselines(
+            state.programs.slider_values().collect(),
+        ));
         // Each failure's full diagnostics go to the terminal; the summary
         // posted last names the programs on the status line.
         let failed: Vec<String> = failed
@@ -534,21 +523,31 @@ impl EffectRunner {
                 // The instrument's sliders and level are read live from the
                 // source program (only the function is an install-time
                 // snapshot).
-                let Some(program) = state.programs.program(keys.id) else {
+                if state.programs.program(keys.id).is_none() {
                     return;
-                };
+                }
                 let args = vec![
                     expr::SourceExpr::float(key as f32),
                     // TODO use a marked waveform for velocity so we can implement after-touch
                     expr::SourceExpr::float(velocity as f32 / 127.0),
                 ];
-                match self.environment.apply_note_function(&keys.function, args) {
-                    Ok((mut note_on, note_off, marks)) => {
+                let owners = state.programs.slider_owners(keys.id);
+                match self
+                    .environment
+                    .apply_note_function(&keys.function, args, &owners)
+                {
+                    Ok((mut note_on, note_off, marks, sliders)) => {
                         keys.note_off_waveforms.insert(key, note_off);
-                        // `note_on`'s `Marked(Slider { .. })` nodes still hold
-                        // the values from when the instrument was originally
-                        // evaluated, so swap in the current runtime ones.
+                        // Another note may reach sliders the sample note
+                        // didn't.
+                        state.programs.reach(&sliders);
+                        // `note_on`'s `Marked(Slider { .. })` nodes hold the
+                        // sliders' defaults, so swap in the current values.
                         player::substitute_current_slider_values(&mut note_on, &state.programs);
+                        let level_db = state
+                            .programs
+                            .program(keys.id)
+                            .map_or(0.0, |program| program.level_db());
                         let marks = player::PlayedMarks {
                             program: keys.id,
                             text: keys.text.clone(),
@@ -558,18 +557,23 @@ impl EffectRunner {
                         self.player.play_note(
                             key,
                             note_on,
-                            program.level_db(),
+                            level_db,
                             marks,
                             &mut state.waveform_marks,
                         );
                     }
-                    Err(error) => {
-                        let diagnostic = self.environment.diagnose(
-                            &error,
-                            program.text(),
-                            state.programs.source(),
-                        );
-                        state.messages.post_diagnostics(&[diagnostic]);
+                    Err(errors) => {
+                        let diagnostics: Vec<_> = errors
+                            .iter()
+                            .map(|error| {
+                                self.environment.diagnose(
+                                    error,
+                                    state.programs.programs()[keys.id].text(),
+                                    state.programs.source(),
+                                )
+                            })
+                            .collect();
+                        state.messages.post_diagnostics(&diagnostics);
                     }
                 }
             }
@@ -579,9 +583,8 @@ impl EffectRunner {
                     && let Some(mut note_off) = keys.note_off_waveforms.remove(&key)
                 {
                     // The stored note-off's `Marked(Slider { .. })` nodes still
-                    // hold the values baked in when the instrument was
-                    // evaluated: `PlayNoteOn` substitutes fresh values into the
-                    // note-on only, and slider moves made while the note was
+                    // hold the sliders' defaults: `PlayNoteOn` substitutes
+                    // current values into the note-on only, and slider moves made while the note was
                     // held reach the tracker's active waveform, not this map.
                     // Swap in the current values so the release doesn't snap
                     // back to stale ones.
@@ -652,13 +655,14 @@ impl EffectRunner {
 
             Effect::PrintEvaluatedProgram(program_index) => {
                 let display_name = state.programs.display_name(program_index);
-                let evaluated = state.programs.program(program_index).and(
+                let plays = state.programs.program(program_index).and(
                     self.environment
                         .evaluate_program(&state.programs.evaluation_input(program_index))
-                        .ok(),
+                        .ok()
+                        .map(|evaluated| evaluated.plays),
                 );
-                match evaluated {
-                    Some(programs::Evaluated::KeysInstrument(function)) => {
+                match plays {
+                    Some(programs::Plays::KeysInstrument(function)) => {
                         // The lambda itself is noisy to print, so show what it
                         // computes for one sample note instead.
 
@@ -671,8 +675,12 @@ impl EffectRunner {
                             expr::SourceExpr::float(SAMPLE_KEY),
                             expr::SourceExpr::float(SAMPLE_VELOCITY),
                         ];
-                        match self.environment.apply_note_function(&function, args) {
-                            Ok((note_on, note_off, _marks)) => {
+                        let owners = state.programs.slider_owners(program_index);
+                        match self
+                            .environment
+                            .apply_note_function(&function, args, &owners)
+                        {
+                            Ok((note_on, note_off, _marks, _sliders)) => {
                                 println!(
                                     "Keys instrument of program {} applied at key {}, velocity {}:",
                                     display_name, SAMPLE_KEY, SAMPLE_VELOCITY
@@ -684,24 +692,29 @@ impl EffectRunner {
                                     format!("Printed program {} to console", display_name),
                                 );
                             }
-                            Err(error) => {
+                            Err(errors) => {
                                 println!("Keys instrument of program {}:", display_name);
                                 println!("{}", function);
-                                let diagnostic = self.environment.diagnose(
-                                    &error,
-                                    state.programs.programs()[program_index].text(),
-                                    state.programs.source(),
-                                );
+                                let diagnostics: Vec<_> = errors
+                                    .iter()
+                                    .map(|error| {
+                                        self.environment.diagnose(
+                                            error,
+                                            state.programs.programs()[program_index].text(),
+                                            state.programs.source(),
+                                        )
+                                    })
+                                    .collect();
                                 println!("Applying it at a sample note failed:");
-                                state.messages.post_diagnostics(&[diagnostic]);
+                                state.messages.post_diagnostics(&diagnostics);
                             }
                         }
                     }
-                    Some(evaluated) => {
+                    Some(plays) => {
                         println!("Evaluated form of program {}:", display_name);
-                        match evaluated {
-                            programs::Evaluated::Waveform(w, _) => println!("{:#?}", w),
-                            programs::Evaluated::Sequence(s) => println!("{:#?}", s.step_waveform),
+                        match plays {
+                            programs::Plays::Waveform(w, _) => println!("{:#?}", w),
+                            programs::Plays::Sequence(s) => println!("{:#?}", s.step_waveform),
                             _ => unreachable!(),
                         };
                         state.messages.post(
@@ -730,19 +743,16 @@ impl EffectRunner {
 fn sync_encoders(state: &AppState, launchkey: &mut launchkey::Launchkey) {
     match launchkey.encoder_mode {
         launchkey::EncoderMode::Plugin => {
-            let program = match state.programs.program(state.active_program_index) {
-                Some(p) => p,
-                None => return,
-            };
             // Set the display for all encoders.
             for i in 0..launchkey::NUM_ENCODERS {
-                if let Some(value) = program.sliders().normalized_values().get(i as usize) {
-                    let config = &program.sliders().configs()[i as usize];
-                    let actual_value = slider::denormalize(&config.function, *value).unwrap_or(0.0);
+                if let Some((label, slider)) = state
+                    .programs
+                    .shown_slider(state.active_program_index, i as usize)
+                {
                     launchkey.set_encoder_display(
                         i,
-                        &config.label,
-                        &programs::format_sig_digits(actual_value, 3).to_string(),
+                        label,
+                        &programs::format_sig_digits(slider.value, 3).to_string(),
                     );
                 } else {
                     launchkey.set_encoder_display(i, "", "");
@@ -818,7 +828,7 @@ mod tests {
         }
     }
 
-    /// The mark of the slider labelled `label` declared on the program at
+    /// The mark of the slider labelled `label` owned by the program at
     /// `program`.
     fn slider_mark(program: usize, label: &str) -> MarkId {
         MarkId::Slider {
@@ -868,7 +878,8 @@ mod tests {
         let mut runner = EffectRunner::new(player, environment, slider_sender, job_sender);
 
         let mut state = AppState::from_source(
-            "#{sliders=[\"vol:0.5:0:1\"], keys}\nk = fn(note, vel) => (vol, vol);".to_string(),
+            "#{sliders=[\"vol\"], keys}\nk = fn(note, vel) => let vol = slider(\"vol\", 0.5) in (vol, vol);"
+                .to_string(),
             std::path::PathBuf::new(),
         )
         .expect("test source should parse");
@@ -906,9 +917,7 @@ mod tests {
         // Move the slider while the note is held.
         state
             .programs
-            .program_mut(0)
-            .unwrap()
-            .set_slider_normalized(0, 1.0)
+            .set_slider_normalized(0, 0, 1.0)
             .expect("program has a vol slider");
 
         runner.run_one(&mut state, &mut world, Effect::PlayNoteOff { key: 60 });
@@ -1440,7 +1449,8 @@ mod tests {
         // not have.
         std::fs::write(
             &path,
-            "#{level_db=0, sliders=[\"gain:0.25:0:1\"]}\nrenamed = gain | fin(time - 1);\n",
+            "#{level_db=0, sliders=[\"gain:0.25\"]}\n\
+             renamed = slider(\"gain\", 0.5) | fin(time - 1);\n",
         )
         .unwrap();
         let status = empty_status();
@@ -1992,9 +2002,9 @@ mod tests {
         assert_eq!(current_message(&state), "Recorded 1 note into A:1");
     }
 
-    /// A slider declared on one binding reaches a sounding voice of another
-    /// program: the consumer embeds the declaring program's mark, and the
-    /// move addresses exactly that mark on every voice.
+    /// A slider owned by one binding reaches a voice of another program: the
+    /// consumer embeds the owning program's mark, and the move addresses
+    /// exactly that mark on every voice.
     #[test]
     fn a_slider_move_reaches_a_voice_of_another_program() {
         let (command_sender, command_receiver) = mpsc::channel();
@@ -2004,9 +2014,11 @@ mod tests {
         let (job_sender, job_receiver) = mpsc::channel();
         let mut runner = EffectRunner::new(player, environment, slider_sender, job_sender);
 
-        // A:1 owns the slider; A:2 opts in by referencing A:1's binding.
+        // A:1 owns the slider, which its annotation lists and its text calls;
+        // A:2 reaches it through A:1's binding.
         let mut state = AppState::from_source(
-            "#{sliders=[\"mix:0.5:0:1\"]}\nm = mix;\n#{level_db=0}\ntone = m | fin(time - 1);\n"
+            "#{sliders=[\"mix\"]}\nm = slider(\"mix\", 0.5);\n\
+             #{level_db=0}\ntone = m | fin(time - 1);\n"
                 .to_string(),
             std::path::PathBuf::new(),
         )

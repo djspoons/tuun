@@ -1,6 +1,7 @@
 //! Programs and their state: text, sliders, level, and evaluation results.
 
 use std::cmp;
+use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::ops::Range;
@@ -15,6 +16,7 @@ use crate::ids::MarkId;
 use crate::parser;
 use crate::sequencer;
 use crate::slider;
+use crate::slider_owners;
 use crate::trace_walk::WaveformMarks;
 use crate::waveform;
 
@@ -38,85 +40,14 @@ pub fn bank_address(index: usize) -> String {
     format!("{}:{}", (b'A' + bank as u8) as char, slot_in_bank)
 }
 
-/// The sliders attached to a program: source-level configs plus the
-/// current normalized position of each.
+/// A slider's spec, from the code that calls it, and its current value in the
+/// slider's own units.
 ///
-/// Invariant: `normalized_values` is parallel to `configs` and every value
-/// lies in 0.0..=1.0.
-#[derive(Debug, Clone, Default)]
-pub struct ProgramSliders {
-    configs: Vec<expr::Slider>,
-    normalized_values: Vec<f32>,
-}
-
-impl ProgramSliders {
-    /// Builds a `ProgramSliders` from a list of source-level slider configs.
-    pub fn from_slider_configs(configs: Vec<expr::Slider>) -> Self {
-        use expr::SliderFunction;
-        let normalized_values = configs
-            .iter()
-            .map(|c| match &c.function {
-                SliderFunction::Linear {
-                    initial_value,
-                    min,
-                    max,
-                } => ((initial_value - min) / (max - min)).clamp(0.0, 1.0),
-                SliderFunction::UserDefined {
-                    normalized_initial_value,
-                    ..
-                } => normalized_initial_value.clamp(0.0, 1.0),
-            })
-            .collect();
-        ProgramSliders {
-            configs,
-            normalized_values,
-        }
-    }
-
-    /// Returns the source-level slider configs.
-    pub fn configs(&self) -> &[expr::Slider] {
-        &self.configs
-    }
-
-    /// Returns the current normalized values, parallel to `configs`.
-    pub fn normalized_values(&self) -> &[f32] {
-        &self.normalized_values
-    }
-
-    // TODO this method only works for mouse-based sliders
-    pub fn slider_display(&self) -> Vec<SliderDisplay> {
-        self.configs
-            .iter()
-            .enumerate()
-            .map(|(j, config)| {
-                let norm = self.normalized_values[j];
-                SliderDisplay {
-                    label: config.label.clone(),
-                    // TODO this is wrong for encoders
-                    axis: if j == 0 {
-                        "X".to_string()
-                    } else {
-                        "Y".to_string()
-                    },
-                    normalized_value: norm,
-                    actual_value: slider::denormalize(&config.function, norm).unwrap_or(0.0),
-                }
-            })
-            .collect()
-    }
-
-    /// Sets the slider at `index` to `normalized` (clamped to 0.0..=1.0)
-    /// and returns the slider's label and new denormalized value, or `None`
-    /// if there is no slider at `index`.
-    fn set_normalized(&mut self, index: usize, normalized: f32) -> Option<SliderChange> {
-        let config = self.configs.get(index)?;
-        let normalized = normalized.clamp(0.0, 1.0);
-        self.normalized_values[index] = normalized;
-        Some(SliderChange {
-            label: config.label.clone(),
-            value: slider::denormalize(&config.function, normalized).unwrap_or(0.0),
-        })
-    }
+/// Invariant: `value` lies in the spec's range.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SliderState {
+    pub spec: slider::SliderSpec,
+    pub value: f32,
 }
 
 /// Renders a `level_db` value the way the UI shows it: one decimal place
@@ -147,7 +78,7 @@ pub fn format_sig_digits(val: f32, sig_figs: usize) -> String {
 }
 
 /// A slider mutation's user-visible result: the slider's label and its new
-/// denormalized value.
+/// value, in the slider's own units (not its position).
 pub struct SliderChange {
     pub label: String,
     pub value: f32,
@@ -164,9 +95,9 @@ pub enum ProgramKind {
     Keys,
 }
 
-/// The result of successfully evaluating a program's text.
+/// What a program plays.
 #[derive(Debug, Clone)]
-pub enum Evaluated {
+pub enum Plays {
     /// The program evaluated to a playable waveform that isn't sequenceable,
     /// with its marks. The waveform is optimized; slider values and the
     /// level wrap are applied per play.
@@ -176,6 +107,18 @@ pub enum Evaluated {
     Sequence(sequencer::Sequence),
     /// The program evaluated to a function usable as a keys instrument.
     KeysInstrument(expr::SourceExpr<MarkId, Source>),
+}
+
+/// The result of successfully evaluating a program's text: what it plays, and
+/// the sliders its waveform reaches, in the order their calls are first
+/// reached.
+///
+/// A keys instrument's sliders are those the waveforms of one sample note
+/// reach, since another note's may reach others.
+#[derive(Debug, Clone)]
+pub struct Evaluated {
+    pub plays: Plays,
+    pub sliders: Vec<slider_owners::Reached>,
 }
 
 /// What evaluating one program reads, copied out of its [`ProgramSet`] so
@@ -192,12 +135,21 @@ pub struct EvaluationInput {
     /// The backing file's text, which errors located in the file resolve
     /// against.
     pub source: String,
+    /// The slots that can own the sliders the program's waveform reaches.
+    pub owners: slider_owners::Owners,
 }
 
-/// The result of checking and evaluating one program: on success, what it
-/// evaluated to (`None` for an empty program) and the checker's warnings; on
-/// failure, the diagnostics.
-pub type Outcome = Result<(Option<Evaluated>, Vec<Diagnostic>), Vec<Diagnostic>>;
+/// The result of checking and evaluating one program.
+#[derive(Debug)]
+pub enum Outcome {
+    /// The text is blank, as when the program was deleted.
+    Empty,
+    /// The program evaluated, with the checker's warnings.
+    Evaluated(Evaluated, Vec<Diagnostic>),
+    /// The program failed to check or to evaluate, with the diagnostics
+    /// (any checker warnings first).
+    Failed(Vec<Diagnostic>),
+}
 
 /// Maximum number of undo units kept per program; recording past the cap drops
 /// the oldest unit.
@@ -237,8 +189,8 @@ impl EditHistory {
     }
 }
 
-/// One program slot: its source text, sliders, level, color, and the
-/// result of its last evaluation.
+/// One program slot: its source text, level, color, and the result of its
+/// last evaluation.
 #[derive(Debug, Clone)]
 pub struct Program {
     /// The program's source expression text. Kept in sync with `evaluated`:
@@ -249,7 +201,6 @@ pub struct Program {
     span: Range<usize>,
     /// Index of the originating binding in the file's `Vec<SourceBinding>`.
     binding_index: usize,
-    sliders: ProgramSliders,
     color: Option<(u8, u8, u8)>,
     level_db: f32,
     /// The declared kind, from a `#{keys}` annotation (or its absence).
@@ -276,7 +227,6 @@ impl Program {
             text: text.to_string(),
             span: 0..0,
             binding_index,
-            sliders: ProgramSliders::default(),
             color: None,
             level_db: 0.0,
             kind: ProgramKind::Waveform,
@@ -301,15 +251,14 @@ impl Program {
         if sb.annotations.is_empty() {
             return None;
         }
-        let mut sliders = ProgramSliders::default();
         let mut color: Option<(u8, u8, u8)> = None;
         let mut level_db: f32 = 0.0;
         let mut kind = ProgramKind::Waveform;
         let mut loop_after_beats: Option<u32> = None;
         for sa in &sb.annotations {
             match &sa.annotation {
-                expr::Annotation::Sliders(configs) => {
-                    sliders = ProgramSliders::from_slider_configs(configs.clone());
+                expr::Annotation::Sliders(_) => {
+                    // Read from the binding (see `ProgramSet::listed`).
                 }
                 expr::Annotation::Color(r, g, b) => {
                     color = Some((*r, *g, *b));
@@ -338,7 +287,6 @@ impl Program {
                     text,
                     span,
                     binding_index,
-                    sliders,
                     color,
                     level_db,
                     kind,
@@ -392,11 +340,6 @@ impl Program {
         self.level_db
     }
 
-    /// Returns the program's sliders.
-    pub fn sliders(&self) -> &ProgramSliders {
-        &self.sliders
-    }
-
     /// Returns the result of the program's last recorded evaluation, if that
     /// evaluation succeeded.
     ///
@@ -418,7 +361,10 @@ impl Program {
     /// isn't sequenceable.
     pub fn waveform(&self) -> Option<&waveform::Waveform<MarkId>> {
         match &self.evaluated {
-            Some(Evaluated::Waveform(waveform, _)) => Some(waveform),
+            Some(Evaluated {
+                plays: Plays::Waveform(waveform, _),
+                ..
+            }) => Some(waveform),
             _ => None,
         }
     }
@@ -428,7 +374,10 @@ impl Program {
     pub fn is_playable(&self) -> bool {
         matches!(
             self.evaluated,
-            Some(Evaluated::Waveform(..) | Evaluated::Sequence(_))
+            Some(Evaluated {
+                plays: Plays::Waveform(..) | Plays::Sequence(_),
+                ..
+            })
         )
     }
 
@@ -436,7 +385,10 @@ impl Program {
     /// produced one.
     pub fn keys_instrument(&self) -> Option<&expr::SourceExpr<MarkId, Source>> {
         match &self.evaluated {
-            Some(Evaluated::KeysInstrument(expr)) => Some(expr),
+            Some(Evaluated {
+                plays: Plays::KeysInstrument(expr),
+                ..
+            }) => Some(expr),
             _ => None,
         }
     }
@@ -445,7 +397,10 @@ impl Program {
     /// a sequenceable waveform.
     pub fn sequence(&self) -> Option<&sequencer::Sequence> {
         match &self.evaluated {
-            Some(Evaluated::Sequence(sequence)) => Some(sequence),
+            Some(Evaluated {
+                plays: Plays::Sequence(sequence),
+                ..
+            }) => Some(sequence),
             _ => None,
         }
     }
@@ -559,17 +514,6 @@ impl Program {
         self.loop_after_beats = loop_after_beats;
     }
 
-    /// Sets the slider at `slider_index` to `normalized` (clamped to
-    /// 0.0..=1.0) and returns its label and new denormalized value, or
-    /// `None` if there is no slider at that index.
-    pub fn set_slider_normalized(
-        &mut self,
-        slider_index: usize,
-        normalized: f32,
-    ) -> Option<SliderChange> {
-        self.sliders.set_normalized(slider_index, normalized)
-    }
-
     /// Realigns the program with its binding after the source file was
     /// re-parsed: updates the binding index and span.
     ///
@@ -643,7 +587,7 @@ fn walk_ui_positions(
 pub enum BoundTo {
     /// The binding of the program at this index.
     Program(usize),
-    /// Some other binding, a module's definition, a slider or the prelude.
+    /// Some other binding, a module's definition, or the prelude.
     Other,
     /// Nothing: the name is unbound.
     Unbound,
@@ -665,6 +609,9 @@ pub struct ProgramSet {
     /// to detect external edits before overwriting them. `None` when there is
     /// no backing file.
     synced_mtime: Option<time::SystemTime>,
+    /// The state of every slider a program's waveform has reached, by owner
+    /// slot and label.
+    sliders: HashMap<(usize, String), SliderState>,
 }
 
 /// Returns the current modification time of `path`, or `None` when the path is
@@ -731,6 +678,7 @@ impl ProgramSet {
                 source,
                 input_path,
                 synced_mtime,
+                sliders: HashMap::new(),
             },
             message,
         ))
@@ -890,14 +838,11 @@ impl ProgramSet {
     }
 
     /// Returns what `name` resolves to in the scope of the program at `index`:
-    /// its own sliders, then the bindings before it in source order (for an
-    /// empty slot, those before the binding of the next program, where its
-    /// binding would be inserted), then the prelude.
+    /// the bindings before it in source order (for an empty slot, those before
+    /// the binding of the next program, where its binding would be inserted),
+    /// then the prelude.
     pub fn resolve_name(&self, environment: &Environment, index: usize, name: &str) -> BoundTo {
         let program = &self.programs[index];
-        if program.sliders.configs().iter().any(|c| c.label == name) {
-            return BoundTo::Other;
-        }
         let end = if program.binding_index < self.bindings.len() {
             program.binding_index
         } else {
@@ -983,29 +928,21 @@ impl ProgramSet {
 
     /// Returns the bindings to evaluate the program at `index` under: the
     /// file-level bindings preceding it (bindings after it are ignored), with
-    /// anonymous `_` definitions filtered out and each remaining definition's
-    /// own sliders bound around its body, plus a binding for each of this
-    /// program's sliders at its current value.
+    /// anonymous `_` definitions filtered out.
     ///
     /// These are the first `counts[index]` of the bindings
-    /// [`ProgramSet::used_evaluation_bindings`] returns, followed by
-    /// [`ProgramSet::own_slider_bindings`].
+    /// [`ProgramSet::used_evaluation_bindings`] returns.
     pub fn evaluation_bindings(&self, index: usize) -> Vec<expr::SourceBinding<MarkId, Source>> {
-        let mut bindings: Vec<_> = (0..self.programs[index].binding_index)
+        (0..self.programs[index].binding_index)
             .filter_map(|binding_index| self.evaluation_binding(binding_index))
-            .collect();
-        // Appended last, so a program's own sliders are never in scope while
-        // its predecessors are evaluated.
-        bindings.extend(self.own_slider_bindings(index));
-        bindings
+            .collect()
     }
 
     /// Returns the file-level bindings programs are evaluated under, in
     /// source order, and for each program the number of them it reads.
     ///
     /// The program at `index` is evaluated under the first `counts[index]`
-    /// bindings followed by its [`ProgramSet::own_slider_bindings`], which is
-    /// what [`ProgramSet::evaluation_bindings`] returns.
+    /// bindings, which is what [`ProgramSet::evaluation_bindings`] returns.
     pub fn used_evaluation_bindings(
         &self,
     ) -> (Vec<expr::SourceBinding<MarkId, Source>>, Vec<usize>) {
@@ -1026,93 +963,20 @@ impl ProgramSet {
         (bindings, counts)
     }
 
-    /// Returns a binding for each of the sliders of the program at `index`,
-    /// at its current value.
-    pub fn own_slider_bindings(&self, index: usize) -> Vec<expr::SourceBinding<MarkId, Source>> {
-        let program = &self.programs[index];
-        let mut bindings = Vec::new();
-        slider::append_slider_bindings(
-            program.sliders.configs(),
-            program.sliders.normalized_values(),
-            |label| MarkId::Slider {
-                program: index,
-                label,
-            },
-            &mut bindings,
-        );
-        bindings
-    }
-
-    /// Returns the binding at `binding_index` as later programs read it: a
-    /// definition with its own sliders bound around its body, any other
-    /// binding as is, or `None` for an anonymous `_` definition.
+    /// Returns the binding at `binding_index` as later programs read it, or
+    /// `None` for an anonymous `_` definition.
     fn evaluation_binding(
         &self,
         binding_index: usize,
     ) -> Option<expr::SourceBinding<MarkId, Source>> {
         let source_binding = &self.bindings[binding_index];
-        let expr::Binding::Definition(pattern, body) = &source_binding.binding else {
-            return Some(source_binding.clone());
-        };
         // Anonymous definitions are not referenceable, so evaluating them
         // would be wasted work — and a broken one would poison every later
         // program's context.
-        if matches!(pattern, expr::Pattern::Identifier(v) if v == "_") {
-            return None;
+        match &source_binding.binding {
+            expr::Binding::Definition(expr::Pattern::Identifier(v), _) if v == "_" => None,
+            _ => Some(source_binding.clone()),
         }
-        Some(expr::SourceBinding {
-            binding: expr::Binding::Definition(
-                pattern.clone(),
-                self.bind_own_sliders(binding_index, body.clone()),
-            ),
-            annotations: source_binding.annotations.clone(),
-            span: source_binding.span.clone(),
-        })
-    }
-
-    /// Returns `body` with the sliders declared on the binding at
-    /// `binding_index` bound around it at their current values, or `body`
-    /// unchanged when that binding declares none.
-    fn bind_own_sliders(
-        &self,
-        binding_index: usize,
-        body: expr::SourceExpr<MarkId, Source>,
-    ) -> expr::SourceExpr<MarkId, Source> {
-        // Padding slots carry `binding_index == self.bindings.len()`, which is
-        // past every real binding, so they never match.
-        let Some(program_index) = self
-            .programs
-            .iter()
-            .position(|p| p.binding_index == binding_index)
-        else {
-            return body;
-        };
-        let sliders = &self.programs[program_index].sliders;
-        let mut wrapped = body;
-        // Innermost first, so the printed form reads in declaration order.
-        for (config, &normalized) in sliders
-            .configs()
-            .iter()
-            .zip(sliders.normalized_values())
-            .rev()
-        {
-            let value = slider::denormalize(&config.function, normalized).unwrap_or(0.0);
-            let marked = expr::SourceExpr::from(expr::Expr::Waveform(waveform::Waveform::Marked {
-                id: MarkId::Slider {
-                    program: program_index,
-                    label: config.label.clone(),
-                },
-                waveform: Box::new(waveform::Waveform::Const(value)),
-            }));
-            wrapped = expr::SourceExpr::application(
-                expr::SourceExpr::function(
-                    vec![expr::Pattern::Identifier(config.label.clone())],
-                    wrapped,
-                ),
-                vec![marked],
-            );
-        }
-        wrapped
     }
 
     /// Returns a copy of what evaluating the program at `index` reads.
@@ -1123,6 +987,45 @@ impl ProgramSet {
             kind: program.kind,
             bindings: self.evaluation_bindings(index),
             source: self.source.clone(),
+            owners: self.slider_owners(index),
+        }
+    }
+
+    /// Returns the slots that can own the sliders the waveform of the program
+    /// at `index` reaches: that program and the programs before it in the
+    /// file.
+    pub fn slider_owners(&self, index: usize) -> slider_owners::Owners {
+        let slot = |index: usize| {
+            let program = &self.programs[index];
+            let listing = self
+                .bindings
+                .get(program.binding_index)
+                .and_then(|binding| {
+                    binding
+                        .annotations
+                        .iter()
+                        .find(|a| matches!(a.annotation, expr::Annotation::Sliders(_)))
+                })
+                .and_then(|annotation| annotation.span.clone());
+            slider_owners::OwnerSlot {
+                index,
+                name: self.display_name(index),
+                text: program.span.clone(),
+                listed: self
+                    .listed(index)
+                    .iter()
+                    .map(|entry| entry.label.clone())
+                    .collect(),
+                listing,
+            }
+        };
+        let binding_index = self.programs[index].binding_index;
+        slider_owners::Owners {
+            played: slot(index),
+            preceding: (0..self.programs.len())
+                .filter(|&other| self.programs[other].binding_index < binding_index)
+                .map(slot)
+                .collect(),
         }
     }
 
@@ -1132,10 +1035,13 @@ impl ProgramSet {
     }
 
     /// Records `outcome` as the result of evaluating `text` as the program at
-    /// `index`, and returns its diagnostics: the warnings on success, the
-    /// errors (and any warnings) on failure.
+    /// `index`, and returns its diagnostics: the warnings on success (none for
+    /// an empty program), the errors (and any warnings) on failure.
     ///
-    /// A failure drops any previous result.
+    /// When the program evaluated, the sliders its waveform reaches are reached
+    /// (see [`ProgramSet::reach`]), and the warnings include those
+    /// [`ProgramSet::slider_warnings`] returns. Otherwise any previous result
+    /// is dropped.
     pub fn record(
         &mut self,
         index: usize,
@@ -1144,15 +1050,226 @@ impl ProgramSet {
     ) -> Result<Vec<Diagnostic>, Vec<Diagnostic>> {
         self.programs[index].evaluated_text = text;
         match outcome {
-            Ok((evaluated, warnings)) => {
-                self.programs[index].evaluated = evaluated;
+            Outcome::Empty => {
+                self.programs[index].evaluated = None;
+                Ok(Vec::new())
+            }
+            Outcome::Evaluated(evaluated, mut warnings) => {
+                self.reach(&evaluated.sliders);
+                warnings.extend(self.slider_warnings(index, &evaluated.sliders));
+                self.programs[index].evaluated = Some(evaluated);
                 Ok(warnings)
             }
-            Err(diagnostics) => {
+            Outcome::Failed(diagnostics) => {
                 self.programs[index].evaluated = None;
                 Err(diagnostics)
             }
         }
+    }
+
+    /// Returns the entries of the `sliders` annotation of the program at
+    /// `index`, in annotation order; empty when it has none.
+    pub fn listed(&self, index: usize) -> &[expr::Slider] {
+        self.programs
+            .get(index)
+            .and_then(|program| self.bindings.get(program.binding_index))
+            .and_then(|binding| {
+                // The last one wins, as the parser reads repeated annotations.
+                binding.annotations.iter().rev().find_map(|annotation| {
+                    match &annotation.annotation {
+                        expr::Annotation::Sliders(entries) => Some(entries.as_slice()),
+                        _ => None,
+                    }
+                })
+            })
+            .unwrap_or(&[])
+    }
+
+    /// Returns the state of the slider `label` owned by the slot at `owner`,
+    /// once a program's waveform has reached it.
+    pub fn slider(&self, owner: usize, label: &str) -> Option<&SliderState> {
+        self.sliders.get(&(owner, label.to_string()))
+    }
+
+    /// Returns the mark and current value of every slider a program's
+    /// waveform has reached.
+    pub fn slider_values(&self) -> impl Iterator<Item = (MarkId, f32)> + '_ {
+        self.sliders.iter().map(|((program, label), state)| {
+            (
+                MarkId::Slider {
+                    program: *program,
+                    label: label.clone(),
+                },
+                state.value,
+            )
+        })
+    }
+
+    /// Adds each slider in `reached` that is new, or whose spec has changed,
+    /// at the value its owner's annotation saves (clamped to its range) or,
+    /// when that saves none, at its default. A slider already reached with
+    /// the same spec keeps its value.
+    pub fn reach(&mut self, reached: &[slider_owners::Reached]) {
+        for slider in reached {
+            let key = (slider.owner, slider.label.clone());
+            if self
+                .sliders
+                .get(&key)
+                .is_some_and(|state| state.spec == slider.spec)
+            {
+                continue;
+            }
+            let saved = self
+                .listed(slider.owner)
+                .iter()
+                .find(|entry| entry.label == slider.label)
+                .and_then(|entry| entry.value);
+            let value = saved.map_or(slider.spec.default, |value| slider.spec.clamp(value));
+            self.sliders.insert(
+                key,
+                SliderState {
+                    spec: slider.spec.clone(),
+                    value,
+                },
+            );
+        }
+    }
+
+    /// Returns warnings about the sliders of the program at `index`, whose
+    /// waveform reaches `reached`.
+    ///
+    /// There is one for each slider in `reached` whose owner saves a value
+    /// outside its range (so it starts clamped), and one for each entry the
+    /// program lists that neither `reached` nor any earlier evaluation has
+    /// reached.
+    pub fn slider_warnings(
+        &self,
+        index: usize,
+        reached: &[slider_owners::Reached],
+    ) -> Vec<Diagnostic> {
+        let mut warnings = Vec::new();
+        for slider in reached {
+            let saved = self
+                .listed(slider.owner)
+                .iter()
+                .find(|entry| entry.label == slider.label)
+                .and_then(|entry| entry.value);
+            if let Some(saved) = saved
+                && slider.spec.clamp(saved) != saved
+            {
+                warnings.push(format!(
+                    "{} saves slider {:?} at {}, outside its range {} to {}; it starts at {}",
+                    self.display_name(slider.owner),
+                    slider.label,
+                    saved,
+                    slider.spec.min,
+                    slider.spec.max,
+                    slider.spec.clamp(saved),
+                ));
+            }
+        }
+        for entry in self.listed(index) {
+            let reached_now = reached
+                .iter()
+                .any(|slider| slider.owner == index && slider.label == entry.label);
+            if !reached_now && self.slider(index, &entry.label).is_none() {
+                warnings.push(format!(
+                    "{} lists slider {:?}, but nothing has reached it",
+                    self.display_name(index),
+                    entry.label,
+                ));
+            }
+        }
+        warnings
+            .into_iter()
+            .map(|message| Diagnostic::message_only(message).as_warning())
+            .collect()
+    }
+
+    /// Returns the labels of the sliders on the encoders of the program at
+    /// `index`, in encoder order.
+    ///
+    /// These are the sliders it lists, in annotation order, then the sliders it
+    /// owns but doesn't list ("auto-shown"), in the order the waveform of its
+    /// last successful evaluation reaches them (see
+    /// [`slider_owners::resolve`]).
+    pub fn shown(&self, index: usize) -> Vec<&str> {
+        let listed = self.listed(index);
+        let mut shown: Vec<&str> = listed.iter().map(|entry| entry.label.as_str()).collect();
+        // TODO a keys instrument's evaluation reaches only its sample note's
+        // sliders, so one that only other notes reach is never shown.
+        // TODO maybe also show sliders owned by earlier bindings this program
+        // is built through, labeled with their owner? turning one would also
+        // move other programs that share it.
+        let reached = self
+            .programs
+            .get(index)
+            .and_then(Program::evaluated)
+            .map_or(&[][..], |evaluated| &evaluated.sliders);
+        for slider in reached {
+            if slider.owner == index && !shown.contains(&slider.label.as_str()) {
+                shown.push(&slider.label);
+            }
+        }
+        shown
+    }
+
+    /// Returns the label and state of the slider at `slider_index` among
+    /// those [`ProgramSet::shown`] returns, or `None` when there are fewer or
+    /// no program's waveform has reached that slider.
+    pub fn shown_slider(&self, index: usize, slider_index: usize) -> Option<(&str, &SliderState)> {
+        let label = *self.shown(index).get(slider_index)?;
+        // TODO a listed slider nothing has reached has no spec, so its encoder
+        // does nothing and shows nothing; consider showing it as unreached.
+        Some((label, self.slider(index, label)?))
+    }
+
+    /// Returns the position, from 0 to 1, of the slider
+    /// [`ProgramSet::shown_slider`] returns.
+    pub fn slider_normalized(&self, index: usize, slider_index: usize) -> Option<f32> {
+        let (_, state) = self.shown_slider(index, slider_index)?;
+        Some(state.spec.normalize(state.value))
+    }
+
+    /// Moves the slider [`ProgramSet::shown_slider`] returns to position
+    /// `normalized` (see [`slider::SliderSpec::denormalize`]) and returns its
+    /// label and new value, or `None` when there is no such slider.
+    pub fn set_slider_normalized(
+        &mut self,
+        index: usize,
+        slider_index: usize,
+        normalized: f32,
+    ) -> Option<SliderChange> {
+        let label = self.shown(index).get(slider_index)?.to_string();
+        let state = self.sliders.get_mut(&(index, label.clone()))?;
+        state.value = state.spec.denormalize(normalized);
+        Some(SliderChange {
+            label,
+            value: state.value,
+        })
+    }
+
+    /// Returns how to show each slider [`ProgramSet::shown`] returns for the
+    /// program at `index` that a program's waveform has reached.
+    // TODO this method only works for mouse-based sliders
+    pub fn slider_display(&self, index: usize) -> Vec<SliderDisplay> {
+        (0..self.shown(index).len())
+            .filter_map(|j| {
+                let (label, state) = self.shown_slider(index, j)?;
+                Some(SliderDisplay {
+                    label: label.to_string(),
+                    // TODO this is wrong for encoders
+                    axis: match j {
+                        0 => "X".to_string(),
+                        1 => "Y".to_string(),
+                        // Only encoders reach the rest.
+                        _ => (j + 1).to_string(),
+                    },
+                    normalized_value: state.spec.normalize(state.value),
+                    actual_value: state.value,
+                })
+            })
+            .collect()
     }
 }
 
@@ -1161,19 +1278,20 @@ impl ProgramSet {
 /// matter (which would be confusing) and looser than encoder/MIDI noise.
 const ANNOTATION_EPSILON: f32 = 1e-4;
 
-/// Returns annotation-persistence edits for `program` against its parsed
-/// `binding`.
+/// Returns annotation-persistence edits for `program`, the program at `index`,
+/// against its parsed `binding`.
 ///
 /// This includes one each for `keys` and `loop_after_beats` if the program's
 /// kind or loop has diverged from the binding's annotations, one for `level_db`
 /// if the runtime level has diverged from what the binding's last `Level`
-/// annotation encodes, and one for `sliders` if any slider's current normalized
-/// value has diverged from its parsed initial value. Returns an empty list when
-/// nothing has changed.
+/// annotation encodes, and one for `sliders` as [`sliders_edit`] returns it.
+/// Returns an empty list when nothing has changed.
 fn annotation_edits(
     program: &Program,
+    index: usize,
     binding: &expr::SourceBinding<MarkId, Source>,
     source: &str,
+    sliders: &HashMap<(usize, String), SliderState>,
 ) -> Vec<(Range<usize>, String)> {
     let keys = (program.kind() == ProgramKind::Keys).then_some(expr::Annotation::Keys);
     let loop_after_beats = program
@@ -1211,7 +1329,7 @@ fn annotation_edits(
     if !replaces_lone_annotation && let Some(edit) = level_edit(program, binding, source) {
         edits.push(edit);
     }
-    if let Some(edit) = sliders_edit(program, binding) {
+    if let Some(edit) = sliders_edit(program, index, binding, source, sliders) {
         edits.push(edit);
     }
     // Pushed last so that an annotation inserted at the start of another
@@ -1434,57 +1552,77 @@ fn remove_annotation_edit(span: Range<usize>, source: &str) -> (Range<usize>, St
     (set_start..set_end, String::new())
 }
 
-/// Returns the edit for the binding's `sliders` annotation, or `None` if
-/// every slider's current normalized value matches its parsed initial.
+/// Returns the edit that saves, in `binding`'s `sliders` annotation, the value
+/// in `sliders` of each slider owned by `program`, the program at `index`, or
+/// `None` when nothing needs saving.
+///
+/// A listed slider is saved when its value differs from what its entry saves
+/// (or its default, for an entry that saves none). A slider `program` reaches
+/// and owns but doesn't list is appended as a new entry once its value
+/// differs from its default, after a bare entry for each such slider shown
+/// before it, so that saving keeps the order of [`ProgramSet::shown`]. The
+/// annotation is added if the binding has none.
 fn sliders_edit(
     program: &Program,
+    index: usize,
     binding: &expr::SourceBinding<MarkId, Source>,
+    source: &str,
+    sliders: &HashMap<(usize, String), SliderState>,
 ) -> Option<(Range<usize>, String)> {
-    if program.sliders().configs().is_empty() {
-        return None;
-    }
-    let diverged = program
-        .sliders()
-        .configs()
-        .iter()
-        .zip(program.sliders().normalized_values())
-        .any(|(config, &current)| {
-            (current - parsed_normalized_value(&config.function)).abs() > ANNOTATION_EPSILON
-        });
-    if !diverged {
-        return None;
-    }
-    let (_, span) = last_annotation_of(binding, |a| match a {
-        expr::Annotation::Sliders(_) => Some(()),
+    let moved = |label: &str, from: Option<f32>| {
+        let state = sliders.get(&(index, label.to_string()))?;
+        ((state.value - from.unwrap_or(state.spec.default)).abs() > ANNOTATION_EPSILON)
+            .then_some(state.value)
+    };
+    let entries = last_annotation_of(binding, |a| match a {
+        expr::Annotation::Sliders(entries) => Some(entries.clone()),
         _ => None,
-    })?;
-    let span = span?;
-    let updated: Vec<expr::Slider> = program
-        .sliders()
-        .configs()
-        .iter()
-        .zip(program.sliders().normalized_values())
-        .map(|(config, &normalized)| {
-            let function = match &config.function {
-                expr::SliderFunction::Linear { min, max, .. } => expr::SliderFunction::Linear {
-                    initial_value: min + normalized * (max - min),
-                    min: *min,
-                    max: *max,
-                },
-                expr::SliderFunction::UserDefined {
-                    function_source, ..
-                } => expr::SliderFunction::UserDefined {
-                    normalized_initial_value: normalized,
-                    function_source: function_source.clone(),
-                },
-            };
-            expr::Slider {
-                label: config.label.clone(),
-                function,
+    })
+    .map_or(Vec::new(), |(entries, _)| entries);
+    let mut changed = false;
+    let mut updated: Vec<expr::Slider> = entries
+        .into_iter()
+        .map(|entry| match moved(&entry.label, entry.value) {
+            Some(value) => {
+                changed = true;
+                expr::Slider {
+                    label: entry.label,
+                    value: Some(value),
+                }
             }
+            None => entry,
         })
         .collect();
-    Some((span, format!("{}", expr::Annotation::Sliders(updated))))
+    let reached = program.evaluated().map_or(&[][..], |e| &e.sliders);
+    let mut shown: Vec<expr::Slider> = Vec::new();
+    for slider in reached {
+        if slider.owner == index
+            && !updated
+                .iter()
+                .chain(&shown)
+                .any(|entry| entry.label == slider.label)
+        {
+            shown.push(expr::Slider {
+                label: slider.label.clone(),
+                value: moved(&slider.label, None),
+            });
+        }
+    }
+    // Unmoved sliders shown after the last moved one aren't written.
+    if let Some(last) = shown.iter().rposition(|entry| entry.value.is_some()) {
+        changed = true;
+        updated.extend(shown.into_iter().take(last + 1));
+    }
+    if !changed {
+        return None;
+    }
+    annotation_edit(
+        binding,
+        |a| matches!(a, expr::Annotation::Sliders(_)),
+        Some(&expr::Annotation::Sliders(updated)),
+        program.level_db(),
+        source,
+    )
 }
 
 /// Returns the (value, span) of the last annotation on `binding` that `pick`
@@ -1505,23 +1643,6 @@ where
         .iter()
         .rev()
         .find_map(|a| pick(&a.annotation).map(|v| (v, a.span.as_ref().map(|s| s.range.clone()))))
-}
-
-/// Returns the normalized 0..1 position implied by a parsed slider's
-/// initial value, so it can be compared against the runtime's current
-/// `normalized_value` directly.
-fn parsed_normalized_value(function: &expr::SliderFunction) -> f32 {
-    match function {
-        expr::SliderFunction::Linear {
-            initial_value,
-            min,
-            max,
-        } => (initial_value - min) / (max - min),
-        expr::SliderFunction::UserDefined {
-            normalized_initial_value,
-            ..
-        } => *normalized_initial_value,
-    }
 }
 
 impl ProgramSet {
@@ -1718,7 +1839,13 @@ impl ProgramSet {
                 continue;
             }
             if let Some(binding) = self.bindings.get(program.binding_index) {
-                edits.extend(annotation_edits(program, binding, &self.source));
+                edits.extend(annotation_edits(
+                    program,
+                    i,
+                    binding,
+                    &self.source,
+                    &self.sliders,
+                ));
             }
         }
 
@@ -1777,6 +1904,7 @@ impl ProgramSet {
             let generation = self.programs[program_index].generation;
             self.programs[program_index] = Program::from_string("", new_bindings.len());
             self.programs[program_index].generation = generation;
+            self.sliders.retain(|(owner, _), _| *owner != program_index);
         }
 
         // Skip the file write when no path is set — tests use an empty
@@ -1836,26 +1964,180 @@ mod tests {
             .0
     }
 
+    /// Returns the slider `label` of the slot at `owner`, reached with a
+    /// linear spec of `default` over `min` to `max`.
+    fn reached(
+        owner: usize,
+        label: &str,
+        default: f32,
+        min: f32,
+        max: f32,
+    ) -> slider_owners::Reached {
+        slider_owners::Reached {
+            owner,
+            label: label.to_string(),
+            spec: slider::SliderSpec::new(default, min, max, slider::Curve::Linear).unwrap(),
+        }
+    }
+
     #[test]
-    fn set_slider_normalized_clamps_and_rejects_out_of_range() {
-        let source = "#{sliders=[\"vol:0.5:0:1\"]}\ntone = saw(220);";
-        let mut set = state_from(source);
-        // No slider at index 1 → None, nothing changed.
-        assert!(
-            set.program_mut(0)
-                .unwrap()
-                .set_slider_normalized(1, 0.5)
-                .is_none()
+    fn a_listed_slider_moves_by_position_once_reached() {
+        let mut set = state_from("#{sliders=[\"vol\"]}\ntone = saw(220);");
+        // Listed but not yet reached: there is no range to move along.
+        assert!(set.set_slider_normalized(0, 0, 0.5).is_none());
+        set.reach(&[reached(0, "vol", 5.0, 0.0, 10.0)]);
+        assert_eq!(set.slider_normalized(0, 0), Some(0.5));
+        // No slider at index 1.
+        assert!(set.set_slider_normalized(0, 1, 0.5).is_none());
+        // Positions past the end clamp to it.
+        let change = set.set_slider_normalized(0, 0, 1.5).unwrap();
+        assert_eq!((change.label.as_str(), change.value), ("vol", 10.0));
+        assert_eq!(set.slider(0, "vol").unwrap().value, 10.0);
+    }
+
+    #[test]
+    fn a_reached_slider_starts_at_its_saved_value_or_its_default() {
+        let mut set = state_from(
+            "#{sliders=[\"vol:0.25\", \"pan\", \"far:7\"]}\ntone = saw(220);\n\
+             #{level_db=0}\n_ = tone;",
         );
-        // Values above the range clamp to 1.0.
-        let change = set
-            .program_mut(0)
-            .unwrap()
-            .set_slider_normalized(0, 1.5)
-            .unwrap();
-        assert_eq!(change.label, "vol");
-        assert!((change.value - 1.0).abs() < 1e-6);
-        assert!((set.programs()[0].sliders().normalized_values()[0] - 1.0).abs() < 1e-6);
+        set.reach(&[
+            reached(0, "vol", 0.5, 0.0, 1.0),
+            reached(0, "pan", 0.5, 0.0, 1.0),
+            reached(0, "far", 0.5, 0.0, 1.0),
+            // Slot 1 saves nothing for its own `vol`.
+            reached(1, "vol", 0.5, 0.0, 1.0),
+        ]);
+        let value = |owner, label| set.slider(owner, label).unwrap().value;
+        assert_eq!(value(0, "vol"), 0.25);
+        assert_eq!(value(0, "pan"), 0.5);
+        // A saved value outside the range is clamped.
+        assert_eq!(value(0, "far"), 1.0);
+        assert_eq!(value(1, "vol"), 0.5);
+    }
+
+    #[test]
+    fn a_slider_reached_again_keeps_its_value_unless_its_spec_changed() {
+        let mut set = state_from("#{sliders=[\"vol\"]}\ntone = saw(220);");
+        set.reach(&[reached(0, "vol", 0.5, 0.0, 1.0)]);
+        set.set_slider_normalized(0, 0, 0.75);
+        set.reach(&[reached(0, "vol", 0.5, 0.0, 1.0)]);
+        assert_eq!(set.slider(0, "vol").unwrap().value, 0.75);
+        set.reach(&[reached(0, "vol", 2.0, 0.0, 4.0)]);
+        assert_eq!(set.slider(0, "vol").unwrap().value, 2.0);
+    }
+
+    /// Records an evaluation of the program at `index` whose waveform reaches
+    /// `sliders`, and returns its warnings.
+    fn record_reaching(
+        set: &mut ProgramSet,
+        index: usize,
+        sliders: Vec<slider_owners::Reached>,
+    ) -> Vec<String> {
+        let evaluated = Evaluated {
+            plays: Plays::Waveform(waveform::Waveform::Const(1.0), Arc::default()),
+            sliders,
+        };
+        let text = set.programs[index].text().into();
+        set.record(index, text, Outcome::Evaluated(evaluated, Vec::new()))
+            .expect("the evaluation is recorded")
+            .into_iter()
+            .map(|warning| warning.message)
+            .collect()
+    }
+
+    #[test]
+    fn encoders_show_the_listed_sliders_then_the_owned_ones_in_reach_order() {
+        let mut set = state_from(
+            "#{sliders=[\"b\", \"a\"]}\npad = saw(220);\n\
+             #{sliders=[\"q\"]}\n_ = pad;",
+        );
+        record_reaching(
+            &mut set,
+            1,
+            vec![
+                reached(1, "z", 0.5, 0.0, 1.0),
+                // Owned by the binding that lists it, so not slot 1's to show.
+                reached(0, "a", 0.5, 0.0, 1.0),
+                reached(1, "q", 0.5, 0.0, 1.0),
+                reached(1, "y", 0.5, 0.0, 1.0),
+            ],
+        );
+        assert_eq!(set.shown(1), ["q", "z", "y"]);
+        // A listed slider keeps its place before anything reaches it.
+        assert_eq!(set.shown(0), ["b", "a"]);
+        assert!(set.shown_slider(0, 0).is_none());
+        let change = set.set_slider_normalized(1, 1, 1.0).unwrap();
+        assert_eq!((change.label.as_str(), change.value), ("z", 1.0));
+        assert_eq!(set.slider(1, "y").unwrap().value, 0.5);
+    }
+
+    #[test]
+    fn a_shown_slider_is_saved_in_its_place_once_moved_off_its_default() {
+        let source = "#{level_db=0}\n_ = saw(220);";
+        let mut set = state_from(source);
+        record_reaching(
+            &mut set,
+            0,
+            vec![
+                reached(0, "cutoff", 0.5, 0.0, 1.0),
+                reached(0, "q", 0.5, 0.0, 1.0),
+                reached(0, "pan", 0.5, 0.0, 1.0),
+            ],
+        );
+        set.splice(0).unwrap();
+        assert_eq!(set.source, source);
+        set.set_slider_normalized(0, 1, 0.75);
+        set.splice(0).unwrap();
+        // `cutoff` is written bare to keep its encoder ahead of `q`'s; `pan`,
+        // unmoved and after it, isn't written.
+        assert_eq!(
+            set.source,
+            "#{sliders=[\"cutoff\",\"q:0.75\"], level_db=0}\n_ = saw(220);"
+        );
+        assert_eq!(set.shown(0), ["cutoff", "q", "pan"]);
+    }
+
+    #[test]
+    fn a_moved_shown_slider_is_appended_to_the_listed_ones() {
+        let mut set = state_from("#{sliders=[\"a\"]}\n_ = saw(220);");
+        record_reaching(
+            &mut set,
+            0,
+            vec![
+                reached(0, "b", 0.5, 0.0, 1.0),
+                reached(0, "a", 0.5, 0.0, 1.0),
+            ],
+        );
+        set.set_slider_normalized(0, 1, 0.25);
+        set.splice(0).unwrap();
+        assert_eq!(set.source, "#{sliders=[\"a\",\"b:0.25\"]}\n_ = saw(220);");
+        assert_eq!(set.shown(0), ["a", "b"]);
+    }
+
+    #[test]
+    fn a_clamped_saved_value_and_an_unreached_entry_are_warnings() {
+        let mut set = state_from("#{sliders=[\"far:7\", \"gone\"]}\n_ = saw(220);");
+        let warnings = record_reaching(&mut set, 0, vec![reached(0, "far", 0.5, 0.0, 1.0)]);
+        assert_eq!(
+            warnings,
+            [
+                "A:1 saves slider \"far\" at 7, outside its range 0 to 1; it starts at 1",
+                "A:1 lists slider \"gone\", but nothing has reached it",
+            ]
+        );
+        // The unreached entry keeps its encoder and its place in the file.
+        assert_eq!(set.shown(0), ["far", "gone"]);
+        set.splice(0).unwrap();
+        assert_eq!(set.source, "#{sliders=[\"far:1\",\"gone\"]}\n_ = saw(220);");
+    }
+
+    #[test]
+    fn an_entry_reached_through_another_program_is_not_a_warning() {
+        let mut set =
+            state_from("#{sliders=[\"cutoff\"]}\npad = saw(220);\n#{level_db=0}\n_ = pad;");
+        record_reaching(&mut set, 1, vec![reached(0, "cutoff", 0.5, 0.0, 1.0)]);
+        assert!(record_reaching(&mut set, 0, Vec::new()).is_empty());
     }
 
     #[test]
@@ -1936,7 +2218,13 @@ mod tests {
     #[test]
     fn evaluated_accessors_follow_the_cached_variant() {
         let mut program = Program::from_string("x", 0);
-        program.evaluated = Some(Evaluated::Waveform(
+        let evaluated = |plays| {
+            Some(Evaluated {
+                plays,
+                sliders: Vec::new(),
+            })
+        };
+        program.evaluated = evaluated(Plays::Waveform(
             waveform::Waveform::Const(1.0),
             Arc::default(),
         ));
@@ -1945,7 +2233,7 @@ mod tests {
         assert!(program.keys_instrument().is_none());
         assert!(program.sequence().is_none());
 
-        program.evaluated = Some(Evaluated::Sequence(sequencer::Sequence {
+        program.evaluated = evaluated(Plays::Sequence(sequencer::Sequence {
             steps: vec![(1.0, 0..1)],
             step_waveform: waveform::Waveform::Const(1.0),
             step_marks: Arc::default(),
@@ -1955,7 +2243,7 @@ mod tests {
         assert!(program.keys_instrument().is_none());
         assert!(program.sequence().is_some());
 
-        program.evaluated = Some(Evaluated::KeysInstrument(expr::SourceExpr::float(1.0)));
+        program.evaluated = evaluated(Plays::KeysInstrument(expr::SourceExpr::float(1.0)));
         assert!(program.waveform().is_none());
         assert!(!program.is_playable());
         assert!(program.keys_instrument().is_some());
@@ -1994,139 +2282,55 @@ mod tests {
             .collect()
     }
 
-    /// Returns the `(name, mark)` pair of each `name = Marked(mark, …)` binding
-    /// in `bindings` — the shape [`slider::append_slider_bindings`] returns for
-    /// a program's own sliders. A preceding binding's sliders are bound inside
-    /// its body rather than at the top level, so they do not appear here.
-    fn own_slider_marks(bindings: &[expr::SourceBinding<MarkId, Source>]) -> Vec<(String, MarkId)> {
-        bindings
-            .iter()
-            .filter_map(|b| match &b.binding {
-                expr::Binding::Definition(
-                    expr::Pattern::Identifier(name),
-                    expr::SourceExpr {
-                        expr: expr::Expr::Waveform(waveform::Waveform::Marked { id, .. }),
-                        ..
-                    },
-                ) => Some((name.clone(), id.clone())),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// A slider's name reaches the right-hand side of the binding that declares
-    /// it and nowhere else: a later program neither sees it among its bindings
-    /// nor can name it.
+    /// A `sliders` annotation lists labels; it binds no names.
     #[test]
-    fn a_slider_name_is_invisible_outside_its_declaring_binding() {
-        let source = "\
-#{sliders=[\"mix:0.5:0:1\"]}
-m = mix;
-#{level_db=0}
-later = mix;";
-        let set = state_from(source);
-        // `m` is in scope for the later program; the slider it declares is not
-        // a binding of its own.
-        assert_eq!(binding_names(&set.evaluation_bindings(1)), vec!["m"]);
-
+    fn a_listed_label_is_not_a_name_in_scope() {
+        let set = state_from("#{sliders=[\"mix\"]}\nm = mix;");
         let environment = Environment::new(8000, 90, PathBuf::new());
-        // The declaring binding still checks and evaluates — the name is in
-        // scope for its own right-hand side.
-        let input = set.evaluation_input(0);
-        assert_eq!(environment.check_program(&input), Vec::new());
-        environment
-            .evaluate_program(&input)
-            .expect("the declaring binding sees its own slider");
-        let diagnostics = environment.check_program(&set.evaluation_input(1));
-        // Located in the later program's own text, not in the file.
+        let diagnostics = environment.check_program(&set.evaluation_input(0));
         assert_eq!(diagnostics.len(), 1, "got {:?}", diagnostics);
         assert_eq!(diagnostics[0].to_string(), "1:1: unbound variable 'mix'");
-        assert_eq!(diagnostics[0].program_range, Some(0..3));
     }
 
-    /// Same-labelled sliders declared on different bindings create distinct
-    /// marks, each qualified by its own program slot.
     #[test]
-    fn same_labelled_sliders_on_different_programs_stay_distinct() {
-        let source = "\
-#{sliders=[\"cents:1:-10:10\"]}
-a = cents;
-#{sliders=[\"cents:2:-10:10\"]}
-b = cents;";
-        let set = state_from(source);
-        let marked = |program| {
-            (
-                "cents".to_string(),
-                MarkId::Slider {
-                    program,
-                    label: "cents".to_string(),
-                },
-            )
+    fn slider_owners_are_the_played_program_and_the_programs_before_it() {
+        let source = "#{sliders=[\"q:0.5\"]}\nf = fn(x) => x;\n\
+                      #{level_db=0}\n_ = f(1);\n\
+                      #{level_db=0}\n_ = f(2);\n";
+        let (set, _) = ProgramSet::from_source(source.to_string(), PathBuf::new()).unwrap();
+        let owners = set.slider_owners(1);
+        assert_eq!(owners.played.index, 1);
+        assert_eq!(&source[owners.played.text.clone()], "f(1)");
+        assert!(owners.played.listed.is_empty());
+        assert_eq!(owners.played.listing, None);
+        let [first] = &owners.preceding[..] else {
+            panic!("expected one preceding slot, got {:?}", owners.preceding);
         };
-        assert_eq!(
-            own_slider_marks(&set.evaluation_bindings(0)),
-            vec![marked(0)]
-        );
-        assert_eq!(
-            own_slider_marks(&set.evaluation_bindings(1)),
-            vec![marked(1)]
-        );
-    }
-
-    /// A named binding carrying `sliders=` used to leave its label free in
-    /// every later program's scope, so each failed with `Variable 'mix' not
-    /// found in context`. Now the binding evaluates to a value carrying the
-    /// mark, and that value is what later programs see.
-    #[test]
-    fn a_named_slider_binding_is_in_scope_for_later_programs_as_its_value() {
-        let source = "\
-#{sliders=[\"mix:0.5:0:1\"]}
-m = mix;
-#{level_db=0}
-later = m;";
-        let set = state_from(source);
-        let environment = Environment::new(8000, 90, PathBuf::new());
-        let context = environment
-            .program_context(&set, 1)
-            .expect("a preceding slider binding must not break later programs");
-        let (_, value) = context
-            .iter()
-            .rev()
-            .find(|(name, _)| name == "m")
-            .expect("`m` is in scope for the later program");
-        let expr::Expr::Waveform(waveform::Waveform::Marked { id, waveform }) = &value.expr else {
-            panic!(
-                "expected `m` to evaluate to a marked waveform, got {}",
-                value
-            );
-        };
-        assert_eq!(
-            *id,
-            MarkId::Slider {
-                program: 0,
-                label: "mix".to_string()
-            }
-        );
-        assert_eq!(**waveform, waveform::Waveform::Const(0.5));
+        assert_eq!(first.index, 0);
+        assert_eq!(first.name, set.display_name(0));
+        assert_eq!(&source[first.text.clone()], "fn(x) => x");
+        assert_eq!(first.listed, ["q"]);
+        let listing = first.listing.clone().expect("slot 0 lists a slider");
+        assert_eq!(listing.source, Source::File);
+        assert!(source[listing.range].contains("q:0.5"));
     }
 
     #[test]
-    fn evaluation_bindings_are_a_prefix_of_used_bindings_and_own_sliders() {
+    fn evaluation_bindings_are_a_prefix_of_used_bindings() {
         let source = "\
 pi = 3.14;
 #{level_db=0}
 _ = pulse(60);
-#{sliders=[\"vol:0.5:0:1\"]}
+#{sliders=[\"vol\"]}
 tone = saw(220);
 open more;
-#{sliders=[\"pan:0.2:0:1\"]}
-_ = tone * vol;";
+#{sliders=[\"pan\"]}
+_ = tone;";
         let set = state_from(source);
         let (used, counts) = set.used_evaluation_bindings();
         assert_eq!(binding_names(&used), vec!["pi", "tone"]);
         for index in 0..set.programs().len() {
-            let mut expected = used[..counts[index]].to_vec();
-            expected.extend(set.own_slider_bindings(index));
+            let expected = used[..counts[index]].to_vec();
             let actual = set.evaluation_bindings(index);
             assert_eq!(
                 format!("{:?}", actual),
@@ -2135,28 +2339,27 @@ _ = tone * vol;";
                 index
             );
         }
-        // The last program reads `pi`, `tone` (with its own slider bound
-        // around it) and `open more`, then its own slider.
+        // The last program reads `pi`, `tone` and `open more`.
         assert_eq!(counts[2], 3);
         assert_eq!(
             binding_names(&set.evaluation_bindings(2)),
-            vec!["pi", "tone", "pan"]
+            vec!["pi", "tone"]
         );
     }
 
     #[test]
-    fn evaluation_bindings_filters_anonymous_and_appends_sliders() {
+    fn evaluation_bindings_filters_anonymous() {
         let source = "\
 pi = 3.14;
 #{level_db=0}
 _ = pulse(60);
-#{sliders=[\"vol:0.5:0:1\"]}
+#{level_db=0}
 tone = saw(220);";
         let set = state_from(source);
         let names = binding_names(&set.evaluation_bindings(1));
         // `pi` precedes the program and survives; the anonymous `_` slot-1
-        // definition is filtered; the program's own slider is appended.
-        assert_eq!(names, vec!["pi".to_string(), "vol".to_string()]);
+        // definition is filtered.
+        assert_eq!(names, vec!["pi".to_string()]);
     }
 
     #[test]
@@ -2515,26 +2718,28 @@ kick = pulse(60);"
     }
 
     #[test]
-    fn changed_slider_value_rewrites_sliders_annotation() {
-        // Move the slider from its parsed initial 0.5 to 0.75. Only the
-        // `sliders=…` annotation's bytes change; the binding body stays
-        // verbatim.
+    fn a_moved_slider_saves_its_value_in_the_annotation() {
+        // Only the `sliders=…` annotation's bytes change; the binding body
+        // stays verbatim.
         let source = "\
-#{sliders=[\"vol:0.5:0:1\"]}
+#{sliders=[\"vol\", \"pan:0.5\", \"far\"]}
 tone = saw(220);";
         let mut state = state_from(source);
-        assert_eq!(state.programs()[0].sliders().configs().len(), 1);
-        assert!((state.programs()[0].sliders().normalized_values()[0] - 0.5).abs() < 1e-6);
-
-        let _ = state.program_mut(0).unwrap().set_slider_normalized(0, 0.75);
+        state.reach(&[
+            reached(0, "vol", 0.5, 0.0, 1.0),
+            reached(0, "pan", 0.25, 0.0, 1.0),
+        ]);
+        // Unmoved, nothing is written, though `pan` differs from its default.
         state.splice(0).unwrap();
-
-        // Linear slider: actual value = min + normalized * (max - min)
-        // = 0 + 0.75 * 1 = 0.75.
+        assert_eq!(state.source, source);
+        state.set_slider_normalized(0, 0, 0.75);
+        state.set_slider_normalized(0, 1, 0.25);
+        state.splice(0).unwrap();
+        // An unreached entry is kept as it is.
         assert_eq!(
             state.source,
             "\
-#{sliders=[\"vol:0.75:0:1\"]}
+#{sliders=[\"vol:0.75\",\"pan:0.25\",\"far\"]}
 tone = saw(220);"
         );
     }
@@ -2545,11 +2750,12 @@ tone = saw(220);"
         // the source exactly — even though splice_program walks every
         // program looking for level/slider drift.
         let source = "\
-#{level_db=-6, sliders=[\"vol:0.25:0:1\"]}
+#{level_db=-6, sliders=[\"vol:0.25\"]}
 kick = pulse(60);
 #{level_db=0}
 synth = saw(220);";
         let mut state = state_from(source);
+        state.reach(&[reached(0, "vol", 0.5, 0.0, 1.0)]);
         // No runtime mutations — same edit-mode-exit pattern but with
         // the program's text unchanged from what parse_module produced.
         state.splice(0).unwrap();
@@ -2954,16 +3160,18 @@ kick = pulse(60);"
         // The deleted slot must not keep the removed binding's level or sliders
         // — a program later created there starts fresh.
         let source = "\
-#{level_db=-6, sliders=[\"vol:0.5:0:1\"]}
+#{level_db=-6, sliders=[\"vol\"]}
 kick = pulse(60);";
         let mut state = state_from(source);
+        state.reach(&[reached(0, "vol", 0.5, 0.0, 1.0)]);
         state.program_mut(0).unwrap().set_text(String::new());
         state.splice(0).unwrap();
 
         assert_eq!(state.source, "");
         assert!(state.programs()[0].is_empty());
         assert!((state.programs()[0].level_db() - 0.0).abs() < 1e-6);
-        assert!(state.programs()[0].sliders().configs().is_empty());
+        assert!(state.listed(0).is_empty());
+        assert_eq!(state.slider(0, "vol"), None);
     }
 
     #[test]

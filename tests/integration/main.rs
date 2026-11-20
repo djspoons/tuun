@@ -8,5 +8,6 @@ mod finseq;
 mod lighting;
 mod precompute;
 mod share;
+mod slider;
 mod strip;
 mod tracing;

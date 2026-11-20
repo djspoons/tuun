@@ -30,8 +30,9 @@ pub fn classify(
             // Encoders are in Relative output mode: one detent = one
             // unit. Map that to a fraction of the slider's full range.
             let slider_index = *index as usize;
-            let program = programs.get(active_program_index)?;
-            let current = *program.sliders().normalized_values().get(slider_index)?;
+            let current = state
+                .programs
+                .slider_normalized(active_program_index, slider_index)?;
             let normalized_delta = *delta as f32 / (ENCODER_ROTATIONS * 128.0);
             let normalized = (current + normalized_delta).clamp(0.0, 1.0);
             Some(vec![Action::SetSliderNormalized {
@@ -138,6 +139,8 @@ pub fn classify(
 }
 
 /// Pushes the current app state out to the Launchkey hardware.
+///
+/// Encoder displays aren't pushed here; see [`actions::Effect::SyncEncoders`].
 pub fn update_launchkey_state(
     state: &actions::AppState,
     status: &tracker::Status<WaveformId>,
@@ -145,8 +148,6 @@ pub fn update_launchkey_state(
     beats_per_measure: u32,
     launchkey: &mut launchkey::Launchkey,
 ) {
-    // TODO update slider state
-
     launchkey.set_launch_color(match state.launch_mode {
         actions::LaunchMode::Trigger => launchkey::Color::White,
         actions::LaunchMode::Toggle => launchkey::Color::Gray,

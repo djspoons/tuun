@@ -483,7 +483,7 @@ impl<'ttf> Renderer<'ttf> {
         // the encoder visualization below covers the same data more
         // completely.
         let slider_display: Vec<SliderDisplay> =
-            programs[active_program_index].sliders().slider_display();
+            state.programs.slider_display(active_program_index);
         if encoder_mode.is_none() {
             let slider_color = if let Mode::MoveSliders = mode {
                 ACTIVE_COLOR
@@ -611,7 +611,9 @@ impl<'ttf> Renderer<'ttf> {
                 let (normalized, color) = match encoder_mode {
                     launchkey::EncoderMode::Plugin => {
                         let program = &programs[active_program_index];
-                        let Some(&normalized) = program.sliders().normalized_values().get(i) else {
+                        let Some(normalized) =
+                            state.programs.slider_normalized(active_program_index, i)
+                        else {
                             continue;
                         };
                         let color = program
@@ -1360,7 +1362,7 @@ pub fn current_beat_info(
 mod tests {
     use std::sync::Arc;
 
-    use crate::programs::Evaluated;
+    use crate::programs::{Evaluated, Outcome, Plays};
     use crate::sequencer::Sequence;
     use crate::trace_walk::{self, WaveformMarks};
     use crate::waveform::Waveform;
@@ -1410,7 +1412,13 @@ mod tests {
         set.record(
             0,
             Arc::default(),
-            Ok((Some(Evaluated::Sequence(sequence)), vec![])),
+            Outcome::Evaluated(
+                Evaluated {
+                    plays: Plays::Sequence(sequence),
+                    sliders: vec![],
+                },
+                vec![],
+            ),
         )
         .expect("a success records");
         set

@@ -3,7 +3,7 @@ use std::fs;
 
 use clap::Parser as ClapParser;
 
-use tuun::{builtins, diagnostics, eval, expr, ids, infer, modules, parser, signatures, slider};
+use tuun::{builtins, diagnostics, eval, expr, ids, infer, modules, parser, signatures};
 
 #[derive(ClapParser, Debug)]
 #[command(version, about = "Check tuun-synth expressions in .md and .html files")]
@@ -23,6 +23,8 @@ enum Source {
 }
 
 // The checker evaluates as the browser does, which doesn't trace.
+// TODO nor does it make slider marks, so it doesn't check that calls of one
+// slider agree, as the browser does when the block plays.
 impl tuun::trace::CarriesTrace<Source> for ids::MarkId {}
 
 type Bindings = Vec<expr::SourceBinding<ids::MarkId, Source>>;
@@ -112,7 +114,7 @@ fn load_modules() -> HashMap<String, Bindings> {
 }
 
 /// Find the closing `>` of an HTML opening tag, skipping over quoted attribute values
-/// that may contain `>` characters (e.g. `sliders='["freq:0.5:fn(x) => 100"]'`).
+/// that may contain `>` characters (e.g. `expression='map(fn(f) => $f, [220])'`).
 fn find_tag_close(html: &str) -> Option<usize> {
     let mut i = 0;
     let bytes = html.as_bytes();
@@ -267,28 +269,6 @@ fn check_block(
         }
     };
 
-    // Sliders: `sliders='["volume:0.5:0:1", ...]'`.
-    let slider_configs = match extract_attr(block, "sliders") {
-        Some(s) => {
-            let slider_source = format!("sliders={}", s);
-            match parser::parse_sliders(&slider_source) {
-                Ok(cs) => cs,
-                Err(errors) => {
-                    let rendered: Vec<String> = errors
-                        .iter()
-                        .map(|e| display_error_in(e, &slider_source))
-                        .collect();
-                    return CheckResult::Fail(format!(
-                        "[FAIL] \"{}\" slider parse error: {}",
-                        label,
-                        rendered.join("\n")
-                    ));
-                }
-            }
-        }
-        None => vec![],
-    };
-
     // Opens: `open='["std", "foo.bar"]'`. Same shape the wasm runtime
     // honors — each entry becomes a `Binding::Open(path)` resolved
     // against the embedded modules table.
@@ -311,7 +291,7 @@ fn check_block(
     };
 
     // Build the bindings the same way the wasm runtime does:
-    // implicit `open __prelude` → opens → uses → sliders → expression.
+    // implicit `open __prelude` → opens → uses → expression.
     let mut bindings: Bindings = Vec::new();
     bindings.push(expr::Binding::Open(vec!["__prelude".to_string()]).into());
     for path in opens {
@@ -320,14 +300,6 @@ fn check_block(
     for path in uses {
         bindings.push(expr::Binding::Use(path).into());
     }
-    // A web component hosts one expression with one slider set, so the mark's
-    // program qualifier has nothing to distinguish and any value will do.
-    slider::append_slider_bindings(
-        &slider_configs,
-        &vec![0.0; slider_configs.len()],
-        |label| ids::MarkId::Slider { program: 0, label },
-        &mut bindings,
-    );
 
     let resolve = |path: &[String]| -> Result<
         &[expr::SourceBinding<ids::MarkId, Source>],
