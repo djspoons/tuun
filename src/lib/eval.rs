@@ -1774,8 +1774,6 @@ mod tests {
         }
     }
 
-    /// Tests of the running code that evaluation hands built-ins, against
-    /// stand-in built-ins.
     /// Tests of which listing provides a slider label where, against stand-in
     /// built-ins and stand-in listings.
     mod providers {
