@@ -83,8 +83,16 @@ The mark on every voice through which it is released or stopped. What is written
 _Avoid_: stop mark, envelope
 
 **Slider**:
-A single named value that can be changed while sound is playing, read wherever a waveform asks for it by name. Each slider belongs to one owner: among the bindings a waveform is built through, the one whose annotation lists that name, or the program being played if none does. Every voice built through the same owner shares one synchronized view of it; voices built through different owners never share one. At most one binding a waveform is built through may list a given name.
+A single named value that can be changed while sound is playing, read wherever a waveform asks for it by name. Each slider belongs to one owner. Every voice built through the same owner shares one synchronized view of it; voices built through different owners never share one.
 _Avoid_: parameter, knob, control
+
+**Spec**:
+A slider's default, range and curve, as a `slider` call gives them. Every call of one slider gives the same spec.
+_Avoid_: settings, parameters, config
+
+**Owner**:
+The binding a slider belongs to: among the bindings a waveform is built through, the one whose annotation lists the slider's name, or the program being played if none does. At most one binding a waveform is built through may list a given name.
+_Avoid_: handler, scope
 
 **Capture**:
 Saving a sounding waveform to a WAV file as it plays. Not Record, which writes notes as text.
@@ -93,7 +101,7 @@ _Avoid_: record, export, bounce
 ### The program set
 
 **Annotation**:
-The `#{…}` header on a binding, holding settings such as `level_db`, `skip_slots`, sliders and `keys`. A binding with an annotation occupies a program slot.
+The `#{…}` header on a binding, holding settings such as `level_db`, `skip_slots`, `keys`, and `sliders`, which lists the names of the sliders the binding owns. A binding with an annotation occupies a program slot.
 _Avoid_: attribute, tag, header
 
 **Skip slots**:
