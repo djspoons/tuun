@@ -12,6 +12,7 @@ use crate::diagnostics::Source;
 use crate::expr;
 use crate::ids::{self, MarkId};
 use crate::slider;
+use crate::slider_effects;
 use crate::waveform;
 
 /// A program slot as an owner of sliders: which slot it is, where its text is,
@@ -55,9 +56,22 @@ impl Owners {
         &self,
         call: &slider::SliderCall<Source>,
     ) -> Result<usize, Vec<expr::Error<Source>>> {
+        self.owner_of(&call.label, call.code())
+    }
+
+    /// Returns the index of the slot that owns the slider labeled `label`
+    /// called from the code at `code`, the call first and then the code
+    /// running around it, as [`Owners::owner`] does.
+    pub fn owner_of<'s>(
+        &self,
+        label: &str,
+        code: impl Iterator<Item = &'s expr::Span<Source>>,
+    ) -> Result<usize, Vec<expr::Error<Source>>> {
         let mut listing: Vec<&OwnerSlot> = Vec::new();
-        for slot in call.code().filter_map(|span| self.slot(span)) {
-            if slot.listed.contains(&call.label) && !listing.iter().any(|s| s.index == slot.index) {
+        for slot in code.filter_map(|span| self.slot(span)) {
+            if slot.listed.iter().any(|l| l == label)
+                && !listing.iter().any(|s| s.index == slot.index)
+            {
                 listing.push(slot);
             }
         }
@@ -70,7 +84,7 @@ impl Owners {
                 let message = format!(
                     "slider {:?} is listed by {}, and this waveform is built through each of them; \
                      keep only one listing",
-                    call.label,
+                    label,
                     names.join(" and ")
                 );
                 Err(many
@@ -150,15 +164,11 @@ pub fn resolve(
                             ));
                         }
                         Entry::Occupied(entry) if *entry.get() != call.0.spec => {
-                            errors.push(expr::Error::eval(
-                                format!(
-                                    "slider {:?} of {} is {} here but {} at another call; \
-                                     calls of one slider must agree",
-                                    call.0.label,
-                                    owners.name(owner),
-                                    call.0.spec,
-                                    entry.get()
-                                ),
+                            errors.push(disagreement(
+                                &call.0.label,
+                                owners.name(owner),
+                                &call.0.spec,
+                                entry.get(),
                                 call.0.site.clone(),
                             ));
                         }
@@ -196,6 +206,132 @@ pub fn resolve(
     } else {
         Err(errors)
     }
+}
+
+/// Returns the error for a call at `site` of the slider labeled `label` of
+/// `owner` whose spec, `here`, differs from that of another call, `there`.
+fn disagreement(
+    label: &str,
+    owner: &str,
+    here: &slider::SliderSpec,
+    there: &slider::SliderSpec,
+    site: Option<expr::Span<Source>>,
+) -> expr::Error<Source> {
+    expr::Error::eval(
+        format!(
+            "slider {:?} of {} is {} here but {} at another call; \
+             calls of one slider must agree",
+            label, owner, here, there
+        ),
+        site,
+    )
+}
+
+/// Returns the sliders `analysis` finds its program reaching, each once with
+/// the slot that owns it, and the errors in how they are owned.
+///
+/// Those errors are [`Owners::owner`]'s; one at each call whose spec differs
+/// from that of an earlier call of the same owner and label; one at each call
+/// the played program owns whose spec depends on a parameter; and one at the
+/// listing of each other slot that owns a slider reached, when a call of it
+/// in that slot's own code has a spec that depends on a parameter, which the
+/// slot's callers give. Calls whose label isn't known are skipped.
+pub fn check(
+    analysis: &slider_effects::Analysis<Source>,
+    owners: &Owners,
+) -> (Vec<Reached>, Vec<expr::Error<Source>>) {
+    let mut reached: Vec<Reached> = Vec::new();
+    let mut errors: Vec<expr::Error<Source>> = Vec::new();
+    let push = |errors: &mut Vec<expr::Error<Source>>, error| {
+        if !errors.contains(&error) {
+            errors.push(error);
+        }
+    };
+    // The slots other than the played program that own a slider reached.
+    let mut listed: Vec<(usize, &str)> = Vec::new();
+    for call in &analysis.program {
+        let Ok(label) = &call.label else { continue };
+        let owner = match owners.owner_of(label, call.code()) {
+            Ok(owner) => owner,
+            Err(found) => {
+                for error in found {
+                    push(&mut errors, error);
+                }
+                continue;
+            }
+        };
+        match &call.spec {
+            Ok(spec) => match reached
+                .iter()
+                .find(|slider| slider.owner == owner && slider.label == *label)
+            {
+                Some(slider) if slider.spec != *spec => {
+                    let error = disagreement(
+                        label,
+                        owners.name(owner),
+                        spec,
+                        &slider.spec,
+                        call.site.clone(),
+                    );
+                    push(&mut errors, error);
+                }
+                Some(_) => {}
+                None => reached.push(Reached {
+                    owner,
+                    label: label.clone(),
+                    spec: spec.clone(),
+                }),
+            },
+            Err(slider_effects::Open {
+                part,
+                parameter: Some(parameter),
+            }) if owner == owners.played.index => {
+                let error = expr::Error::eval(
+                    format!(
+                        "slider {:?}'s {} depends on `{}`, which isn't known until it plays",
+                        label, part, parameter.name
+                    ),
+                    call.site.clone(),
+                );
+                push(&mut errors, error);
+            }
+            Err(_) => {}
+        }
+        if owner != owners.played.index && !listed.contains(&(owner, label.as_str())) {
+            listed.push((owner, label));
+        }
+    }
+    for (owner, label) in listed {
+        let Some(slot) = owners.preceding.iter().find(|slot| slot.index == owner) else {
+            continue;
+        };
+        let open = analysis
+            .definitions
+            .iter()
+            .find_map(|call| match &call.spec {
+                Err(slider_effects::Open {
+                    part,
+                    parameter: Some(parameter),
+                }) if call.label.as_deref() == Ok(label)
+                    && owners.owner_of(label, call.code()) == Ok(owner) =>
+                {
+                    Some((part, parameter))
+                }
+                _ => None,
+            });
+        if let Some((part, parameter)) = open {
+            let error = expr::Error::eval(
+                format!(
+                    "{} lists slider {:?}, but its {} depends on `{}`, which its callers give; \
+                     list it where `{}` is given instead",
+                    slot.name, label, part, parameter.name, parameter.name
+                ),
+                slot.listing.clone(),
+            );
+            push(&mut errors, error);
+        }
+    }
+    (reached, errors)
 }
 
 #[cfg(test)]

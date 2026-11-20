@@ -26,6 +26,7 @@ use crate::parser;
 use crate::programs::{Evaluated, EvaluationInput, Plays, ProgramKind, ProgramSet};
 use crate::sequencer;
 use crate::signatures;
+use crate::slider_effects;
 use crate::slider_owners;
 use crate::trace::{self, Trace};
 use crate::trace_walk::{self, WaveformMarks};
@@ -453,6 +454,20 @@ impl Environment {
             self.checked_generation.set(self.modules_generation.get());
             break errors;
         };
+        // The abstract evaluation expects a program the checker accepts.
+        let mut errors = errors;
+        if !errors
+            .iter()
+            .any(|e| matches!(e.source(), Some(Source::Program) | Some(Source::File)))
+        {
+            let analysis = slider_effects::analyze(
+                |path| self.resolve(path),
+                &bindings,
+                &expr,
+                input.kind == ProgramKind::Keys,
+            );
+            errors.extend(slider_owners::check(&analysis, &input.owners).1);
+        }
         log::debug!(
             "Checked program in {:.3}s: {} errors",
             (time::Instant::now() - start).as_secs_f32(),

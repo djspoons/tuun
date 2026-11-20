@@ -493,3 +493,84 @@ fn the_slider_demo_loads_and_reaches_what_it_lists() {
         }
     }
 }
+
+/// Returns the messages of the checker's findings for the program at `index`
+/// of `source`.
+fn check(source: &str, index: usize) -> Vec<String> {
+    messages(&environment().check_program(&set(source).evaluation_input(index)))
+}
+
+#[test]
+fn a_listing_function_whose_spec_its_callers_give_is_an_error_at_the_listing() {
+    for (slider, part) in [
+        ("slider(\"q\", d / 4)", "default"),
+        ("slider(\"q\", 0.5, 0, d)", "range"),
+    ] {
+        let source = format!(
+            "#{{sliders=[\"q\"]}}\n\
+             pad = fn(d) => time * {slider};\n\
+             #{{{PLAIN}}}\n\
+             _ = pad(2);\n"
+        );
+        assert_eq!(
+            check(&source, 1),
+            [format!(
+                "1:3: A:1 (pad) lists slider \"q\", but its {part} depends on `d`, which its \
+                 callers give; list it where `d` is given instead"
+            )],
+            "{slider}"
+        );
+    }
+}
+
+#[test]
+fn a_named_parameter_a_caller_may_give_is_one_its_callers_give() {
+    let source = format!(
+        "#{{sliders=[\"q\"]}}\n\
+         pad = fn(top = 1) => time * slider(\"q\", 0.5, 0, top);\n\
+         #{{{PLAIN}}}\n\
+         _ = pad();\n"
+    );
+    assert_eq!(
+        check(&source, 1),
+        [
+            "1:3: A:1 (pad) lists slider \"q\", but its range depends on `top`, which its \
+          callers give; list it where `top` is given instead"
+        ]
+    );
+}
+
+#[test]
+fn a_spec_its_callers_give_is_the_played_programs_when_nothing_lists_it() {
+    let source = format!(
+        "#{{{PLAIN}}}\n\
+         pad = fn(d) => time * slider(\"q\", d * 2);\n\
+         #{{{PLAIN}}}\n\
+         _ = pad(0.2);\n"
+    );
+    assert_eq!(check(&source, 1), Vec::<String>::new());
+    assert_eq!(owner(&source, 1), Ok(vec!["q of A:2 = 0.4".to_string()]));
+}
+
+#[test]
+fn branches_a_note_chooses_between_must_agree() {
+    let source = "#{keys}\n\
+                  k = fn(note, vel) => \
+                  (if note > 60 then slider(\"q\", 0.5) else slider(\"q\", 0.25), 1);\n";
+    assert_eq!(
+        check(source, 0),
+        [
+            "1:59: slider \"q\" of A:1 (k) is 0.25 (0 to 1, linear) here but 0.5 (0 to 1, \
+          linear) at another call; calls of one slider must agree"
+        ]
+    );
+}
+
+#[test]
+fn a_keys_slider_whose_spec_depends_on_the_note_is_an_error() {
+    let source = "#{keys}\nk = fn(note, vel) => (slider(\"q\", note / 128), 1);\n";
+    assert_eq!(
+        check(source, 0),
+        ["1:19: slider \"q\"'s default depends on `note`, which isn't known until it plays"]
+    );
+}

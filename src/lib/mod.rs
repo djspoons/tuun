@@ -9,6 +9,7 @@ pub mod optimizer;
 pub mod parser;
 pub mod signatures;
 pub mod slider;
+pub mod slider_effects;
 pub mod trace;
 pub mod trace_walk;
 pub mod types;
