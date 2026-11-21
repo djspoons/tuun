@@ -1807,6 +1807,9 @@ mod tests {
         analysis.reached.iter().map(|r| r.label.as_str()).collect()
     }
 
+    /// A list whose length the key a note plays, `k`, chooses.
+    const KEYS_LIST: &str = "unfold(fn(x) => x, 0, k)";
+
     const DEPENDS_ON_KEY: &str =
         "slider \"q\"'s default depends on the key a note plays, which isn't known until it plays";
 
@@ -1814,7 +1817,9 @@ mod tests {
     fn reducing_a_list_the_note_chooses_depends_on_the_note() {
         // The step returns its accumulator unchanged, but the result still
         // depends on how many steps the note's list takes.
-        let analysis = check_keys("fn(k, v) => slider(\"q\", reduce(fn(acc, x) => acc, 0.5, k))");
+        let analysis = check_keys(&format!(
+            "fn(k, v) => slider(\"q\", reduce(fn(acc, x) => acc, 0.5, {KEYS_LIST}))"
+        ));
         assert_eq!(messages(&analysis), [DEPENDS_ON_KEY]);
     }
 
@@ -1822,9 +1827,10 @@ mod tests {
     fn a_function_the_steps_build_is_applied_with_the_result() {
         // The seed calls no slider; each step's result does, so the slider is
         // reached only if the result includes what the steps build.
-        let analysis = check_keys(
-            "fn(k, v) => reduce(fn(f, x) => fn(y) => slider(\"q\", 0.5) * f(y), fn(y) => y, k)(1)",
-        );
+        let analysis = check_keys(&format!(
+            "fn(k, v) => reduce(fn(f, x) => fn(y) => slider(\"q\", 0.5) * f(y), fn(y) => y, \
+             {KEYS_LIST})(1)"
+        ));
         assert_eq!(messages(&analysis), Vec::<&str>::new());
         assert_eq!(labels(&analysis), ["q"]);
     }
