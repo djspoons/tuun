@@ -23,7 +23,7 @@ use crate::ids::MarkId;
 use crate::infer;
 use crate::optimizer;
 use crate::parser;
-use crate::programs::{EvaluationInput, Plays, ProgramKind, ProgramSet};
+use crate::programs::{EvaluationInput, KeysInstrument, Plays, ProgramKind, ProgramSet};
 use crate::sequencer;
 use crate::signatures;
 use crate::slider;
@@ -839,13 +839,16 @@ impl Environment {
                 ProgramKind::Keys => {
                     // Sanity check: actually invoke with dummy args.
                     // TODO use a non-constant waveform for velocity
+                    let instrument = KeysInstrument {
+                        function: expr,
+                        listings: input.listings(),
+                    };
                     match self.apply_note_function(
-                        &expr,
+                        &instrument,
                         vec![expr::SourceExpr::float(60.0), expr::SourceExpr::float(0.7)],
-                        &input.providers,
                         input.index,
                     ) {
-                        Ok(_) => Ok(Plays::KeysInstrument(expr)),
+                        Ok(_) => Ok(Plays::KeysInstrument(instrument)),
                         Err(errors) => Err(errors.iter().map(diagnose).collect()),
                     }
                 }
@@ -921,20 +924,20 @@ impl Environment {
         })
     }
 
-    /// Applies a note function `expr` to the given `arguments`, expecting a
-    /// pair of (note-on, note-off) waveforms as a result, as the program at
-    /// `program` plays. Returns both waveforms with their sliders provided
-    /// among `providers` (see [`slider_providers::provide`]), without trace
-    /// marks, optimized; and the note-on's marks, which light `expr`'s place
-    /// wherever nothing else does.
+    /// Applies the note function of `instrument` to the given `arguments`,
+    /// expecting a pair of (note-on, note-off) waveforms as a result, as the
+    /// program at `program` plays. Returns both waveforms with their sliders
+    /// provided among `instrument`'s listings (see
+    /// [`slider_providers::provide`]), without trace marks, optimized; and the
+    /// note-on's marks, which light the function's place wherever nothing else
+    /// does.
     ///
-    /// Both `expr` and `arguments` must be closed.
+    /// `arguments` must be closed.
     #[allow(clippy::type_complexity)]
     pub fn apply_note_function(
         &self,
-        expr: &expr::SourceExpr<MarkId, Source>,
+        instrument: &KeysInstrument,
         arguments: Vec<expr::SourceExpr<MarkId, Source>>,
-        providers: &slider_providers::Providers,
         program: usize,
     ) -> Result<
         (
@@ -945,9 +948,9 @@ impl Environment {
         Vec<expr::Error<Source>>,
     > {
         use expr::Expr::{Tuple, Waveform};
-        let instrument = Trace::of(expr);
-        let expr = expr::SourceExpr::application(expr.clone(), arguments);
-        let scope = eval::DynamicScope::new(providers.listings(program));
+        let instrument_trace = Trace::of(&instrument.function);
+        let expr = expr::SourceExpr::application(instrument.function.clone(), arguments);
+        let scope = eval::DynamicScope::new(instrument.listings.clone());
         let expr = eval::evaluate_with_context(&mut Vec::new(), expr, &scope)
             .map_err(|error| vec![error])?;
         match expr.expr {
@@ -965,7 +968,7 @@ impl Environment {
                         slider_providers::provide(&mut note_on, program);
                         slider_providers::provide(&mut note_off, program);
                         let (note_on, marks) =
-                            self.prepare_waveform(note_on, &trace, Some(&instrument));
+                            self.prepare_waveform(note_on, &trace, Some(&instrument_trace));
                         // The note-off is written into the held voice, and
                         // its envelope has no source waveform to light.
                         let note_off = optimizer::optimize(trace::strip_trace_marks(note_off));
@@ -1129,7 +1132,7 @@ mod tests {
 
         // The program classifies as a keys instrument, reaching its slider.
         let input = set.evaluation_input(0);
-        let Ok(Plays::KeysInstrument(function)) = environment.evaluate_program(&input) else {
+        let Ok(Plays::KeysInstrument(instrument)) = environment.evaluate_program(&input) else {
             panic!("expected a keys instrument");
         };
         let sliders = environment.check_program(&input).sliders;
@@ -1143,7 +1146,7 @@ mod tests {
         // A note played at the initial slider position carries vol = 0.5.
         let args = vec![expr::SourceExpr::float(60.0), expr::SourceExpr::float(0.5)];
         let (mut note_on, _note_off, _marks) = environment
-            .apply_note_function(&function, args.clone(), &set.slider_providers(), 0)
+            .apply_note_function(&instrument, args.clone(), 0)
             .expect("note function should apply");
         substitute_current_slider_values(&mut note_on, &set);
         let mut marks = Vec::new();
@@ -1154,12 +1157,46 @@ mod tests {
         set.set_slider_normalized(0, 0, 1.0)
             .expect("program has a vol slider");
         let (mut note_on, _note_off, _marks) = environment
-            .apply_note_function(&function, args, &set.slider_providers(), 0)
+            .apply_note_function(&instrument, args, 0)
             .expect("note function should apply");
         substitute_current_slider_values(&mut note_on, &set);
         let mut marks = Vec::new();
         slider_mark_values(&note_on, &mut marks);
         assert_eq!(marks, vec![(slider_mark(0, "vol"), 1.0)]);
+    }
+
+    /// A keys instrument's sliders are provided by the slots that provided
+    /// them when it was evaluated, even after an edit to an earlier slot moves
+    /// every later slot's text in the file.
+    #[test]
+    fn keys_instrument_keeps_its_providers_after_an_earlier_slot_grows() {
+        let (mut set, warning) = ProgramSet::from_source(
+            "#{level_db=0}\na = 1;\n\
+             #{sliders=[\"q\"]}\nh = fn(n) => n * slider(\"q\", 0.5);\n\
+             #{keys}\nk = fn(note, vel) => (h(note), h(note));\n"
+                .to_string(),
+            PathBuf::new(),
+        )
+        .expect("test source should parse");
+        assert_eq!(warning, "");
+        let environment = Environment::new(44100, 90, PathBuf::new());
+        let instrument = match environment.evaluate_program(&set.evaluation_input(2)) {
+            Ok(Plays::KeysInstrument(instrument)) => instrument,
+            other => panic!("expected a keys instrument, got {:?}", other),
+        };
+
+        set.program_mut(0)
+            .unwrap()
+            .set_text("1 + 1000000".to_string());
+        set.splice(0).expect("splice should succeed");
+
+        let args = vec![expr::SourceExpr::float(60.0), expr::SourceExpr::float(0.5)];
+        let (note_on, _note_off, _marks) = environment
+            .apply_note_function(&instrument, args, 2)
+            .expect("note function should apply");
+        let mut marks = Vec::new();
+        slider_mark_values(&note_on, &mut marks);
+        assert_eq!(marks, vec![(slider_mark(1, "q"), 0.5)]);
     }
 
     #[test]
@@ -1176,8 +1213,8 @@ mod tests {
         let environment = Environment::new(44100, 90, std::path::PathBuf::from("./lib/v0"));
 
         let input = set.evaluation_input(0);
-        let function = match environment.evaluate_program(&input) {
-            Ok(Plays::KeysInstrument(function)) => function,
+        let instrument = match environment.evaluate_program(&input) {
+            Ok(Plays::KeysInstrument(instrument)) => instrument,
             Err(diagnostics) => panic!("invalid: {:?}", diagnostics),
             Ok(Plays::Waveform(..) | Plays::Sequence(_)) => panic!("classified as waveform"),
         };
@@ -1187,7 +1224,7 @@ mod tests {
 
         let args = vec![expr::SourceExpr::float(60.0), expr::SourceExpr::float(0.5)];
         let (mut note_on, _note_off, _marks) = environment
-            .apply_note_function(&function, args, &set.slider_providers(), 0)
+            .apply_note_function(&instrument, args, 0)
             .expect("note function should apply");
         substitute_current_slider_values(&mut note_on, &set);
         let mut marks = Vec::new();
@@ -1289,16 +1326,15 @@ mod tests {
 
         // The evaluating environment loads `first` then `second`.
         let evaluating = Environment::new(44100, 90, root.clone());
-        let Ok(Plays::KeysInstrument(function)) =
+        let Ok(Plays::KeysInstrument(instrument)) =
             evaluating.evaluate_program(&set.evaluation_input(0))
         else {
             panic!("expected a keys instrument");
         };
         let errors = evaluating
             .apply_note_function(
-                &function,
+                &instrument,
                 vec![expr::SourceExpr::float(64.0), expr::SourceExpr::float(0.7)],
-                &set.slider_providers(),
                 0,
             )
             .expect_err("note 64 is out of range");

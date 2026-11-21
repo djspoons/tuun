@@ -3787,7 +3787,10 @@ _ = saw(220);";
     fn install_test_keys(state: &mut AppState) {
         state.keys = Some(keys::Keys {
             id: 0,
-            function: expr::SourceExpr::float(0.0),
+            instrument: programs::KeysInstrument {
+                function: expr::SourceExpr::float(0.0),
+                listings: slider::Listings::new(|_| None),
+            },
             text: Arc::default(),
             note_off_waveforms: Default::default(),
         });

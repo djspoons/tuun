@@ -98,10 +98,10 @@ fn voice_after(preamble: &str, annotations: &str, program: &str, sixteenth: u8) 
             (*sequence.step_marks).clone(),
             sequence.step_literal_marks(sixteenth),
         ),
-        Ok(Plays::KeysInstrument(function)) => {
+        Ok(Plays::KeysInstrument(instrument)) => {
             let arguments = vec![SourceExpr::float(60.0), SourceExpr::float(0.7)];
             let (_, _, marks) = environment
-                .apply_note_function(&function, arguments, &set.slider_providers(), index)
+                .apply_note_function(&instrument, arguments, index)
                 .expect("a note should play");
             ((*marks).clone(), vec![])
         }

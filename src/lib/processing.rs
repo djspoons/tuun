@@ -142,7 +142,7 @@ fn precomputed(plays: Plays, sample_rate: u32) -> Plays {
             step_waveform: generator.precompute(sequence.step_waveform),
             ..sequence
         }),
-        Plays::KeysInstrument(function) => Plays::KeysInstrument(function),
+        Plays::KeysInstrument(instrument) => Plays::KeysInstrument(instrument),
     }
 }
 
