@@ -1772,19 +1772,20 @@ mod tests {
     }
 
     /// Returns stand-ins for the built-ins the check applies itself, which it
-    /// knows only by name, and for the operators `>` and `*`.
+    /// knows only by name, and for the operator `>` and the built-in `phase`.
     fn prelude() -> Vec<SourceBinding<u32, ()>> {
-        ["slider", "map", "reduce", "unfold", ">", "*"]
+        ["slider", "map", "reduce", "unfold", ">", "phase"]
             .into_iter()
             .map(stand_in)
             .collect()
     }
 
-    /// Checks the keys instrument `source` under [`prelude`], with no modules
-    /// or listings.
-    fn check_keys(source: &str) -> Analysis<()> {
+    /// Checks the keys instrument `fn(k, v) => (note_on, 0)` under
+    /// [`prelude`], with no modules or listings.
+    fn check_keys(note_on: &str) -> Analysis<()> {
         let bindings = prelude();
-        let expr = parse_program::<u32, _>(source, ()).unwrap();
+        let source = format!("fn(k, v) => ({note_on}, 0)");
+        let expr = parse_program::<u32, _>(&source, ()).unwrap();
         let program = Program {
             bindings: &bindings,
             expr: &expr,
@@ -1807,6 +1808,9 @@ mod tests {
         analysis.reached.iter().map(|r| r.label.as_str()).collect()
     }
 
+    /// A list whose length the key a note plays, `k`, chooses.
+    const KEYS_LIST: &str = "unfold(fn(x) => x, 0, k)";
+
     const DEPENDS_ON_KEY: &str =
         "slider \"q\"'s default depends on the key a note plays, which isn't known until it plays";
 
@@ -1814,16 +1818,22 @@ mod tests {
     fn reducing_a_list_the_note_chooses_depends_on_the_note() {
         // The step returns its accumulator unchanged, but the result still
         // depends on how many steps the note's list takes.
-        let analysis = check_keys("fn(k, v) => slider(\"q\", reduce(fn(acc, x) => acc, 0.5, k))");
+        let analysis = check_keys(&format!(
+            "slider(\"q\", reduce(fn(acc, x) => acc, 0.5, {KEYS_LIST}))"
+        ));
         assert_eq!(messages(&analysis), [DEPENDS_ON_KEY]);
     }
 
     #[test]
-    fn a_function_a_later_step_builds_is_applied_with_the_result() {
-        // Only the first step's result holds the closure that calls `slider`.
-        let analysis = check_keys(
-            "fn(k, v) => reduce(fn(f, x) => fn(y) => slider(\"q\", 0.5) * f(y), fn(y) => y, k)(1)",
-        );
+    fn a_function_the_steps_build_is_applied_with_the_result() {
+        // The seed calls no slider; each step's result does, so the slider is
+        // reached only if the result includes what the steps build. `phase`
+        // stands in for `*`, which the type checker can't tell yields a
+        // waveform rather than a seq when one side is a function's result.
+        let analysis = check_keys(&format!(
+            "reduce(fn(f, x) => fn(y) => phase(f(y), slider(\"q\", 0.5)), fn(y) => y, \
+             {KEYS_LIST})(0.5)"
+        ));
         assert_eq!(messages(&analysis), Vec::<&str>::new());
         assert_eq!(labels(&analysis), ["q"]);
     }
@@ -1832,11 +1842,13 @@ mod tests {
     fn steps_that_build_the_same_function_afresh_stop() {
         // Each step builds a new closure with the same body, which covers the
         // last; otherwise the steps would go on until the check ran out of
-        // fuel.
+        // fuel. The note applies each function the steps build in turn.
         let analysis = check_keys(
-            "fn(k, v) => unfold(fn(f) => fn(y) => f(y) * slider(\"q\", 0.5), fn(y) => y, k)",
+            "reduce(fn(acc, g) => g(acc), 0.5, \
+             unfold(fn(f) => fn(y) => phase(f(y), slider(\"q\", 0.5)), fn(y) => y, k))",
         );
         assert_eq!(messages(&analysis), Vec::<&str>::new());
+        assert_eq!(labels(&analysis), ["q"]);
     }
 
     /// Returns a new closure of no parameters with `body`.
@@ -1880,20 +1892,20 @@ mod tests {
 
     #[test]
     fn branches_the_note_chooses_between_that_agree_are_known() {
-        let analysis = check_keys("fn(k, v) => slider(\"q\", if k > 60 then 0.5 else 0.5)");
+        let analysis = check_keys("slider(\"q\", if k > 60 then 0.5 else 0.5)");
         assert_eq!(messages(&analysis), Vec::<&str>::new());
         assert_eq!(labels(&analysis), ["q"]);
     }
 
     #[test]
     fn branches_the_note_chooses_between_that_differ_depend_on_the_note() {
-        let analysis = check_keys("fn(k, v) => slider(\"q\", if k > 60 then 0.4 else 0.5)");
+        let analysis = check_keys("slider(\"q\", if k > 60 then 0.4 else 0.5)");
         assert_eq!(messages(&analysis), [DEPENDS_ON_KEY]);
     }
 
     #[test]
     fn a_failing_branch_leaves_the_other_branch() {
-        let analysis = check_keys("fn(k, v) => slider(\"q\", if k > 60 then 0.4 else missing)");
+        let analysis = check_keys("slider(\"q\", if k > 60 then 0.4 else missing)");
         assert_eq!(messages(&analysis), Vec::<&str>::new());
         assert_eq!(labels(&analysis), ["q"]);
     }
@@ -1901,20 +1913,16 @@ mod tests {
     #[test]
     fn branches_merge_part_by_part() {
         let pair = "if k > 60 then (0.5, 0.1) else (0.5, 0.2)";
-        let agreeing = check_keys(&format!(
-            "fn(k, v) => let (a, b) = {pair} in slider(\"q\", a)"
-        ));
+        let agreeing = check_keys(&format!("let (a, b) = {pair} in slider(\"q\", a)"));
         assert_eq!(messages(&agreeing), Vec::<&str>::new());
-        let differing = check_keys(&format!(
-            "fn(k, v) => let (a, b) = {pair} in slider(\"q\", b)"
-        ));
+        let differing = check_keys(&format!("let (a, b) = {pair} in slider(\"q\", b)"));
         assert_eq!(messages(&differing), [DEPENDS_ON_KEY]);
     }
 
     #[test]
     fn branches_the_note_chooses_between_apply_each_function() {
         let analysis = check_keys(
-            "fn(k, v) => (if k > 60 then fn(x) => slider(\"a\", x) else fn(x) => slider(\"b\", x))(0.5)",
+            "(if k > 60 then fn(x) => slider(\"a\", x) else fn(x) => slider(\"b\", x))(0.5)",
         );
         assert_eq!(messages(&analysis), Vec::<&str>::new());
         assert_eq!(labels(&analysis), ["a", "b"]);
