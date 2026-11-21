@@ -1662,7 +1662,7 @@ impl ProgramSet {
     /// persists every program's changed state as annotation edits, re-parses
     /// the file to refresh `self.bindings`, realigns each program's
     /// `span`/`binding_index` via the position walk, and writes the new source
-    /// to `self.input_path`.
+    /// to `self.input_path` if it changed.
     ///
     /// A program with no source binding (a padding slot) is treated as
     /// brand-new unless its text is empty, in which case only the other
@@ -1921,8 +1921,10 @@ impl ProgramSet {
         }
 
         // Skip the file write when no path is set — tests use an empty
-        // `PathBuf` so they can exercise the splice without touching disk.
-        if !self.input_path.as_os_str().is_empty() {
+        // `PathBuf` so they can exercise the splice without touching disk — or
+        // when nothing changed, so that a splice that saves nothing doesn't
+        // touch the file.
+        if !self.input_path.as_os_str().is_empty() && new_source != self.source {
             if let Err(e) = fs::write(&self.input_path, &new_source) {
                 return Err(format!(
                     "Warning: failed to write {}: {}",
@@ -2202,6 +2204,27 @@ mod tests {
         new_set.program_mut(0).unwrap().set_text("3".to_string());
         new_set.splice(0).expect("fresh set should splice");
         fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_splice_that_changes_nothing_leaves_the_file_alone() {
+        let path = temp_dir().join(format!("tuun_splice_unchanged_{}.tuun", std::process::id()));
+        fs::write(&path, "#{level_db=0}\ntone = 1 | fin(time - 1);\n").unwrap();
+        let modified = time::SystemTime::UNIX_EPOCH + time::Duration::from_secs(1);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        let (mut set, _) =
+            ProgramSet::from_source(fs::read_to_string(&path).unwrap(), path.clone())
+                .expect("test source should parse");
+
+        set.splice(0).expect("the splice should succeed");
+        let after = fs::metadata(&path).unwrap().modified().unwrap();
+        fs::remove_file(&path).ok();
+        assert_eq!(after, modified);
     }
 
     #[test]
