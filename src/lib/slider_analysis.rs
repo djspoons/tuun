@@ -1819,8 +1819,9 @@ mod tests {
     }
 
     #[test]
-    fn a_function_a_later_step_builds_is_applied_with_the_result() {
-        // Only the first step's result holds the closure that calls `slider`.
+    fn a_function_the_steps_build_is_applied_with_the_result() {
+        // The seed calls no slider; each step's result does, so the slider is
+        // reached only if the result includes what the steps build.
         let analysis = check_keys(
             "fn(k, v) => reduce(fn(f, x) => fn(y) => slider(\"q\", 0.5) * f(y), fn(y) => y, k)(1)",
         );
