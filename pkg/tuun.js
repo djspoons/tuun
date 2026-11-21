@@ -514,4 +514,4 @@ export { initSync };
 export default __wbg_init;
 
 // The git revision this build was made from (stamped by build-wasm.sh).
-export const tuunBuild = '38a4805';
+export const tuunBuild = 'ebe6a27';
