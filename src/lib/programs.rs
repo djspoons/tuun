@@ -1664,11 +1664,12 @@ impl ProgramSet {
     /// `span`/`binding_index` via the position walk, and writes the new source
     /// to `self.input_path`.
     ///
-    /// Programs with no source binding (padding slots) are treated as
-    /// brand-new: a fresh `Definition` is inserted between its source-order
-    /// neighbors with a `#{skip_slots=…, level_db=…}` annotation, and the
-    /// following program's `skip_slots` is decremented to keep its absolute
-    /// slot stable. The new binding goes just past its predecessor's line (so
+    /// A program with no source binding (a padding slot) is treated as
+    /// brand-new unless its text is empty, in which case only the other
+    /// programs' state is persisted. A brand-new program's fresh `Definition` is
+    /// inserted between its source-order neighbors with a
+    /// `#{skip_slots=…, level_db=…}` annotation, and the following program's
+    /// `skip_slots` is decremented to keep its absolute slot stable. The new binding goes just past its predecessor's line (so
     /// comments above the next binding stay with it), with a blank line on each
     /// side and a newline after it. Existing programs are spliced in place —
     /// except when the edited text is empty (or whitespace-only), which deletes
@@ -1697,8 +1698,10 @@ impl ProgramSet {
         // misclassify an existing binding whose expression is empty (e.g. `_ =
         // ;` loaded from a file).
         let binding_index = self.programs[program_index].binding_index;
-        let is_new = binding_index >= self.bindings.len();
-        let is_deletion = !is_new && edited_text.trim().is_empty();
+        let is_padding = binding_index >= self.bindings.len();
+        let is_empty = edited_text.trim().is_empty();
+        let is_new = is_padding && !is_empty;
+        let is_deletion = !is_padding && is_empty;
 
         // Collect every edit we want to apply to `self.source` in one pass: the
         // active program's expression splice (or a fresh-binding insert or
@@ -1709,11 +1712,6 @@ impl ProgramSet {
         let mut edits: Vec<(Range<usize>, String)> = Vec::new();
         let mut new_binding_edit: Option<(Range<usize>, String)> = None;
         if is_new {
-            if edited_text.trim().is_empty() {
-                // Padding slot still empty after edit — nothing to do.
-                // TODO is this true? what about sliders/levels?
-                return Ok(());
-            }
             // Find the source-order neighbors of the new program in the
             // pre-splice bindings so we can insert the new binding between them
             // and adjust the following program's `skip_slots`.
@@ -1836,9 +1834,11 @@ impl ProgramSet {
                     edits.push(edit);
                 }
             }
-        } else {
+        } else if !is_padding {
             edits.push((edited_span, edited_text));
         }
+        // A padding slot that is still empty adds no binding, but the other
+        // programs' annotations below are still persisted.
 
         // Walk every program (active and not) and append annotation edits
         // for level_db / sliders that have diverged from the parsed source.
@@ -2799,6 +2799,23 @@ synth = saw(220);";
         // the program's text unchanged from what parse_module produced.
         state.splice(0).unwrap();
         assert_eq!(state.source, source);
+    }
+
+    #[test]
+    fn splicing_an_empty_slot_persists_the_other_programs() {
+        let source = "\
+#{level_db=0}
+kick = pulse(60);";
+        let mut state = state_from(source);
+        state.program_mut(0).unwrap().set_level_db(-9.0);
+        state.splice(1).unwrap();
+        assert_eq!(
+            state.source,
+            "\
+#{level_db=-9}
+kick = pulse(60);"
+        );
+        assert_eq!(state.bindings.len(), 1);
     }
 
     #[test]
