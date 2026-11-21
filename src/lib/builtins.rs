@@ -1040,8 +1040,9 @@ where
 ///
 /// The value is `default`, marked as a slider when `M` makes slider marks,
 /// with the provider the call's scope gives the label (see
-/// [`eval::DynamicScope::provider`]). Fails if `default` is outside the range, `min` is not less than `max`, an
-/// `"exp"` range is not above zero, or the curve is another name.
+/// [`eval::DynamicScope::provider`]). Fails if `default` is outside the
+/// range, `min` is not less than `max`, an `"exp"` range is not above zero, or
+/// the curve is another name.
 fn slider<M, S>(
     arguments: Vec<SourceExpr<M, S>>,
     call: &BuiltInCall<S>,
@@ -1176,7 +1177,7 @@ where
             };
             let print = print.clone();
             Ok(call.assembled(BuiltIn {
-                name: format!("debug({})", label),
+                name: debug_result_name(&label),
                 function: BuiltInFn::new(move |arguments, _call| {
                     let [value] = exactly(arguments, "debug")?;
                     // The value prints as it would play, without the
@@ -1188,6 +1189,17 @@ where
             }))
         }),
     })
+}
+
+/// Returns the name of the built-in that `debug` returns for `label`.
+fn debug_result_name(label: &str) -> String {
+    format!("debug({})", label)
+}
+
+/// Returns whether `name` names a built-in that `debug` returns: the identity
+/// function that prints its argument.
+pub fn is_debug_result(name: &str) -> bool {
+    name.starts_with("debug(")
 }
 
 /// Adds all of the built-ins to `bindings`.
@@ -1393,7 +1405,10 @@ mod tests {
 
         let func = apply(&function, vec![Expr::String("freq".to_string())]);
         let result = match func.unwrap() {
-            BuiltIn { function, .. } => apply(&function, vec![Expr::float(440.0)]),
+            BuiltIn { name, function } => {
+                assert!(is_debug_result(&name));
+                apply(&function, vec![Expr::float(440.0)])
+            }
             _ => panic!("debug applied to label should be a BuiltIn"),
         };
         assert_eq!(format!("{}", result.clone().unwrap()), "440");

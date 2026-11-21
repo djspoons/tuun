@@ -97,7 +97,7 @@ pub struct Checked {
     /// The sliders the program can reach, on any branch and any note of a
     /// keys instrument, each with the slot that provides it, in the order the
     /// text reaches their first calls.
-    pub sliders: Vec<slider_providers::Reached>,
+    pub sliders: Vec<slider_analysis::Reached>,
 }
 
 /// What `check_program`'s findings become: errors or warnings.
@@ -550,15 +550,11 @@ impl Environment {
         input: &EvaluationInput,
         bindings: &[expr::SourceBinding<MarkId, Source>],
         expr: &expr::SourceExpr<MarkId, Source>,
-    ) -> (Vec<slider_providers::Reached>, Vec<expr::Error<Source>>) {
+    ) -> (Vec<slider_analysis::Reached>, Vec<expr::Error<Source>>) {
         let slots = &input.providers.slots;
-        let index = |provider: slider::Provider| match provider {
-            slider::Provider::Played => input.index,
-            slider::Provider::Listing(index) => index,
-        };
-        let name = |provider| {
+        let name = |index: usize| {
             slots
-                .get(index(provider))
+                .get(index)
                 .map_or_else(String::new, |slot| slot.name.clone())
         };
         let annotation = |index: usize| slots.get(index)?.listing.clone();
@@ -567,20 +563,12 @@ impl Environment {
             expr,
             keys: input.kind == ProgramKind::Keys,
             listings: input.listings(),
+            played: input.index,
             name: &name,
             annotation: &annotation,
         };
         let analysis = slider_analysis::analyze(|path| self.resolve(path), &program);
-        let reached = analysis
-            .reached
-            .into_iter()
-            .map(|reached| slider_providers::Reached {
-                provider: index(reached.provider),
-                label: reached.label,
-                spec: reached.spec,
-            })
-            .collect();
-        (reached, analysis.errors)
+        (analysis.reached, analysis.errors)
     }
 
     /// Returns the type of the identifier covering `offset` in the program at
@@ -849,7 +837,7 @@ impl Environment {
                         input.index,
                     ) {
                         Ok(_) => Ok(Plays::KeysInstrument(instrument)),
-                        Err(errors) => Err(errors.iter().map(diagnose).collect()),
+                        Err(error) => Err(vec![diagnose(&error)]),
                     }
                 }
                 ProgramKind::Waveform => Err(message_only(
@@ -945,21 +933,20 @@ impl Environment {
             waveform::Waveform<MarkId>,
             Arc<WaveformMarks>,
         ),
-        Vec<expr::Error<Source>>,
+        expr::Error<Source>,
     > {
         use expr::Expr::{Tuple, Waveform};
         let instrument_trace = Trace::of(&instrument.function);
         let expr = expr::SourceExpr::application(instrument.function.clone(), arguments);
         let scope = eval::DynamicScope::new(instrument.listings.clone());
-        let expr = eval::evaluate_with_context(&mut Vec::new(), expr, &scope)
-            .map_err(|error| vec![error])?;
+        let expr = eval::evaluate_with_context(&mut Vec::new(), expr, &scope)?;
         match expr.expr {
             Tuple(mut exprs) => {
                 if exprs.len() != 2 {
-                    return Err(vec![expr::Error::eval_here(format!(
+                    return Err(expr::Error::eval_here(format!(
                         "Expected 2 waveforms for note, got {} elements",
                         exprs.len()
-                    ))]);
+                    )));
                 }
                 let note_on = exprs.remove(0);
                 let trace = trace_walk::result_trace(&note_on);
@@ -974,20 +961,20 @@ impl Environment {
                         let note_off = optimizer::optimize(trace::strip_trace_marks(note_off));
                         Ok((note_on, note_off, marks))
                     }
-                    (expr, Waveform(_)) => Err(vec![expr::Error::eval_here(format!(
+                    (expr, Waveform(_)) => Err(expr::Error::eval_here(format!(
                         "Expected waveform for note-on, got: {}",
                         expr
-                    ))]),
-                    (_, expr) => Err(vec![expr::Error::eval_here(format!(
+                    ))),
+                    (_, expr) => Err(expr::Error::eval_here(format!(
                         "Expected waveform for note-off, got: {}",
                         expr
-                    ))]),
+                    ))),
                 }
             }
-            expr => Err(vec![expr::Error::eval_here(format!(
+            expr => Err(expr::Error::eval_here(format!(
                 "Expected 2 waveforms for note, got: {}",
                 expr
-            ))]),
+            ))),
         }
     }
 }
@@ -1331,16 +1318,13 @@ mod tests {
         else {
             panic!("expected a keys instrument");
         };
-        let errors = evaluating
+        let error = evaluating
             .apply_note_function(
                 &instrument,
                 vec![expr::SourceExpr::float(64.0), expr::SourceExpr::float(0.7)],
                 0,
             )
             .expect_err("note 64 is out of range");
-        let [error] = &errors[..] else {
-            panic!("expected one error, got {:?}", errors);
-        };
         assert!(
             matches!(error.source(), Some(Source::Module(_))),
             "expected an error inside a module, got {:?}",
@@ -1357,7 +1341,7 @@ mod tests {
         diagnosing
             .resolve(&["first".to_string()])
             .expect("first resolves");
-        let diagnostic = diagnosing.diagnose(error, set.programs()[0].text(), set.source());
+        let diagnostic = diagnosing.diagnose(&error, set.programs()[0].text(), set.source());
         assert_eq!(diagnostic.file, Some(PathBuf::from("second.tuun")));
 
         fs::remove_dir_all(&root).ok();

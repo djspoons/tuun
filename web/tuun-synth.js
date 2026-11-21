@@ -495,6 +495,9 @@ class TuunSynthElement extends HTMLElement {
                 if (textarea) {
                     textarea.value = this._originalExpression;
                 }
+                if (this._isPlaying) {
+                    this.stop();
+                }
                 this._resetSliders();
                 this._hideError();
                 this._updateResetButton();

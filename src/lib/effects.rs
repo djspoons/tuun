@@ -557,18 +557,13 @@ impl EffectRunner {
                             &mut state.waveform_marks,
                         );
                     }
-                    Err(errors) => {
-                        let diagnostics: Vec<_> = errors
-                            .iter()
-                            .map(|error| {
-                                self.environment.diagnose(
-                                    error,
-                                    state.programs.programs()[keys.id].text(),
-                                    state.programs.source(),
-                                )
-                            })
-                            .collect();
-                        state.messages.post_diagnostics(&diagnostics);
+                    Err(error) => {
+                        let diagnostic = self.environment.diagnose(
+                            &error,
+                            state.programs.programs()[keys.id].text(),
+                            state.programs.source(),
+                        );
+                        state.messages.post_diagnostics(&[diagnostic]);
                     }
                 }
             }
@@ -685,21 +680,16 @@ impl EffectRunner {
                                     format!("Printed program {} to console", display_name),
                                 );
                             }
-                            Err(errors) => {
+                            Err(error) => {
                                 println!("Keys instrument of program {}:", display_name);
                                 println!("{}", instrument.function);
-                                let diagnostics: Vec<_> = errors
-                                    .iter()
-                                    .map(|error| {
-                                        self.environment.diagnose(
-                                            error,
-                                            state.programs.programs()[program_index].text(),
-                                            state.programs.source(),
-                                        )
-                                    })
-                                    .collect();
+                                let diagnostic = self.environment.diagnose(
+                                    &error,
+                                    state.programs.programs()[program_index].text(),
+                                    state.programs.source(),
+                                );
                                 println!("Applying it at a sample note failed:");
-                                state.messages.post_diagnostics(&diagnostics);
+                                state.messages.post_diagnostics(&[diagnostic]);
                             }
                         }
                     }

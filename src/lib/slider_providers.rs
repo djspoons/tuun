@@ -10,6 +10,7 @@ use crate::diagnostics::Source;
 use crate::expr;
 use crate::ids::MarkId;
 use crate::slider;
+use crate::slider_analysis::Reached;
 use crate::waveform;
 
 /// A program slot as a provider of sliders: its name, where its text is, and
@@ -83,21 +84,26 @@ impl Providers {
     /// ```
     pub fn listings(&self, played: usize) -> slider::Listings<Source> {
         let providers = self.clone();
+        // Each slot's listing, built once rather than for each span found.
+        let listings: Vec<Option<slider::Listing>> = self
+            .slots
+            .iter()
+            .enumerate()
+            .map(|(id, slot)| {
+                let labels: Vec<String> = slot
+                    .listed
+                    .iter()
+                    .map(|entry| entry.label.clone())
+                    .collect();
+                (!labels.is_empty()).then(|| slider::Listing {
+                    id,
+                    labels: Arc::from(labels),
+                })
+            })
+            .collect();
         slider::Listings::new(move |span| {
             let id = providers.slot(played, span)?;
-            let slot = providers.slots.get(id)?;
-            if slot.listed.is_empty() {
-                return None;
-            }
-            let labels: Vec<String> = slot
-                .listed
-                .iter()
-                .map(|entry| entry.label.clone())
-                .collect();
-            Some(slider::Listing {
-                id,
-                labels: Arc::from(labels),
-            })
+            listings.get(id)?.clone()
         })
     }
 
@@ -151,15 +157,6 @@ impl Providers {
         }
         warnings
     }
-}
-
-/// A slider a program can reach: the slot that provides it, its label, and its
-/// spec.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Reached {
-    pub provider: usize,
-    pub label: String,
-    pub spec: slider::SliderSpec,
 }
 
 /// Makes `waveform` the program at `program`'s: each slider in it that the

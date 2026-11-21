@@ -856,3 +856,18 @@ fn a_slider_only_some_notes_reach_is_reached() {
     assert_eq!(check(source, 0), Vec::<String>::new());
     assert_eq!(reachable(source, 0), ["hi of A:1 = 0.5 (0 to 1, linear)"]);
 }
+
+#[test]
+fn a_slider_the_played_program_lists_is_the_one_it_provides_unlisted() {
+    // A:1's slider is evaluated once, outside A:2's text, so A:2 provides it
+    // as the played program; A:2 also lists `q` and calls it in its text.
+    let source = "#{level_db=0}\ns = slider(\"q\", 0.5);\n\
+                  #{sliders=[\"q\"]}\n_ = s * slider(\"q\", 0.5, 0, 2);\n";
+    assert_eq!(
+        check(source, 1),
+        [
+            "1:5: slider \"q\" of A:2 is 0.5 (0 to 2, linear) here but 0.5 (0 to 1, linear) at \
+          another call; calls of one slider must agree"
+        ]
+    );
+}
