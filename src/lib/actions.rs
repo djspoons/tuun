@@ -454,9 +454,12 @@ pub enum Action {
     EnterKeysMode,
 
     // --- navigation ---
-    /// Jump to a specific program index.
+    /// Jump to a specific program index, saving every program's changed
+    /// state, such as slider values, to the source file unless the file changed
+    /// on disk.
     SelectProgram(usize),
-    /// Move the active index by `delta` (wraps).
+    /// Move the active index by `delta` (wraps), saving as `SelectProgram`
+    /// does.
     AdvanceProgram(i32),
 
     // --- text editing (Edit mode) ---
@@ -1573,7 +1576,8 @@ fn apply_select_program(state: &mut AppState, ctx: &Context, i: usize) -> Vec<Ef
     if i >= state.programs.programs().len() {
         return vec![];
     }
-    let changed = state.active_program_index != i;
+    let previous = state.active_program_index;
+    let changed = previous != i;
     state.active_program_index = i;
     // Replace the previous status with the newly-selected program's
     // selection message. Navigation represents a fresh context, so any prior
@@ -1587,6 +1591,12 @@ fn apply_select_program(state: &mut AppState, ctx: &Context, i: usize) -> Vec<Ef
             hold.picked = None;
             effects.extend(held_loop_effects(state, ctx.source_stale));
         }
+    }
+    // Navigation goes on when the file is stale; only the save is skipped, so
+    // that each move doesn't replace the selection with the stale error. Last,
+    // so that a failed save's error isn't replaced by the selection.
+    if !ctx.source_stale {
+        effects.push(Effect::UpdateSource(previous));
     }
     effects
 }
@@ -3720,6 +3730,40 @@ mod tests {
                 .any(|e| matches!(e, Effect::ShowMessage(_, s) if s == "A:2")),
             "expected a ShowMessage replacing the status, got {:?}",
             effects
+        );
+    }
+
+    #[test]
+    fn navigation_saves_the_program_left_last() {
+        let mut state = AppState::from_source(
+            "#{level_db=0}\n_ = test;\n#{level_db=0}\n_ = second;".to_string(),
+            std::path::PathBuf::new(),
+        )
+        .expect("test source should parse");
+        let effects = apply_with_empty_status(&mut state, Action::AdvanceProgram(1));
+        assert!(
+            matches!(effects.last(), Some(Effect::UpdateSource(0))),
+            "got {effects:?}"
+        );
+        let effects = apply_with_empty_status(&mut state, Action::SelectProgram(0));
+        assert!(
+            matches!(effects.last(), Some(Effect::UpdateSource(1))),
+            "got {effects:?}"
+        );
+    }
+
+    #[test]
+    fn navigation_with_a_stale_file_moves_without_saving() {
+        let mut state = AppState::from_source(
+            "#{level_db=0}\n_ = test;\n#{level_db=0}\n_ = second;".to_string(),
+            std::path::PathBuf::new(),
+        )
+        .expect("test source should parse");
+        let effects = apply_with_stale_source(&mut state, Action::AdvanceProgram(1));
+        assert_eq!(state.active_program_index, 1);
+        assert!(
+            !effects.iter().any(|e| matches!(e, Effect::UpdateSource(_))),
+            "got {effects:?}"
         );
     }
 
