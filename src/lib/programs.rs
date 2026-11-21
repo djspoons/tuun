@@ -108,6 +108,9 @@ pub enum Plays {
     Sequence(sequencer::Sequence),
     /// The program evaluated to a function usable as a keys instrument.
     KeysInstrument(KeysInstrument),
+    /// The program lists sliders and evaluated to a function, which provides
+    /// them to its callers: it plays nothing itself.
+    Provider,
 }
 
 /// A function usable as a keys instrument, with the listing bindings its code
@@ -160,6 +163,14 @@ impl EvaluationInput {
     /// played (see [`slider_providers::Providers::listings`]).
     pub fn listings(&self) -> slider::Listings<Source> {
         self.providers.listings(self.index)
+    }
+
+    /// Returns whether the program's annotation lists any sliders.
+    pub fn lists_sliders(&self) -> bool {
+        self.providers
+            .slots
+            .get(self.index)
+            .is_some_and(|slot| !slot.listed.is_empty())
     }
 }
 

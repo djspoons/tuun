@@ -424,17 +424,22 @@ impl Environment {
     /// module reloads. A slider finding is the program's wherever it is,
     /// since it depends on how the program uses the module. The slider
     /// check's findings are returned only when the type checker finds nothing
-    /// in the program's text or file, and its warnings about the sliders the
-    /// program lists (see [`slider_providers::Providers::warnings`]) only when
-    /// it finds nothing either. Parse failures return no findings and no
-    /// sliders.
+    /// in the program's text or file, and the findings about the sliders the
+    /// program lists (see [`slider_providers::Providers`]) only when it finds
+    /// nothing either. Parse failures return no findings and no sliders.
+    ///
+    /// A waveform program that lists sliders may instead evaluate to a
+    /// function, which provides them to its callers. Its sliders are those it
+    /// provides, and each entry it lists that it doesn't provide is an error.
     pub fn check_program(&self, input: &EvaluationInput) -> Checked {
         let mut bindings = input.bindings.clone();
         bindings.insert(0, expr::Binding::Open(vec!["__prelude".to_string()]).into());
         let Ok(expr) = parser::parse_program(&input.text, Source::Program) else {
             return Checked::default();
         };
+        let lists = input.lists_sliders();
         let expectation = match input.kind {
+            ProgramKind::Waveform if lists => infer::Expectation::PlayableOrFunction,
             ProgramKind::Waveform => infer::Expectation::Playable,
             ProgramKind::Keys => infer::Expectation::NoteFunction,
         };
@@ -447,7 +452,7 @@ impl Environment {
         // An empty cache cannot have served anything stale, which also keeps
         // the very first check (whose initial loads all bump the counter)
         // from running twice.
-        let errors = loop {
+        let (errors, ty) = loop {
             let generation = self.modules_generation.get();
             if self.checked_generation.get() != generation {
                 self.module_types.borrow_mut().clear();
@@ -455,7 +460,7 @@ impl Environment {
                 self.checked_generation.set(generation);
             }
             let could_be_stale = !self.module_types.borrow().is_empty();
-            let (errors, _) = infer::check_program(
+            let (errors, ty) = infer::check_program(
                 |path| self.resolve(path),
                 &bindings,
                 signatures::signature,
@@ -471,23 +476,35 @@ impl Environment {
             // current generation even when loads during the run bumped it
             // (the first check's initial loads, in particular).
             self.checked_generation.set(self.modules_generation.get());
-            break errors;
+            break (errors, ty);
         };
         // The slider check expects a program the type checker accepts, though
         // its sliders are the best guess at what plays either way.
         let typed = !errors
             .iter()
             .any(|e| matches!(e.source(), Some(Source::Program) | Some(Source::File)));
-        let (sliders, mut slider_errors) = self.analyze_sliders(input, &bindings, &expr);
+        let role = match input.kind {
+            ProgramKind::Keys => slider_analysis::Role::Keys,
+            // A function that lists sliders gives them to its callers.
+            ProgramKind::Waveform if lists && ty.is_function() => slider_analysis::Role::Provides,
+            ProgramKind::Waveform => slider_analysis::Role::Plays,
+        };
+        let (sliders, mut slider_errors) = self.analyze_sliders(input, &bindings, &expr, role);
         if !typed {
             slider_errors.clear();
         }
         // A call the slider check finds an error in isn't among the sliders,
-        // so warning about what is missing from them would mislead.
-        let slider_warnings = match typed && slider_errors.is_empty() {
-            true => input.providers.warnings(input.index, &sliders),
-            false => Vec::new(),
-        };
+        // so reporting what is missing from them would mislead.
+        let mut slider_warnings = Vec::new();
+        if typed && slider_errors.is_empty() {
+            slider_warnings = input.providers.warnings(&sliders);
+            match role {
+                slider_analysis::Role::Provides => {
+                    slider_errors = input.providers.unprovided(input.index, &sliders);
+                }
+                _ => slider_warnings.extend(input.providers.unreached(input.index, &sliders)),
+            }
+        }
         log::debug!(
             "Checked program in {:.3}s: {} errors",
             (time::Instant::now() - start).as_secs_f32(),
@@ -543,13 +560,15 @@ impl Environment {
     }
 
     /// Checks how `expr`, the parsed text of the program `input` describes,
-    /// uses sliders under `bindings`, and returns the sliders it can reach,
-    /// each with the slot that provides it, and the errors found.
+    /// uses sliders under `bindings` when its value is for `role`, and returns
+    /// the sliders it can reach, each with the slot that provides it, and the
+    /// errors found.
     fn analyze_sliders(
         &self,
         input: &EvaluationInput,
         bindings: &[expr::SourceBinding<MarkId, Source>],
         expr: &expr::SourceExpr<MarkId, Source>,
+        role: slider_analysis::Role,
     ) -> (Vec<slider_analysis::Reached>, Vec<expr::Error<Source>>) {
         let slots = &input.providers.slots;
         let name = |index: usize| {
@@ -561,7 +580,7 @@ impl Environment {
         let program = slider_analysis::Program {
             bindings,
             expr,
-            keys: input.kind == ProgramKind::Keys,
+            role,
             listings: input.listings(),
             played: input.index,
             name: &name,
@@ -691,9 +710,10 @@ impl Environment {
     }
 
     /// Evaluates the program `input` describes against its declared kind: an
-    /// unmarked program must evaluate to a playable waveform, and one marked
-    /// `#{keys}` must evaluate to a keys-instrument note function. Returns what
-    /// the program plays, or the user-visible diagnostics as the error.
+    /// unmarked program must evaluate to a playable waveform, or to a function
+    /// when it lists sliders, and one marked `#{keys}` must evaluate to a
+    /// keys-instrument note function. Returns what the program plays, or the
+    /// user-visible diagnostics as the error.
     ///
     /// Keys instruments are sanity-checked by actually invoking them with dummy
     /// note/velocity arguments. A waveform program whose text has the
@@ -790,6 +810,7 @@ impl Environment {
         context: &mut Vec<eval::ContextEntry<MarkId, Source>>,
     ) -> Result<Plays, Vec<Diagnostic>> {
         let kind = input.kind;
+        let lists = input.lists_sliders();
         let diagnose =
             |error: &expr::Error<Source>| self.diagnose(error, &input.text, &input.source);
         let start = time::Instant::now();
@@ -840,6 +861,7 @@ impl Environment {
                         Err(error) => Err(vec![diagnose(&error)]),
                     }
                 }
+                ProgramKind::Waveform if lists => Ok(Plays::Provider),
                 ProgramKind::Waveform => Err(message_only(
                     "Program evaluates to a function (annotate with #{keys}?)",
                 )),
@@ -1203,7 +1225,9 @@ mod tests {
         let instrument = match environment.evaluate_program(&input) {
             Ok(Plays::KeysInstrument(instrument)) => instrument,
             Err(diagnostics) => panic!("invalid: {:?}", diagnostics),
-            Ok(Plays::Waveform(..) | Plays::Sequence(_)) => panic!("classified as waveform"),
+            Ok(Plays::Waveform(..) | Plays::Sequence(_) | Plays::Provider) => {
+                panic!("not classified as keys")
+            }
         };
         set.reach(&environment.check_program(&input).sliders);
         set.set_slider_normalized(0, 0, 1.0)

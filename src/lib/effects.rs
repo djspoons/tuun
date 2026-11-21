@@ -693,6 +693,15 @@ impl EffectRunner {
                             }
                         }
                     }
+                    Some(programs::Plays::Provider) => {
+                        state.messages.post(
+                            Severity::Info,
+                            format!(
+                                "Program {} is a function that provides sliders; it plays nothing",
+                                display_name
+                            ),
+                        );
+                    }
                     Some(plays) => {
                         println!("Evaluated form of program {}:", display_name);
                         match plays {

@@ -372,7 +372,7 @@ impl Wasm {
             &slider_analysis::Program {
                 bindings: &bindings,
                 expr: &parsed_expr,
-                keys: false,
+                role: slider_analysis::Role::Plays,
                 listings: slider::Listings::new(|_| None),
                 played: 0,
                 name: &|_| "the expression".to_string(),

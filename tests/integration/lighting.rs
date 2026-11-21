@@ -105,6 +105,7 @@ fn voice_after(preamble: &str, annotations: &str, program: &str, sixteenth: u8) 
                 .expect("a note should play");
             ((*marks).clone(), vec![])
         }
+        Ok(Plays::Provider) => panic!("{}: plays nothing", program),
         Err(diagnostics) => panic!("{}: {:?}", program, diagnostics),
     };
     Voice { text, marks, extra }
