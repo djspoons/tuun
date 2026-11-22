@@ -5,10 +5,10 @@ use env.finseq;
 use env.expfil;
 
 // An example of subtractive synthesis from Welsh's Synthesizer Cookbook
-harmonica = fn(dur, freq) =>
+harmonica = fn(dur, freq) => share(freq, fn(freq) =>
+  share(pulse(0.93 + 0.05 * $(1.6), freq), fn(osc1) =>
   let
     // These are approximately Welsh's values but not exactly
-    osc1 = pulse(0.93 + 0.05 * $(1.6), freq),
     osc2 = reset(osc1, pulse(0.7, add_cents(add_semitones(freq, 8), 7))),
     osc = 0.375 * osc1 + 0.5 * osc2,
     a = 0.13,
@@ -20,27 +20,75 @@ harmonica = fn(dur, freq) =>
     | rbj.lpf(0.5, 1900)
     | minmax.ADSR(a + d + s + r, a, d, 0.5, r)
     | fin(time - dur) // redundant with the ADSR
-    | seq(time - dur);
+    | seq(time - dur)));
 
 
-tuned_kick_drum = fn() => fn(dur, freq_hz) =>
+tuned_kick_drum = fn(dur, freq_hz) =>
   let
-    lpf_cutoff = 300,
-    Q = 0.707,
+    // Initial strike
+    stick_amp = slider("stick_amp", 0.05),
+    stick_dur = slider("stick_dur", 0.002, 0, 0.3),
+    stick = stick_amp * noise | expfil.R(stick_dur, 1.0),
+
     freq_hz = freq_hz / 8, // Lower three octaves
     freq_env_mul = 4,
     freq_env_dur = 0.02,
-    freq_env = max(linear(freq_env_mul, -1/freq_env_dur), 1)
-  in
-    (0.08 * noise | expfil.R(0.01, 1.0))
-    &
-    (1.1 * triangle(freq_hz * freq_env)
+    freq_env = max(linear(freq_env_mul, -1/freq_env_dur), 1),
+
+    Q = 0.707,
+    lpf_cutoff = slider("lpf_cutoff", 300, 10, 1000, "exp"),
+    body_release = slider("body_release", 0.15, 0, 0.3),
+
+    // Main oscillators
+    osc_mix = slider("osc_mix", 0.65),
+    osc = osc_mix * triangle(freq_hz * freq_env)
+      & (1-osc_mix) * triangle(freq_hz * 1.7 * freq_env)
       | rbj.lpf(Q, lpf_cutoff)
-      | expfil.R(0.2, 1.0))
+      | expfil.R(body_release, 1.0),
+    osc_amp = slider("osc_amp", 1.56, 0, 2),
+  in
+    stick
+      & (osc_amp * osc)
       | seq(time - dur);
 
-// Defaults to C
-kick_drum = fn() => fn(dur) => tuned_kick_drum()(dur, @60);
+// Defaults to C below middle C
+kick_drum = fn(dur) => tuned_kick_drum(dur, @48);
+
+
+tuned_snare_drum = fn(dur, freq_hz) =>
+  let
+    // Initial strike
+    stick_amp = slider("stick_amp", 0.1),
+    stick_dur = slider("stick_dur", 0.002, 0, 0.3),
+    stick = stick_amp * noise | expfil.R(stick_dur, 1.0),
+
+    freq_env_mul = slider("freq_env_mul", 2, 1, 4),
+    freq_env_dur = slider("freq_env_dur", 0.01, 0, 0.15),
+    freq_env = max(linear(freq_env_mul, -freq_env_mul/freq_env_dur), 1),
+
+    body_release = slider("body_release", 0.15, 0, 0.3),
+    osc_mix = slider("osc_mix", 0.55),
+    osc = osc_mix * $(freq_hz * freq_env)
+      & (1-osc_mix) * $(freq_hz * 1.59 * freq_env)
+      | expfil.R(body_release, 1.0),
+
+    snare_center_freq_hz = 4000, // slider("snare_center_freq_hz", 4000, 100, 8000, "exp"),
+    snare_release = slider("snare_release", 0.2, 0, 0.3),
+    Q = 0.707,
+
+    snare = noise
+      | rbj.bpf_const_peak_gain(Q, snare_center_freq_hz)
+      | expfil.R(snare_release, 1.0),
+
+    snare_mix = slider("snare_mix", 0.4),
+  in
+    stick
+      & (1-snare_mix) * osc
+      & snare_mix * snare
+//    & (0 | fin(time - dur))
+      | seq(time - dur);
+
+snare_drum = fn(dur) => tuned_snare_drum(dur, @50);
 
 _flute_osc = fn(freq_hz, lpf_Q = 0.6, lpf_cutoff = 1600, hpf_Q = 0.6, hpf_cutoff = 1600) =>
   sawtooth(freq_hz)
