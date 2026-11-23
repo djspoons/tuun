@@ -620,6 +620,24 @@ where
                 }
                 optimize(body)
             }
+            // A shared reference can be used directly.
+            Ref(outer_id) => {
+                let mut body = optimize(*body);
+                // Check that outer_id isn't reused: we don't currently create
+                // any Shared like this but let's be extra safe!
+                if body.any_node(&|w| matches!(w, Shared { id, .. } if *id == outer_id)) {
+                    Shared {
+                        id,
+                        waveform: Box::new(Ref(outer_id)),
+                        body: Box::new(body),
+                    }
+                } else {
+                    for reference in refs_to(&mut body, id) {
+                        *reference = Ref(outer_id);
+                    }
+                    optimize(body)
+                }
+            }
             // TODO when the body holds exactly one `Ref` and every path down to
             // it keeps the clock, the `Ref` could be replaced by the shared
             // waveform itself.
@@ -1122,6 +1140,36 @@ mod tests {
         assert_eq!(optimize(shared(0, Const(2.0), inner)), Const(2.0));
         let inner = shared(0, Time(()), reference(0));
         assert_eq!(optimize(shared(0, Const(2.0), inner.clone())), inner);
+    }
+
+    #[test]
+    fn a_shared_waveform_that_is_a_ref_is_read_through_that_ref() {
+        let sum = |id| {
+            BinaryOp(
+                BinaryOperator::Add,
+                Box::new(reference(id)),
+                Box::new(reference(id)),
+            )
+        };
+        let inner = shared(1, reference(0), sum(1));
+        assert_eq!(optimize(shared(0, Noise, inner)), shared(0, Noise, sum(0)));
+        // A `Ref` in the shared waveform of a `Shared` with the same id reads
+        // the outer one.
+        let inner = shared(0, reference(0), sum(0));
+        assert_eq!(optimize(shared(0, Noise, inner)), shared(0, Noise, sum(0)));
+        // A `Ref(0)` in place of the `Ref(1)` would read the nested `Shared`
+        // with id 0 instead.
+        let nested = shared(
+            0,
+            Noise,
+            BinaryOp(
+                BinaryOperator::Add,
+                Box::new(reference(1)),
+                Box::new(reference(0)),
+            ),
+        );
+        let shadowed = shared(0, Time(()), shared(1, reference(0), nested));
+        assert_eq!(optimize(shadowed.clone()), shadowed);
     }
 
     #[test]
