@@ -33,6 +33,14 @@ pub enum Reply {
     Loaded(Result<Loaded, String>),
 }
 
+/// The processing thread's stack size, in bytes.
+///
+/// The size of a main thread's default stack on macOS and Linux, so programs
+/// that evaluate on a main thread also evaluate here. Checking, evaluating and
+/// optimizing recurse over the program, so the depth of a waveform (e.g. the
+/// length of a sequence) is bounded by the stack.
+const STACK_SIZE: usize = 8 * 1024 * 1024;
+
 /// Starts the processing thread and returns the sender its jobs go to and the
 /// receiver its replies come from.
 ///
@@ -54,6 +62,7 @@ pub fn spawn(
     let (reply_sender, replies) = mpsc::channel();
     thread::Builder::new()
         .name("processing".to_string())
+        .stack_size(STACK_SIZE)
         .spawn(move || {
             let mut environment =
                 Environment::with_module_table(sample_rate, tempo, library_root, module_table);
@@ -283,6 +292,46 @@ mod tests {
             thread::yield_now();
         }
         assert_eq!(wakes.load(Ordering::SeqCst), 3);
+    }
+
+    /// The thread has the stack of a main thread: a waveform nested ninety
+    /// deep, which overflows the 2 MiB default for spawned threads in a debug
+    /// build, evaluates.
+    #[test]
+    fn the_thread_evaluates_deeply_nested_waveforms() {
+        // Each binding appends to the last, so the source itself stays flat.
+        let mut source = "w0 = 1 | fin(time - 0.001);\n".to_string();
+        for i in 1..90 {
+            source += &format!("w{i} = append(1 | fin(time - 0.001), w{});\n", i - 1);
+        }
+        let set = set_from(&format!("{source}#{{level_db=0}}\ndeep = w89;\n"));
+        let (jobs, replies) = spawn(
+            8000,
+            90,
+            PathBuf::new(),
+            CheckMode::Errors,
+            ModuleTable::default(),
+            || {},
+        );
+
+        jobs.send(Job::Program(set.evaluation_input(0))).unwrap();
+        let Ok(Reply::Program(outcome)) = replies.recv() else {
+            panic!("expected the program's reply");
+        };
+        assert!(
+            matches!(
+                outcome,
+                Outcome::Evaluated(
+                    Evaluated {
+                        plays: Plays::Waveform(..),
+                        ..
+                    },
+                    _
+                )
+            ),
+            "got {:?}",
+            outcome
+        );
     }
 
     /// Returns the diagnostics of `outcome`, which must have failed for the
