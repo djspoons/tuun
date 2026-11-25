@@ -38,8 +38,8 @@ $ = fn(freq_hz) => sin(2 * pi * phase(freq_hz, 0));
 naive_sawtooth = fn(freq_hz) => 1 - 2 * phase(freq_hz, 0);
 // Computes a naive square wave at the given frequency in hertz.
 naive_square = fn(freq_hz) => alt(phase(freq_hz, 0) - 0.5, -1, 1);
-// Computes a triangle wave at the given frequency in hertz.
-triangle = fn(freq_hz) => 1 - 2 * abs(2 * phase(freq_hz, 0.25) - 1);
+// Computes a naive triangle wave at the given frequency in hertz.
+naive_triangle = fn(freq_hz) => 1 - 2 * abs(2 * phase(freq_hz, 0.25) - 1);
 
 // Computes a naive pulse wave with the given width. `width` should be a number
 // (or waveform) between 0.0 and 1.0, where 0.0 is a square wave (i.e., 50% duty
@@ -69,6 +69,25 @@ blep = fn(t, dt) =>
     sq = fn(x) => share(x, fn(x) => x * x),
   in sq(max(1 + v, 0))      // last sample
      - sq(max(1 - u, 0)))); // first sample
+
+// The polyBLAMP correction for a slope change of +8 per cycle at phase `t` = 0,
+// where `t` is in [0, 1) and `dt` is the phase increment per sample.
+blamp = fn(t, dt) =>
+  // `t` and `dt` are each shared, since both are used several times.
+  share(t, fn(t) =>
+  share(dt, fn(dt) =>
+  let
+    // The slope change is smoothed by integrating the BLEP correction above.
+    u = t / dt,       // samples since the beginning of a cycle
+    v = (t - 1) / dt, // samples counting back from the end of the cycle
+    // 4/3*dt*(1 - u)^3 is the correction for the first sample and
+    // 4/3*dt*(1 + v)^3 is the correction for the last sample, each for
+    // a slope change of +8 per cycle (8*dt per sample). Each factor is
+    // positive only in its own sample, so `max` zeroes the rest.
+    cu = fn(x) => share(x, fn(x) => x * x * x),
+  in 4/3 * dt *
+     (cu(max(1 + v, 0))      // last sample
+     + cu(max(1 - u, 0))))); // first sample
 
 // Computes a sawtooth wave at the given frequency in hertz with polyBLEP
 // correction. Note that this is an inverse sawtooth (used so that it meets the
@@ -113,6 +132,20 @@ pulse = fn(width, freq_hz) =>
   in alt(d, -1, 1)
      + blep(p, dt)                    // rising edge at the wrap
      - blep(d + alt(d, 0, 1), dt)))); // falling edge at p = e
+
+// Computes a triangle wave at the given frequency in hertz with polyBLAMP
+// correction.
+triangle = fn(freq_hz) =>
+  // The frequency and phase are shared, as in `square`.
+  share(freq_hz, fn(freq_hz) =>
+  share(phase(freq_hz, 0.25), fn(p) =>
+  let
+    dt = freq_hz / sample_rate,
+    d2 = p - 0.5,
+  in
+    1 - 2 * abs(2 * p - 1)
+    + blamp(p, dt)                      // -4 to +4 slope (p = 0)
+    - blamp(d2 + alt(d2, 0, 1), dt)));  // +4 to -4 slope (p = 0.5)
 
 // LISTS
 
